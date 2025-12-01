@@ -8,6 +8,26 @@ BeforeAll {
 
 Describe "VSS Snapshots - Platform Independent Tests" {
 
+    Context "New-VssSnapshot Validation" {
+        It "Should throw when SourcePath is null or empty" {
+            {
+                New-VssSnapshot -SourcePath ""
+            } | Should -Throw
+        }
+
+        It "Should throw when SourcePath is a UNC path" {
+            {
+                New-VssSnapshot -SourcePath "\\server\share\folder"
+            } | Should -Throw "*UNC path*"
+        }
+
+        It "Should throw when SourcePath does not have a drive letter" {
+            {
+                New-VssSnapshot -SourcePath "\Relative\Path"
+            } | Should -Throw "*local path*"
+        }
+    }
+
     Context "Get-VolumeFromPath" {
         It "Should extract volume from local path with drive C" {
             $result = Get-VolumeFromPath -Path "C:\Users\John"
@@ -200,7 +220,7 @@ Describe "VSS Snapshots - Platform Independent Tests" {
                 Invoke-WithVssSnapshot -SourcePath "C:\Test" -ScriptBlock {
                     throw "Simulated error during processing"
                 }
-            } | Should -Throw "Simulated error during processing"
+            } | Should -Throw "*Simulated error during processing*"
 
             Should -Invoke Remove-VssSnapshot -Times 1
         }
@@ -217,7 +237,7 @@ Describe "VSS Snapshots - Platform Independent Tests" {
                     # This should never execute
                     $script:executed = $true
                 }
-            } | Should -Throw "Failed to create VSS snapshot"
+            } | Should -Throw "*Failed to create VSS snapshot*"
 
             $script:executed | Should -Be $false
             Should -Invoke Remove-VssSnapshot -Times 0

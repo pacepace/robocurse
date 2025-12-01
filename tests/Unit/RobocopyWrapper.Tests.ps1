@@ -221,6 +221,62 @@ Describe "Robocopy Wrapper" {
     }
 
     Context "Start-RobocopyJob" {
+        It "Should throw when Chunk is null" {
+            {
+                Start-RobocopyJob -Chunk $null -LogPath "$TestDrive/test.log"
+            } | Should -Throw "*Chunk*"
+        }
+
+        It "Should throw when Chunk.SourcePath is empty" {
+            $badChunk = [PSCustomObject]@{
+                SourcePath = ""
+                DestinationPath = "D:\Test"
+            }
+            {
+                Start-RobocopyJob -Chunk $badChunk -LogPath "$TestDrive/test.log"
+            } | Should -Throw "*SourcePath*"
+        }
+
+        It "Should throw when Chunk.DestinationPath is empty" {
+            $badChunk = [PSCustomObject]@{
+                SourcePath = "C:\Source"
+                DestinationPath = ""
+            }
+            {
+                Start-RobocopyJob -Chunk $badChunk -LogPath "$TestDrive/test.log"
+            } | Should -Throw "*DestinationPath*"
+        }
+
+        It "Should throw when LogPath is empty" {
+            $chunk = [PSCustomObject]@{
+                SourcePath = "C:\Source"
+                DestinationPath = "D:\Dest"
+            }
+            {
+                Start-RobocopyJob -Chunk $chunk -LogPath ""
+            } | Should -Throw
+        }
+
+        It "Should throw when ThreadsPerJob is out of range (too low)" {
+            $chunk = [PSCustomObject]@{
+                SourcePath = "C:\Source"
+                DestinationPath = "D:\Dest"
+            }
+            {
+                Start-RobocopyJob -Chunk $chunk -LogPath "$TestDrive/test.log" -ThreadsPerJob 0
+            } | Should -Throw
+        }
+
+        It "Should throw when ThreadsPerJob is out of range (too high)" {
+            $chunk = [PSCustomObject]@{
+                SourcePath = "C:\Source"
+                DestinationPath = "D:\Dest"
+            }
+            {
+                Start-RobocopyJob -Chunk $chunk -LogPath "$TestDrive/test.log" -ThreadsPerJob 129
+            } | Should -Throw
+        }
+
         It "Should build correct arguments with chunk object" {
             # Create mock chunk
             $chunk = [PSCustomObject]@{

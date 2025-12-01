@@ -3,6 +3,70 @@ Describe "Email Notifications" {
         . "$PSScriptRoot\..\..\Robocurse.ps1" -Help
     }
 
+    Context "Send-CompletionEmail Validation" {
+        It "Should throw when Config is null" {
+            $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
+            {
+                Send-CompletionEmail -Config $null -Results $results -Status 'Success'
+            } | Should -Throw "*Config*"
+        }
+
+        It "Should throw when Results is null" {
+            $config = [PSCustomObject]@{ Enabled = $true; SmtpServer = "smtp.test.com"; From = "test@test.com"; To = @("user@test.com"); Port = 587 }
+            {
+                Send-CompletionEmail -Config $config -Results $null -Status 'Success'
+            } | Should -Throw "*Results*"
+        }
+
+        It "Should throw when Config.Enabled is null" {
+            $config = [PSCustomObject]@{ SmtpServer = "smtp.test.com" }
+            $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
+            {
+                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+            } | Should -Throw "*Enabled*"
+        }
+
+        It "Should return without error when email is disabled" {
+            $config = [PSCustomObject]@{ Enabled = $false }
+            $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
+            {
+                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+            } | Should -Not -Throw
+        }
+
+        It "Should throw when Config.SmtpServer is missing and email is enabled" {
+            $config = [PSCustomObject]@{ Enabled = $true; From = "test@test.com"; To = @("user@test.com"); Port = 587 }
+            $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
+            {
+                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+            } | Should -Throw "*SmtpServer*"
+        }
+
+        It "Should throw when Config.From is missing and email is enabled" {
+            $config = [PSCustomObject]@{ Enabled = $true; SmtpServer = "smtp.test.com"; To = @("user@test.com"); Port = 587 }
+            $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
+            {
+                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+            } | Should -Throw "*From*"
+        }
+
+        It "Should throw when Config.To is missing and email is enabled" {
+            $config = [PSCustomObject]@{ Enabled = $true; SmtpServer = "smtp.test.com"; From = "test@test.com"; Port = 587 }
+            $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
+            {
+                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+            } | Should -Throw "*To*"
+        }
+
+        It "Should throw when Config.Port is missing and email is enabled" {
+            $config = [PSCustomObject]@{ Enabled = $true; SmtpServer = "smtp.test.com"; From = "test@test.com"; To = @("user@test.com") }
+            $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
+            {
+                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+            } | Should -Throw "*Port*"
+        }
+    }
+
     Context "Format-FileSize" {
         It "Should format bytes correctly" {
             Format-FileSize -Bytes 512 | Should -Be "512 bytes"
@@ -227,7 +291,7 @@ Describe "Email Notifications" {
             { Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Success' } | Should -Not -Throw
         }
 
-        It "Should not send with incomplete configuration" {
+        It "Should throw with incomplete configuration (empty SmtpServer)" {
             Mock Get-SmtpCredential { }
             Mock Send-MailMessage { }
 
@@ -238,12 +302,12 @@ Describe "Email Notifications" {
                 UseTls = $true
                 CredentialTarget = "Test-SMTP"
                 From = "test@example.com"
-                To = @()
+                To = @("user@test.com")
             }
 
-            Send-CompletionEmail -Config $incompleteConfig -Results $script:mockResults -Status 'Success'
-
-            Should -Not -Invoke Send-MailMessage
+            {
+                Send-CompletionEmail -Config $incompleteConfig -Results $script:mockResults -Status 'Success'
+            } | Should -Throw "*SmtpServer*"
         }
     }
 

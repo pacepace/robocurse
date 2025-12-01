@@ -2,15 +2,63 @@ Describe "Recursive Chunking" {
     BeforeAll {
         . "$PSScriptRoot\..\..\Robocurse.ps1" -Help
         # Reset chunk counter for consistent testing
-        $script:ChunkIdCounter = 0
+        $script:ChunkIdCounter.Value = 0
     }
 
     BeforeEach {
         # Reset chunk counter before each test
-        $script:ChunkIdCounter = 0
+        $script:ChunkIdCounter.Value = 0
+    }
+
+    Context "Get-DirectoryChunks Validation" {
+        It "Should throw when Path is null or empty" {
+            {
+                Get-DirectoryChunks -Path "" -DestinationRoot "D:\Backup"
+            } | Should -Throw
+        }
+
+        It "Should throw when Path does not exist" {
+            {
+                Get-DirectoryChunks -Path "C:\NonExistent\Path\12345" -DestinationRoot "D:\Backup"
+            } | Should -Throw "*does not exist*"
+        }
+
+        It "Should throw when DestinationRoot is empty" {
+            # Create a temporary directory for testing
+            $testDir = New-Item -ItemType Directory -Path "$TestDrive/testdir" -Force
+            {
+                Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot ""
+            } | Should -Throw
+        }
+
+        It "Should throw when MaxSizeBytes is out of range (too low)" {
+            $testDir = New-Item -ItemType Directory -Path "$TestDrive/testdir2" -Force
+            {
+                Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" -MaxSizeBytes 0
+            } | Should -Throw
+        }
+
+        It "Should throw when MaxFiles is out of range (too low)" {
+            $testDir = New-Item -ItemType Directory -Path "$TestDrive/testdir3" -Force
+            {
+                Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" -MaxFiles 0
+            } | Should -Throw
+        }
+
+        It "Should throw when MaxDepth is out of range (too low)" {
+            $testDir = New-Item -ItemType Directory -Path "$TestDrive/testdir4" -Force
+            {
+                Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" -MaxDepth -1
+            } | Should -Throw
+        }
     }
 
     Context "Get-DirectoryChunks - Simple Cases" {
+        BeforeEach {
+            # Mock Test-Path to return true for fake Windows paths
+            Mock Test-Path { $true } -ParameterFilter { $Path -match '^[A-Z]:\\' }
+        }
+
         It "Should return single chunk for small directory" {
             Mock Get-DirectoryProfile {
                 [PSCustomObject]@{
@@ -95,6 +143,10 @@ Describe "Recursive Chunking" {
     }
 
     Context "Get-DirectoryChunks - Depth Limiting" {
+        BeforeEach {
+            Mock Test-Path { $true } -ParameterFilter { $Path -match '^[A-Z]:\\' }
+        }
+
         It "Should stop at max depth even if directory is large" {
             Mock Get-DirectoryProfile {
                 [PSCustomObject]@{
@@ -143,6 +195,10 @@ Describe "Recursive Chunking" {
     }
 
     Context "Get-DirectoryChunks - Files at Level" {
+        BeforeEach {
+            Mock Test-Path { $true } -ParameterFilter { $Path -match '^[A-Z]:\\' }
+        }
+
         It "Should create files-only chunk for intermediate directories" {
             Mock Get-DirectoryProfile {
                 param($Path)
@@ -404,7 +460,189 @@ Describe "Recursive Chunking" {
         }
     }
 
+    Context "New-FlatChunks" {
+        BeforeEach {
+            Mock Test-Path { $true } -ParameterFilter { $Path -match '^[A-Z]:\\' }
+        }
+
+        It "Should create chunks without recursing into subdirectories" {
+            Mock Get-DirectoryProfile {
+                param($Path)
+                [PSCustomObject]@{
+                    Path = $Path
+                    TotalSize = 100GB
+                    FileCount = 200000
+                    DirCount = 0
+                    AvgFileSize = 500KB
+                    LastScanned = Get-Date
+                }
+            }
+            Mock Get-DirectoryChildren { @() }
+
+            $chunks = New-FlatChunks -Path "C:\TestFlat" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 10GB
+
+            # Should accept as single chunk at MaxDepth 0 (even if large)
+            $chunks.Count | Should -Be 1
+            $chunks[0].SourcePath | Should -Be "C:\TestFlat"
+            $chunks[0].DestinationPath | Should -Be "D:\Backup"
+        }
+
+        It "Should use provided MaxChunkSizeBytes parameter" {
+            Mock Get-DirectoryProfile {
+                [PSCustomObject]@{
+                    Path = $Path
+                    TotalSize = 5GB
+                    FileCount = 10000
+                    DirCount = 0
+                    AvgFileSize = 500KB
+                    LastScanned = Get-Date
+                }
+            }
+            Mock Get-DirectoryChildren { @() }
+
+            $chunks = New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 20GB
+
+            $chunks.Count | Should -Be 1
+            $chunks[0].EstimatedSize | Should -Be 5GB
+        }
+
+        It "Should use provided MaxFiles parameter" {
+            Mock Get-DirectoryProfile {
+                [PSCustomObject]@{
+                    Path = $Path
+                    TotalSize = 1GB
+                    FileCount = 5000
+                    DirCount = 0
+                    AvgFileSize = 200KB
+                    LastScanned = Get-Date
+                }
+            }
+            Mock Get-DirectoryChildren { @() }
+
+            $chunks = New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxFiles 10000
+
+            $chunks.Count | Should -Be 1
+        }
+    }
+
+    Context "New-SmartChunks" {
+        BeforeEach {
+            Mock Test-Path { $true } -ParameterFilter { $Path -match '^[A-Z]:\\' }
+        }
+
+        It "Should create chunks recursively" {
+            Mock Get-DirectoryProfile {
+                param($Path)
+                if ($Path -eq "C:\TestSmart") {
+                    [PSCustomObject]@{
+                        Path = $Path
+                        TotalSize = 50GB
+                        FileCount = 100000
+                        DirCount = 2
+                        AvgFileSize = 500KB
+                        LastScanned = Get-Date
+                    }
+                }
+                else {
+                    [PSCustomObject]@{
+                        Path = $Path
+                        TotalSize = 5GB
+                        FileCount = 10000
+                        DirCount = 0
+                        AvgFileSize = 500KB
+                        LastScanned = Get-Date
+                    }
+                }
+            }
+            Mock Get-DirectoryChildren {
+                param($Path)
+                if ($Path -eq "C:\TestSmart") {
+                    @("C:\TestSmart\Child1", "C:\TestSmart\Child2")
+                }
+                else { @() }
+            }
+            Mock Get-FilesAtLevel { @() }
+
+            $chunks = New-SmartChunks -Path "C:\TestSmart" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 10GB
+
+            # Should split into child chunks
+            $chunks.Count | Should -Be 2
+            $chunks[0].SourcePath | Should -BeLike "*Child*"
+            $chunks[1].SourcePath | Should -BeLike "*Child*"
+        }
+
+        It "Should respect MaxDepth parameter" {
+            Mock Get-DirectoryProfile {
+                [PSCustomObject]@{
+                    Path = $Path
+                    TotalSize = 100GB
+                    FileCount = 500000
+                    DirCount = 1
+                    AvgFileSize = 200KB
+                    LastScanned = Get-Date
+                }
+            }
+            Mock Get-DirectoryChildren {
+                param($Path)
+                @("$Path\Child")
+            }
+            Mock Get-FilesAtLevel { @() }
+
+            # With MaxDepth 0, should not recurse
+            $chunks = New-SmartChunks -Path "C:\Deep" -DestinationRoot "D:\Backup" -MaxDepth 0 -MaxChunkSizeBytes 10GB
+
+            # Should accept as single chunk
+            $chunks.Count | Should -Be 1
+            $chunks[0].SourcePath | Should -Be "C:\Deep"
+        }
+
+        It "Should use provided MaxChunkSizeBytes parameter" {
+            Mock Get-DirectoryProfile {
+                [PSCustomObject]@{
+                    Path = $Path
+                    TotalSize = 15GB
+                    FileCount = 30000
+                    DirCount = 0
+                    AvgFileSize = 500KB
+                    LastScanned = Get-Date
+                }
+            }
+            Mock Get-DirectoryChildren { @() }
+
+            # Should be too large for 10GB but fit in 20GB
+            $chunks = New-SmartChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 20GB
+
+            $chunks.Count | Should -Be 1
+            $chunks[0].EstimatedSize | Should -Be 15GB
+        }
+
+        It "Should use default parameters when not specified" {
+            Mock Get-DirectoryProfile {
+                [PSCustomObject]@{
+                    Path = $Path
+                    TotalSize = 5GB
+                    FileCount = 10000
+                    DirCount = 0
+                    AvgFileSize = 500KB
+                    LastScanned = Get-Date
+                }
+            }
+            Mock Get-DirectoryChildren { @() }
+
+            # Call without optional parameters
+            $chunks = New-SmartChunks -Path "C:\Test" -DestinationRoot "D:\Backup"
+
+            $chunks.Count | Should -Be 1
+            $chunks[0].SourcePath | Should -Be "C:\Test"
+            $chunks[0].DestinationPath | Should -Be "D:\Backup"
+        }
+    }
+
     Context "Integration - Complex Directory Structure" {
+        BeforeEach {
+            Mock Test-Path { $true } -ParameterFilter { $Path -match '^[A-Z]:\\' }
+        }
+
         It "Should handle complex multi-level structure" {
             Mock Get-DirectoryProfile {
                 param($Path)

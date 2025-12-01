@@ -47,6 +47,48 @@ Describe "Logging" {
         }
     }
 
+    Context "Logging Before Initialization" {
+        BeforeEach {
+            # Ensure no session
+            $script:CurrentOperationalLogPath = $null
+            $script:CurrentSiemLogPath = $null
+        }
+
+        It "Should not throw when logging Info before initialization" {
+            { Write-RobocurseLog -Message "Test" -Level "Info" } | Should -Not -Throw
+        }
+
+        It "Should not throw when logging Debug before initialization" {
+            { Write-RobocurseLog -Message "Test" -Level "Debug" } | Should -Not -Throw
+        }
+
+        It "Should output warnings to console when no session" {
+            $output = Write-RobocurseLog -Message "Test warning" -Level "Warning" 3>&1
+            $output | Should -Match "Test warning"
+        }
+
+        It "Should output errors to console when no session" {
+            $output = Write-RobocurseLog -Message "Test error" -Level "Error" 2>&1
+            $output | Should -Match "Test error"
+        }
+
+        It "Should silently skip Info messages when no session" {
+            # Should not produce any output
+            $warningOutput = Write-RobocurseLog -Message "Info msg" -Level "Info" 3>&1
+            $warningOutput | Should -BeNullOrEmpty
+        }
+
+        It "Should silently skip Debug messages when no session" {
+            # Should not produce any output
+            $warningOutput = Write-RobocurseLog -Message "Debug msg" -Level "Debug" 3>&1
+            $warningOutput | Should -BeNullOrEmpty
+        }
+
+        It "Should not throw when writing SIEM event before initialization" {
+            { Write-SiemEvent -EventType "SessionStart" -Data @{ test = "value" } } | Should -Not -Throw
+        }
+    }
+
     Context "Write-SiemEvent" {
         BeforeEach {
             $script:Session = Initialize-LogSession -LogRoot $script:TestLogRoot

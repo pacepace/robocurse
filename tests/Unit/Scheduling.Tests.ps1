@@ -24,6 +24,52 @@ Describe "Scheduling" {
         . "$PSScriptRoot\..\..\Robocurse.ps1" -Help
     }
 
+    Context "Register-RobocurseTask Validation" {
+        BeforeEach {
+            # Create a temporary config file for testing
+            $script:tempConfigPath = "$TestDrive/test-config.json"
+            '{}' | Set-Content $script:tempConfigPath
+        }
+
+        It "Should throw when ConfigPath is null or empty" {
+            {
+                Register-RobocurseTask -ConfigPath ""
+            } | Should -Throw
+        }
+
+        It "Should throw when ConfigPath does not exist" -Skip:(-not $IsWindows) {
+            # Skip on non-Windows as the function returns early before validation
+            {
+                Register-RobocurseTask -ConfigPath "C:\NonExistent\Path\config.json"
+            } | Should -Throw "*does not exist*"
+        }
+
+        It "Should throw when Time format is invalid" {
+            {
+                Register-RobocurseTask -ConfigPath $script:tempConfigPath -Time "25:00"
+            } | Should -Throw
+        }
+
+        It "Should throw when Time format is invalid (no colon)" {
+            {
+                Register-RobocurseTask -ConfigPath $script:tempConfigPath -Time "0300"
+            } | Should -Throw
+        }
+
+        It "Should accept valid Time format HH:mm" {
+            Mock New-ScheduledTaskAction { [PSCustomObject]@{ Execute = "powershell.exe" } }
+            Mock New-ScheduledTaskTrigger { [PSCustomObject]@{ Type = "Daily" } }
+            Mock New-ScheduledTaskPrincipal { [PSCustomObject]@{ UserId = "TestUser" } }
+            Mock New-ScheduledTaskSettingsSet { [PSCustomObject]@{ } }
+            Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
+            Mock Write-RobocurseLog { }
+
+            {
+                Register-RobocurseTask -ConfigPath $script:tempConfigPath -Time "14:30"
+            } | Should -Not -Throw
+        }
+    }
+
     Context "Register-RobocurseTask" -Skip:(-not $IsWindows) {
         It "Should create task with daily trigger" {
             Mock New-ScheduledTaskAction { [PSCustomObject]@{ Execute = "powershell.exe" } }

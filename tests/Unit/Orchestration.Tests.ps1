@@ -41,6 +41,72 @@ Describe "Orchestration" {
         Mock Write-SiemEvent { }
     }
 
+    Context "Start-ReplicationRun Validation" {
+        It "Should throw when Profiles is null" {
+            {
+                Start-ReplicationRun -Profiles $null
+            } | Should -Throw "*Profiles*"
+        }
+
+        It "Should throw when Profiles array is empty" {
+            {
+                Start-ReplicationRun -Profiles @()
+            } | Should -Throw  # PowerShell rejects empty arrays at binding time
+        }
+
+        It "Should throw when Profile is missing Name property" {
+            $badProfile = [PSCustomObject]@{
+                Source = "C:\Test"
+                Destination = "D:\Test"
+            }
+            {
+                Start-ReplicationRun -Profiles @($badProfile)
+            } | Should -Throw "*Name*"
+        }
+
+        It "Should throw when Profile is missing Source property" {
+            $badProfile = [PSCustomObject]@{
+                Name = "TestProfile"
+                Destination = "D:\Test"
+            }
+            {
+                Start-ReplicationRun -Profiles @($badProfile)
+            } | Should -Throw "*Source*"
+        }
+
+        It "Should throw when Profile is missing Destination property" {
+            $badProfile = [PSCustomObject]@{
+                Name = "TestProfile"
+                Source = "C:\Test"
+            }
+            {
+                Start-ReplicationRun -Profiles @($badProfile)
+            } | Should -Throw "*Destination*"
+        }
+
+        It "Should throw when MaxConcurrentJobs is out of range (too low)" {
+            $profile = [PSCustomObject]@{
+                Name = "TestProfile"
+                Source = "C:\Test"
+                Destination = "D:\Test"
+            }
+            {
+                Start-ReplicationRun -Profiles @($profile) -MaxConcurrentJobs 0
+            } | Should -Throw
+        }
+
+        It "Should throw when MaxConcurrentJobs is out of range (too high)" {
+            $profile = [PSCustomObject]@{
+                Name = "TestProfile"
+                Source = "C:\Test"
+                Destination = "D:\Test"
+            }
+            {
+                Start-ReplicationRun -Profiles @($profile) -MaxConcurrentJobs 129
+            } | Should -Throw
+        }
+    }
+
     Context "Initialize-OrchestrationState" {
         It "Should initialize state with default values" {
             Initialize-OrchestrationState

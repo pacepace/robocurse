@@ -30,6 +30,65 @@ param(
     [switch]$Help
 )
 
+#region ==================== CONSTANTS ====================
+
+# Chunking defaults
+# Maximum size for a single chunk. Larger directories will be split into smaller chunks.
+# 10GB is chosen to balance parallelism vs. overhead - large enough to avoid excessive splitting,
+# small enough to allow meaningful parallel processing.
+$script:DefaultMaxChunkSizeBytes = 10GB
+
+# Maximum number of files in a single chunk before splitting.
+# 50,000 files is chosen to prevent robocopy from being overwhelmed by file enumeration
+# while still processing meaningful batches.
+$script:DefaultMaxFilesPerChunk = 50000
+
+# Maximum directory depth to traverse when creating chunks.
+# Depth of 5 prevents excessive recursion while allowing reasonable directory structure analysis.
+$script:DefaultMaxChunkDepth = 5
+
+# Minimum size threshold for creating a separate chunk.
+# 100MB ensures we don't create chunks for trivial directories, reducing overhead.
+$script:DefaultMinChunkSizeBytes = 100MB
+
+# Retry policy
+# Maximum retry attempts for failed chunks before marking as permanently failed.
+# 3 retries handles transient network issues without indefinite loops.
+$script:MaxChunkRetries = 3
+
+# Number of times robocopy will retry a failed file copy (maps to /R: parameter).
+# 3 retries is sufficient for transient file locks or network glitches.
+$script:RobocopyRetryCount = 3
+
+# Wait time in seconds between robocopy retry attempts (maps to /W: parameter).
+# 10 seconds allows time for locks to clear without excessive delay.
+$script:RobocopyRetryWaitSeconds = 10
+
+# Threading
+# Default number of threads per robocopy job (maps to /MT: parameter).
+# 8 threads provides good parallelism without overwhelming the network or disk I/O.
+$script:DefaultThreadsPerJob = 8
+
+# Maximum number of concurrent robocopy jobs to run in parallel.
+# 4 concurrent jobs balances system resources while maintaining good throughput.
+$script:DefaultMaxConcurrentJobs = 4
+
+# Caching
+# Maximum age in hours for cached directory profiles before re-scanning.
+# 24 hours prevents unnecessary re-scans while ensuring reasonably fresh data.
+$script:ProfileCacheMaxAgeHours = 24
+
+# Logging
+# Compress log files older than this many days to save disk space.
+# 7 days keeps recent logs readily accessible while compressing older logs.
+$script:LogCompressAfterDays = 7
+
+# Delete compressed log files older than this many days.
+# 30 days aligns with typical retention policies and provides adequate audit history.
+$script:LogDeleteAfterDays = 30
+
+#endregion
+
 #region ==================== CONFIGURATION ====================
 
 function New-DefaultConfig {
@@ -48,10 +107,10 @@ function New-DefaultConfig {
     $config = [PSCustomObject]@{
         Version = "1.0"
         GlobalSettings = [PSCustomObject]@{
-            MaxConcurrentJobs = 4
-            ThreadsPerJob = 8
+            MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs
+            ThreadsPerJob = $script:DefaultThreadsPerJob
             DefaultScanMode = "Smart"
-            LogRetentionDays = 30
+            LogRetentionDays = $script:LogDeleteAfterDays
             LogPath = ".\Logs"
         }
         Email = [PSCustomObject]@{
@@ -89,11 +148,14 @@ function Get-RobocurseConfig {
     .DESCRIPTION
         Loads and parses the Robocurse configuration from a JSON file.
         If the file doesn't exist, returns a default configuration.
-        Handles malformed JSON gracefully by returning default config with a warning.
+        Handles malformed JSON gracefully by returning default config with a verbose message.
     .PARAMETER Path
         Path to the configuration JSON file. Defaults to .\Robocurse.config.json
     .OUTPUTS
         PSCustomObject with configuration
+    .NOTES
+        Error Behavior: Returns default configuration on error. Never throws.
+        Use -Verbose to see error details.
     .EXAMPLE
         $config = Get-RobocurseConfig
         Loads configuration from default path
@@ -120,8 +182,9 @@ function Get-RobocurseConfig {
         return $config
     }
     catch {
-        Write-Warning "Failed to load configuration from '$Path': $($_.Exception.Message)"
-        Write-Warning "Returning default configuration."
+        # Use Write-Verbose since logging may not be initialized yet
+        Write-Verbose "Failed to load configuration from '$Path': $($_.Exception.Message)"
+        Write-Verbose "Returning default configuration."
         return New-DefaultConfig
     }
 }
@@ -139,6 +202,9 @@ function Save-RobocurseConfig {
         Path to save the configuration file. Defaults to .\Robocurse.config.json
     .OUTPUTS
         Boolean - $true on success, $false on failure
+    .NOTES
+        Error Behavior: Returns $false on error. Never throws.
+        Use -Verbose to see error details.
     .EXAMPLE
         $config = New-DefaultConfig
         Save-RobocurseConfig -Config $config
@@ -173,7 +239,7 @@ function Save-RobocurseConfig {
         return $true
     }
     catch {
-        Write-Warning "Failed to save configuration to '$Path': $($_.Exception.Message)"
+        Write-Verbose "Failed to save configuration to '$Path': $($_.Exception.Message)"
         return $false
     }
 }
@@ -435,18 +501,24 @@ function Write-RobocurseLog {
         [bool]$WriteSiem = ($Level -in @('Warning', 'Error'))
     )
 
-    # Use current operational log path if available
-    $logPath = $script:CurrentOperationalLogPath
-
-    if (-not $logPath) {
-        Write-Warning "No log session initialized. Call Initialize-LogSession first."
-        return
-    }
-
     # Format the log entry
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $levelUpper = $Level.ToUpper()
     $logEntry = "${timestamp} [${levelUpper}] [${Component}] ${Message}"
+
+    # Check if log session is initialized
+    $logPath = $script:CurrentOperationalLogPath
+    if (-not $logPath) {
+        # For important messages, fall back to console
+        if ($Level -in @('Error', 'Warning')) {
+            switch ($Level) {
+                'Error'   { Write-Error $logEntry }
+                'Warning' { Write-Warning $logEntry }
+            }
+        }
+        # For Info/Debug, silently skip
+        return
+    }
 
     # Write to operational log
     try {
@@ -496,11 +568,10 @@ function Write-SiemEvent {
         [string]$SessionId = $script:CurrentSessionId
     )
 
-    # Use current SIEM log path if available
+    # Check if log session is initialized
     $siemPath = $script:CurrentSiemLogPath
-
     if (-not $siemPath) {
-        Write-Warning "No log session initialized. Call Initialize-LogSession first."
+        # Silently skip if no log session
         return
     }
 
@@ -570,8 +641,8 @@ function Invoke-LogRotation {
     #>
     param(
         [string]$LogRoot = ".\Logs",
-        [int]$CompressAfterDays = 7,
-        [int]$DeleteAfterDays = 30
+        [int]$CompressAfterDays = $script:LogCompressAfterDays,
+        [int]$DeleteAfterDays = $script:LogDeleteAfterDays
     )
 
     if (-not (Test-Path $LogRoot)) {
@@ -791,7 +862,7 @@ function Get-DirectoryProfile {
 
         [bool]$UseCache = $true,
 
-        [int]$CacheMaxAgeHours = 24
+        [int]$CacheMaxAgeHours = $script:ProfileCacheMaxAgeHours
     )
 
     # Normalize path for cache lookup
@@ -927,8 +998,8 @@ function Set-CachedProfile {
 
 #region ==================== CHUNKING ====================
 
-# Script-level counter for unique chunk IDs
-$script:ChunkIdCounter = 0
+# Script-level counter for unique chunk IDs (using [ref] for thread-safe Interlocked operations)
+$script:ChunkIdCounter = [ref]0
 
 function Get-DirectoryChunks {
     <#
@@ -955,19 +1026,36 @@ function Get-DirectoryChunks {
     #>
     param(
         [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
         [string]$Path,
 
         [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
         [string]$DestinationRoot,
 
+        [ValidateNotNullOrEmpty()]
         [string]$SourceRoot,
 
-        [int64]$MaxSizeBytes = 10GB,
-        [int]$MaxFiles = 50000,
-        [int]$MaxDepth = 5,
-        [int64]$MinSizeBytes = 100MB,
+        [ValidateRange(1MB, 1TB)]
+        [int64]$MaxSizeBytes = $script:DefaultMaxChunkSizeBytes,
+
+        [ValidateRange(1, 10000000)]
+        [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
+
+        [ValidateRange(0, 20)]
+        [int]$MaxDepth = $script:DefaultMaxChunkDepth,
+
+        [ValidateRange(1KB, 1TB)]
+        [int64]$MinSizeBytes = $script:DefaultMinChunkSizeBytes,
+
+        [ValidateRange(0, 20)]
         [int]$CurrentDepth = 0
     )
+
+    # Validate path exists (inside function body so mocks can intercept)
+    if (-not (Test-Path -Path $Path -PathType Container)) {
+        throw "Path '$Path' does not exist or is not a directory"
+    }
 
     # Default SourceRoot to Path if not specified (for initial call)
     if ([string]::IsNullOrEmpty($SourceRoot)) {
@@ -1083,10 +1171,11 @@ function New-Chunk {
         [bool]$IsFilesOnly = $false
     )
 
-    $script:ChunkIdCounter++
+    # Thread-safe increment using Interlocked
+    $chunkId = [System.Threading.Interlocked]::Increment($script:ChunkIdCounter)
 
     $chunk = [PSCustomObject]@{
-        ChunkId = $script:ChunkIdCounter
+        ChunkId = $chunkId
         SourcePath = $SourcePath
         DestinationPath = $DestinationPath
         EstimatedSize = $Profile.TotalSize
@@ -1147,6 +1236,86 @@ function New-FilesOnlyChunk {
     Write-RobocurseLog "Created files-only chunk #$($chunk.ChunkId): $SourcePath (Files: $($filesAtLevel.Count))" -Level Debug
 
     return $chunk
+}
+
+function New-FlatChunks {
+    <#
+    .SYNOPSIS
+        Creates chunks using flat (non-recursive) scanning strategy
+    .DESCRIPTION
+        Generates chunks without recursing into subdirectories.
+        This is a fast scanning mode that treats each top-level directory as a chunk.
+    .PARAMETER Path
+        Root path to chunk
+    .PARAMETER DestinationRoot
+        Destination root path
+    .PARAMETER MaxChunkSizeBytes
+        Maximum size per chunk (default: 10GB)
+    .PARAMETER MaxFiles
+        Maximum files per chunk (default: 50000)
+    .OUTPUTS
+        Array of chunk objects
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$DestinationRoot,
+
+        [int64]$MaxChunkSizeBytes = $script:DefaultMaxChunkSizeBytes,
+        [int]$MaxFiles = $script:DefaultMaxFilesPerChunk
+    )
+
+    # Flat mode: MaxDepth = 0 (no recursion into subdirectories)
+    return Get-DirectoryChunks `
+        -Path $Path `
+        -DestinationRoot $DestinationRoot `
+        -MaxSizeBytes $MaxChunkSizeBytes `
+        -MaxFiles $MaxFiles `
+        -MaxDepth 0
+}
+
+function New-SmartChunks {
+    <#
+    .SYNOPSIS
+        Creates chunks using smart (recursive) scanning strategy
+    .DESCRIPTION
+        Generates chunks by recursively analyzing the directory tree and
+        splitting based on size and file count thresholds.
+        This is the recommended mode for most use cases.
+    .PARAMETER Path
+        Root path to chunk
+    .PARAMETER DestinationRoot
+        Destination root path
+    .PARAMETER MaxChunkSizeBytes
+        Maximum size per chunk (default: 10GB)
+    .PARAMETER MaxFiles
+        Maximum files per chunk (default: 50000)
+    .PARAMETER MaxDepth
+        Maximum recursion depth (default: 5)
+    .OUTPUTS
+        Array of chunk objects
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$DestinationRoot,
+
+        [int64]$MaxChunkSizeBytes = $script:DefaultMaxChunkSizeBytes,
+        [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
+        [int]$MaxDepth = $script:DefaultMaxChunkDepth
+    )
+
+    # Smart mode: recursive chunking with configurable depth
+    return Get-DirectoryChunks `
+        -Path $Path `
+        -DestinationRoot $DestinationRoot `
+        -MaxSizeBytes $MaxChunkSizeBytes `
+        -MaxFiles $MaxFiles `
+        -MaxDepth $MaxDepth
 }
 
 function Convert-ToDestinationPath {
@@ -1222,13 +1391,24 @@ function Start-RobocopyJob {
     #>
     param(
         [Parameter(Mandatory)]
+        [ValidateNotNull()]
         [PSCustomObject]$Chunk,
 
         [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
         [string]$LogPath,
 
-        [int]$ThreadsPerJob = 8
+        [ValidateRange(1, 128)]
+        [int]$ThreadsPerJob = $script:DefaultThreadsPerJob
     )
+
+    # Validate Chunk properties
+    if ([string]::IsNullOrWhiteSpace($Chunk.SourcePath)) {
+        throw "Chunk.SourcePath is required and cannot be null or empty"
+    }
+    if ([string]::IsNullOrWhiteSpace($Chunk.DestinationPath)) {
+        throw "Chunk.DestinationPath is required and cannot be null or empty"
+    }
 
     # Build argument list with all required switches
     $argList = @(
@@ -1238,8 +1418,8 @@ function Start-RobocopyJob {
         "/COPY:DAT",
         "/DCOPY:T",
         "/MT:$ThreadsPerJob",
-        "/R:3",
-        "/W:10",
+        "/R:$script:RobocopyRetryCount",
+        "/W:$script:RobocopyRetryWaitSeconds",
         "/LOG:`"$LogPath`"",
         "/TEE",
         "/NP",
@@ -1387,7 +1567,8 @@ function Parse-RobocopyLog {
         $fs.Close()
     }
     catch {
-        # If we can't read the file, return zeros
+        # If we can't read the file, log the error and return zeros
+        Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level Warning
         return $result
     }
 
@@ -1596,9 +1777,28 @@ function Start-ReplicationRun {
     #>
     param(
         [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [ValidateScript({
+            if ($_.Count -eq 0) {
+                throw "At least one profile is required in the Profiles array"
+            }
+            foreach ($p in $_) {
+                if (-not $p.Name) {
+                    throw "Profile is missing the required 'Name' property"
+                }
+                if (-not $p.Source) {
+                    throw "Profile '$($p.Name)' is missing the required 'Source' property"
+                }
+                if (-not $p.Destination) {
+                    throw "Profile '$($p.Name)' is missing the required 'Destination' property"
+                }
+            }
+            $true
+        })]
         [PSCustomObject[]]$Profiles,
 
-        [int]$MaxConcurrentJobs = 4,
+        [ValidateRange(1, 128)]
+        [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs,
 
         [scriptblock]$OnProgress,
         [scriptblock]$OnChunkComplete,
@@ -1645,7 +1845,7 @@ function Start-ProfileReplication {
         [Parameter(Mandatory)]
         [PSCustomObject]$Profile,
 
-        [int]$MaxConcurrentJobs = 4
+        [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs
     )
 
     $state = $script:OrchestrationState
@@ -1669,24 +1869,40 @@ function Start-ProfileReplication {
     $scanResult = Get-DirectoryProfile -Path $Profile.Source
 
     # Generate chunks based on scan mode
+    # Convert ChunkMaxSizeGB to bytes
+    $maxChunkBytes = if ($Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB * 1GB } else { $script:DefaultMaxChunkSizeBytes }
+    $maxFiles = if ($Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
+    $maxDepth = if ($Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
+
     $chunks = switch ($Profile.ScanMode) {
         'Flat' {
-            New-FlatChunks -Profile $scanResult -MaxChunkSizeMB $Profile.MaxChunkSizeMB
+            New-FlatChunks `
+                -Path $Profile.Source `
+                -DestinationRoot $Profile.Destination `
+                -MaxChunkSizeBytes $maxChunkBytes `
+                -MaxFiles $maxFiles
         }
         'Smart' {
-            New-SmartChunks -Profile $scanResult -MaxChunkSizeMB $Profile.MaxChunkSizeMB
+            New-SmartChunks `
+                -Path $Profile.Source `
+                -DestinationRoot $Profile.Destination `
+                -MaxChunkSizeBytes $maxChunkBytes `
+                -MaxFiles $maxFiles `
+                -MaxDepth $maxDepth
         }
         default {
-            New-SmartChunks -Profile $scanResult -MaxChunkSizeMB $Profile.MaxChunkSizeMB
+            New-SmartChunks `
+                -Path $Profile.Source `
+                -DestinationRoot $Profile.Destination `
+                -MaxChunkSizeBytes $maxChunkBytes `
+                -MaxFiles $maxFiles `
+                -MaxDepth $maxDepth
         }
     }
 
-    # Update chunks with destination paths
+    # Chunks already have destination paths from the chunking functions
+    # Just add additional metadata
     foreach ($chunk in $chunks) {
-        # Map source path to destination
-        $relativePath = $chunk.SourcePath.Substring($Profile.Source.Length).TrimStart('\', '/')
-        $chunk | Add-Member -MemberType NoteProperty -Name 'DestinationPath' -Value (Join-Path $Profile.Destination $relativePath) -Force
-        $chunk | Add-Member -MemberType NoteProperty -Name 'Status' -Value 'Pending' -Force
         $chunk | Add-Member -MemberType NoteProperty -Name 'RetryCount' -Value 0 -Force
     }
 
@@ -1736,7 +1952,7 @@ function Start-ChunkJob {
     }
 
     # Start the robocopy job
-    $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath -ThreadsPerJob 8
+    $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath -ThreadsPerJob $script:DefaultThreadsPerJob
 
     return $job
 }
@@ -1754,7 +1970,7 @@ function Invoke-ReplicationTick {
         Maximum concurrent jobs
     #>
     param(
-        [int]$MaxConcurrentJobs = 4
+        [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs
     )
 
     $state = $script:OrchestrationState
@@ -1893,9 +2109,9 @@ function Handle-FailedChunk {
     if (-not $chunk.RetryCount) { $chunk.RetryCount = 0 }
     $chunk.RetryCount++
 
-    if ($chunk.RetryCount -lt 3 -and $Result.ExitMeaning.ShouldRetry) {
+    if ($chunk.RetryCount -lt $script:MaxChunkRetries -and $Result.ExitMeaning.ShouldRetry) {
         # Re-queue for retry
-        Write-RobocurseLog -Message "Chunk $($chunk.ChunkId) failed, retrying ($($chunk.RetryCount)/3)" `
+        Write-RobocurseLog -Message "Chunk $($chunk.ChunkId) failed, retrying ($($chunk.RetryCount)/$script:MaxChunkRetries)" `
             -Level 'Warning' -Component 'Orchestrator'
 
         $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
@@ -2182,12 +2398,25 @@ function New-VssSnapshot {
         Path on the volume to snapshot (used to determine volume)
     .OUTPUTS
         PSCustomObject with ShadowId, ShadowPath, SourceVolume, CreatedAt
+    .NOTES
+        Error Behavior: Throws exception with context on failure.
+        Requires Administrator privileges.
     .EXAMPLE
         $snapshot = New-VssSnapshot -SourcePath "C:\Users"
         Returns object with shadow copy details
     #>
     param(
         [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [ValidateScript({
+            if ($_ -match '^\\\\') {
+                throw "SourcePath '$_' is a UNC path. VSS snapshots can only be created for local paths (e.g., C:\path)"
+            }
+            if (-not ($_ -match '^[A-Za-z]:')) {
+                throw "SourcePath '$_' must be a local path with a drive letter (e.g., C:\path)"
+            }
+            $true
+        })]
         [string]$SourcePath
     )
 
@@ -2235,8 +2464,12 @@ function New-VssSnapshot {
         return $snapshotInfo
     }
     catch {
-        Write-RobocurseLog -Message "Failed to create VSS snapshot: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
-        throw
+        Write-RobocurseLog -Message "Failed to create VSS snapshot for '$SourcePath': $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        $contextError = [System.Exception]::new(
+            "Failed to create VSS snapshot for '$SourcePath': $($_.Exception.Message)",
+            $_.Exception
+        )
+        throw $contextError
     }
 }
 
@@ -2249,6 +2482,8 @@ function Remove-VssSnapshot {
         used by the snapshot.
     .PARAMETER ShadowId
         ID of shadow copy to delete (GUID string)
+    .NOTES
+        Error Behavior: Throws exception with context on failure.
     .EXAMPLE
         Remove-VssSnapshot -ShadowId "{12345678-1234-1234-1234-123456789012}"
     #>
@@ -2271,7 +2506,11 @@ function Remove-VssSnapshot {
     }
     catch {
         Write-RobocurseLog -Message "Error deleting VSS snapshot $ShadowId : $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
-        throw
+        $contextError = [System.Exception]::new(
+            "Failed to delete VSS snapshot '$ShadowId': $($_.Exception.Message)",
+            $_.Exception
+        )
+        throw $contextError
     }
 }
 
@@ -2398,6 +2637,9 @@ function Invoke-WithVssSnapshot {
         Path to snapshot
     .PARAMETER ScriptBlock
         Code to execute (receives $VssPath parameter)
+    .NOTES
+        Error Behavior: Throws exception with context on failure.
+        Cleanup is guaranteed via finally block.
     .EXAMPLE
         Invoke-WithVssSnapshot -SourcePath "C:\Users" -ScriptBlock {
             param($VssPath)
@@ -2428,8 +2670,12 @@ function Invoke-WithVssSnapshot {
         & $ScriptBlock -VssPath $vssPath
     }
     catch {
-        Write-RobocurseLog -Message "Error during VSS snapshot operation: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
-        throw
+        Write-RobocurseLog -Message "Error during VSS snapshot operation for '$SourcePath': $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        $contextError = [System.Exception]::new(
+            "Failed to execute VSS snapshot operation for '$SourcePath': $($_.Exception.Message)",
+            $_.Exception
+        )
+        throw $contextError
     }
     finally {
         if ($snapshot) {
@@ -2546,7 +2792,7 @@ function Get-SmtpCredential {
             return New-Object System.Management.Automation.PSCredential($envUser, $securePass)
         }
         catch {
-            Write-RobocurseLog -Message "Failed to read credential from environment: $_" -Level 'Warning' -Component 'Email'
+            Write-RobocurseLog -Message "Failed to read credential from environment: $_" -Level 'Debug' -Component 'Email'
         }
     }
 
@@ -2951,14 +3197,21 @@ function Send-CompletionEmail {
     #>
     param(
         [Parameter(Mandatory)]
+        [ValidateNotNull()]
         [PSCustomObject]$Config,
 
         [Parameter(Mandatory)]
+        [ValidateNotNull()]
         [PSCustomObject]$Results,
 
         [ValidateSet('Success', 'Warning', 'Failed')]
         [string]$Status = 'Success'
     )
+
+    # Validate Config has required properties
+    if ($null -eq $Config.Enabled) {
+        throw "Config.Enabled property is required"
+    }
 
     # Check if email is enabled
     if (-not $Config.Enabled) {
@@ -2966,10 +3219,18 @@ function Send-CompletionEmail {
         return
     }
 
-    # Validate required configuration
-    if (-not $Config.SmtpServer -or -not $Config.From -or -not $Config.To -or $Config.To.Count -eq 0) {
-        Write-RobocurseLog -Message "Email configuration incomplete (missing SmtpServer, From, or To)" -Level 'Warning' -Component 'Email'
-        return
+    # Validate required configuration properties
+    if ([string]::IsNullOrWhiteSpace($Config.SmtpServer)) {
+        throw "Config.SmtpServer is required when email is enabled"
+    }
+    if ([string]::IsNullOrWhiteSpace($Config.From)) {
+        throw "Config.From is required when email is enabled"
+    }
+    if ($null -eq $Config.To -or $Config.To.Count -eq 0) {
+        throw "Config.To must contain at least one email address when email is enabled"
+    }
+    if ($null -eq $Config.Port -or $Config.Port -le 0) {
+        throw "Config.Port must be a valid port number when email is enabled"
     }
 
     # Get credential
@@ -3093,16 +3354,21 @@ function Register-RobocurseTask {
         Register-RobocurseTask -ConfigPath "C:\config.json" -Schedule Weekly -DaysOfWeek @('Monday', 'Friday') -RunAsSystem
     #>
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication",
 
         [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
         [string]$ConfigPath,
 
         [ValidateSet('Daily', 'Weekly', 'Hourly')]
         [string]$Schedule = 'Daily',
 
+        [ValidateNotNullOrEmpty()]
+        [ValidatePattern('^([01]\d|2[0-3]):[0-5]\d$')]
         [string]$Time = "02:00",
 
+        [ValidateNotNullOrEmpty()]
         [string[]]$DaysOfWeek = @('Sunday'),
 
         [switch]$RunAsSystem
@@ -3113,6 +3379,11 @@ function Register-RobocurseTask {
         if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
             return $false
+        }
+
+        # Validate config path exists (inside function body so mocks can intercept)
+        if (-not (Test-Path -Path $ConfigPath -PathType Leaf)) {
+            throw "ConfigPath '$ConfigPath' does not exist or is not a file"
         }
 
         # Get script path
