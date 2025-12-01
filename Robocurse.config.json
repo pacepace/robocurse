@@ -1,0 +1,212 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "version": "1.0",
+  "profiles": {
+    "DailyBackup": {
+      "description": "Daily incremental backup of file servers",
+      "enabled": true,
+      "sources": [
+        {
+          "path": "\\\\FILESERVER01\\Share1",
+          "credentials": {
+            "useCredentials": true,
+            "credentialName": "FileServer01-Admin"
+          },
+          "useVss": true,
+          "vssRetryCount": 3
+        },
+        {
+          "path": "\\\\FILESERVER02\\Share2",
+          "credentials": {
+            "useCredentials": true,
+            "credentialName": "FileServer02-Admin"
+          },
+          "useVss": true,
+          "vssRetryCount": 3
+        }
+      ],
+      "destination": {
+        "path": "\\\\BACKUPSERVER\\Backups",
+        "credentials": {
+          "useCredentials": true,
+          "credentialName": "BackupServer-Admin"
+        }
+      },
+      "robocopy": {
+        "switches": [
+          "/MIR",
+          "/COPYALL",
+          "/DCOPY:DAT",
+          "/R:3",
+          "/W:10",
+          "/MT:8",
+          "/XO",
+          "/NP",
+          "/NFL",
+          "/NDL"
+        ],
+        "excludeFiles": [
+          "*.tmp",
+          "*.temp",
+          "~*"
+        ],
+        "excludeDirs": [
+          "System Volume Information",
+          "$RECYCLE.BIN",
+          "Temporary Internet Files"
+        ],
+        "logVerbosity": "normal"
+      },
+      "chunking": {
+        "enabled": true,
+        "strategy": "auto",
+        "maxChunkSizeGB": 100,
+        "minChunkSizeGB": 10,
+        "maxDepthToScan": 3,
+        "parallelChunks": 4
+      },
+      "scheduling": {
+        "enabled": true,
+        "type": "daily",
+        "time": "02:00:00",
+        "daysOfWeek": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+      },
+      "retryPolicy": {
+        "maxRetries": 3,
+        "retryDelayMinutes": 5,
+        "exponentialBackoff": true
+      }
+    },
+    "WeeklyFull": {
+      "description": "Weekly full backup with verification",
+      "enabled": true,
+      "sources": [
+        {
+          "path": "\\\\FILESERVER01\\Share1",
+          "credentials": {
+            "useCredentials": true,
+            "credentialName": "FileServer01-Admin"
+          },
+          "useVss": true,
+          "vssRetryCount": 3
+        }
+      ],
+      "destination": {
+        "path": "E:\\WeeklyBackups",
+        "credentials": {
+          "useCredentials": false
+        }
+      },
+      "robocopy": {
+        "switches": [
+          "/MIR",
+          "/COPYALL",
+          "/DCOPY:DAT",
+          "/R:5",
+          "/W:30",
+          "/MT:16",
+          "/V",
+          "/ETA",
+          "/BYTES"
+        ],
+        "excludeFiles": [],
+        "excludeDirs": [],
+        "logVerbosity": "verbose"
+      },
+      "chunking": {
+        "enabled": true,
+        "strategy": "balanced",
+        "maxChunkSizeGB": 200,
+        "minChunkSizeGB": 50,
+        "maxDepthToScan": 4,
+        "parallelChunks": 2
+      },
+      "scheduling": {
+        "enabled": true,
+        "type": "weekly",
+        "time": "22:00:00",
+        "daysOfWeek": ["Saturday"]
+      },
+      "retryPolicy": {
+        "maxRetries": 5,
+        "retryDelayMinutes": 10,
+        "exponentialBackoff": true
+      },
+      "verification": {
+        "enabled": true,
+        "method": "hash",
+        "samplePercentage": 10
+      }
+    }
+  },
+  "global": {
+    "logging": {
+      "operationalLog": {
+        "enabled": true,
+        "path": "C:\\Logs\\Robocurse\\operational.log",
+        "level": "Info",
+        "rotation": {
+          "enabled": true,
+          "maxSizeMB": 100,
+          "maxAgeDays": 30,
+          "compressionEnabled": true
+        }
+      },
+      "robocopyLogs": {
+        "enabled": true,
+        "basePath": "C:\\Logs\\Robocurse\\robocopy",
+        "retentionDays": 90
+      },
+      "siemIntegration": {
+        "enabled": false,
+        "method": "eventLog",
+        "eventLogName": "Application",
+        "eventSource": "Robocurse",
+        "syslogServer": "",
+        "syslogPort": 514
+      }
+    },
+    "email": {
+      "enabled": true,
+      "smtp": {
+        "server": "smtp.company.com",
+        "port": 587,
+        "useSsl": true,
+        "credentialName": "SMTP-Robocurse"
+      },
+      "from": "robocurse@company.com",
+      "to": [
+        "backupteam@company.com",
+        "admin@company.com"
+      ],
+      "sendOnSuccess": true,
+      "sendOnFailure": true,
+      "sendOnWarning": false,
+      "includeDetailedLog": true,
+      "includeStatistics": true
+    },
+    "performance": {
+      "maxConcurrentJobs": 4,
+      "throttleNetworkMbps": 0,
+      "priorityClass": "Normal",
+      "cpuAffinityMask": 0
+    },
+    "security": {
+      "credentialStorage": "WindowsCredentialManager",
+      "requireAdminRights": true,
+      "allowRemoteExecution": false
+    },
+    "monitoring": {
+      "enableProgressTracking": true,
+      "progressUpdateIntervalSeconds": 30,
+      "enableEtaCalculation": true,
+      "enablePerformanceCounters": false
+    },
+    "advanced": {
+      "tempDirectory": "C:\\Temp\\Robocurse",
+      "cleanupTempFiles": true,
+      "debugMode": false,
+      "dryRun": false
+    }
+  }
+}

@@ -1,0 +1,472 @@
+Describe "Recursive Chunking" {
+    BeforeAll {
+        . "$PSScriptRoot\..\..\Robocurse.ps1" -Help
+        # Reset chunk counter for consistent testing
+        $script:ChunkIdCounter = 0
+    }
+
+    BeforeEach {
+        # Reset chunk counter before each test
+        $script:ChunkIdCounter = 0
+    }
+
+    Context "Get-DirectoryChunks - Simple Cases" {
+        It "Should return single chunk for small directory" {
+            Mock Get-DirectoryProfile {
+                [PSCustomObject]@{
+                    Path = $Path
+                    TotalSize = 1GB
+                    FileCount = 1000
+                    DirCount = 0
+                    AvgFileSize = 1MB
+                    LastScanned = Get-Date
+                }
+            }
+            Mock Get-DirectoryChildren { @() }
+
+            $chunks = Get-DirectoryChunks -Path "C:\Small" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+
+            $chunks.Count | Should -Be 1
+            $chunks[0].SourcePath | Should -Be "C:\Small"
+            $chunks[0].DestinationPath | Should -Be "D:\Backup"
+            $chunks[0].EstimatedSize | Should -Be 1GB
+            $chunks[0].EstimatedFiles | Should -Be 1000
+        }
+
+        It "Should split large directory into child chunks" {
+            Mock Get-DirectoryProfile {
+                param($Path)
+                if ($Path -eq "C:\Large") {
+                    [PSCustomObject]@{
+                        Path = $Path
+                        TotalSize = 50GB
+                        FileCount = 100000
+                        DirCount = 2
+                        AvgFileSize = 500KB
+                        LastScanned = Get-Date
+                    }
+                }
+                else {
+                    [PSCustomObject]@{
+                        Path = $Path
+                        TotalSize = 5GB
+                        FileCount = 10000
+                        DirCount = 0
+                        AvgFileSize = 500KB
+                        LastScanned = Get-Date
+                    }
+                }
+            }
+            Mock Get-DirectoryChildren {
+                param($Path)
+                if ($Path -eq "C:\Large") {
+                    @("C:\Large\Child1", "C:\Large\Child2")
+                }
+                else { @() }
+            }
+            Mock Get-FilesAtLevel { @() }
+
+            $chunks = Get-DirectoryChunks -Path "C:\Large" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+
+            $chunks.Count | Should -Be 2
+            $chunks[0].SourcePath | Should -BeLike "*Child*"
+            $chunks[1].SourcePath | Should -BeLike "*Child*"
+        }
+
+        It "Should handle directory with no subdirectories but large size" {
+            Mock Get-DirectoryProfile {
+                [PSCustomObject]@{
+                    Path = $Path
+                    TotalSize = 100GB
+                    FileCount = 500000
+                    DirCount = 0
+                    AvgFileSize = 200KB
+                    LastScanned = Get-Date
+                }
+            }
+            Mock Get-DirectoryChildren { @() }
+
+            $chunks = Get-DirectoryChunks -Path "C:\NoSubdirs" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+
+            $chunks.Count | Should -Be 1
+            $chunks[0].SourcePath | Should -Be "C:\NoSubdirs"
+            # Should accept as large chunk since no subdirs to split
+        }
+    }
+
+    Context "Get-DirectoryChunks - Depth Limiting" {
+        It "Should stop at max depth even if directory is large" {
+            Mock Get-DirectoryProfile {
+                [PSCustomObject]@{
+                    Path = $Path
+                    TotalSize = 100GB
+                    FileCount = 500000
+                    DirCount = 1
+                    AvgFileSize = 200KB
+                    LastScanned = Get-Date
+                }
+            }
+            Mock Get-DirectoryChildren {
+                param($Path)
+                @("$Path\Child")
+            }
+            Mock Get-FilesAtLevel { @() }
+
+            $chunks = Get-DirectoryChunks -Path "C:\Deep" -DestinationRoot "D:\Backup" -MaxDepth 2 -MaxSizeBytes 10GB
+
+            # Should not infinitely recurse
+            $chunks.Count | Should -BeGreaterThan 0
+            $chunks.Count | Should -BeLessOrEqual 10  # Reasonable limit
+        }
+
+        It "Should accept large directory at max depth" {
+            $callCount = 0
+            Mock Get-DirectoryProfile {
+                [PSCustomObject]@{
+                    Path = $Path
+                    TotalSize = 100GB
+                    FileCount = 500000
+                    DirCount = 0
+                    AvgFileSize = 200KB
+                    LastScanned = Get-Date
+                }
+            }
+            Mock Get-DirectoryChildren { @() }
+
+            # With MaxDepth 0, should immediately accept as chunk
+            $chunks = Get-DirectoryChunks -Path "C:\AtDepth" -DestinationRoot "D:\Backup" -MaxDepth 0 -MaxSizeBytes 10GB
+
+            $chunks.Count | Should -Be 1
+            $chunks[0].SourcePath | Should -Be "C:\AtDepth"
+            # Should be a large chunk at max depth
+        }
+    }
+
+    Context "Get-DirectoryChunks - Files at Level" {
+        It "Should create files-only chunk for intermediate directories" {
+            Mock Get-DirectoryProfile {
+                param($Path)
+                if ($Path -eq "C:\Mixed") {
+                    [PSCustomObject]@{
+                        Path = $Path
+                        TotalSize = 20GB
+                        FileCount = 50000
+                        DirCount = 1
+                        AvgFileSize = 400KB
+                        LastScanned = Get-Date
+                    }
+                }
+                else {
+                    [PSCustomObject]@{
+                        Path = $Path
+                        TotalSize = 5GB
+                        FileCount = 10000
+                        DirCount = 0
+                        AvgFileSize = 500KB
+                        LastScanned = Get-Date
+                    }
+                }
+            }
+            Mock Get-DirectoryChildren {
+                param($Path)
+                if ($Path -eq "C:\Mixed") { @("C:\Mixed\SubDir") } else { @() }
+            }
+            Mock Get-FilesAtLevel {
+                param($Path)
+                if ($Path -eq "C:\Mixed") {
+                    @([PSCustomObject]@{ Name = "file.txt"; Length = 1000; FullName = "C:\Mixed\file.txt" })
+                }
+                else { @() }
+            }
+
+            $chunks = Get-DirectoryChunks -Path "C:\Mixed" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+
+            $filesOnlyChunk = $chunks | Where-Object { $_.IsFilesOnly -eq $true }
+            $filesOnlyChunk | Should -Not -BeNullOrEmpty
+            $filesOnlyChunk.RobocopyArgs | Should -Contain "/LEV:1"
+            $filesOnlyChunk.SourcePath | Should -Be "C:\Mixed"
+        }
+
+        It "Should not create files-only chunk when no files at level" {
+            Mock Get-DirectoryProfile {
+                param($Path)
+                if ($Path -eq "C:\OnlySubdirs") {
+                    [PSCustomObject]@{
+                        Path = $Path
+                        TotalSize = 20GB
+                        FileCount = 50000
+                        DirCount = 2
+                        AvgFileSize = 400KB
+                        LastScanned = Get-Date
+                    }
+                }
+                else {
+                    [PSCustomObject]@{
+                        Path = $Path
+                        TotalSize = 5GB
+                        FileCount = 10000
+                        DirCount = 0
+                        AvgFileSize = 500KB
+                        LastScanned = Get-Date
+                    }
+                }
+            }
+            Mock Get-DirectoryChildren {
+                param($Path)
+                if ($Path -eq "C:\OnlySubdirs") { @("C:\OnlySubdirs\Sub1", "C:\OnlySubdirs\Sub2") } else { @() }
+            }
+            Mock Get-FilesAtLevel { @() }
+
+            $chunks = Get-DirectoryChunks -Path "C:\OnlySubdirs" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+
+            $filesOnlyChunks = $chunks | Where-Object { $_.IsFilesOnly -eq $true }
+            $filesOnlyChunks.Count | Should -Be 0
+        }
+    }
+
+    Context "Convert-ToDestinationPath" {
+        It "Should correctly map UNC to local path" {
+            $result = Convert-ToDestinationPath `
+                -SourcePath "\\server\users$\john\docs" `
+                -SourceRoot "\\server\users$" `
+                -DestRoot "D:\Backup"
+
+            $result | Should -Be "D:\Backup\john\docs"
+        }
+
+        It "Should handle trailing slashes" {
+            $result = Convert-ToDestinationPath `
+                -SourcePath "\\server\share\folder\" `
+                -SourceRoot "\\server\share\" `
+                -DestRoot "E:\Dest\"
+
+            $result | Should -Match "E:\\Dest\\folder"
+        }
+
+        It "Should handle when source equals source root" {
+            $result = Convert-ToDestinationPath `
+                -SourcePath "C:\Source" `
+                -SourceRoot "C:\Source" `
+                -DestRoot "D:\Dest"
+
+            $result | Should -Be "D:\Dest"
+        }
+
+        It "Should handle nested paths correctly" {
+            $result = Convert-ToDestinationPath `
+                -SourcePath "\\server\users$\john\docs\work\project1" `
+                -SourceRoot "\\server\users$" `
+                -DestRoot "D:\Backup"
+
+            $result | Should -Be "D:\Backup\john\docs\work\project1"
+        }
+
+        It "Should handle local paths" {
+            $result = Convert-ToDestinationPath `
+                -SourcePath "C:\Data\Projects\MyProject" `
+                -SourceRoot "C:\Data" `
+                -DestRoot "E:\Backup"
+
+            $result | Should -Be "E:\Backup\Projects\MyProject"
+        }
+    }
+
+    Context "New-Chunk" {
+        It "Should create chunk with correct properties" {
+            $profile = [PSCustomObject]@{
+                TotalSize = 5GB
+                FileCount = 10000
+                DirCount = 5
+                AvgFileSize = 500KB
+                LastScanned = Get-Date
+            }
+
+            $chunk = New-Chunk -SourcePath "C:\Test" -DestinationPath "D:\Test" -Profile $profile
+
+            $chunk.SourcePath | Should -Be "C:\Test"
+            $chunk.DestinationPath | Should -Be "D:\Test"
+            $chunk.EstimatedSize | Should -Be 5GB
+            $chunk.EstimatedFiles | Should -Be 10000
+            $chunk.IsFilesOnly | Should -Be $false
+            $chunk.Status | Should -Be "Pending"
+            $chunk.ChunkId | Should -BeGreaterThan 0
+        }
+
+        It "Should increment chunk ID for each chunk" {
+            $profile = [PSCustomObject]@{
+                TotalSize = 1GB
+                FileCount = 1000
+                DirCount = 0
+                AvgFileSize = 1MB
+                LastScanned = Get-Date
+            }
+
+            $chunk1 = New-Chunk -SourcePath "C:\Test1" -DestinationPath "D:\Test1" -Profile $profile
+            $chunk2 = New-Chunk -SourcePath "C:\Test2" -DestinationPath "D:\Test2" -Profile $profile
+
+            $chunk2.ChunkId | Should -Be ($chunk1.ChunkId + 1)
+        }
+    }
+
+    Context "New-FilesOnlyChunk" {
+        It "Should set IsFilesOnly flag" {
+            Mock Get-FilesAtLevel {
+                @([PSCustomObject]@{ Name = "file.txt"; Length = 1000; FullName = "C:\Test\file.txt" })
+            }
+
+            $chunk = New-FilesOnlyChunk -SourcePath "C:\Test" -DestinationPath "D:\Test"
+
+            $chunk.IsFilesOnly | Should -Be $true
+        }
+
+        It "Should include /LEV:1 in robocopy args" {
+            Mock Get-FilesAtLevel {
+                @([PSCustomObject]@{ Name = "file.txt"; Length = 1000; FullName = "C:\Test\file.txt" })
+            }
+
+            $chunk = New-FilesOnlyChunk -SourcePath "C:\Test" -DestinationPath "D:\Test"
+
+            $chunk.RobocopyArgs | Should -Contain "/LEV:1"
+        }
+
+        It "Should calculate size from files at level" {
+            Mock Get-FilesAtLevel {
+                @(
+                    [PSCustomObject]@{ Name = "file1.txt"; Length = 1000; FullName = "C:\Test\file1.txt" }
+                    [PSCustomObject]@{ Name = "file2.txt"; Length = 2000; FullName = "C:\Test\file2.txt" }
+                )
+            }
+
+            $chunk = New-FilesOnlyChunk -SourcePath "C:\Test" -DestinationPath "D:\Test"
+
+            $chunk.EstimatedSize | Should -Be 3000
+            $chunk.EstimatedFiles | Should -Be 2
+        }
+
+        It "Should handle empty directory" {
+            Mock Get-FilesAtLevel { @() }
+
+            $chunk = New-FilesOnlyChunk -SourcePath "C:\Test" -DestinationPath "D:\Test"
+
+            $chunk.EstimatedSize | Should -Be 0
+            $chunk.EstimatedFiles | Should -Be 0
+            $chunk.IsFilesOnly | Should -Be $true
+        }
+    }
+
+    Context "Get-FilesAtLevel" {
+        BeforeEach {
+            # Create test directory structure
+            $tempPath = [System.IO.Path]::GetTempPath()
+            $script:FilesAtLevelTestDir = Join-Path $tempPath "RobocurseTests_FilesAtLevel_$(Get-Random)"
+            New-Item -ItemType Directory -Path $script:FilesAtLevelTestDir -Force | Out-Null
+        }
+
+        AfterEach {
+            if ($null -ne $script:FilesAtLevelTestDir -and (Test-Path $script:FilesAtLevelTestDir)) {
+                Remove-Item -Path $script:FilesAtLevelTestDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It "Should return only files, not subdirectories" {
+            # Create files and subdirectories
+            "test" | Out-File (Join-Path $script:FilesAtLevelTestDir "file1.txt")
+            "test" | Out-File (Join-Path $script:FilesAtLevelTestDir "file2.txt")
+            New-Item -ItemType Directory -Path (Join-Path $script:FilesAtLevelTestDir "SubDir") -Force | Out-Null
+
+            $files = Get-FilesAtLevel -Path $script:FilesAtLevelTestDir
+
+            $files.Count | Should -Be 2
+            $files[0] | Should -BeOfType [System.IO.FileInfo]
+        }
+
+        It "Should return empty array when no files" {
+            New-Item -ItemType Directory -Path (Join-Path $script:FilesAtLevelTestDir "SubDir") -Force | Out-Null
+
+            $files = Get-FilesAtLevel -Path $script:FilesAtLevelTestDir
+
+            $files.Count | Should -Be 0
+        }
+
+        It "Should not recurse into subdirectories" {
+            # Create file in subdirectory
+            $subdir = Join-Path $script:FilesAtLevelTestDir "SubDir"
+            New-Item -ItemType Directory -Path $subdir -Force | Out-Null
+            "test" | Out-File (Join-Path $subdir "file_in_subdir.txt")
+
+            # Create file at level
+            "test" | Out-File (Join-Path $script:FilesAtLevelTestDir "file_at_level.txt")
+
+            $files = Get-FilesAtLevel -Path $script:FilesAtLevelTestDir
+
+            $files.Count | Should -Be 1
+            $files[0].Name | Should -Be "file_at_level.txt"
+        }
+    }
+
+    Context "Integration - Complex Directory Structure" {
+        It "Should handle complex multi-level structure" {
+            Mock Get-DirectoryProfile {
+                param($Path)
+                switch -Wildcard ($Path) {
+                    "*Root" {
+                        [PSCustomObject]@{
+                            Path = $Path
+                            TotalSize = 100GB
+                            FileCount = 200000
+                            DirCount = 3
+                            AvgFileSize = 500KB
+                            LastScanned = Get-Date
+                        }
+                    }
+                    "*Level1_*" {
+                        [PSCustomObject]@{
+                            Path = $Path
+                            TotalSize = 8GB
+                            FileCount = 10000
+                            DirCount = 0
+                            AvgFileSize = 800KB
+                            LastScanned = Get-Date
+                        }
+                    }
+                    default {
+                        [PSCustomObject]@{
+                            Path = $Path
+                            TotalSize = 1GB
+                            FileCount = 1000
+                            DirCount = 0
+                            AvgFileSize = 1MB
+                            LastScanned = Get-Date
+                        }
+                    }
+                }
+            }
+            Mock Get-DirectoryChildren {
+                param($Path)
+                if ($Path -match "Root$") {
+                    @("C:\Root\Level1_A", "C:\Root\Level1_B", "C:\Root\Level1_C")
+                }
+                else { @() }
+            }
+            Mock Get-FilesAtLevel {
+                param($Path)
+                if ($Path -match "Root$") {
+                    @([PSCustomObject]@{ Name = "root_file.txt"; Length = 5000; FullName = "$Path\root_file.txt" })
+                }
+                else { @() }
+            }
+
+            $chunks = Get-DirectoryChunks -Path "C:\Root" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+
+            # Should have 3 child chunks + 1 files-only chunk
+            $chunks.Count | Should -Be 4
+
+            $regularChunks = $chunks | Where-Object { -not $_.IsFilesOnly }
+            $regularChunks.Count | Should -Be 3
+
+            $filesOnlyChunks = $chunks | Where-Object { $_.IsFilesOnly }
+            $filesOnlyChunks.Count | Should -Be 1
+            $filesOnlyChunks[0].SourcePath | Should -Be "C:\Root"
+        }
+    }
+}
