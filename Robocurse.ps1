@@ -1,3 +1,46 @@
+<#
+.TITLE
+    Robocurse
+
+.DESCRIPTION
+    Multi-share parallel robocopy orchestrator for Windows environments.
+
+    Robocurse intelligently splits large directory trees into manageable chunks
+    and orchestrates multiple parallel robocopy processes for high-throughput
+    file replication. Designed for enterprise scenarios where single robocopy
+    instances become bottlenecked by massive directory structures.
+
+    Features:
+    - Smart chunking based on directory size and file count
+    - Parallel robocopy execution with configurable concurrency
+    - VSS snapshot support for copying locked files
+    - SIEM-compatible JSON logging for audit trails
+    - Email notifications on completion
+    - Windows Task Scheduler integration
+    - WPF GUI or headless CLI operation
+
+.AUTHOR
+    Mark Pace <pace@pace.org>
+
+.COPYRIGHT
+    (c) 2024 Mark Pace. All rights reserved.
+
+.VERSION
+    1.0.0
+
+.LICENSEURI
+    https://opensource.org/licenses/MIT
+
+.PROJECTURI
+    https://github.com/pacepace/robocurse
+
+.TAGS
+    robocopy, backup, replication, parallel, orchestration, file-sync
+
+.RELEASENOTES
+    1.0.0 - Initial release
+#>
+
 #Requires -Version 5.1
 #Requires -RunAsAdministrator
 
@@ -89,6 +132,31 @@ $script:LogDeleteAfterDays = 30
 
 #endregion
 
+#region ==================== UTILITY ====================
+
+function Test-IsWindowsPlatform {
+    <#
+    .SYNOPSIS
+        Tests if the current platform is Windows
+    .DESCRIPTION
+        Provides a consistent way to check if running on Windows.
+        Works across PowerShell 5.1 (where $IsWindows doesn't exist) and PowerShell 7+.
+    .OUTPUTS
+        Boolean - $true if running on Windows, $false otherwise
+    .EXAMPLE
+        if (Test-IsWindowsPlatform) { "Running on Windows" }
+    #>
+
+    # In PowerShell 5.1, $IsWindows doesn't exist (it's always Windows)
+    # In PowerShell 7+, $IsWindows is defined
+    if ($null -eq $IsWindows) {
+        return $true  # PowerShell 5.1 only runs on Windows
+    }
+    return $IsWindows
+}
+
+#endregion
+
 #region ==================== CONFIGURATION ====================
 
 function New-DefaultConfig {
@@ -110,8 +178,9 @@ function New-DefaultConfig {
             MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs
             ThreadsPerJob = $script:DefaultThreadsPerJob
             DefaultScanMode = "Smart"
-            LogRetentionDays = $script:LogDeleteAfterDays
             LogPath = ".\Logs"
+            LogCompressAfterDays = $script:LogCompressAfterDays
+            LogRetentionDays = $script:LogDeleteAfterDays
         }
         Email = [PSCustomObject]@{
             Enabled = $false
@@ -613,13 +682,22 @@ function Initialize-LogSession {
     <#
     .SYNOPSIS
         Creates log directory for today, generates session ID, initializes log files
+    .DESCRIPTION
+        Initializes logging for a new session. Also performs log rotation/cleanup
+        to compress old logs and delete ancient ones based on retention settings.
     .PARAMETER LogRoot
-        Root directory for logs
+        Root directory for logs (default: .\Logs)
+    .PARAMETER CompressAfterDays
+        Compress logs older than this many days (default from script constant or config)
+    .PARAMETER DeleteAfterDays
+        Delete compressed logs older than this many days (default from script constant or config)
     .OUTPUTS
         Hashtable with SessionId, OperationalLogPath, SiemLogPath
     #>
     param(
-        [string]$LogRoot = ".\Logs"
+        [string]$LogRoot = ".\Logs",
+        [int]$CompressAfterDays = $script:LogCompressAfterDays,
+        [int]$DeleteAfterDays = $script:LogDeleteAfterDays
     )
 
     # Generate unique session ID based on timestamp
@@ -654,6 +732,16 @@ function Initialize-LogSession {
     $script:CurrentOperationalLogPath = $operationalLogPath
     $script:CurrentSiemLogPath = $siemLogPath
     $script:CurrentJobsPath = $jobsDirectory
+
+    # Perform log rotation/cleanup (compress old, delete ancient)
+    # This runs at session start to maintain log hygiene
+    try {
+        Invoke-LogRotation -LogRoot $LogRoot -CompressAfterDays $CompressAfterDays -DeleteAfterDays $DeleteAfterDays
+    }
+    catch {
+        Write-Warning "Log rotation failed: $($_.Exception.Message)"
+        # Non-fatal - continue with session initialization
+    }
 
     # Return session information
     return @{
@@ -956,8 +1044,8 @@ function Get-LogPath {
 
 #region ==================== DIRECTORY PROFILING ====================
 
-# Script-level cache for directory profiles
-$script:ProfileCache = @{}
+# Script-level cache for directory profiles (thread-safe)
+$script:ProfileCache = [System.Collections.Concurrent.ConcurrentDictionary[string, PSCustomObject]]::new()
 
 function Invoke-RobocopyList {
     <#
@@ -978,7 +1066,7 @@ function Invoke-RobocopyList {
     return $output
 }
 
-function Parse-RobocopyListOutput {
+function ConvertFrom-RobocopyListOutput {
     <#
     .SYNOPSIS
         Parses robocopy /L output to extract file info
@@ -1076,7 +1164,7 @@ function Get-DirectoryProfile {
         $output = Invoke-RobocopyList -Source $Path
 
         # Parse the output
-        $parseResult = Parse-RobocopyListOutput -Output $output
+        $parseResult = ConvertFrom-RobocopyListOutput -Output $output
 
         # Calculate average file size (handle division by zero)
         $avgFileSize = 0
@@ -1186,17 +1274,18 @@ function Get-CachedProfile {
     # Normalize path for cache lookup
     $cacheKey = Get-NormalizedCacheKey -Path $Path
 
-    # Check if path exists in cache
-    if (-not $script:ProfileCache.ContainsKey($cacheKey)) {
+    # Thread-safe retrieval from ConcurrentDictionary
+    $cachedProfile = $null
+    if (-not $script:ProfileCache.TryGetValue($cacheKey, [ref]$cachedProfile)) {
         return $null
     }
-
-    $cachedProfile = $script:ProfileCache[$cacheKey]
 
     # Check if cache is still valid
     $age = (Get-Date) - $cachedProfile.LastScanned
     if ($age.TotalHours -gt $MaxAgeHours) {
         Write-RobocurseLog "Cache expired for: $Path (age: $([math]::Round($age.TotalHours, 1))h)" -Level Debug
+        # Remove expired entry (thread-safe)
+        $script:ProfileCache.TryRemove($cacheKey, [ref]$null) | Out-Null
         return $null
     }
 
@@ -1206,7 +1295,7 @@ function Get-CachedProfile {
 function Set-CachedProfile {
     <#
     .SYNOPSIS
-        Stores directory profile in cache
+        Stores directory profile in cache (thread-safe)
     .PARAMETER Profile
         Profile object to cache
     #>
@@ -1217,6 +1306,7 @@ function Set-CachedProfile {
     # Normalize path for cache key
     $cacheKey = Get-NormalizedCacheKey -Path $Profile.Path
 
+    # Thread-safe add or update using ConcurrentDictionary indexer
     $script:ProfileCache[$cacheKey] = $Profile
     Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level Debug
 }
@@ -1410,6 +1500,7 @@ function New-Chunk {
         Depth = 0  # Will be set by caller if needed
         IsFilesOnly = $IsFilesOnly
         Status = "Pending"
+        RetryCount = 0  # Track retry attempts for failed chunks
         RobocopyArgs = @()
     }
 
@@ -1813,7 +1904,7 @@ function Get-RobocopyExitMeaning {
     return $result
 }
 
-function Parse-RobocopyLog {
+function ConvertFrom-RobocopyLog {
     <#
     .SYNOPSIS
         Parses a robocopy log file for progress and statistics
@@ -1930,8 +2021,8 @@ function Get-RobocopyProgress {
         [PSCustomObject]$Job
     )
 
-    # Use Parse-RobocopyLog with tail parsing to get current status
-    return Parse-RobocopyLog -LogPath $Job.LogPath -TailLines 100
+    # Use ConvertFrom-RobocopyLog with tail parsing to get current status
+    return ConvertFrom-RobocopyLog -LogPath $Job.LogPath -TailLines 100
 }
 
 function Wait-RobocopyJob {
@@ -1972,7 +2063,7 @@ function Wait-RobocopyJob {
     $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
 
     # Parse final statistics from log
-    $finalStats = Parse-RobocopyLog -LogPath $Job.LogPath
+    $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
 
     return [PSCustomObject]@{
         ExitCode = $exitCode
@@ -1986,7 +2077,7 @@ function Wait-RobocopyJob {
 
 #region ==================== ORCHESTRATION ====================
 
-# Script-scoped orchestration state
+# Script-scoped orchestration state (using concurrent collections for thread safety)
 $script:OrchestrationState = [PSCustomObject]@{
     SessionId        = ""
     CurrentProfile   = $null
@@ -1994,14 +2085,17 @@ $script:OrchestrationState = [PSCustomObject]@{
     Profiles         = @()     # All profiles to process
     ProfileIndex     = 0       # Current profile index
 
-    # Current profile state
-    ChunkQueue       = [System.Collections.Generic.Queue[PSCustomObject]]::new()
-    ActiveJobs       = [System.Collections.Generic.Dictionary[int,PSCustomObject]]::new()  # ProcessId -> Job
-    CompletedChunks  = [System.Collections.Generic.List[PSCustomObject]]::new()
-    FailedChunks     = [System.Collections.Generic.List[PSCustomObject]]::new()
+    # Current profile state (thread-safe collections)
+    ChunkQueue       = [System.Collections.Concurrent.ConcurrentQueue[PSCustomObject]]::new()
+    ActiveJobs       = [System.Collections.Concurrent.ConcurrentDictionary[int,PSCustomObject]]::new()  # ProcessId -> Job
+    CompletedChunks  = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+    FailedChunks     = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
 
     # Profile-specific robocopy options (set by Start-ProfileReplication)
     CurrentRobocopyOptions = @{}
+
+    # VSS snapshot for current profile (if UseVSS is enabled)
+    CurrentVssSnapshot = $null  # Holds snapshot info from New-VssSnapshot
 
     # Statistics
     TotalChunks      = 0
@@ -2036,12 +2130,16 @@ function Initialize-OrchestrationState {
         Profiles         = @()
         ProfileIndex     = 0
 
-        ChunkQueue       = [System.Collections.Generic.Queue[PSCustomObject]]::new()
-        ActiveJobs       = [System.Collections.Generic.Dictionary[int,PSCustomObject]]::new()
-        CompletedChunks  = [System.Collections.Generic.List[PSCustomObject]]::new()
-        FailedChunks     = [System.Collections.Generic.List[PSCustomObject]]::new()
+        # Thread-safe collections for cross-runspace access
+        ChunkQueue       = [System.Collections.Concurrent.ConcurrentQueue[PSCustomObject]]::new()
+        ActiveJobs       = [System.Collections.Concurrent.ConcurrentDictionary[int,PSCustomObject]]::new()
+        CompletedChunks  = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+        FailedChunks     = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
 
         CurrentRobocopyOptions = @{}
+
+        # VSS snapshot for current profile (if UseVSS is enabled)
+        CurrentVssSnapshot = $null
 
         TotalChunks      = 0
         CompletedCount   = 0
@@ -2178,12 +2276,41 @@ function Start-ProfileReplication {
         destination = $Profile.Destination
     }
 
-    # TODO: In future tasks, add VSS snapshot creation here if UseVSS is enabled
-    # For now, just scan and chunk
+    # VSS snapshot handling - allows copying of locked files
+    $state.CurrentVssSnapshot = $null
+    $effectiveSource = $Profile.Source
 
-    # Scan source directory
+    if ($Profile.UseVSS) {
+        if (Test-VssSupported -Path $Profile.Source) {
+            try {
+                Write-RobocurseLog -Message "Creating VSS snapshot for: $($Profile.Source)" -Level 'Info' -Component 'VSS'
+                $snapshot = New-VssSnapshot -SourcePath $Profile.Source
+                $state.CurrentVssSnapshot = $snapshot
+
+                # Convert source path to use VSS shadow copy
+                $effectiveSource = Get-VssPath -OriginalPath $Profile.Source -VssSnapshot $snapshot
+                Write-RobocurseLog -Message "Using VSS path: $effectiveSource" -Level 'Info' -Component 'VSS'
+
+                Write-SiemEvent -EventType 'VssSnapshotCreated' -Data @{
+                    profileName = $Profile.Name
+                    shadowId = $snapshot.ShadowId
+                    shadowPath = $snapshot.ShadowPath
+                }
+            }
+            catch {
+                Write-RobocurseLog -Message "Failed to create VSS snapshot, continuing without VSS: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+                $state.CurrentVssSnapshot = $null
+                $effectiveSource = $Profile.Source
+            }
+        }
+        else {
+            Write-RobocurseLog -Message "VSS not supported for path: $($Profile.Source), continuing without VSS" -Level 'Warning' -Component 'VSS'
+        }
+    }
+
+    # Scan source directory (using VSS path if available)
     $state.Phase = "Scanning"
-    $scanResult = Get-DirectoryProfile -Path $Profile.Source
+    $scanResult = Get-DirectoryProfile -Path $effectiveSource
 
     # Generate chunks based on scan mode
     # Convert ChunkMaxSizeGB to bytes
@@ -2194,14 +2321,14 @@ function Start-ProfileReplication {
     $chunks = switch ($Profile.ScanMode) {
         'Flat' {
             New-FlatChunks `
-                -Path $Profile.Source `
+                -Path $effectiveSource `
                 -DestinationRoot $Profile.Destination `
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles
         }
         'Smart' {
             New-SmartChunks `
-                -Path $Profile.Source `
+                -Path $effectiveSource `
                 -DestinationRoot $Profile.Destination `
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles `
@@ -2209,7 +2336,7 @@ function Start-ProfileReplication {
         }
         default {
             New-SmartChunks `
-                -Path $Profile.Source `
+                -Path $effectiveSource `
                 -DestinationRoot $Profile.Destination `
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles `
@@ -2217,14 +2344,12 @@ function Start-ProfileReplication {
         }
     }
 
-    # Chunks already have destination paths from the chunking functions
-    # Just add additional metadata
-    foreach ($chunk in $chunks) {
-        $chunk | Add-Member -MemberType NoteProperty -Name 'RetryCount' -Value 0 -Force
-    }
+    # Initialize fresh concurrent collections (ConcurrentQueue/Bag don't have Clear())
+    $state.ChunkQueue = [System.Collections.Concurrent.ConcurrentQueue[PSCustomObject]]::new()
+    $state.CompletedChunks = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+    $state.FailedChunks = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
 
-    # Initialize queue
-    $state.ChunkQueue.Clear()
+    # Enqueue all chunks (RetryCount is now part of New-Chunk)
     foreach ($chunk in $chunks) {
         $state.ChunkQueue.Enqueue($chunk)
     }
@@ -2233,8 +2358,6 @@ function Start-ProfileReplication {
     $state.TotalBytes = $scanResult.TotalSize
     $state.CompletedCount = 0
     $state.BytesComplete = 0
-    $state.CompletedChunks.Clear()
-    $state.FailedChunks.Clear()
     $state.Phase = "Replicating"
 
     Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($scanResult.TotalSize/1GB, 2)) GB" `
@@ -2304,17 +2427,20 @@ function Invoke-ReplicationTick {
         return  # Don't start new jobs, but let running ones complete
     }
 
-    # Check completed jobs
-    $completedIds = @()
-    foreach ($kvp in $state.ActiveJobs.GetEnumerator()) {
+    # Check completed jobs - snapshot keys first for safe enumeration
+    $activeJobsCopy = $state.ActiveJobs.ToArray()
+    foreach ($kvp in $activeJobsCopy) {
         $job = $kvp.Value
         if ($job.Process.HasExited) {
             # Process completion
             $result = Complete-RobocopyJob -Job $job
-            $completedIds += $kvp.Key
+
+            # Thread-safe removal from ConcurrentDictionary
+            $removedJob = $null
+            $state.ActiveJobs.TryRemove($kvp.Key, [ref]$removedJob) | Out-Null
 
             if ($result.ExitMeaning.Severity -in @('Error', 'Fatal')) {
-                Handle-FailedChunk -Job $job -Result $result
+                Invoke-FailedChunkHandler -Job $job -Result $result
             }
             else {
                 $state.CompletedChunks.Add($job.Chunk)
@@ -2328,17 +2454,14 @@ function Invoke-ReplicationTick {
         }
     }
 
-    # Remove completed from active
-    foreach ($id in $completedIds) {
-        $state.ActiveJobs.Remove($id)
-    }
-
-    # Start new jobs
+    # Start new jobs - use TryDequeue for thread-safe queue access
     while (($state.ActiveJobs.Count -lt $MaxConcurrentJobs) -and
            ($state.ChunkQueue.Count -gt 0)) {
-        $chunk = $state.ChunkQueue.Dequeue()
-        $job = Start-ChunkJob -Chunk $chunk
-        $state.ActiveJobs[$job.Process.Id] = $job
+        $chunk = $null
+        if ($state.ChunkQueue.TryDequeue([ref]$chunk)) {
+            $job = Start-ChunkJob -Chunk $chunk
+            $state.ActiveJobs[$job.Process.Id] = $job
+        }
     }
 
     # Check if profile complete
@@ -2371,7 +2494,7 @@ function Complete-RobocopyJob {
 
     $exitCode = $Job.Process.ExitCode
     $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
-    $stats = Parse-RobocopyLog -LogPath $Job.LogPath
+    $stats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
     $duration = [datetime]::Now - $Job.StartTime
 
     # Update chunk status
@@ -2408,12 +2531,12 @@ function Complete-RobocopyJob {
     }
 }
 
-function Handle-FailedChunk {
+function Invoke-FailedChunkHandler {
     <#
     .SYNOPSIS
-        Handles a failed chunk - retry or mark failed
+        Processes a failed chunk - retry or mark as permanently failed
     .PARAMETER Job
-        Failed job
+        Failed job object
     .PARAMETER Result
         Result from Complete-RobocopyJob
     #>
@@ -2424,19 +2547,18 @@ function Handle-FailedChunk {
 
     $chunk = $Job.Chunk
 
-    # Check retry count
-    if (-not $chunk.RetryCount) { $chunk.RetryCount = 0 }
+    # Increment retry count (RetryCount is initialized in New-Chunk)
     $chunk.RetryCount++
 
     if ($chunk.RetryCount -lt $script:MaxChunkRetries -and $Result.ExitMeaning.ShouldRetry) {
-        # Re-queue for retry
+        # Re-queue for retry (thread-safe ConcurrentQueue)
         Write-RobocurseLog -Message "Chunk $($chunk.ChunkId) failed, retrying ($($chunk.RetryCount)/$script:MaxChunkRetries)" `
             -Level 'Warning' -Component 'Orchestrator'
 
         $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
     }
     else {
-        # Mark as failed
+        # Mark as permanently failed (thread-safe ConcurrentBag)
         $chunk.Status = 'Failed'
         $script:OrchestrationState.FailedChunks.Add($chunk)
 
@@ -2473,6 +2595,25 @@ function Complete-CurrentProfile {
         chunksCompleted = $state.CompletedChunks.Count
         chunksFailed = $state.FailedChunks.Count
         durationMs = $profileDuration.TotalMilliseconds
+    }
+
+    # Clean up VSS snapshot if one was created for this profile
+    if ($state.CurrentVssSnapshot) {
+        try {
+            Write-RobocurseLog -Message "Cleaning up VSS snapshot: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
+            Remove-VssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId
+
+            Write-SiemEvent -EventType 'VssSnapshotRemoved' -Data @{
+                profileName = $state.CurrentProfile.Name
+                shadowId = $state.CurrentVssSnapshot.ShadowId
+            }
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to clean up VSS snapshot: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+        }
+        finally {
+            $state.CurrentVssSnapshot = $null
+        }
     }
 
     # Invoke callback
@@ -2527,6 +2668,20 @@ function Stop-AllJobs {
     $state.ActiveJobs.Clear()
     $state.Phase = "Stopped"
 
+    # Clean up VSS snapshot if one exists
+    if ($state.CurrentVssSnapshot) {
+        try {
+            Write-RobocurseLog -Message "Cleaning up VSS snapshot after stop: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
+            Remove-VssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to clean up VSS snapshot: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+        }
+        finally {
+            $state.CurrentVssSnapshot = $null
+        }
+    }
+
     Write-SiemEvent -EventType 'SessionEnd' -Data @{
         reason = 'Stopped by user'
         chunksCompleted = $state.CompletedCount
@@ -2579,16 +2734,18 @@ function Update-ProgressStats {
     $state = $script:OrchestrationState
 
     # Calculate bytes complete from completed chunks + in-progress
+    # Use ToArray() for thread-safe snapshot of ConcurrentBag
     $bytesFromCompleted = 0
-    foreach ($chunk in $state.CompletedChunks) {
+    foreach ($chunk in $state.CompletedChunks.ToArray()) {
         if ($chunk.EstimatedSize) {
             $bytesFromCompleted += $chunk.EstimatedSize
         }
     }
 
+    # Snapshot ActiveJobs for safe iteration
     $bytesFromActive = 0
-    foreach ($job in $state.ActiveJobs.Values) {
-        $progress = Get-RobocopyProgress -Job $job
+    foreach ($kvp in $state.ActiveJobs.ToArray()) {
+        $progress = Get-RobocopyProgress -Job $kvp.Value
         if ($progress) {
             $bytesFromActive += $progress.BytesCopied
         }
@@ -2748,10 +2905,12 @@ function New-VssSnapshot {
 
         Write-RobocurseLog -Message "Creating VSS snapshot for volume $volume (from path: $SourcePath)" -Level 'Info' -Component 'VSS'
 
-        # Create shadow copy via WMI
+        # Create shadow copy via CIM (modern replacement for WMI)
         # Note: Requires Administrator privileges
-        $shadowClass = [wmiclass]"root\cimv2:Win32_ShadowCopy"
-        $result = $shadowClass.Create("$volume\", "ClientAccessible")
+        $result = Invoke-CimMethod -ClassName Win32_ShadowCopy -MethodName Create -Arguments @{
+            Volume = "$volume\"
+            Context = "ClientAccessible"
+        }
 
         if ($result.ReturnValue -ne 0) {
             # Common error codes:
@@ -2766,7 +2925,7 @@ function New-VssSnapshot {
         $shadowId = $result.ShadowID
         Write-RobocurseLog -Message "VSS snapshot created with ID: $shadowId" -Level 'Debug' -Component 'VSS'
 
-        $shadow = Get-WmiObject Win32_ShadowCopy | Where-Object { $_.ID -eq $shadowId }
+        $shadow = Get-CimInstance -ClassName Win32_ShadowCopy | Where-Object { $_.ID -eq $shadowId }
         if (-not $shadow) {
             throw "Shadow copy created but could not retrieve details for ID: $shadowId"
         }
@@ -2814,9 +2973,9 @@ function Remove-VssSnapshot {
     try {
         Write-RobocurseLog -Message "Attempting to delete VSS snapshot: $ShadowId" -Level 'Debug' -Component 'VSS'
 
-        $shadow = Get-WmiObject Win32_ShadowCopy | Where-Object { $_.ID -eq $ShadowId }
+        $shadow = Get-CimInstance -ClassName Win32_ShadowCopy | Where-Object { $_.ID -eq $ShadowId }
         if ($shadow) {
-            $shadow.Delete() | Out-Null
+            Remove-CimInstance -InputObject $shadow
             Write-RobocurseLog -Message "Deleted VSS snapshot: $ShadowId" -Level 'Info' -Component 'VSS'
         }
         else {
@@ -2922,13 +3081,13 @@ function Test-VssSupported {
         # Check if local path
         $volume = Get-VolumeFromPath -Path $Path
         if (-not $volume) {
-            # UNC path - would need remote WMI (complex, not supported in v1.0)
+            # UNC path - would need remote CIM session (complex, not supported in v1.0)
             Write-RobocurseLog -Message "VSS not supported for path: $Path (UNC path)" -Level 'Debug' -Component 'VSS'
             return $false
         }
 
-        # Check if WMI is available and we can access Win32_ShadowCopy class
-        $shadowClass = Get-WmiObject -List Win32_ShadowCopy -ErrorAction Stop
+        # Check if CIM is available and we can access Win32_ShadowCopy class
+        $shadowClass = Get-CimClass -ClassName Win32_ShadowCopy -ErrorAction Stop
         if ($shadowClass) {
             Write-RobocurseLog -Message "VSS is supported for path: $Path" -Level 'Debug' -Component 'VSS'
             return $true
@@ -3030,7 +3189,7 @@ function Initialize-CredentialManager {
     }
 
     # Only attempt on Windows
-    if (-not $IsWindows -and $null -ne $IsWindows) {
+    if (-not (Test-IsWindowsPlatform)) {
         return
     }
 
@@ -3116,7 +3275,7 @@ function Get-SmtpCredential {
     }
 
     # Try Windows Credential Manager (Windows only)
-    if ($IsWindows -or $null -eq $IsWindows) {
+    if (Test-IsWindowsPlatform) {
         try {
             Initialize-CredentialManager
 
@@ -3176,7 +3335,7 @@ function Save-SmtpCredential {
     )
 
     # Check if running on non-Windows
-    if (-not $IsWindows -and $null -ne $IsWindows) {
+    if (-not (Test-IsWindowsPlatform)) {
         Write-RobocurseLog -Message "Credential Manager not available on non-Windows platforms. Use environment variables ROBOCURSE_SMTP_USER and ROBOCURSE_SMTP_PASS instead." -Level 'Warning' -Component 'Email'
         return
     }
@@ -3243,7 +3402,7 @@ function Remove-SmtpCredential {
     )
 
     # Check if running on non-Windows
-    if (-not $IsWindows -and $null -ne $IsWindows) {
+    if (-not (Test-IsWindowsPlatform)) {
         Write-RobocurseLog -Message "Credential Manager not available on non-Windows platforms." -Level 'Warning' -Component 'Email'
         return
     }
@@ -3695,7 +3854,7 @@ function Register-RobocurseTask {
 
     try {
         # Check if running on Windows
-        if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+        if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
             return $false
         }
@@ -3800,7 +3959,7 @@ function Unregister-RobocurseTask {
 
     try {
         # Check if running on Windows
-        if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+        if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
             return $false
         }
@@ -3837,7 +3996,7 @@ function Get-RobocurseTask {
 
     try {
         # Check if running on Windows
-        if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+        if (-not (Test-IsWindowsPlatform)) {
             return $null
         }
 
@@ -3883,7 +4042,7 @@ function Start-RobocurseTask {
 
     try {
         # Check if running on Windows
-        if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+        if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
             return $false
         }
@@ -3917,7 +4076,7 @@ function Enable-RobocurseTask {
 
     try {
         # Check if running on Windows
-        if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+        if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
             return $false
         }
@@ -3952,7 +4111,7 @@ function Disable-RobocurseTask {
 
     try {
         # Check if running on Windows
-        if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+        if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
             return $false
         }
@@ -3986,7 +4145,7 @@ function Test-RobocurseTaskExists {
 
     try {
         # Check if running on Windows
-        if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+        if (-not (Test-IsWindowsPlatform)) {
             return $false
         }
 
@@ -4271,7 +4430,7 @@ function Initialize-RobocurseGui {
     #>
 
     # Check platform
-    if (-not $IsWindows -and $PSVersionTable.PSVersion.Major -ge 6) {
+    if (-not (Test-IsWindowsPlatform)) {
         Write-Warning "WPF GUI is only supported on Windows. Use -Headless mode on other platforms."
         return $null
     }
@@ -4459,23 +4618,38 @@ function Save-ProfileFromForm {
     $selected.UseVSS = $script:Controls.chkUseVss.IsChecked
     $selected.ScanMode = $script:Controls.cmbScanMode.Text
 
-    # Parse numeric values with validation
+    # Parse numeric values with validation and bounds checking
+    # ChunkMaxSizeGB: valid range 1-1000 GB
     try {
-        $selected.ChunkMaxSizeGB = [int]$script:Controls.txtMaxSize.Text
+        $value = [int]$script:Controls.txtMaxSize.Text
+        $selected.ChunkMaxSizeGB = [Math]::Max(1, [Math]::Min(1000, $value))
+        if ($value -ne $selected.ChunkMaxSizeGB) {
+            $script:Controls.txtMaxSize.Text = $selected.ChunkMaxSizeGB.ToString()
+        }
     } catch {
         $selected.ChunkMaxSizeGB = 10
         $script:Controls.txtMaxSize.Text = "10"
     }
 
+    # ChunkMaxFiles: valid range 1000-10000000
     try {
-        $selected.ChunkMaxFiles = [int]$script:Controls.txtMaxFiles.Text
+        $value = [int]$script:Controls.txtMaxFiles.Text
+        $selected.ChunkMaxFiles = [Math]::Max(1000, [Math]::Min(10000000, $value))
+        if ($value -ne $selected.ChunkMaxFiles) {
+            $script:Controls.txtMaxFiles.Text = $selected.ChunkMaxFiles.ToString()
+        }
     } catch {
         $selected.ChunkMaxFiles = 50000
         $script:Controls.txtMaxFiles.Text = "50000"
     }
 
+    # ChunkMaxDepth: valid range 1-20
     try {
-        $selected.ChunkMaxDepth = [int]$script:Controls.txtMaxDepth.Text
+        $value = [int]$script:Controls.txtMaxDepth.Text
+        $selected.ChunkMaxDepth = [Math]::Max(1, [Math]::Min(20, $value))
+        if ($value -ne $selected.ChunkMaxDepth) {
+            $script:Controls.txtMaxDepth.Text = $selected.ChunkMaxDepth.ToString()
+        }
     } catch {
         $selected.ChunkMaxDepth = 5
         $script:Controls.txtMaxDepth.Text = "5"
@@ -4627,19 +4801,36 @@ function Start-GuiReplication {
     # Start timer
     $script:ProgressTimer.Start()
 
-    # Start replication asynchronously
+    # Initialize orchestration state before starting background runspace
+    # This ensures the same state object is referenced by both threads
+    Initialize-OrchestrationState
+
+    # Start replication in a background runspace
+    # IMPORTANT: We pass the orchestration state object by reference so both
+    # the GUI thread and worker thread operate on the same concurrent collections
     $runspace = [runspacefactory]::CreateRunspace()
     $runspace.Open()
+
+    # Pass shared state and parameters to the runspace
+    $runspace.SessionStateProxy.SetVariable("SharedOrchestrationState", $script:OrchestrationState)
     $runspace.SessionStateProxy.SetVariable("profilesToRun", $profilesToRun)
     $runspace.SessionStateProxy.SetVariable("maxWorkers", $maxWorkers)
 
-    # Execute replication in background
+    # Execute replication in background - note we set the script variable from the passed-in state
     $powershell = [powershell]::Create()
     $powershell.Runspace = $runspace
     $powershell.AddScript({
-        param($profiles, $workers)
+        param($sharedState, $profiles, $workers)
+        # Reference the shared state from the parent runspace
+        $script:OrchestrationState = $sharedState
         Start-ReplicationRun -Profiles $profiles -MaxConcurrentJobs $workers
-    }).AddArgument($profilesToRun).AddArgument($maxWorkers)
+
+        # Run the orchestration loop until complete
+        while ($script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
+            Invoke-ReplicationTick -MaxConcurrentJobs $workers
+            Start-Sleep -Milliseconds 250
+        }
+    }).AddArgument($script:OrchestrationState).AddArgument($profilesToRun).AddArgument($maxWorkers)
 
     $script:ReplicationHandle = $powershell.BeginInvoke()
     $script:ReplicationPowerShell = $powershell
@@ -4965,9 +5156,11 @@ if (-not $script:TestMode) {
                 throw "Profile parameter required for headless mode. Use -Profile <name>"
             }
 
-            # Initialize logging for headless mode
+            # Initialize logging for headless mode with config-based retention settings
             $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { ".\Logs" }
-            Initialize-LogSession -LogRoot $logRoot
+            $compressDays = if ($config.GlobalSettings.LogCompressAfterDays) { $config.GlobalSettings.LogCompressAfterDays } else { $script:LogCompressAfterDays }
+            $deleteDays = if ($config.GlobalSettings.LogRetentionDays) { $config.GlobalSettings.LogRetentionDays } else { $script:LogDeleteAfterDays }
+            Initialize-LogSession -LogRoot $logRoot -CompressAfterDays $compressDays -DeleteAfterDays $deleteDays
 
             # Find the specified profile
             $targetProfile = $config.SyncProfiles | Where-Object { $_.Name -eq $Profile }

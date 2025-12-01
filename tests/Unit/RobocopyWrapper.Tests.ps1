@@ -113,7 +113,7 @@ Describe "Robocopy Wrapper" {
         }
     }
 
-    Context "Parse-RobocopyLog" {
+    Context "ConvertFrom-RobocopyLog" {
         It "Should extract file counts from completed log" {
             $logContent = @"
 -------------------------------------------------------------------------------
@@ -129,7 +129,7 @@ Describe "Robocopy Wrapper" {
             $logPath = "$TestDrive/test.log"
             $logContent | Set-Content $logPath
 
-            $result = Parse-RobocopyLog -LogPath $logPath
+            $result = ConvertFrom-RobocopyLog -LogPath $logPath
 
             $result.FilesCopied | Should -Be 500
             $result.FilesSkipped | Should -Be 500
@@ -142,7 +142,7 @@ Describe "Robocopy Wrapper" {
         }
 
         It "Should handle log file not existing" {
-            $result = Parse-RobocopyLog -LogPath "$TestDrive/nonexistent.log"
+            $result = ConvertFrom-RobocopyLog -LogPath "$TestDrive/nonexistent.log"
             $result | Should -Not -BeNullOrEmpty
             $result.FilesCopied | Should -Be 0
             $result.FilesSkipped | Should -Be 0
@@ -153,7 +153,7 @@ Describe "Robocopy Wrapper" {
             $logPath = "$TestDrive/empty.log"
             "" | Set-Content $logPath
 
-            $result = Parse-RobocopyLog -LogPath $logPath
+            $result = ConvertFrom-RobocopyLog -LogPath $logPath
 
             $result.FilesCopied | Should -Be 0
             $result.FilesSkipped | Should -Be 0
@@ -169,7 +169,7 @@ Describe "Robocopy Wrapper" {
             $logPath = "$TestDrive/progress.log"
             $logContent | Set-Content $logPath
 
-            $result = Parse-RobocopyLog -LogPath $logPath
+            $result = ConvertFrom-RobocopyLog -LogPath $logPath
 
             $result.CurrentFile | Should -Be "OldStuff\deleted.tmp"
         }
@@ -184,7 +184,7 @@ Describe "Robocopy Wrapper" {
             $logPath = "$TestDrive/kb.log"
             $logContent | Set-Content $logPath
 
-            $result = Parse-RobocopyLog -LogPath $logPath
+            $result = ConvertFrom-RobocopyLog -LogPath $logPath
 
             $result.BytesCopied | Should -Be 51200  # 50 KB
         }
@@ -199,7 +199,7 @@ Describe "Robocopy Wrapper" {
             $logPath = "$TestDrive/gb.log"
             $logContent | Set-Content $logPath
 
-            $result = Parse-RobocopyLog -LogPath $logPath
+            $result = ConvertFrom-RobocopyLog -LogPath $logPath
 
             $result.BytesCopied | Should -Be 1610612736  # 1.5 GB
         }
@@ -214,7 +214,7 @@ Describe "Robocopy Wrapper" {
             $logPath = "$TestDrive/bytes.log"
             $logContent | Set-Content $logPath
 
-            $result = Parse-RobocopyLog -LogPath $logPath
+            $result = ConvertFrom-RobocopyLog -LogPath $logPath
 
             $result.BytesCopied | Should -Be 512
         }

@@ -3,7 +3,7 @@ Describe "Directory Profiling" {
         . "$PSScriptRoot\..\..\Robocurse.ps1" -Help
     }
 
-    Context "Parse-RobocopyListOutput" {
+    Context "ConvertFrom-RobocopyListOutput" {
         It "Should extract file sizes correctly" {
             $output = @(
                 "          1000    test\file1.txt",
@@ -11,7 +11,7 @@ Describe "Directory Profiling" {
                 "             0    test\subdir\"
             )
 
-            $result = Parse-RobocopyListOutput -Output $output
+            $result = ConvertFrom-RobocopyListOutput -Output $output
 
             $result.TotalSize | Should -Be 3000
             $result.FileCount | Should -Be 2
@@ -24,7 +24,7 @@ Describe "Directory Profiling" {
                 "             0    test\dir2\"
             )
 
-            $result = Parse-RobocopyListOutput -Output $output
+            $result = ConvertFrom-RobocopyListOutput -Output $output
 
             $result.FileCount | Should -Be 1
             $result.DirCount | Should -Be 2
@@ -33,7 +33,7 @@ Describe "Directory Profiling" {
         It "Should handle empty output" {
             $output = @()
 
-            $result = Parse-RobocopyListOutput -Output $output
+            $result = ConvertFrom-RobocopyListOutput -Output $output
 
             $result.TotalSize | Should -Be 0
             $result.FileCount | Should -Be 0
@@ -44,7 +44,7 @@ Describe "Directory Profiling" {
                 "   10737418240    test\largefile.iso"  # 10 GB
             )
 
-            $result = Parse-RobocopyListOutput -Output $output
+            $result = ConvertFrom-RobocopyListOutput -Output $output
 
             $result.TotalSize | Should -Be 10737418240
         }
@@ -57,7 +57,7 @@ Describe "Directory Profiling" {
                 "          2000    test\file2.txt"
             )
 
-            $result = Parse-RobocopyListOutput -Output $output
+            $result = ConvertFrom-RobocopyListOutput -Output $output
 
             $result.TotalSize | Should -Be 3000
             $result.FileCount | Should -Be 2
@@ -68,7 +68,7 @@ Describe "Directory Profiling" {
                 "          1000    test\file with spaces.txt"
             )
 
-            $result = Parse-RobocopyListOutput -Output $output
+            $result = ConvertFrom-RobocopyListOutput -Output $output
 
             $result.FileCount | Should -Be 1
             $result.Files[0].Path | Should -Be "test\file with spaces.txt"
@@ -78,7 +78,7 @@ Describe "Directory Profiling" {
     Context "Get-DirectoryProfile" {
         BeforeEach {
             # Clear cache
-            $script:ProfileCache = @{}
+            $script:ProfileCache = [System.Collections.Concurrent.ConcurrentDictionary[string, PSCustomObject]]::new()
         }
 
         It "Should call robocopy and parse output" {
@@ -155,7 +155,7 @@ Describe "Directory Profiling" {
     Context "Cache Functions" {
         BeforeEach {
             # Clear cache
-            $script:ProfileCache = @{}
+            $script:ProfileCache = [System.Collections.Concurrent.ConcurrentDictionary[string, PSCustomObject]]::new()
         }
 
         It "Should store and retrieve cached profiles" {

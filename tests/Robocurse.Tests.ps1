@@ -101,8 +101,8 @@ Describe "Robocurse Main Script" {
             Get-Command Get-RobocopyExitMeaning -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
         }
 
-        It "Should have Parse-RobocopyLog function" {
-            Get-Command Parse-RobocopyLog -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+        It "Should have ConvertFrom-RobocopyLog function" {
+            Get-Command ConvertFrom-RobocopyLog -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
         }
     }
 

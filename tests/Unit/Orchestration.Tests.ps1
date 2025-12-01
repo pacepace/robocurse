@@ -7,7 +7,7 @@ BeforeAll {
 
 Describe "Orchestration" {
     BeforeEach {
-        # Reset state before each test
+        # Reset state before each test (using concurrent collections to match main script)
         $script:OrchestrationState = [PSCustomObject]@{
             SessionId        = ""
             CurrentProfile   = $null
@@ -15,10 +15,13 @@ Describe "Orchestration" {
             Profiles         = @()
             ProfileIndex     = 0
 
-            ChunkQueue       = [System.Collections.Generic.Queue[PSCustomObject]]::new()
-            ActiveJobs       = [System.Collections.Generic.Dictionary[int,PSCustomObject]]::new()
-            CompletedChunks  = [System.Collections.Generic.List[PSCustomObject]]::new()
-            FailedChunks     = [System.Collections.Generic.List[PSCustomObject]]::new()
+            ChunkQueue       = [System.Collections.Concurrent.ConcurrentQueue[PSCustomObject]]::new()
+            ActiveJobs       = [System.Collections.Concurrent.ConcurrentDictionary[int,PSCustomObject]]::new()
+            CompletedChunks  = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+            FailedChunks     = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+
+            CurrentRobocopyOptions = @{}
+            CurrentVssSnapshot = $null
 
             TotalChunks      = 0
             CompletedCount   = 0
@@ -288,7 +291,7 @@ Describe "Orchestration" {
         }
     }
 
-    Context "Handle-FailedChunk" {
+    Context "Invoke-FailedChunkHandler" {
         It "Should retry failed chunk up to 3 times" {
             $chunk = [PSCustomObject]@{
                 ChunkId = 1
@@ -305,7 +308,7 @@ Describe "Orchestration" {
                 }
             }
 
-            Handle-FailedChunk -Job $job -Result $result
+            Invoke-FailedChunkHandler -Job $job -Result $result
 
             $script:OrchestrationState.ChunkQueue.Count | Should -Be 1
             $chunk.RetryCount | Should -Be 1
@@ -328,7 +331,7 @@ Describe "Orchestration" {
                 }
             }
 
-            Handle-FailedChunk -Job $job -Result $result
+            Invoke-FailedChunkHandler -Job $job -Result $result
 
             $script:OrchestrationState.ChunkQueue.Count | Should -Be 1
             $chunk.RetryCount | Should -Be 2
@@ -352,7 +355,7 @@ Describe "Orchestration" {
                 }
             }
 
-            Handle-FailedChunk -Job $job -Result $result
+            Invoke-FailedChunkHandler -Job $job -Result $result
 
             $script:OrchestrationState.FailedChunks.Count | Should -Be 1
             $script:OrchestrationState.ChunkQueue.Count | Should -Be 0
@@ -377,7 +380,7 @@ Describe "Orchestration" {
                 }
             }
 
-            Handle-FailedChunk -Job $job -Result $result
+            Invoke-FailedChunkHandler -Job $job -Result $result
 
             $script:OrchestrationState.FailedChunks.Count | Should -Be 1
             $script:OrchestrationState.ChunkQueue.Count | Should -Be 0
@@ -637,7 +640,7 @@ Describe "Orchestration" {
                 }
             }
 
-            Mock Parse-RobocopyLog {
+            Mock ConvertFrom-RobocopyLog {
                 [PSCustomObject]@{
                     FilesCopied = 100
                     BytesCopied = 1000000
@@ -675,7 +678,7 @@ Describe "Orchestration" {
                 }
             }
 
-            Mock Parse-RobocopyLog {
+            Mock ConvertFrom-RobocopyLog {
                 [PSCustomObject]@{
                     FilesCopied = 50
                     BytesCopied = 500000
