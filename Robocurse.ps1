@@ -141,21 +141,209 @@ function New-DefaultConfig {
     return $config
 }
 
+function ConvertFrom-ConfigFileFormat {
+    <#
+    .SYNOPSIS
+        Converts JSON config file format to internal format
+    .DESCRIPTION
+        The JSON config file uses a user-friendly format with:
+        - "profiles" as an object with profile names as keys
+        - "global" with nested settings
+
+        This function converts to the internal format with:
+        - "SyncProfiles" as an array of profile objects
+        - "GlobalSettings" with flattened settings
+    .PARAMETER RawConfig
+        Raw config object loaded from JSON
+    .OUTPUTS
+        PSCustomObject in internal format
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$RawConfig
+    )
+
+    # Check if already in internal format (has SyncProfiles)
+    $props = $RawConfig.PSObject.Properties.Name
+    if ($props -contains 'SyncProfiles') {
+        Write-Verbose "Config already in internal format"
+        return $RawConfig
+    }
+
+    # Start with default config as base
+    $config = New-DefaultConfig
+
+    # Transform global settings
+    if ($props -contains 'global') {
+        $global = $RawConfig.global
+
+        # Performance settings
+        if ($global.performance) {
+            if ($global.performance.maxConcurrentJobs) {
+                $config.GlobalSettings.MaxConcurrentJobs = $global.performance.maxConcurrentJobs
+            }
+        }
+
+        # Logging settings
+        if ($global.logging -and $global.logging.operationalLog -and $global.logging.operationalLog.path) {
+            $logPath = Split-Path -Path $global.logging.operationalLog.path -Parent
+            $config.GlobalSettings.LogPath = $logPath
+        }
+        if ($global.logging -and $global.logging.operationalLog -and $global.logging.operationalLog.rotation) {
+            if ($global.logging.operationalLog.rotation.maxAgeDays) {
+                $config.GlobalSettings.LogRetentionDays = $global.logging.operationalLog.rotation.maxAgeDays
+            }
+        }
+
+        # Email settings
+        if ($global.email) {
+            $config.Email.Enabled = if ($global.email.enabled) { $true } else { $false }
+            if ($global.email.smtp) {
+                $config.Email.SmtpServer = $global.email.smtp.server
+                $config.Email.Port = if ($global.email.smtp.port) { $global.email.smtp.port } else { 587 }
+                $config.Email.UseTls = if ($global.email.smtp.useSsl) { $true } else { $false }
+                if ($global.email.smtp.credentialName) {
+                    $config.Email.CredentialTarget = $global.email.smtp.credentialName
+                }
+            }
+            if ($global.email.from) { $config.Email.From = $global.email.from }
+            if ($global.email.to) { $config.Email.To = @($global.email.to) }
+        }
+    }
+
+    # Transform profiles
+    $syncProfiles = @()
+    if ($props -contains 'profiles' -and $RawConfig.profiles) {
+        $profileNames = $RawConfig.profiles.PSObject.Properties.Name
+        foreach ($profileName in $profileNames) {
+            $rawProfile = $RawConfig.profiles.$profileName
+
+            # Skip disabled profiles
+            if ($rawProfile.enabled -eq $false) {
+                Write-Verbose "Skipping disabled profile: $profileName"
+                continue
+            }
+
+            # Build sync profile
+            $syncProfile = [PSCustomObject]@{
+                Name = $profileName
+                Description = if ($rawProfile.description) { $rawProfile.description } else { "" }
+                Source = ""
+                Destination = ""
+                UseVss = $false
+                ScanMode = "Smart"
+                ChunkMaxSizeGB = 10
+                ChunkMaxFiles = 50000
+                ChunkMaxDepth = 5
+                RobocopyOptions = @{}
+            }
+
+            # Handle source - can be single path or sources array
+            if ($rawProfile.sources -and $rawProfile.sources.Count -gt 0) {
+                # Use first source for now (multi-source support is a future feature)
+                $firstSource = $rawProfile.sources[0]
+                $syncProfile.Source = $firstSource.path
+                if ($firstSource.useVss) {
+                    $syncProfile.UseVss = $true
+                }
+            }
+            elseif ($rawProfile.source) {
+                $syncProfile.Source = $rawProfile.source
+            }
+
+            # Handle destination
+            if ($rawProfile.destination -and $rawProfile.destination.path) {
+                $syncProfile.Destination = $rawProfile.destination.path
+            }
+            elseif ($rawProfile.destination -is [string]) {
+                $syncProfile.Destination = $rawProfile.destination
+            }
+
+            # Handle chunking settings
+            if ($rawProfile.chunking) {
+                if ($rawProfile.chunking.maxChunkSizeGB) {
+                    $syncProfile.ChunkMaxSizeGB = $rawProfile.chunking.maxChunkSizeGB
+                }
+                if ($rawProfile.chunking.parallelChunks) {
+                    # This is actually max concurrent, but store for reference
+                    $syncProfile | Add-Member -MemberType NoteProperty -Name 'ParallelChunks' -Value $rawProfile.chunking.parallelChunks -Force
+                }
+                if ($rawProfile.chunking.maxDepthToScan) {
+                    $syncProfile.ChunkMaxDepth = $rawProfile.chunking.maxDepthToScan
+                }
+                # Handle strategy -> ScanMode mapping
+                if ($rawProfile.chunking.strategy) {
+                    $syncProfile.ScanMode = switch ($rawProfile.chunking.strategy) {
+                        'auto' { 'Smart' }
+                        'balanced' { 'Smart' }
+                        'aggressive' { 'Smart' }
+                        'flat' { 'Flat' }
+                        default { 'Smart' }
+                    }
+                }
+            }
+
+            # Handle robocopy settings
+            $robocopyOptions = @{
+                Switches = @()
+                ExcludeFiles = @()
+                ExcludeDirs = @()
+            }
+
+            if ($rawProfile.robocopy) {
+                if ($rawProfile.robocopy.switches) {
+                    $robocopyOptions.Switches = @($rawProfile.robocopy.switches)
+                }
+                if ($rawProfile.robocopy.excludeFiles) {
+                    $robocopyOptions.ExcludeFiles = @($rawProfile.robocopy.excludeFiles)
+                }
+                if ($rawProfile.robocopy.excludeDirs) {
+                    $robocopyOptions.ExcludeDirs = @($rawProfile.robocopy.excludeDirs)
+                }
+            }
+
+            # Handle retry policy
+            if ($rawProfile.retryPolicy) {
+                if ($rawProfile.retryPolicy.maxRetries) {
+                    $robocopyOptions.RetryCount = $rawProfile.retryPolicy.maxRetries
+                }
+                if ($rawProfile.retryPolicy.retryDelayMinutes) {
+                    # Convert minutes to seconds for robocopy /W:
+                    $robocopyOptions.RetryWait = $rawProfile.retryPolicy.retryDelayMinutes * 60
+                }
+            }
+
+            $syncProfile.RobocopyOptions = $robocopyOptions
+            $syncProfiles += $syncProfile
+        }
+    }
+
+    $config.SyncProfiles = $syncProfiles
+
+    Write-Verbose "Converted config: $($syncProfiles.Count) profiles loaded"
+    return $config
+}
+
 function Get-RobocurseConfig {
     <#
     .SYNOPSIS
         Loads configuration from JSON file
     .DESCRIPTION
         Loads and parses the Robocurse configuration from a JSON file.
+        Automatically detects and converts between JSON file format and internal format.
         If the file doesn't exist, returns a default configuration.
         Handles malformed JSON gracefully by returning default config with a verbose message.
     .PARAMETER Path
         Path to the configuration JSON file. Defaults to .\Robocurse.config.json
     .OUTPUTS
-        PSCustomObject with configuration
+        PSCustomObject with configuration in internal format
     .NOTES
         Error Behavior: Returns default configuration on error. Never throws.
         Use -Verbose to see error details.
+
+        Supports two config formats:
+        1. JSON file format: profiles/global structure (user-friendly)
+        2. Internal format: SyncProfiles/GlobalSettings structure
     .EXAMPLE
         $config = Get-RobocurseConfig
         Loads configuration from default path
@@ -177,7 +365,11 @@ function Get-RobocurseConfig {
     # Try to load and parse the JSON file
     try {
         $jsonContent = Get-Content -Path $Path -Raw -ErrorAction Stop
-        $config = $jsonContent | ConvertFrom-Json -Depth 10 -ErrorAction Stop
+        $rawConfig = $jsonContent | ConvertFrom-Json -Depth 10 -ErrorAction Stop
+
+        # Convert to internal format (handles both formats)
+        $config = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+
         Write-Verbose "Configuration loaded successfully from '$Path'"
         return $config
     }
@@ -946,6 +1138,35 @@ function Get-DirectoryChildren {
     }
 }
 
+function Get-NormalizedCacheKey {
+    <#
+    .SYNOPSIS
+        Normalizes a path for use as a cache key
+    .DESCRIPTION
+        Creates a consistent cache key from a path by:
+        - Converting to lowercase (Windows paths are case-insensitive)
+        - Removing trailing slashes
+        - Normalizing path separators
+    .PARAMETER Path
+        Path to normalize
+    .OUTPUTS
+        Normalized path string suitable for cache key
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    # Remove trailing slashes and normalize
+    $normalized = $Path.TrimEnd('\', '/')
+
+    # Convert to lowercase for case-insensitive matching on Windows
+    # This ensures C:\Users and c:\users hit the same cache entry
+    $normalized = $normalized.ToLowerInvariant()
+
+    return $normalized
+}
+
 function Get-CachedProfile {
     <#
     .SYNOPSIS
@@ -962,12 +1183,15 @@ function Get-CachedProfile {
         [int]$MaxAgeHours = 24
     )
 
+    # Normalize path for cache lookup
+    $cacheKey = Get-NormalizedCacheKey -Path $Path
+
     # Check if path exists in cache
-    if (-not $script:ProfileCache.ContainsKey($Path)) {
+    if (-not $script:ProfileCache.ContainsKey($cacheKey)) {
         return $null
     }
 
-    $cachedProfile = $script:ProfileCache[$Path]
+    $cachedProfile = $script:ProfileCache[$cacheKey]
 
     # Check if cache is still valid
     $age = (Get-Date) - $cachedProfile.LastScanned
@@ -990,7 +1214,10 @@ function Set-CachedProfile {
         [PSCustomObject]$Profile
     )
 
-    $script:ProfileCache[$Profile.Path] = $Profile
+    # Normalize path for cache key
+    $cacheKey = Get-NormalizedCacheKey -Path $Profile.Path
+
+    $script:ProfileCache[$cacheKey] = $Profile
     Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level Debug
 }
 
@@ -1386,8 +1613,25 @@ function Start-RobocopyJob {
         Path for robocopy log file
     .PARAMETER ThreadsPerJob
         Number of threads for robocopy (/MT:n)
+    .PARAMETER RobocopyOptions
+        Hashtable of robocopy options from profile. Supports:
+        - Switches: Array of robocopy switches (e.g., @("/MIR", "/COPYALL"))
+        - ExcludeFiles: Array of file patterns to exclude (e.g., @("*.tmp", "~*"))
+        - ExcludeDirs: Array of directory names to exclude
+        - RetryCount: Override default retry count
+        - RetryWait: Override default retry wait seconds
+        - NoMirror: Set to $true to use /E instead of /MIR (copy without deleting)
+        - SkipJunctions: Set to $false to include junction points (default: skip)
     .OUTPUTS
         PSCustomObject with Process, Chunk, StartTime, LogPath
+    .EXAMPLE
+        $options = @{
+            Switches = @("/COPYALL", "/DCOPY:DAT")
+            ExcludeFiles = @("*.tmp", "*.log")
+            ExcludeDirs = @("temp", "cache")
+            NoMirror = $true
+        }
+        Start-RobocopyJob -Chunk $chunk -LogPath $logPath -RobocopyOptions $options
     #>
     param(
         [Parameter(Mandatory)]
@@ -1399,7 +1643,9 @@ function Start-RobocopyJob {
         [string]$LogPath,
 
         [ValidateRange(1, 128)]
-        [int]$ThreadsPerJob = $script:DefaultThreadsPerJob
+        [int]$ThreadsPerJob = $script:DefaultThreadsPerJob,
+
+        [hashtable]$RobocopyOptions = @{}
     )
 
     # Validate Chunk properties
@@ -1410,25 +1656,70 @@ function Start-RobocopyJob {
         throw "Chunk.DestinationPath is required and cannot be null or empty"
     }
 
-    # Build argument list with all required switches
+    # Extract options with defaults
+    $retryCount = if ($RobocopyOptions.RetryCount) { $RobocopyOptions.RetryCount } else { $script:RobocopyRetryCount }
+    $retryWait = if ($RobocopyOptions.RetryWait) { $RobocopyOptions.RetryWait } else { $script:RobocopyRetryWaitSeconds }
+    $skipJunctions = if ($RobocopyOptions.ContainsKey('SkipJunctions')) { $RobocopyOptions.SkipJunctions } else { $true }
+    $noMirror = if ($RobocopyOptions.NoMirror) { $true } else { $false }
+
+    # Build base argument list (source, dest, essential logging)
     $argList = @(
         "`"$($Chunk.SourcePath)`"",
-        "`"$($Chunk.DestinationPath)`"",
-        "/MIR",
-        "/COPY:DAT",
-        "/DCOPY:T",
+        "`"$($Chunk.DestinationPath)`""
+    )
+
+    # Add copy mode: /MIR (mirror with delete) or /E (copy subdirs including empty)
+    if ($noMirror) {
+        $argList += "/E"
+    }
+    else {
+        $argList += "/MIR"
+    }
+
+    # Add profile-specified switches if provided, otherwise use defaults
+    if ($RobocopyOptions.Switches -and $RobocopyOptions.Switches.Count -gt 0) {
+        # Filter out switches we handle separately (/MT, /R, /W, /LOG, /MIR, /E)
+        $customSwitches = $RobocopyOptions.Switches | Where-Object {
+            $_ -notmatch '^/(MT|R|W|LOG|MIR|E|TEE|NP|BYTES)' -and
+            $_ -notmatch '^/LOG:'
+        }
+        $argList += $customSwitches
+    }
+    else {
+        # Default copy options when none specified
+        $argList += @(
+            "/COPY:DAT",
+            "/DCOPY:T"
+        )
+    }
+
+    # Threading, retry, and logging (always applied)
+    $argList += @(
         "/MT:$ThreadsPerJob",
-        "/R:$script:RobocopyRetryCount",
-        "/W:$script:RobocopyRetryWaitSeconds",
+        "/R:$retryCount",
+        "/W:$retryWait",
         "/LOG:`"$LogPath`"",
         "/TEE",
         "/NP",
-        "/NDL",
-        "/BYTES",
-        "/256",
-        "/XJD",
-        "/XJF"
+        "/BYTES"
     )
+
+    # Junction handling
+    if ($skipJunctions) {
+        $argList += @("/XJD", "/XJF")
+    }
+
+    # Exclude files
+    if ($RobocopyOptions.ExcludeFiles -and $RobocopyOptions.ExcludeFiles.Count -gt 0) {
+        $argList += "/XF"
+        $argList += $RobocopyOptions.ExcludeFiles | ForEach-Object { "`"$_`"" }
+    }
+
+    # Exclude directories
+    if ($RobocopyOptions.ExcludeDirs -and $RobocopyOptions.ExcludeDirs.Count -gt 0) {
+        $argList += "/XD"
+        $argList += $RobocopyOptions.ExcludeDirs | ForEach-Object { "`"$_`"" }
+    }
 
     # Add chunk-specific arguments (like /LEV:1 for files-only chunks)
     if ($Chunk.RobocopyArgs) {
@@ -1443,6 +1734,8 @@ function Start-RobocopyJob {
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $false  # Using /LOG and /TEE instead
     $psi.RedirectStandardError = $true
+
+    Write-RobocurseLog -Message "Robocopy args: $($argList -join ' ')" -Level 'Debug' -Component 'Robocopy'
 
     # Start the process
     $process = [System.Diagnostics.Process]::Start($psi)
@@ -1707,6 +2000,9 @@ $script:OrchestrationState = [PSCustomObject]@{
     CompletedChunks  = [System.Collections.Generic.List[PSCustomObject]]::new()
     FailedChunks     = [System.Collections.Generic.List[PSCustomObject]]::new()
 
+    # Profile-specific robocopy options (set by Start-ProfileReplication)
+    CurrentRobocopyOptions = @{}
+
     # Statistics
     TotalChunks      = 0
     CompletedCount   = 0
@@ -1744,6 +2040,8 @@ function Initialize-OrchestrationState {
         ActiveJobs       = [System.Collections.Generic.Dictionary[int,PSCustomObject]]::new()
         CompletedChunks  = [System.Collections.Generic.List[PSCustomObject]]::new()
         FailedChunks     = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+        CurrentRobocopyOptions = @{}
 
         TotalChunks      = 0
         CompletedCount   = 0
@@ -1852,6 +2150,25 @@ function Start-ProfileReplication {
     $state.CurrentProfile = $Profile
     $state.ProfileStartTime = [datetime]::Now
 
+    # Extract robocopy options from profile
+    $state.CurrentRobocopyOptions = @{}
+    if ($Profile.RobocopyOptions) {
+        # Profile has explicit RobocopyOptions hashtable
+        $state.CurrentRobocopyOptions = $Profile.RobocopyOptions
+    }
+    elseif ($Profile.Switches -or $Profile.ExcludeFiles -or $Profile.ExcludeDirs) {
+        # Profile has individual properties - build options hashtable
+        $state.CurrentRobocopyOptions = @{
+            Switches = if ($Profile.Switches) { @($Profile.Switches) } else { @() }
+            ExcludeFiles = if ($Profile.ExcludeFiles) { @($Profile.ExcludeFiles) } else { @() }
+            ExcludeDirs = if ($Profile.ExcludeDirs) { @($Profile.ExcludeDirs) } else { @() }
+            NoMirror = if ($Profile.NoMirror) { $true } else { $false }
+            SkipJunctions = if ($Profile.PSObject.Properties['SkipJunctions']) { $Profile.SkipJunctions } else { $true }
+            RetryCount = if ($Profile.RetryCount) { $Profile.RetryCount } else { $null }
+            RetryWait = if ($Profile.RetryWait) { $Profile.RetryWait } else { $null }
+        }
+    }
+
     Write-RobocurseLog -Message "Starting profile: $($Profile.Name)" `
         -Level 'Info' -Component 'Orchestrator'
 
@@ -1951,8 +2268,10 @@ function Start-ChunkJob {
         estimatedSize = $Chunk.EstimatedSize
     }
 
-    # Start the robocopy job
-    $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath -ThreadsPerJob $script:DefaultThreadsPerJob
+    # Start the robocopy job with profile-specific options
+    $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath `
+        -ThreadsPerJob $script:DefaultThreadsPerJob `
+        -RobocopyOptions $script:OrchestrationState.CurrentRobocopyOptions
 
     return $job
 }
@@ -4632,7 +4951,7 @@ if (-not $script:TestMode) {
             Write-Warning "Configuration file not found: $ConfigPath"
             if (-not $Headless) {
                 # GUI can create a new config
-                $config = $null
+                $config = New-DefaultConfig
             }
             else {
                 throw "Configuration file required for headless mode"
@@ -4642,16 +4961,60 @@ if (-not $script:TestMode) {
         # Launch appropriate interface
         if ($Headless) {
             # Run in headless mode
-            if ($Profile) {
-                Start-ReplicationRun -Config $config -ProfileName $Profile
+            if (-not $Profile) {
+                throw "Profile parameter required for headless mode. Use -Profile <name>"
             }
-            else {
-                throw "Profile parameter required for headless mode"
+
+            # Initialize logging for headless mode
+            $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { ".\Logs" }
+            Initialize-LogSession -LogRoot $logRoot
+
+            # Find the specified profile
+            $targetProfile = $config.SyncProfiles | Where-Object { $_.Name -eq $Profile }
+            if (-not $targetProfile) {
+                $availableProfiles = ($config.SyncProfiles | ForEach-Object { $_.Name }) -join ", "
+                throw "Profile '$Profile' not found. Available profiles: $availableProfiles"
+            }
+
+            # Get concurrency settings
+            $maxJobs = if ($config.GlobalSettings.MaxConcurrentJobs) {
+                $config.GlobalSettings.MaxConcurrentJobs
+            } else {
+                $script:DefaultMaxConcurrentJobs
+            }
+
+            Write-Host "Starting replication for profile: $Profile"
+            Write-Host "Max concurrent jobs: $maxJobs"
+
+            # Start replication with the profile
+            Start-ReplicationRun -Profiles @($targetProfile) -MaxConcurrentJobs $maxJobs
+
+            # Run the orchestration loop until complete
+            while ($script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
+                Invoke-ReplicationTick -MaxConcurrentJobs $maxJobs
+                Start-Sleep -Milliseconds 500
+            }
+
+            # Report results
+            $status = Get-OrchestrationStatus
+            Write-Host "`nReplication complete."
+            Write-Host "  Chunks completed: $($status.ChunksComplete)/$($status.ChunksTotal)"
+            Write-Host "  Chunks failed: $($status.ChunksFailed)"
+            Write-Host "  Duration: $($status.Elapsed.ToString('hh\:mm\:ss'))"
+
+            if ($status.ChunksFailed -gt 0) {
+                exit 1
             }
         }
         else {
             # Launch GUI
-            Initialize-RobocurseGui -Config $config
+            $window = Initialize-RobocurseGui
+            if ($window) {
+                $window.ShowDialog() | Out-Null
+            }
+            else {
+                throw "Failed to initialize GUI. Try running with -Headless mode."
+            }
         }
     }
     catch {

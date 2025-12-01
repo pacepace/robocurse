@@ -50,39 +50,60 @@ Edit `Robocurse.config.json` to configure your replication profiles. The configu
 - **Email Settings**: SMTP configuration for notifications
 - **Retry Policies**: Define how failures are handled
 
-### Example Profile
+**Note**: Robocurse supports two configuration formats and auto-detects which you're using:
+- **Enterprise format** (`profiles`/`global`): The full JSON structure in `Robocurse.config.json`
+- **Simplified format** (`SyncProfiles`/`GlobalSettings`): Flatter structure for programmatic use
+
+### Example Profile (Simplified Format)
+
+For headless/CLI operation, profiles use this simplified structure:
 
 ```json
 {
-  "profiles": {
-    "DailyBackup": {
-      "description": "Daily incremental backup of file servers",
-      "enabled": true,
-      "sources": [
-        {
-          "path": "\\\\FILESERVER01\\Share1",
-          "credentials": {
-            "useCredentials": true,
-            "credentialName": "FileServer01-Admin"
-          },
-          "useVss": true
-        }
-      ],
-      "destination": {
-        "path": "\\\\BACKUPSERVER\\Backups"
-      },
-      "robocopy": {
-        "switches": ["/MIR", "/COPYALL", "/R:3", "/W:10", "/MT:8"]
-      },
-      "chunking": {
-        "enabled": true,
-        "maxChunkSizeGB": 100,
-        "parallelChunks": 4
+  "Version": "1.0",
+  "GlobalSettings": {
+    "MaxConcurrentJobs": 4,
+    "ThreadsPerJob": 8,
+    "LogPath": ".\\Logs"
+  },
+  "SyncProfiles": [
+    {
+      "Name": "DailyBackup",
+      "Source": "\\\\FILESERVER01\\Share1",
+      "Destination": "D:\\Backups\\FileServer01",
+      "UseVss": true,
+      "ScanMode": "Smart",
+      "ChunkMaxSizeGB": 10,
+      "ChunkMaxFiles": 50000,
+      "RobocopyOptions": {
+        "Switches": ["/COPYALL", "/DCOPY:DAT"],
+        "ExcludeFiles": ["*.tmp", "*.temp", "~*"],
+        "ExcludeDirs": ["$RECYCLE.BIN", "System Volume Information"],
+        "NoMirror": false,
+        "SkipJunctions": true,
+        "RetryCount": 3,
+        "RetryWait": 10
       }
     }
-  }
+  ]
 }
 ```
+
+### Robocopy Options Reference
+
+Each profile can specify `RobocopyOptions` to customize robocopy behavior:
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `Switches` | string[] | `/COPY:DAT /DCOPY:T` | Additional robocopy switches |
+| `ExcludeFiles` | string[] | `[]` | File patterns to exclude (e.g., `*.tmp`) |
+| `ExcludeDirs` | string[] | `[]` | Directory names to exclude |
+| `NoMirror` | bool | `false` | Use `/E` instead of `/MIR` (don't delete extras) |
+| `SkipJunctions` | bool | `true` | Skip junction points (`/XJD /XJF`) |
+| `RetryCount` | int | `3` | Retry count for failed files (`/R:`) |
+| `RetryWait` | int | `10` | Wait seconds between retries (`/W:`) |
+
+**Note**: Threading (`/MT:`), logging (`/LOG:`), and progress (`/TEE /BYTES`) flags are always applied by Robocurse and cannot be overridden.
 
 ## Usage
 
@@ -169,17 +190,18 @@ robocurse/
 This project is currently under active development. The following features are implemented or planned:
 
 - [x] Project structure and testing framework
-- [ ] Configuration management
-- [ ] Logging system
-- [ ] Directory profiling
-- [ ] Chunking algorithms
-- [ ] Robocopy wrapper
-- [ ] Job orchestration
-- [ ] Progress tracking
-- [ ] VSS integration
-- [ ] Email notifications
-- [ ] Scheduling support
-- [ ] GUI interface
+- [x] Configuration management (auto-converts between JSON and internal formats)
+- [x] Logging system (operational logs + SIEM JSON Lines)
+- [x] Directory profiling (robocopy /L based scanning with caching)
+- [x] Chunking algorithms (Smart + Flat modes)
+- [x] Robocopy wrapper with configurable options per profile
+- [x] Job orchestration (parallel execution, retry logic)
+- [x] Progress tracking (ETA, byte/file counts)
+- [x] VSS integration (snapshot creation/cleanup)
+- [x] Email notifications (SMTP with Credential Manager)
+- [x] Scheduling support (Windows Task Scheduler)
+- [x] GUI interface (WPF dark theme)
+- [x] Headless/CLI mode with full orchestration loop
 
 ## Contributing
 

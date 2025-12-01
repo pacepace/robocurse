@@ -69,8 +69,12 @@ Describe "Robocurse Main Script" {
             Get-Command Get-DirectoryProfile -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
         }
 
-        It "Should have Get-DirectorySize function" {
-            Get-Command Get-DirectorySize -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+        It "Should have Invoke-RobocopyList function" {
+            Get-Command Invoke-RobocopyList -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+        }
+
+        It "Should have Get-DirectoryChildren function" {
+            Get-Command Get-DirectoryChildren -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
         }
     }
 
@@ -79,8 +83,12 @@ Describe "Robocurse Main Script" {
             Get-Command Get-DirectoryChunks -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
         }
 
-        It "Should have Split-LargeDirectory function" {
-            Get-Command Split-LargeDirectory -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+        It "Should have New-SmartChunks function" {
+            Get-Command New-SmartChunks -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+        }
+
+        It "Should have New-FlatChunks function" {
+            Get-Command New-FlatChunks -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
         }
     }
 
@@ -113,16 +121,20 @@ Describe "Robocurse Main Script" {
     }
 
     Context "Progress Functions" {
-        It "Should have Get-ChunkProgress function" {
-            Get-Command Get-ChunkProgress -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+        It "Should have Get-RobocopyProgress function" {
+            Get-Command Get-RobocopyProgress -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
         }
 
-        It "Should have Update-OverallProgress function" {
-            Get-Command Update-OverallProgress -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+        It "Should have Update-ProgressStats function" {
+            Get-Command Update-ProgressStats -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
         }
 
         It "Should have Get-ETAEstimate function" {
             Get-Command Get-ETAEstimate -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+        }
+
+        It "Should have Get-OrchestrationStatus function" {
+            Get-Command Get-OrchestrationStatus -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
         }
     }
 

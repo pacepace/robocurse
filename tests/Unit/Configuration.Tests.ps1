@@ -332,4 +332,215 @@ Describe "Configuration Management" {
             $result.IsValid | Should -Be $true
         }
     }
+
+    Context "ConvertFrom-ConfigFileFormat" {
+        It "Should pass through config already in internal format" {
+            $internalConfig = New-DefaultConfig
+            $internalConfig.SyncProfiles = @(
+                [PSCustomObject]@{
+                    Name = "TestProfile"
+                    Source = "C:\Source"
+                    Destination = "D:\Dest"
+                }
+            )
+
+            $result = ConvertFrom-ConfigFileFormat -RawConfig $internalConfig
+
+            $result.SyncProfiles.Count | Should -Be 1
+            $result.SyncProfiles[0].Name | Should -Be "TestProfile"
+        }
+
+        It "Should convert JSON file format (profiles/global) to internal format" {
+            # Create a raw config in JSON file format
+            $rawConfig = [PSCustomObject]@{
+                profiles = [PSCustomObject]@{
+                    DailyBackup = [PSCustomObject]@{
+                        description = "Daily backup"
+                        enabled = $true
+                        sources = @(
+                            [PSCustomObject]@{
+                                path = "\\server\share"
+                                useVss = $true
+                            }
+                        )
+                        destination = [PSCustomObject]@{
+                            path = "D:\Backups"
+                        }
+                        robocopy = [PSCustomObject]@{
+                            switches = @("/COPYALL", "/DCOPY:DAT")
+                            excludeFiles = @("*.tmp")
+                            excludeDirs = @("temp")
+                        }
+                        chunking = [PSCustomObject]@{
+                            maxChunkSizeGB = 50
+                            strategy = "auto"
+                        }
+                    }
+                }
+                global = [PSCustomObject]@{
+                    performance = [PSCustomObject]@{
+                        maxConcurrentJobs = 8
+                    }
+                }
+            }
+
+            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+
+            # Check global settings were converted
+            $result.GlobalSettings.MaxConcurrentJobs | Should -Be 8
+
+            # Check profile was converted
+            $result.SyncProfiles.Count | Should -Be 1
+            $result.SyncProfiles[0].Name | Should -Be "DailyBackup"
+            $result.SyncProfiles[0].Source | Should -Be "\\server\share"
+            $result.SyncProfiles[0].Destination | Should -Be "D:\Backups"
+            $result.SyncProfiles[0].UseVss | Should -Be $true
+            $result.SyncProfiles[0].ChunkMaxSizeGB | Should -Be 50
+            $result.SyncProfiles[0].ScanMode | Should -Be "Smart"
+
+            # Check robocopy options were converted
+            $result.SyncProfiles[0].RobocopyOptions.Switches | Should -Contain "/COPYALL"
+            $result.SyncProfiles[0].RobocopyOptions.ExcludeFiles | Should -Contain "*.tmp"
+            $result.SyncProfiles[0].RobocopyOptions.ExcludeDirs | Should -Contain "temp"
+        }
+
+        It "Should skip disabled profiles" {
+            $rawConfig = [PSCustomObject]@{
+                profiles = [PSCustomObject]@{
+                    EnabledProfile = [PSCustomObject]@{
+                        enabled = $true
+                        sources = @([PSCustomObject]@{ path = "C:\Source1" })
+                        destination = [PSCustomObject]@{ path = "D:\Dest1" }
+                    }
+                    DisabledProfile = [PSCustomObject]@{
+                        enabled = $false
+                        sources = @([PSCustomObject]@{ path = "C:\Source2" })
+                        destination = [PSCustomObject]@{ path = "D:\Dest2" }
+                    }
+                }
+            }
+
+            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+
+            $result.SyncProfiles.Count | Should -Be 1
+            $result.SyncProfiles[0].Name | Should -Be "EnabledProfile"
+        }
+
+        It "Should handle retry policy conversion" {
+            $rawConfig = [PSCustomObject]@{
+                profiles = [PSCustomObject]@{
+                    TestProfile = [PSCustomObject]@{
+                        enabled = $true
+                        sources = @([PSCustomObject]@{ path = "C:\Source" })
+                        destination = [PSCustomObject]@{ path = "D:\Dest" }
+                        retryPolicy = [PSCustomObject]@{
+                            maxRetries = 5
+                            retryDelayMinutes = 2
+                        }
+                    }
+                }
+            }
+
+            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+
+            $result.SyncProfiles[0].RobocopyOptions.RetryCount | Should -Be 5
+            # 2 minutes = 120 seconds
+            $result.SyncProfiles[0].RobocopyOptions.RetryWait | Should -Be 120
+        }
+
+        It "Should map chunking strategy to ScanMode" {
+            $rawConfig = [PSCustomObject]@{
+                profiles = [PSCustomObject]@{
+                    FlatProfile = [PSCustomObject]@{
+                        enabled = $true
+                        sources = @([PSCustomObject]@{ path = "C:\Source" })
+                        destination = [PSCustomObject]@{ path = "D:\Dest" }
+                        chunking = [PSCustomObject]@{
+                            strategy = "flat"
+                        }
+                    }
+                }
+            }
+
+            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+
+            $result.SyncProfiles[0].ScanMode | Should -Be "Flat"
+        }
+
+        It "Should handle email settings conversion" {
+            $rawConfig = [PSCustomObject]@{
+                profiles = [PSCustomObject]@{}
+                global = [PSCustomObject]@{
+                    email = [PSCustomObject]@{
+                        enabled = $true
+                        smtp = [PSCustomObject]@{
+                            server = "smtp.test.com"
+                            port = 465
+                            useSsl = $true
+                            credentialName = "TestCred"
+                        }
+                        from = "sender@test.com"
+                        to = @("recipient@test.com")
+                    }
+                }
+            }
+
+            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+
+            $result.Email.Enabled | Should -Be $true
+            $result.Email.SmtpServer | Should -Be "smtp.test.com"
+            $result.Email.Port | Should -Be 465
+            $result.Email.UseTls | Should -Be $true
+            $result.Email.CredentialTarget | Should -Be "TestCred"
+            $result.Email.From | Should -Be "sender@test.com"
+            $result.Email.To | Should -Contain "recipient@test.com"
+        }
+    }
+
+    Context "Get-RobocurseConfig with JSON file format" {
+        BeforeEach {
+            $script:TestConfigPath = Join-Path $script:TestDir "json-format-config.json"
+        }
+
+        AfterEach {
+            if (Test-Path $script:TestConfigPath) {
+                Remove-Item $script:TestConfigPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It "Should load and convert JSON file format automatically" {
+            # Create a config file in JSON file format
+            $jsonFileFormat = @{
+                profiles = @{
+                    TestBackup = @{
+                        enabled = $true
+                        sources = @(
+                            @{
+                                path = "C:\TestSource"
+                                useVss = $false
+                            }
+                        )
+                        destination = @{
+                            path = "D:\TestDest"
+                        }
+                    }
+                }
+                global = @{
+                    performance = @{
+                        maxConcurrentJobs = 6
+                    }
+                }
+            }
+            $jsonFileFormat | ConvertTo-Json -Depth 10 | Set-Content $script:TestConfigPath
+
+            $config = Get-RobocurseConfig -Path $script:TestConfigPath
+
+            # Should be converted to internal format
+            $config.GlobalSettings.MaxConcurrentJobs | Should -Be 6
+            $config.SyncProfiles.Count | Should -Be 1
+            $config.SyncProfiles[0].Name | Should -Be "TestBackup"
+            $config.SyncProfiles[0].Source | Should -Be "C:\TestSource"
+            $config.SyncProfiles[0].Destination | Should -Be "D:\TestDest"
+        }
+    }
 }
