@@ -10,8 +10,8 @@ function Get-CheckpointPath {
     .OUTPUTS
         Path to checkpoint file
     #>
-    $logDir = if ($script:CurrentLogPath) {
-        Split-Path $script:CurrentLogPath -Parent
+    $logDir = if ($script:CurrentOperationalLogPath) {
+        Split-Path $script:CurrentOperationalLogPath -Parent
     } else {
         "."
     }
