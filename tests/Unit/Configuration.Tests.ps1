@@ -793,6 +793,188 @@ Describe "Configuration Management" {
         }
     }
 
+    Context "ConvertFrom-GlobalSettings" {
+        It "Should convert performance settings to GlobalSettings" {
+            $rawGlobal = [PSCustomObject]@{
+                performance = [PSCustomObject]@{
+                    maxConcurrentJobs = 12
+                    threadsPerJob = 16
+                    bandwidthLimitMbps = 500
+                }
+            }
+            $config = New-DefaultConfig
+
+            ConvertFrom-GlobalSettings -RawGlobal $rawGlobal -Config $config
+
+            $config.GlobalSettings.MaxConcurrentJobs | Should -Be 12
+            $config.GlobalSettings.ThreadsPerJob | Should -Be 16
+            $config.GlobalSettings.BandwidthLimitMbps | Should -Be 500
+        }
+
+        It "Should convert logging settings" {
+            $rawGlobal = [PSCustomObject]@{
+                logging = [PSCustomObject]@{
+                    path = "D:\CustomLogs"
+                    retentionDays = 60
+                }
+            }
+            $config = New-DefaultConfig
+
+            ConvertFrom-GlobalSettings -RawGlobal $rawGlobal -Config $config
+
+            $config.GlobalSettings.LogPath | Should -Be "D:\CustomLogs"
+            $config.GlobalSettings.LogRetentionDays | Should -Be 60
+        }
+
+        It "Should convert email settings" {
+            $rawGlobal = [PSCustomObject]@{
+                email = [PSCustomObject]@{
+                    enabled = $true
+                    smtp = [PSCustomObject]@{
+                        server = "mail.example.com"
+                        port = 587
+                        useSsl = $true
+                        credentialName = "MyEmailCred"
+                    }
+                    from = "backup@example.com"
+                    to = @("admin@example.com", "ops@example.com")
+                }
+            }
+            $config = New-DefaultConfig
+
+            ConvertFrom-GlobalSettings -RawGlobal $rawGlobal -Config $config
+
+            $config.Email.Enabled | Should -Be $true
+            $config.Email.SmtpServer | Should -Be "mail.example.com"
+            $config.Email.Port | Should -Be 587
+            $config.Email.UseTls | Should -Be $true
+            $config.Email.CredentialTarget | Should -Be "MyEmailCred"
+            $config.Email.From | Should -Be "backup@example.com"
+            $config.Email.To | Should -Contain "admin@example.com"
+        }
+
+        It "Should handle null rawGlobal gracefully" {
+            $config = New-DefaultConfig
+
+            { ConvertFrom-GlobalSettings -RawGlobal $null -Config $config } | Should -Not -Throw
+
+            # Should keep defaults
+            $config.GlobalSettings.MaxConcurrentJobs | Should -Be 4
+        }
+
+        It "Should have correct function signature" {
+            $cmd = Get-Command ConvertFrom-GlobalSettings
+
+            $cmd.Parameters.ContainsKey('RawGlobal') | Should -Be $true
+            $cmd.Parameters.ContainsKey('Config') | Should -Be $true
+        }
+    }
+
+    Context "ConvertFrom-ProfileSources" {
+        It "Should convert single source profile" {
+            $rawProfile = [PSCustomObject]@{
+                description = "Test profile"
+                enabled = $true
+                sources = @(
+                    [PSCustomObject]@{
+                        path = "C:\TestSource"
+                        useVss = $true
+                    }
+                )
+                destination = [PSCustomObject]@{
+                    path = "D:\TestDest"
+                }
+            }
+
+            $result = ConvertFrom-ProfileSources -ProfileName "TestProfile" -RawProfile $rawProfile
+
+            $result.Count | Should -Be 1
+            $result[0].Name | Should -Be "TestProfile"
+            $result[0].Source | Should -Be "C:\TestSource"
+            $result[0].Destination | Should -Be "D:\TestDest"
+            $result[0].UseVss | Should -Be $true
+        }
+
+        It "Should expand multi-source profile into separate profiles" {
+            $rawProfile = [PSCustomObject]@{
+                enabled = $true
+                sources = @(
+                    [PSCustomObject]@{ path = "C:\Source1"; useVss = $false },
+                    [PSCustomObject]@{ path = "D:\Source2"; useVss = $true },
+                    [PSCustomObject]@{ path = "E:\Source3"; useVss = $false }
+                )
+                destination = [PSCustomObject]@{ path = "F:\Backup" }
+            }
+
+            $result = ConvertFrom-ProfileSources -ProfileName "MultiSource" -RawProfile $rawProfile
+
+            $result.Count | Should -Be 3
+            $result[0].Name | Should -Be "MultiSource-Source1"
+            $result[1].Name | Should -Be "MultiSource-Source2"
+            $result[2].Name | Should -Be "MultiSource-Source3"
+        }
+
+        It "Should set ParentProfile for expanded profiles" {
+            $rawProfile = [PSCustomObject]@{
+                enabled = $true
+                sources = @(
+                    [PSCustomObject]@{ path = "C:\Source1" },
+                    [PSCustomObject]@{ path = "D:\Source2" }
+                )
+                destination = [PSCustomObject]@{ path = "E:\Dest" }
+            }
+
+            $result = ConvertFrom-ProfileSources -ProfileName "Parent" -RawProfile $rawProfile
+
+            $result[0].ParentProfile | Should -Be "Parent"
+            $result[1].ParentProfile | Should -Be "Parent"
+        }
+
+        It "Should inherit robocopy options for all expanded profiles" {
+            $rawProfile = [PSCustomObject]@{
+                enabled = $true
+                sources = @(
+                    [PSCustomObject]@{ path = "C:\Source1" },
+                    [PSCustomObject]@{ path = "D:\Source2" }
+                )
+                destination = [PSCustomObject]@{ path = "E:\Dest" }
+                robocopy = [PSCustomObject]@{
+                    switches = @("/COPYALL")
+                    excludeFiles = @("*.tmp")
+                }
+            }
+
+            $result = ConvertFrom-ProfileSources -ProfileName "Shared" -RawProfile $rawProfile
+
+            $result[0].RobocopyOptions.Switches | Should -Contain "/COPYALL"
+            $result[1].RobocopyOptions.Switches | Should -Contain "/COPYALL"
+            $result[0].RobocopyOptions.ExcludeFiles | Should -Contain "*.tmp"
+            $result[1].RobocopyOptions.ExcludeFiles | Should -Contain "*.tmp"
+        }
+
+        It "Should skip disabled profiles" {
+            $rawProfile = [PSCustomObject]@{
+                enabled = $false
+                sources = @(
+                    [PSCustomObject]@{ path = "C:\Source" }
+                )
+                destination = [PSCustomObject]@{ path = "D:\Dest" }
+            }
+
+            $result = ConvertFrom-ProfileSources -ProfileName "Disabled" -RawProfile $rawProfile
+
+            $result.Count | Should -Be 0
+        }
+
+        It "Should have correct function signature" {
+            $cmd = Get-Command ConvertFrom-ProfileSources
+
+            $cmd.Parameters.ContainsKey('ProfileName') | Should -Be $true
+            $cmd.Parameters.ContainsKey('RawProfile') | Should -Be $true
+            $cmd.Parameters['ProfileName'].ParameterType.Name | Should -Be 'String'
+        }
+    }
+
     Context "Get-NormalizedCacheKey" {
         It "Should remove trailing backslashes" {
             $result = Get-NormalizedCacheKey -Path "C:\Data\"

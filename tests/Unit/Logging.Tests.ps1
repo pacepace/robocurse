@@ -89,6 +89,59 @@ Describe "Logging" {
         }
     }
 
+    Context "Caller Information in Logs" {
+        BeforeEach {
+            $script:Session = Initialize-LogSession -LogRoot $script:TestLogRoot
+        }
+
+        It "Should include caller function name in log entry" {
+            # Define a wrapper function to test caller detection
+            function Test-CallerLogging {
+                Write-RobocurseLog -Message "Called from Test-CallerLogging" -Level "Info"
+            }
+
+            Test-CallerLogging
+
+            $content = Get-Content $script:Session.OperationalLogPath -Raw
+            $content | Should -Match "Test-CallerLogging"
+        }
+
+        It "Should include line number in log entry" {
+            Write-RobocurseLog -Message "Line number test" -Level "Info"
+
+            $content = Get-Content $script:Session.OperationalLogPath -Raw
+            # Should contain a line reference like ":XX" where XX is the line number
+            $content | Should -Match ":\d+"
+        }
+
+        It "Should format caller info consistently" {
+            function Test-FormattedCaller {
+                Write-RobocurseLog -Message "Format test" -Level "Warning"
+            }
+
+            Test-FormattedCaller
+
+            $content = Get-Content $script:Session.OperationalLogPath -Raw
+            # Should contain caller info in format "FunctionName:LineNumber"
+            $content | Should -Match "Test-FormattedCaller:\d+"
+        }
+
+        It "Should handle nested function calls" {
+            function Outer-Function {
+                Inner-Function
+            }
+            function Inner-Function {
+                Write-RobocurseLog -Message "Nested call" -Level "Info"
+            }
+
+            Outer-Function
+
+            $content = Get-Content $script:Session.OperationalLogPath -Raw
+            # Should show the immediate caller (Inner-Function), not Outer-Function
+            $content | Should -Match "Inner-Function"
+        }
+    }
+
     Context "Write-SiemEvent" {
         BeforeEach {
             $script:Session = Initialize-LogSession -LogRoot $script:TestLogRoot

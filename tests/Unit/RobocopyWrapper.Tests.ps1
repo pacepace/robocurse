@@ -550,4 +550,95 @@ Describe "Robocopy Wrapper" {
             $cmd.Parameters['TimeoutSeconds'].ParameterType.Name | Should -Be 'Int32'
         }
     }
+
+    Context "Get-BandwidthThrottleIPG" {
+        It "Should return 0 when bandwidth limit is 0 (unlimited)" {
+            $result = Get-BandwidthThrottleIPG -BandwidthLimitMbps 0 -ActiveJobs 4
+            $result | Should -Be 0
+        }
+
+        It "Should return 0 when bandwidth limit is negative" {
+            $result = Get-BandwidthThrottleIPG -BandwidthLimitMbps -10 -ActiveJobs 2
+            $result | Should -Be 0
+        }
+
+        It "Should calculate IPG for single job" {
+            # 100 Mbps = 12,500,000 bytes/sec
+            # IPG = 512000 / 12500000 ≈ 0.04 → rounds to 1ms (minimum)
+            $result = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 1
+            $result | Should -BeGreaterOrEqual 1
+        }
+
+        It "Should increase IPG as more jobs are active" {
+            # More jobs = less bandwidth per job = higher IPG
+            $ipg1Job = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 1
+            $ipg4Jobs = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 4
+
+            $ipg4Jobs | Should -BeGreaterThan $ipg1Job
+        }
+
+        It "Should account for pending job start" {
+            # With -PendingJobStart, effective jobs should be ActiveJobs + 1
+            $ipgWithoutPending = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 2
+            $ipgWithPending = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 2 -PendingJobStart
+
+            # With pending, we calculate for 3 jobs instead of 2
+            $ipgWithPending | Should -BeGreaterThan $ipgWithoutPending
+        }
+
+        It "Should treat 0 active jobs as 1 (minimum)" {
+            # Should not divide by zero
+            $result = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 0
+            $result | Should -BeGreaterOrEqual 1
+        }
+
+        It "Should clamp IPG to minimum of 1ms" {
+            # Very high bandwidth with few jobs should still return at least 1
+            $result = Get-BandwidthThrottleIPG -BandwidthLimitMbps 10000 -ActiveJobs 1
+            $result | Should -BeGreaterOrEqual 1
+        }
+
+        It "Should clamp IPG to maximum of 10000ms" {
+            # Very low bandwidth with many jobs
+            $result = Get-BandwidthThrottleIPG -BandwidthLimitMbps 1 -ActiveJobs 100
+            $result | Should -BeLessOrEqual 10000
+        }
+
+        It "Should have correct function signature" {
+            $cmd = Get-Command Get-BandwidthThrottleIPG
+
+            $cmd.Parameters.ContainsKey('BandwidthLimitMbps') | Should -Be $true
+            $cmd.Parameters.ContainsKey('ActiveJobs') | Should -Be $true
+            $cmd.Parameters.ContainsKey('PendingJobStart') | Should -Be $true
+
+            $cmd.Parameters['BandwidthLimitMbps'].ParameterType.Name | Should -Be 'Int32'
+            $cmd.Parameters['ActiveJobs'].ParameterType.Name | Should -Be 'Int32'
+            $cmd.Parameters['PendingJobStart'].ParameterType.Name | Should -Be 'SwitchParameter'
+        }
+
+        It "Should have mandatory parameters for BandwidthLimitMbps and ActiveJobs" {
+            $cmd = Get-Command Get-BandwidthThrottleIPG
+
+            $cmd.Parameters['BandwidthLimitMbps'].Attributes.Mandatory | Should -Contain $true
+            $cmd.Parameters['ActiveJobs'].Attributes.Mandatory | Should -Contain $true
+        }
+
+        It "Should calculate reasonable IPG for common scenarios" {
+            # 100 Mbps with 4 jobs = 25 Mbps per job = 3,125,000 bytes/sec
+            # IPG = 512000 / 3125000 ≈ 0.16 → ceiling to 1ms
+            $result = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 4
+            $result | Should -BeGreaterOrEqual 1
+            $result | Should -BeLessOrEqual 1000  # Should be reasonable
+
+            # 10 Mbps with 4 jobs = 2.5 Mbps per job = 312,500 bytes/sec
+            # IPG = 512000 / 312500 ≈ 1.6 → ceiling to 2ms
+            $result = Get-BandwidthThrottleIPG -BandwidthLimitMbps 10 -ActiveJobs 4
+            $result | Should -BeGreaterOrEqual 1
+        }
+
+        It "Should return integer value" {
+            $result = Get-BandwidthThrottleIPG -BandwidthLimitMbps 50 -ActiveJobs 3
+            $result | Should -BeOfType [int]
+        }
+    }
 }

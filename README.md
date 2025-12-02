@@ -17,6 +17,9 @@ Robocurse is a PowerShell-based tool designed to manage multiple robocopy instan
 - **GUI and Headless Modes**: Run interactively with a GUI or in headless mode for automation
 - **Retry Logic**: Configurable retry policies for transient failures
 - **Credential Management**: Secure credential storage for network shares
+- **Aggregate Bandwidth Throttling**: Dynamic bandwidth limiting across all concurrent jobs
+- **VSS Orphan Cleanup**: Automatic cleanup of VSS snapshots from crashed runs
+- **Enhanced Logging**: Function name and line number tracing for troubleshooting
 
 ## Prerequisites
 
@@ -64,6 +67,7 @@ For headless/CLI operation, profiles use this simplified structure:
   "GlobalSettings": {
     "MaxConcurrentJobs": 4,
     "ThreadsPerJob": 8,
+    "BandwidthLimitMbps": 0,
     "LogPath": ".\\Logs"
   },
   "SyncProfiles": [
@@ -105,6 +109,37 @@ Each profile can specify `RobocopyOptions` to customize robocopy behavior:
 | `InterPacketGapMs` | int | `null` | Bandwidth throttling - ms between packets (`/IPG:`) |
 
 **Note**: Threading (`/MT:`), logging (`/LOG:`), and progress (`/TEE /BYTES`) flags are always applied by Robocurse and cannot be overridden.
+
+### Aggregate Bandwidth Throttling
+
+Set `BandwidthLimitMbps` in `GlobalSettings` to limit total bandwidth consumption across all concurrent robocopy jobs. This is useful when replicating over WAN links or shared network infrastructure.
+
+```json
+"GlobalSettings": {
+  "MaxConcurrentJobs": 4,
+  "BandwidthLimitMbps": 100
+}
+```
+
+The bandwidth is dynamically divided among active jobs. For example:
+- 100 Mbps limit with 4 concurrent jobs = ~25 Mbps per job
+- As jobs complete, remaining jobs get more bandwidth
+- Set to `0` for unlimited (default)
+
+**Implementation Note**: Robocurse uses robocopy's `/IPG` (Inter-Packet Gap) flag, which introduces a delay between 512-byte packets. The IPG value is automatically calculated based on the per-job bandwidth allocation.
+
+### VSS Orphan Cleanup
+
+If Robocurse crashes or is terminated while VSS snapshots are active, those snapshots may be left behind consuming disk space. Robocurse automatically cleans up orphaned snapshots from previous failed runs at startup.
+
+The tracking file is stored at `$PSScriptRoot\vss_active.json` and records all active VSS snapshots. On startup, any snapshots still in this file are removed.
+
+To manually trigger orphan cleanup:
+
+```powershell
+# After dot-sourcing the script
+Clear-OrphanVssSnapshots
+```
 
 ## Usage
 
@@ -218,9 +253,25 @@ Robocurse generates several types of logs:
 
 - **Operational Log**: High-level application events and errors
 - **Robocopy Logs**: Detailed per-job robocopy output
-- **SIEM Integration**: Optional Windows Event Log or syslog integration
+- **SIEM Integration**: JSON Lines format for security monitoring tools
 
 Log locations are configured in the `global.logging` section of the configuration file.
+
+### Log Format
+
+Each operational log entry includes:
+- Timestamp (local time)
+- Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
+- Component name
+- **Caller info**: Function name and line number (e.g., `Start-ReplicationJob:1234`)
+- Message
+
+Example log entry:
+```
+2024-01-15 14:32:45 [INFO] [Orchestrator] Start-ReplicationJob:1234 - Starting profile 'DailyBackup'
+```
+
+This caller tracing makes debugging significantly easier when tracking down issues.
 
 ## Credential Management
 

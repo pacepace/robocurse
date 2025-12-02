@@ -122,6 +122,10 @@ $script:DefaultMaxConcurrentJobs = 4
 # 24 hours prevents unnecessary re-scans while ensuring reasonably fresh data.
 $script:ProfileCacheMaxAgeHours = 24
 
+# Maximum number of entries in the profile cache before triggering cleanup.
+# 10,000 entries is sufficient for large directory trees while preventing unbounded growth.
+$script:ProfileCacheMaxEntries = 10000
+
 # Logging
 # Compress log files older than this many days to save disk space.
 # 7 days keeps recent logs readily accessible while compressing older logs.
@@ -287,6 +291,7 @@ function New-DefaultConfig {
             MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs
             ThreadsPerJob = $script:DefaultThreadsPerJob
             DefaultScanMode = "Smart"
+            BandwidthLimitMbps = 0  # 0 = unlimited; set to limit aggregate bandwidth across all jobs
             LogPath = ".\Logs"
             LogCompressAfterDays = $script:LogCompressAfterDays
             LogRetentionDays = $script:LogDeleteAfterDays
@@ -403,6 +408,106 @@ function Get-DestinationPathFromRaw {
     return ""
 }
 
+function ConvertFrom-GlobalSettings {
+    <#
+    .SYNOPSIS
+        Converts global settings from user-friendly to internal format
+    .PARAMETER RawGlobal
+        Raw global settings object from JSON
+    .PARAMETER Config
+        Config object to update
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$RawGlobal,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    # Performance settings
+    if ($RawGlobal.performance) {
+        if ($RawGlobal.performance.maxConcurrentJobs) {
+            $Config.GlobalSettings.MaxConcurrentJobs = $RawGlobal.performance.maxConcurrentJobs
+        }
+        if ($RawGlobal.performance.bandwidthLimitMbps) {
+            $Config.GlobalSettings.BandwidthLimitMbps = $RawGlobal.performance.bandwidthLimitMbps
+        }
+    }
+
+    # Logging settings
+    if ($RawGlobal.logging -and $RawGlobal.logging.operationalLog) {
+        if ($RawGlobal.logging.operationalLog.path) {
+            $logPath = Split-Path -Path $RawGlobal.logging.operationalLog.path -Parent
+            $Config.GlobalSettings.LogPath = $logPath
+        }
+        if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
+            $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays
+        }
+    }
+
+    # Email settings
+    if ($RawGlobal.email) {
+        $Config.Email.Enabled = [bool]$RawGlobal.email.enabled
+        if ($RawGlobal.email.smtp) {
+            $Config.Email.SmtpServer = $RawGlobal.email.smtp.server
+            $Config.Email.Port = if ($RawGlobal.email.smtp.port) { $RawGlobal.email.smtp.port } else { 587 }
+            $Config.Email.UseTls = [bool]$RawGlobal.email.smtp.useSsl
+            if ($RawGlobal.email.smtp.credentialName) {
+                $Config.Email.CredentialTarget = $RawGlobal.email.smtp.credentialName
+            }
+        }
+        if ($RawGlobal.email.from) { $Config.Email.From = $RawGlobal.email.from }
+        if ($RawGlobal.email.to) { $Config.Email.To = @($RawGlobal.email.to) }
+    }
+}
+
+function ConvertFrom-ProfileSources {
+    <#
+    .SYNOPSIS
+        Expands multi-source profiles into separate sync profiles
+    .PARAMETER ProfileName
+        Name of the parent profile
+    .PARAMETER RawProfile
+        Raw profile object from JSON
+    .OUTPUTS
+        Array of expanded sync profile objects
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$RawProfile
+    )
+
+    $expandedProfiles = @()
+    $description = if ($RawProfile.description) { $RawProfile.description } else { "" }
+
+    for ($i = 0; $i -lt $RawProfile.sources.Count; $i++) {
+        $sourceInfo = $RawProfile.sources[$i]
+        $expandedProfile = [PSCustomObject]@{
+            Name = "$ProfileName-Source$($i + 1)"
+            Description = "$description (Source $($i + 1))"
+            Source = $sourceInfo.path
+            Destination = Get-DestinationPathFromRaw -RawDestination $RawProfile.destination
+            UseVss = [bool]$sourceInfo.useVss
+            ScanMode = "Smart"
+            ChunkMaxSizeGB = 10
+            ChunkMaxFiles = 50000
+            ChunkMaxDepth = 5
+            RobocopyOptions = ConvertTo-RobocopyOptionsInternal -RawRobocopy $RawProfile.robocopy
+            Enabled = $true
+            ParentProfile = $ProfileName
+        }
+
+        ConvertTo-ChunkSettingsInternal -Profile $expandedProfile -RawChunking $RawProfile.chunking
+        $expandedProfiles += $expandedProfile
+    }
+
+    return $expandedProfiles
+}
+
 function ConvertFrom-ConfigFileFormat {
     <#
     .SYNOPSIS
@@ -415,9 +520,6 @@ function ConvertFrom-ConfigFileFormat {
         This function converts to the internal format with:
         - "SyncProfiles" as an array of profile objects
         - "GlobalSettings" with flattened settings
-
-        Helper functions (ConvertTo-RobocopyOptionsInternal, ConvertTo-ChunkSettingsInternal,
-        Get-DestinationPathFromRaw) handle common conversion logic to reduce duplication.
     .PARAMETER RawConfig
         Raw config object loaded from JSON
     .OUTPUTS
@@ -440,40 +542,7 @@ function ConvertFrom-ConfigFileFormat {
 
     # Transform global settings
     if ($props -contains 'global') {
-        $global = $RawConfig.global
-
-        # Performance settings
-        if ($global.performance) {
-            if ($global.performance.maxConcurrentJobs) {
-                $config.GlobalSettings.MaxConcurrentJobs = $global.performance.maxConcurrentJobs
-            }
-        }
-
-        # Logging settings
-        if ($global.logging -and $global.logging.operationalLog -and $global.logging.operationalLog.path) {
-            $logPath = Split-Path -Path $global.logging.operationalLog.path -Parent
-            $config.GlobalSettings.LogPath = $logPath
-        }
-        if ($global.logging -and $global.logging.operationalLog -and $global.logging.operationalLog.rotation) {
-            if ($global.logging.operationalLog.rotation.maxAgeDays) {
-                $config.GlobalSettings.LogRetentionDays = $global.logging.operationalLog.rotation.maxAgeDays
-            }
-        }
-
-        # Email settings
-        if ($global.email) {
-            $config.Email.Enabled = if ($global.email.enabled) { $true } else { $false }
-            if ($global.email.smtp) {
-                $config.Email.SmtpServer = $global.email.smtp.server
-                $config.Email.Port = if ($global.email.smtp.port) { $global.email.smtp.port } else { 587 }
-                $config.Email.UseTls = if ($global.email.smtp.useSsl) { $true } else { $false }
-                if ($global.email.smtp.credentialName) {
-                    $config.Email.CredentialTarget = $global.email.smtp.credentialName
-                }
-            }
-            if ($global.email.from) { $config.Email.From = $global.email.from }
-            if ($global.email.to) { $config.Email.To = @($global.email.to) }
-        }
+        ConvertFrom-GlobalSettings -RawGlobal $RawConfig.global -Config $config
     }
 
     # Transform profiles
@@ -489,7 +558,14 @@ function ConvertFrom-ConfigFileFormat {
                 continue
             }
 
-            # Build sync profile
+            # Handle multi-source profiles (expand into separate sync profiles)
+            if ($rawProfile.sources -and $rawProfile.sources.Count -gt 1) {
+                Write-Verbose "Profile '$profileName' has $($rawProfile.sources.Count) sources - expanding"
+                $syncProfiles += ConvertFrom-ProfileSources -ProfileName $profileName -RawProfile $rawProfile
+                continue
+            }
+
+            # Build single sync profile
             $syncProfile = [PSCustomObject]@{
                 Name = $profileName
                 Description = if ($rawProfile.description) { $rawProfile.description } else { "" }
@@ -503,44 +579,10 @@ function ConvertFrom-ConfigFileFormat {
                 RobocopyOptions = @{}
             }
 
-            # Handle source - can be single path or sources array
-            # Multi-source profiles are expanded into separate sync profiles
-            if ($rawProfile.sources -and $rawProfile.sources.Count -gt 0) {
-                if ($rawProfile.sources.Count -eq 1) {
-                    # Single source - use the profile name as-is
-                    $syncProfile.Source = $rawProfile.sources[0].path
-                    if ($rawProfile.sources[0].useVss) {
-                        $syncProfile.UseVss = $true
-                    }
-                }
-                else {
-                    # Multiple sources - create separate profiles for each
-                    Write-Verbose "Profile '$profileName' has $($rawProfile.sources.Count) sources - expanding"
-                    for ($i = 0; $i -lt $rawProfile.sources.Count; $i++) {
-                        $sourceInfo = $rawProfile.sources[$i]
-                        $expandedProfile = [PSCustomObject]@{
-                            Name = "$profileName-Source$($i + 1)"
-                            Description = "$($syncProfile.Description) (Source $($i + 1))"
-                            Source = $sourceInfo.path
-                            Destination = Get-DestinationPathFromRaw -RawDestination $rawProfile.destination
-                            UseVss = if ($sourceInfo.useVss) { $true } else { $false }
-                            ScanMode = "Smart"
-                            ChunkMaxSizeGB = 10
-                            ChunkMaxFiles = 50000
-                            ChunkMaxDepth = 5
-                            RobocopyOptions = ConvertTo-RobocopyOptionsInternal -RawRobocopy $rawProfile.robocopy
-                            Enabled = $true
-                            ParentProfile = $profileName  # Track origin for logging
-                        }
-
-                        # Apply chunking settings using helper
-                        ConvertTo-ChunkSettingsInternal -Profile $expandedProfile -RawChunking $rawProfile.chunking
-
-                        $syncProfiles += $expandedProfile
-                    }
-                    # Skip adding the original syncProfile since we've expanded it
-                    continue
-                }
+            # Handle source - single source from array or direct property
+            if ($rawProfile.sources -and $rawProfile.sources.Count -eq 1) {
+                $syncProfile.Source = $rawProfile.sources[0].path
+                $syncProfile.UseVss = [bool]$rawProfile.sources[0].useVss
             }
             elseif ($rawProfile.source) {
                 $syncProfile.Source = $rawProfile.source
@@ -937,6 +979,9 @@ function Write-RobocurseLog {
     <#
     .SYNOPSIS
         Writes to operational log and optionally SIEM log
+    .DESCRIPTION
+        Logs messages to the operational log file with automatic caller information
+        (function name and line number) for easier debugging.
     .PARAMETER Message
         Log message
     .PARAMETER Level
@@ -962,10 +1007,25 @@ function Write-RobocurseLog {
         [bool]$WriteSiem = ($Level -in @('Warning', 'Error'))
     )
 
-    # Format the log entry
+    # Get caller information from call stack
+    # Index 1 is the immediate caller (index 0 is this function)
+    $callStack = Get-PSCallStack
+    $callerInfo = ""
+    if ($callStack.Count -gt 1) {
+        $caller = $callStack[1]
+        $functionName = if ($caller.FunctionName -and $caller.FunctionName -ne '<ScriptBlock>') {
+            $caller.FunctionName
+        } else {
+            'Main'
+        }
+        $lineNumber = $caller.ScriptLineNumber
+        $callerInfo = "${functionName}:${lineNumber}"
+    }
+
+    # Format the log entry with caller info
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $levelUpper = $Level.ToUpper()
-    $logEntry = "${timestamp} [${levelUpper}] [${Component}] ${Message}"
+    $logEntry = "${timestamp} [${levelUpper}] [${Component}] [${callerInfo}] ${Message}"
 
     # Check if log session is initialized
     $logPath = $script:CurrentOperationalLogPath
@@ -1002,6 +1062,7 @@ function Write-RobocurseLog {
         Write-SiemEvent -EventType $eventType -Data @{
             Level = $Level
             Component = $Component
+            Caller = $callerInfo
             Message = $Message
         } -SessionId $SessionId
     }
@@ -1496,9 +1557,39 @@ function Set-CachedProfile {
     # Normalize path for cache key
     $cacheKey = Get-NormalizedCacheKey -Path $Profile.Path
 
+    # Enforce cache size limit - if at max, remove oldest entries
+    if ($script:ProfileCache.Count -ge $script:ProfileCacheMaxEntries) {
+        # Remove oldest 10% of entries based on LastScanned
+        $entriesToRemove = [math]::Ceiling($script:ProfileCacheMaxEntries * 0.1)
+        $oldestEntries = $script:ProfileCache.ToArray() |
+            Sort-Object { $_.Value.LastScanned } |
+            Select-Object -First $entriesToRemove
+
+        foreach ($entry in $oldestEntries) {
+            $script:ProfileCache.TryRemove($entry.Key, [ref]$null) | Out-Null
+        }
+        Write-RobocurseLog "Cache at capacity, removed $entriesToRemove oldest entries" -Level Debug
+    }
+
     # Thread-safe add or update using ConcurrentDictionary indexer
     $script:ProfileCache[$cacheKey] = $Profile
     Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level Debug
+}
+
+function Clear-ProfileCache {
+    <#
+    .SYNOPSIS
+        Clears the directory profile cache
+    .DESCRIPTION
+        Removes all entries from the profile cache. Call this between
+        replication runs or when memory pressure is a concern.
+    .EXAMPLE
+        Clear-ProfileCache
+    #>
+
+    $count = $script:ProfileCache.Count
+    $script:ProfileCache.Clear()
+    Write-RobocurseLog "Cleared profile cache ($count entries removed)" -Level Debug
 }
 
 #endregion
@@ -1927,6 +2018,73 @@ function Convert-ToDestinationPath {
 #endregion
 
 #region ==================== ROBOCOPY WRAPPER ====================
+
+# Script-level bandwidth limit (set from config during replication start)
+$script:BandwidthLimitMbps = 0
+
+function Get-BandwidthThrottleIPG {
+    <#
+    .SYNOPSIS
+        Calculates Inter-Packet Gap (IPG) for bandwidth throttling
+    .DESCRIPTION
+        Computes the robocopy /IPG:n value based on:
+        - Total bandwidth limit (Mbps)
+        - Number of active concurrent jobs
+
+        The IPG is the delay in milliseconds between 512-byte packets.
+        Formula: IPG = (512 * 8 * 1000) / (BandwidthBytesPerSec / ActiveJobs)
+               = 4096000 / (PerJobBytesPerSec)
+
+        Returns 0 (unlimited) if no bandwidth limit is set.
+    .PARAMETER BandwidthLimitMbps
+        Total bandwidth limit in Megabits per second (0 = unlimited)
+    .PARAMETER ActiveJobs
+        Number of currently active jobs (minimum 1)
+    .PARAMETER PendingJobStart
+        Set to $true when calculating for a new job about to start
+    .OUTPUTS
+        Integer IPG value in milliseconds, or 0 for unlimited
+    .EXAMPLE
+        # 100 Mbps total, 4 active jobs = 25 Mbps per job
+        $ipg = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 4
+        # Returns approximately 164 ms
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [int]$BandwidthLimitMbps,
+
+        [Parameter(Mandatory)]
+        [int]$ActiveJobs,
+
+        [switch]$PendingJobStart
+    )
+
+    # No limit set
+    if ($BandwidthLimitMbps -le 0) {
+        return 0
+    }
+
+    # Account for the job we're about to start
+    $effectiveJobs = if ($PendingJobStart) { $ActiveJobs + 1 } else { [Math]::Max(1, $ActiveJobs) }
+
+    # Convert Mbps to bytes per second per job
+    # 1 Mbps = 125,000 bytes/sec (1,000,000 bits / 8)
+    $totalBytesPerSec = $BandwidthLimitMbps * 125000
+    $perJobBytesPerSec = $totalBytesPerSec / $effectiveJobs
+
+    # Robocopy IPG is delay in ms between 512-byte packets
+    # Time per packet (ms) = (512 bytes * 8 bits * 1000 ms) / bits_per_second
+    # IPG = (4096000) / (perJobBytesPerSec * 8) = 512000 / perJobBytesPerSec
+    $ipg = [Math]::Ceiling(512000 / $perJobBytesPerSec)
+
+    # Clamp to reasonable range (1ms to 10000ms)
+    $ipg = [Math]::Max(1, [Math]::Min(10000, $ipg))
+
+    Write-RobocurseLog -Message "Bandwidth throttle: $BandwidthLimitMbps Mbps / $effectiveJobs jobs = IPG ${ipg}ms" `
+        -Level 'Debug' -Component 'Bandwidth'
+
+    return $ipg
+}
 
 function New-RobocopyArguments {
     <#
@@ -2511,6 +2669,20 @@ namespace Robocurse
             return Interlocked.Add(ref _completedChunkBytes, bytes);
         }
 
+        // Cumulative files copied from completed chunks
+        private long _completedChunkFiles;
+        public long CompletedChunkFiles
+        {
+            get { return Interlocked.Read(ref _completedChunkFiles); }
+            set { Interlocked.Exchange(ref _completedChunkFiles, value); }
+        }
+
+        /// <summary>Atomically add files from a completed chunk</summary>
+        public long AddCompletedChunkFiles(long files)
+        {
+            return Interlocked.Add(ref _completedChunkFiles, files);
+        }
+
         // Timing (nullable DateTime via object boxing)
         private object _startTime;
         public object StartTime
@@ -2604,6 +2776,7 @@ namespace Robocurse
             Interlocked.Exchange(ref _completedCount, 0);
             Interlocked.Exchange(ref _bytesComplete, 0);
             Interlocked.Exchange(ref _completedChunkBytes, 0);
+            Interlocked.Exchange(ref _completedChunkFiles, 0);
 
             // Reset volatile flags
             _stopRequested = false;
@@ -2687,10 +2860,25 @@ function Initialize-OrchestrationState {
     .DESCRIPTION
         Resets the thread-safe orchestration state object for a new replication run.
         Uses the C# class's Reset() method to properly clear all state.
+        Also clears the directory profile cache to prevent memory growth across runs
+        and cleans up any orphaned VSS snapshots from previous crashed runs.
     #>
 
     # Reset the existing state object (don't create a new one - that breaks cross-thread sharing)
     $script:OrchestrationState.Reset()
+
+    # Clear profile cache to prevent unbounded memory growth across runs
+    Clear-ProfileCache
+
+    # Reset chunk ID counter
+    $script:ChunkIdCounter = [ref]0
+
+    # Clean up any orphaned VSS snapshots from crashed previous runs
+    $orphansCleared = Clear-OrphanVssSnapshots
+    if ($orphansCleared -gt 0) {
+        Write-RobocurseLog -Message "Cleaned up $orphansCleared orphaned VSS snapshot(s) from previous run" `
+            -Level 'Info' -Component 'VSS'
+    }
 
     Write-RobocurseLog -Message "Orchestration state initialized: $($script:OrchestrationState.SessionId)" `
         -Level 'Info' -Component 'Orchestrator'
@@ -2744,6 +2932,9 @@ function Start-ReplicationRun {
         [ValidateRange(1, 128)]
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs,
 
+        [ValidateRange(0, 10000)]
+        [int]$BandwidthLimitMbps = 0,
+
         [switch]$SkipInitialization,
 
         [scriptblock]$OnProgress,
@@ -2754,6 +2945,13 @@ function Start-ReplicationRun {
     # Initialize state (unless caller already did - e.g., GUI cross-thread scenario)
     if (-not $SkipInitialization) {
         Initialize-OrchestrationState
+    }
+
+    # Set bandwidth limit for dynamic IPG calculation
+    $script:BandwidthLimitMbps = $BandwidthLimitMbps
+    if ($BandwidthLimitMbps -gt 0) {
+        Write-RobocurseLog -Message "Aggregate bandwidth limit: $BandwidthLimitMbps Mbps across all jobs" `
+            -Level 'Info' -Component 'Orchestrator'
     }
 
     # Validate robocopy is available before starting
@@ -2927,6 +3125,10 @@ function Start-ChunkJob {
     <#
     .SYNOPSIS
         Starts a robocopy job for a chunk
+    .DESCRIPTION
+        Starts a robocopy process for the specified chunk, applying:
+        - Profile-specific robocopy options
+        - Dynamic bandwidth throttling (IPG) based on aggregate limit and active jobs
     .PARAMETER Chunk
         Chunk object to replicate
     .OUTPUTS
@@ -2950,10 +3152,31 @@ function Start-ChunkJob {
         estimatedSize = $Chunk.EstimatedSize
     }
 
-    # Start the robocopy job with profile-specific options
+    # Build effective robocopy options, applying dynamic bandwidth throttling
+    $effectiveOptions = @{}
+    $profileOptions = $script:OrchestrationState.CurrentRobocopyOptions
+    if ($profileOptions) {
+        # Copy profile options
+        foreach ($key in $profileOptions.Keys) {
+            $effectiveOptions[$key] = $profileOptions[$key]
+        }
+    }
+
+    # Apply dynamic bandwidth throttling if aggregate limit is set
+    if ($script:BandwidthLimitMbps -gt 0) {
+        $activeJobCount = $script:OrchestrationState.ActiveJobs.Count
+        $dynamicIPG = Get-BandwidthThrottleIPG -BandwidthLimitMbps $script:BandwidthLimitMbps `
+            -ActiveJobs $activeJobCount -PendingJobStart
+        if ($dynamicIPG -gt 0) {
+            # Dynamic IPG overrides any profile-level IPG when bandwidth limit is set
+            $effectiveOptions['InterPacketGapMs'] = $dynamicIPG
+        }
+    }
+
+    # Start the robocopy job with effective options
     $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath `
         -ThreadsPerJob $script:DefaultThreadsPerJob `
-        -RobocopyOptions $script:OrchestrationState.CurrentRobocopyOptions
+        -RobocopyOptions $effectiveOptions
 
     return $job
 }
@@ -2990,7 +3213,9 @@ function Invoke-ReplicationTick {
     $activeJobsCopy = $state.ActiveJobs.ToArray()
     foreach ($kvp in $activeJobsCopy) {
         $job = $kvp.Value
-        if ($job.Process.HasExited) {
+        # Use WaitForExit(0) instead of HasExited - this is atomic and ensures
+        # the exit code is properly available when it returns true
+        if ($job.Process.WaitForExit(0)) {
             # Process completion
             $result = Complete-RobocopyJob -Job $job
 
@@ -3006,6 +3231,10 @@ function Invoke-ReplicationTick {
                 # Track cumulative bytes from completed chunks (avoids O(n) iteration in Update-ProgressStats)
                 if ($job.Chunk.EstimatedSize) {
                     $state.AddCompletedChunkBytes($job.Chunk.EstimatedSize)
+                }
+                # Track files copied from the parsed robocopy log
+                if ($result.Stats -and $result.Stats.FilesCopied -gt 0) {
+                    $state.AddCompletedChunkFiles($result.Stats.FilesCopied)
                 }
             }
             $state.IncrementCompletedCount()
@@ -3250,7 +3479,8 @@ function Stop-AllJobs {
         -Level 'Warning' -Component 'Orchestrator'
 
     foreach ($job in $state.ActiveJobs.Values) {
-        if (-not $job.Process.HasExited) {
+        # WaitForExit(0) returns true if already exited, so we only kill if still running
+        if (-not $job.Process.WaitForExit(0)) {
             try {
                 $job.Process.Kill()
                 Write-RobocurseLog -Message "Killed chunk $($job.Chunk.ChunkId)" -Level 'Warning' -Component 'Orchestrator'
@@ -3379,6 +3609,7 @@ function Get-OrchestrationStatus {
         ChunksFailed = $state.FailedChunks.Count
         BytesComplete = $state.BytesComplete
         BytesTotal = $state.TotalBytes
+        FilesCopied = $state.CompletedChunkFiles
         Elapsed = $elapsed
         ETA = $eta
         ActiveJobs = $state.ActiveJobs.Count
@@ -3415,6 +3646,118 @@ function Get-ETAEstimate {
 #endregion
 
 #region ==================== VSS ====================
+
+# Path to track active VSS snapshots (for orphan cleanup)
+$script:VssTrackingFile = Join-Path $env:TEMP "Robocurse-VSS-Tracking.json"
+
+function Clear-OrphanVssSnapshots {
+    <#
+    .SYNOPSIS
+        Cleans up VSS snapshots that may have been left behind from crashed runs
+    .DESCRIPTION
+        Reads the VSS tracking file and removes any snapshots that are still present.
+        This should be called at startup to clean up after unexpected terminations.
+    .OUTPUTS
+        Number of snapshots cleaned up
+    .EXAMPLE
+        $cleaned = Clear-OrphanVssSnapshots
+        if ($cleaned -gt 0) { Write-Host "Cleaned up $cleaned orphan snapshots" }
+    #>
+
+    # Skip if not Windows
+    if (-not (Test-IsWindowsPlatform)) {
+        return 0
+    }
+
+    if (-not (Test-Path $script:VssTrackingFile)) {
+        return 0
+    }
+
+    $cleaned = 0
+    try {
+        $trackedSnapshots = Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json
+
+        foreach ($snapshot in $trackedSnapshots) {
+            if ($snapshot.ShadowId) {
+                $removeResult = Remove-VssSnapshot -ShadowId $snapshot.ShadowId
+                if ($removeResult.Success) {
+                    Write-RobocurseLog -Message "Cleaned up orphan VSS snapshot: $($snapshot.ShadowId)" -Level 'Info' -Component 'VSS'
+                    $cleaned++
+                }
+            }
+        }
+
+        # Clear the tracking file after cleanup
+        Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-RobocurseLog -Message "Error during orphan VSS cleanup: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+    }
+
+    return $cleaned
+}
+
+function Add-VssToTracking {
+    <#
+    .SYNOPSIS
+        Adds a VSS snapshot to the tracking file
+    .PARAMETER SnapshotInfo
+        Snapshot info object with ShadowId
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$SnapshotInfo
+    )
+
+    try {
+        $tracked = @()
+        if (Test-Path $script:VssTrackingFile) {
+            $tracked = @(Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json)
+        }
+
+        $tracked += [PSCustomObject]@{
+            ShadowId = $SnapshotInfo.ShadowId
+            SourceVolume = $SnapshotInfo.SourceVolume
+            CreatedAt = $SnapshotInfo.CreatedAt.ToString('o')
+        }
+
+        $tracked | ConvertTo-Json -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to add VSS to tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+    }
+}
+
+function Remove-VssFromTracking {
+    <#
+    .SYNOPSIS
+        Removes a VSS snapshot from the tracking file
+    .PARAMETER ShadowId
+        Shadow ID to remove
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$ShadowId
+    )
+
+    try {
+        if (-not (Test-Path $script:VssTrackingFile)) {
+            return
+        }
+
+        $tracked = @(Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json)
+        $tracked = @($tracked | Where-Object { $_.ShadowId -ne $ShadowId })
+
+        if ($tracked.Count -eq 0) {
+            Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+        } else {
+            $tracked | ConvertTo-Json -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to remove VSS from tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+    }
+}
 
 function Get-VolumeFromPath {
     <#
@@ -3529,6 +3872,9 @@ function New-VssSnapshot {
 
         Write-RobocurseLog -Message "VSS snapshot ready. Shadow path: $($snapshotInfo.ShadowPath)" -Level 'Info' -Component 'VSS'
 
+        # Track snapshot for orphan cleanup in case of crash
+        Add-VssToTracking -SnapshotInfo $snapshotInfo
+
         return New-OperationResult -Success $true -Data $snapshotInfo
     }
     catch {
@@ -3564,10 +3910,14 @@ function Remove-VssSnapshot {
         if ($shadow) {
             Remove-CimInstance -InputObject $shadow
             Write-RobocurseLog -Message "Deleted VSS snapshot: $ShadowId" -Level 'Info' -Component 'VSS'
+            # Remove from tracking file
+            Remove-VssFromTracking -ShadowId $ShadowId
             return New-OperationResult -Success $true -Data $ShadowId
         }
         else {
             Write-RobocurseLog -Message "VSS snapshot not found: $ShadowId (may have been already deleted)" -Level 'Warning' -Component 'VSS'
+            # Remove from tracking even if not found (cleanup)
+            Remove-VssFromTracking -ShadowId $ShadowId
             # Still return success since the snapshot is gone (idempotent operation)
             return New-OperationResult -Success $true -Data $ShadowId
         }
@@ -4170,7 +4520,7 @@ function New-CompletionEmailBody {
 
             $profilesHtml += @"
                 <div class="profile-item $profileClass">
-                    <strong>$([System.Web.HttpUtility]::HtmlEncode($profile.Name))</strong><br>
+                    <strong>$([System.Net.WebUtility]::HtmlEncode($profile.Name))</strong><br>
                     Chunks: $($profile.ChunksComplete)/$($profile.ChunksTotal) |
                     Files: $profileFilesCopied |
                     Size: $profileBytesCopied
@@ -4192,7 +4542,7 @@ function New-CompletionEmailBody {
         $errorItems = ""
         $errorCount = [Math]::Min($Results.Errors.Count, 10)
         for ($i = 0; $i -lt $errorCount; $i++) {
-            $encodedError = [System.Web.HttpUtility]::HtmlEncode($Results.Errors[$i])
+            $encodedError = [System.Net.WebUtility]::HtmlEncode($Results.Errors[$i])
             $errorItems += "                <li>$encodedError</li>`n"
         }
 
@@ -5399,74 +5749,69 @@ function Show-FolderBrowser {
     return $null
 }
 
-function Start-GuiReplication {
+function Get-ProfilesToRun {
     <#
     .SYNOPSIS
-        Starts replication from GUI
+        Determines which profiles to run based on selection mode
     .PARAMETER AllProfiles
-        Run all enabled profiles
+        Include all enabled profiles
     .PARAMETER SelectedOnly
-        Run only selected profile
+        Include only the currently selected profile
+    .OUTPUTS
+        Array of profile objects, or $null if validation fails
     #>
     param(
         [switch]$AllProfiles,
         [switch]$SelectedOnly
     )
 
-    # Determine which profiles to run
     $profilesToRun = @()
 
     if ($AllProfiles) {
         $profilesToRun = @($script:Config.SyncProfiles | Where-Object { $_.Enabled -eq $true })
         if ($profilesToRun.Count -eq 0) {
             Show-GuiError -Message "No enabled profiles found. Please enable at least one profile."
-            return
+            return $null
         }
     }
     elseif ($SelectedOnly) {
         $selected = $script:Controls.lstProfiles.SelectedItem
         if (-not $selected) {
             Show-GuiError -Message "No profile selected. Please select a profile to run."
-            return
+            return $null
         }
         $profilesToRun = @($selected)
     }
 
-    # Validate profiles
+    # Validate profiles have required paths
     foreach ($profile in $profilesToRun) {
         if ([string]::IsNullOrWhiteSpace($profile.Source) -or [string]::IsNullOrWhiteSpace($profile.Destination)) {
             Show-GuiError -Message "Profile '$($profile.Name)' has invalid source or destination paths."
-            return
+            return $null
         }
     }
 
-    # Update UI state
-    $script:Controls.btnRunAll.IsEnabled = $false
-    $script:Controls.btnRunSelected.IsEnabled = $false
-    $script:Controls.btnStop.IsEnabled = $true
-    $script:Controls.txtStatus.Text = "Replication in progress..."
+    return $profilesToRun
+}
 
-    # Reset GUI progress cache for fresh display
-    $script:LastGuiUpdateState = $null
+function New-ReplicationRunspace {
+    <#
+    .SYNOPSIS
+        Creates and configures a background runspace for replication
+    .PARAMETER Profiles
+        Array of profiles to run
+    .PARAMETER MaxWorkers
+        Maximum concurrent robocopy jobs
+    .OUTPUTS
+        PSCustomObject with PowerShell, Handle, and Runspace properties
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject[]]$Profiles,
 
-    Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
-
-    # Get worker count
-    $maxWorkers = [int]$script:Controls.sldWorkers.Value
-
-    # Clear chunk display
-    $script:Controls.dgChunks.ItemsSource = $null
-
-    # Start timer
-    $script:ProgressTimer.Start()
-
-    # Initialize orchestration state before starting background runspace
-    # This ensures the same state object is referenced by both threads
-    Initialize-OrchestrationState
-
-    # Start replication in a background runspace
-    # IMPORTANT: We must dot-source the script to load all functions into the runspace
-    # The orchestration state uses concurrent collections for thread-safe sharing
+        [Parameter(Mandatory)]
+        [int]$MaxWorkers
+    )
 
     # Get the path to this script for dot-sourcing into the runspace
     $scriptPath = $PSCommandPath
@@ -5480,8 +5825,6 @@ function Start-GuiReplication {
     $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
     $runspace.Open()
 
-    # Execute replication in background
-    # We dot-source the script to load all functions into the runspace
     $powershell = [powershell]::Create()
     $powershell.Runspace = $runspace
 
@@ -5495,11 +5838,9 @@ function Start-GuiReplication {
         . `$ScriptPath -Help
 
         # Use the shared C# OrchestrationState instance (thread-safe by design)
-        # The C# class handles all locking internally
         `$script:OrchestrationState = `$SharedState
 
         # Clear callbacks - GUI mode uses timer-based polling, not callbacks
-        # This prevents any thread-safety issues with callback invocation
         `$script:OnProgress = `$null
         `$script:OnChunkComplete = `$null
         `$script:OnProfileComplete = `$null
@@ -5517,13 +5858,60 @@ function Start-GuiReplication {
     $powershell.AddScript($backgroundScript)
     $powershell.AddArgument($scriptPath)
     $powershell.AddArgument($script:OrchestrationState)
-    $powershell.AddArgument($profilesToRun)
-    $powershell.AddArgument($maxWorkers)
+    $powershell.AddArgument($Profiles)
+    $powershell.AddArgument($MaxWorkers)
     $powershell.AddArgument($ConfigPath)
 
-    $script:ReplicationHandle = $powershell.BeginInvoke()
-    $script:ReplicationPowerShell = $powershell
-    $script:ReplicationRunspace = $runspace
+    $handle = $powershell.BeginInvoke()
+
+    return [PSCustomObject]@{
+        PowerShell = $powershell
+        Handle = $handle
+        Runspace = $runspace
+    }
+}
+
+function Start-GuiReplication {
+    <#
+    .SYNOPSIS
+        Starts replication from GUI
+    .PARAMETER AllProfiles
+        Run all enabled profiles
+    .PARAMETER SelectedOnly
+        Run only selected profile
+    #>
+    param(
+        [switch]$AllProfiles,
+        [switch]$SelectedOnly
+    )
+
+    # Get and validate profiles
+    $profilesToRun = Get-ProfilesToRun -AllProfiles:$AllProfiles -SelectedOnly:$SelectedOnly
+    if (-not $profilesToRun) { return }
+
+    # Update UI state for replication mode
+    $script:Controls.btnRunAll.IsEnabled = $false
+    $script:Controls.btnRunSelected.IsEnabled = $false
+    $script:Controls.btnStop.IsEnabled = $true
+    $script:Controls.txtStatus.Text = "Replication in progress..."
+    $script:LastGuiUpdateState = $null
+    $script:Controls.dgChunks.ItemsSource = $null
+
+    Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
+
+    # Get worker count and start progress timer
+    $maxWorkers = [int]$script:Controls.sldWorkers.Value
+    $script:ProgressTimer.Start()
+
+    # Initialize orchestration state (must happen before runspace creation)
+    Initialize-OrchestrationState
+
+    # Create and start background runspace
+    $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers
+
+    $script:ReplicationHandle = $runspaceInfo.Handle
+    $script:ReplicationPowerShell = $runspaceInfo.PowerShell
+    $script:ReplicationRunspace = $runspaceInfo.Runspace
 }
 
 function Complete-GuiReplication {
@@ -5548,6 +5936,17 @@ function Complete-GuiReplication {
             elseif ($script:ReplicationHandle) {
                 # Collect any remaining output
                 $script:ReplicationPowerShell.EndInvoke($script:ReplicationHandle) | Out-Null
+            }
+
+            # Check for errors from the background runspace and surface them
+            if ($script:ReplicationPowerShell.HadErrors) {
+                Write-GuiLog "Background replication encountered errors:"
+                foreach ($err in $script:ReplicationPowerShell.Streams.Error) {
+                    $errorLocation = if ($err.InvocationInfo) {
+                        "$($err.InvocationInfo.ScriptName):$($err.InvocationInfo.ScriptLineNumber)"
+                    } else { "Unknown" }
+                    Write-GuiLog "  [$errorLocation] $($err.Exception.Message)"
+                }
             }
 
             # Dispose the runspace
@@ -5593,6 +5992,134 @@ function Complete-GuiReplication {
 # Cache for GUI progress updates - avoids unnecessary rebuilds
 $script:LastGuiUpdateState = $null
 
+function Update-GuiProgressText {
+    <#
+    .SYNOPSIS
+        Updates the progress text labels from status object
+    .PARAMETER Status
+        Orchestration status object from Get-OrchestrationStatus
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Status
+    )
+
+    # Update progress bars
+    $script:Controls.pbProfile.Value = $Status.ProfileProgress
+    $script:Controls.pbOverall.Value = $Status.OverallProgress
+
+    # Update text labels
+    $profileName = if ($Status.CurrentProfile) { $Status.CurrentProfile } else { "--" }
+    $script:Controls.txtProfileProgress.Text = "Profile: $profileName - $($Status.ProfileProgress)%"
+    $script:Controls.txtOverallProgress.Text = "Overall: $($Status.OverallProgress)%"
+
+    # Update ETA
+    $script:Controls.txtEta.Text = if ($Status.ETA) {
+        "ETA: $($Status.ETA.ToString('hh\:mm\:ss'))"
+    } else {
+        "ETA: --:--:--"
+    }
+
+    # Update speed (bytes per second from elapsed time)
+    $script:Controls.txtSpeed.Text = if ($Status.Elapsed.TotalSeconds -gt 0 -and $Status.BytesComplete -gt 0) {
+        $speed = $Status.BytesComplete / $Status.Elapsed.TotalSeconds
+        "Speed: $(Format-FileSize $speed)/s"
+    } else {
+        "Speed: -- MB/s"
+    }
+
+    $script:Controls.txtChunks.Text = "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
+}
+
+function Get-ChunkDisplayItems {
+    <#
+    .SYNOPSIS
+        Builds the chunk display items list for the GUI grid
+    .DESCRIPTION
+        Creates display objects from active, failed, and completed chunks.
+        Limits completed chunks to last 20 to prevent UI lag.
+    .PARAMETER MaxCompletedItems
+        Maximum number of completed chunks to display (default 20)
+    .OUTPUTS
+        Array of display objects for DataGrid binding
+    #>
+    param(
+        [int]$MaxCompletedItems = 20
+    )
+
+    $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    # Add active jobs (typically small - MaxConcurrentJobs)
+    foreach ($kvp in $script:OrchestrationState.ActiveJobs.ToArray()) {
+        $job = $kvp.Value
+        $chunkDisplayItems.Add([PSCustomObject]@{
+            ChunkId = $job.Chunk.ChunkId
+            SourcePath = $job.Chunk.SourcePath
+            Status = "Running"
+            Progress = if ($job.Progress) { $job.Progress } else { 0 }
+            Speed = "--"
+        })
+    }
+
+    # Add failed chunks (show all - usually small or indicates problems)
+    foreach ($chunk in $script:OrchestrationState.FailedChunks.ToArray()) {
+        $chunkDisplayItems.Add([PSCustomObject]@{
+            ChunkId = $chunk.ChunkId
+            SourcePath = $chunk.SourcePath
+            Status = "Failed"
+            Progress = 0
+            Speed = "--"
+        })
+    }
+
+    # Add completed chunks - limit to last N to prevent UI lag
+    $completedSnapshot = $script:OrchestrationState.CompletedChunks.ToArray()
+    $startIndex = [Math]::Max(0, $completedSnapshot.Length - $MaxCompletedItems)
+    for ($i = $startIndex; $i -lt $completedSnapshot.Length; $i++) {
+        $chunk = $completedSnapshot[$i]
+        $chunkDisplayItems.Add([PSCustomObject]@{
+            ChunkId = $chunk.ChunkId
+            SourcePath = $chunk.SourcePath
+            Status = "Complete"
+            Progress = 100
+            Speed = "--"
+        })
+    }
+
+    return $chunkDisplayItems.ToArray()
+}
+
+function Test-ChunkGridNeedsRebuild {
+    <#
+    .SYNOPSIS
+        Determines if the chunk grid needs to be rebuilt
+    .OUTPUTS
+        $true if grid needs rebuild, $false otherwise
+    #>
+
+    $currentState = @{
+        ActiveCount = $script:OrchestrationState.ActiveJobs.Count
+        CompletedCount = $script:OrchestrationState.CompletedCount
+        FailedCount = $script:OrchestrationState.FailedChunks.Count
+    }
+
+    $needsRebuild = $false
+    if (-not $script:LastGuiUpdateState) {
+        $needsRebuild = $true
+    }
+    elseif ($script:LastGuiUpdateState.ActiveCount -ne $currentState.ActiveCount -or
+            $script:LastGuiUpdateState.CompletedCount -ne $currentState.CompletedCount -or
+            $script:LastGuiUpdateState.FailedCount -ne $currentState.FailedCount) {
+        $needsRebuild = $true
+    }
+
+    if ($needsRebuild) {
+        $script:LastGuiUpdateState = $currentState
+    }
+
+    return $needsRebuild
+}
+
 function Update-GuiProgress {
     <#
     .SYNOPSIS
@@ -5602,107 +6129,17 @@ function Update-GuiProgress {
         - Only rebuilds display list when chunk counts change
         - Uses efficient ToArray() snapshot for thread-safe iteration
         - Limits displayed items to prevent UI sluggishness
-        - Tracks last state to skip redundant updates
     #>
 
     try {
         $status = Get-OrchestrationStatus
 
-        # Update progress bars (always - lightweight)
-        $script:Controls.pbProfile.Value = $status.ProfileProgress
-        $script:Controls.pbOverall.Value = $status.OverallProgress
+        # Update progress text (always - lightweight)
+        Update-GuiProgressText -Status $status
 
-        # Update text (always - lightweight)
-        $profileName = if ($status.CurrentProfile) { $status.CurrentProfile } else { "--" }
-        $script:Controls.txtProfileProgress.Text = "Profile: $profileName - $($status.ProfileProgress)%"
-        $script:Controls.txtOverallProgress.Text = "Overall: $($status.OverallProgress)%"
-
-        # Update ETA
-        if ($status.ETA) {
-            $script:Controls.txtEta.Text = "ETA: $($status.ETA.ToString('hh\:mm\:ss'))"
-        } else {
-            $script:Controls.txtEta.Text = "ETA: --:--:--"
-        }
-
-        # Update speed (bytes per second from elapsed time)
-        if ($status.Elapsed.TotalSeconds -gt 0 -and $status.BytesComplete -gt 0) {
-            $speed = $status.BytesComplete / $status.Elapsed.TotalSeconds
-            $script:Controls.txtSpeed.Text = "Speed: $(Format-FileSize $speed)/s"
-        } else {
-            $script:Controls.txtSpeed.Text = "Speed: -- MB/s"
-        }
-
-        $script:Controls.txtChunks.Text = "Chunks: $($status.ChunksComplete)/$($status.ChunksTotal)"
-
-        # Update chunk grid - optimized for performance
-        if ($script:OrchestrationState) {
-            # Check if we need to rebuild the display list
-            # Only rebuild when active job count, completed count, or failed count changes
-            $currentState = @{
-                ActiveCount = $script:OrchestrationState.ActiveJobs.Count
-                CompletedCount = $script:OrchestrationState.CompletedCount
-                FailedCount = $script:OrchestrationState.FailedChunks.Count
-            }
-
-            $needsRebuild = $false
-            if (-not $script:LastGuiUpdateState) {
-                $needsRebuild = $true
-            }
-            elseif ($script:LastGuiUpdateState.ActiveCount -ne $currentState.ActiveCount -or
-                    $script:LastGuiUpdateState.CompletedCount -ne $currentState.CompletedCount -or
-                    $script:LastGuiUpdateState.FailedCount -ne $currentState.FailedCount) {
-                $needsRebuild = $true
-            }
-
-            if ($needsRebuild) {
-                $script:LastGuiUpdateState = $currentState
-
-                # Use List for efficient building
-                $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
-
-                # Add active jobs (typically small - MaxConcurrentJobs)
-                # Use ToArray() for thread-safe snapshot of ConcurrentDictionary
-                foreach ($kvp in $script:OrchestrationState.ActiveJobs.ToArray()) {
-                    $job = $kvp.Value
-                    $chunkDisplayItems.Add([PSCustomObject]@{
-                        ChunkId = $job.Chunk.ChunkId
-                        SourcePath = $job.Chunk.SourcePath
-                        Status = "Running"
-                        Progress = if ($job.Progress) { $job.Progress } else { 0 }
-                        Speed = "--"
-                    })
-                }
-
-                # Add failed chunks (show all - usually small or indicates problems)
-                # Use ToArray() for thread-safe snapshot
-                foreach ($chunk in $script:OrchestrationState.FailedChunks.ToArray()) {
-                    $chunkDisplayItems.Add([PSCustomObject]@{
-                        ChunkId = $chunk.ChunkId
-                        SourcePath = $chunk.SourcePath
-                        Status = "Failed"
-                        Progress = 0
-                        Speed = "--"
-                    })
-                }
-
-                # Add completed chunks - limit to last 20 to prevent UI lag
-                # Take a snapshot and get last N efficiently
-                $completedSnapshot = $script:OrchestrationState.CompletedChunks.ToArray()
-                $startIndex = [Math]::Max(0, $completedSnapshot.Length - 20)
-                for ($i = $startIndex; $i -lt $completedSnapshot.Length; $i++) {
-                    $chunk = $completedSnapshot[$i]
-                    $chunkDisplayItems.Add([PSCustomObject]@{
-                        ChunkId = $chunk.ChunkId
-                        SourcePath = $chunk.SourcePath
-                        Status = "Complete"
-                        Progress = 100
-                        Speed = "--"
-                    })
-                }
-
-                # Update DataGrid
-                $script:Controls.dgChunks.ItemsSource = $chunkDisplayItems.ToArray()
-            }
+        # Update chunk grid - only when state changes
+        if ($script:OrchestrationState -and (Test-ChunkGridNeedsRebuild)) {
+            $script:Controls.dgChunks.ItemsSource = Get-ChunkDisplayItems
         }
 
         # Check if complete
@@ -5837,6 +6274,23 @@ function Show-ScheduleDialog {
         # Load current settings
         $chkEnabled.IsChecked = $script:Config.Schedule.Enabled
         $txtTime.Text = if ($script:Config.Schedule.Time) { $script:Config.Schedule.Time } else { "02:00" }
+
+        # Add real-time time validation with visual feedback
+        $txtTime.Add_TextChanged({
+            param($sender, $e)
+            $isValid = $false
+            $text = $sender.Text
+            if ($text -match '^([01]?\d|2[0-3]):([0-5]\d)$') {
+                $isValid = $true
+            }
+            if ($isValid) {
+                $sender.BorderBrush = [System.Windows.Media.Brushes]::Gray
+                $sender.ToolTip = "Time in 24-hour format (HH:MM)"
+            } else {
+                $sender.BorderBrush = [System.Windows.Media.Brushes]::Red
+                $sender.ToolTip = "Invalid format. Use HH:MM (24-hour, e.g., 02:00, 14:30)"
+            }
+        })
 
         # Check current task status
         $taskExists = Test-RobocurseTaskExists
@@ -6005,6 +6459,8 @@ function Invoke-HeadlessReplication {
         Array of profile objects to run
     .PARAMETER MaxConcurrentJobs
         Maximum concurrent robocopy processes
+    .PARAMETER BandwidthLimitMbps
+        Aggregate bandwidth limit in Mbps (0 = unlimited)
     .OUTPUTS
         Exit code: 0 for success, 1 for failures
     #>
@@ -6015,16 +6471,21 @@ function Invoke-HeadlessReplication {
         [Parameter(Mandatory)]
         [PSCustomObject[]]$ProfilesToRun,
 
-        [int]$MaxConcurrentJobs
+        [int]$MaxConcurrentJobs,
+
+        [int]$BandwidthLimitMbps = 0
     )
 
     $profileNames = ($ProfilesToRun | ForEach-Object { $_.Name }) -join ", "
     Write-Host "Starting replication for profile(s): $profileNames"
     Write-Host "Max concurrent jobs: $MaxConcurrentJobs"
+    if ($BandwidthLimitMbps -gt 0) {
+        Write-Host "Bandwidth limit: $BandwidthLimitMbps Mbps (aggregate)"
+    }
     Write-Host ""
 
-    # Start replication
-    Start-ReplicationRun -Profiles $ProfilesToRun -MaxConcurrentJobs $MaxConcurrentJobs
+    # Start replication with bandwidth throttling
+    Start-ReplicationRun -Profiles $ProfilesToRun -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps
 
     # Track last progress output time for throttling
     $lastProgressOutput = [datetime]::MinValue
@@ -6077,7 +6538,7 @@ function Invoke-HeadlessReplication {
     $results = [PSCustomObject]@{
         Duration = $status.Elapsed
         TotalBytesCopied = $totalBytesCopied
-        TotalFilesCopied = 0  # Would need chunk-level tracking
+        TotalFilesCopied = $status.FilesCopied
         TotalErrors = $totalFailed
         Profiles = $profileResultsArray
         Errors = $allErrors
@@ -6096,6 +6557,7 @@ function Invoke-HeadlessReplication {
     Write-Host "=========================================="
     Write-Host "  Duration: $($status.Elapsed.ToString('hh\:mm\:ss'))"
     Write-Host "  Total data copied: $(Format-FileSize -Bytes $totalBytesCopied)"
+    Write-Host "  Total files copied: $($status.FilesCopied.ToString('N0'))"
     Write-Host "  Total chunks failed: $totalFailed"
     Write-Host ""
 
@@ -6116,6 +6578,7 @@ function Invoke-HeadlessReplication {
             Write-Host "Email sent successfully."
         }
         else {
+            Write-RobocurseLog -Message "Failed to send completion email: $($emailResult.ErrorMessage)" -Level 'Warning' -Component 'Email'
             Write-Warning "Failed to send email: $($emailResult.ErrorMessage)"
         }
     }
@@ -6149,6 +6612,19 @@ function Start-RobocurseMain {
     }
 
     try {
+        # Resolve ConfigPath - prefer script directory over working directory
+        # This ensures the config is found when running from Task Scheduler or other locations
+        if ($ConfigPath -match '^\.[\\/]' -or -not [System.IO.Path]::IsPathRooted($ConfigPath)) {
+            # Relative path - try script directory first
+            $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $PSCommandPath }
+            $scriptRelativePath = Join-Path $scriptDir ($ConfigPath -replace '^\.[\\\/]', '')
+
+            if ((Test-Path $scriptRelativePath) -and -not (Test-Path $ConfigPath)) {
+                Write-Verbose "Using config from script directory: $scriptRelativePath"
+                $ConfigPath = $scriptRelativePath
+            }
+        }
+
         # Load configuration
         if (Test-Path $ConfigPath) {
             $config = Get-RobocurseConfig -Path $ConfigPath
@@ -6210,8 +6686,16 @@ function Start-RobocurseMain {
                 $script:DefaultMaxConcurrentJobs
             }
 
+            # Get bandwidth limit (0 = unlimited)
+            $bandwidthLimit = if ($config.GlobalSettings.BandwidthLimitMbps) {
+                $config.GlobalSettings.BandwidthLimitMbps
+            } else {
+                0
+            }
+
             # Run headless replication
-            return Invoke-HeadlessReplication -Config $config -ProfilesToRun $profilesToRun -MaxConcurrentJobs $maxJobs
+            return Invoke-HeadlessReplication -Config $config -ProfilesToRun $profilesToRun `
+                -MaxConcurrentJobs $maxJobs -BandwidthLimitMbps $bandwidthLimit
         }
         else {
             # Launch GUI

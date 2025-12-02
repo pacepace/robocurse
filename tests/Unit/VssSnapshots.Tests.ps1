@@ -405,3 +405,200 @@ Describe "VSS Path Manipulation Edge Cases" {
         }
     }
 }
+
+Describe "VSS Snapshot Tracking" {
+    BeforeAll {
+        # Save original tracking file path
+        $script:OriginalTrackingFile = $script:VssTrackingFile
+    }
+
+    BeforeEach {
+        # Use test drive for tracking file
+        $script:VssTrackingFile = "$TestDrive\vss_tracking.json"
+
+        # Clean up any existing tracking file
+        if (Test-Path $script:VssTrackingFile) {
+            Remove-Item $script:VssTrackingFile -Force
+        }
+    }
+
+    AfterAll {
+        # Restore original tracking file path
+        $script:VssTrackingFile = $script:OriginalTrackingFile
+    }
+
+    Context "Add-VssToTracking" {
+        It "Should create tracking file if it does not exist" {
+            $snapshot = [PSCustomObject]@{
+                ShadowId = "{TEST-1234-5678-90AB-CDEF12345678}"
+                SourceVolume = "C:"
+                CreatedAt = [datetime]::Now
+            }
+
+            Add-VssToTracking -SnapshotInfo $snapshot
+
+            Test-Path $script:VssTrackingFile | Should -Be $true
+        }
+
+        It "Should add snapshot info to tracking file" {
+            $snapshot = [PSCustomObject]@{
+                ShadowId = "{SNAP-1111-2222-3333-444455556666}"
+                SourceVolume = "D:"
+                CreatedAt = [datetime]"2024-01-15T10:30:00"
+            }
+
+            Add-VssToTracking -SnapshotInfo $snapshot
+
+            $content = Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json
+            $content.ShadowId | Should -Contain "{SNAP-1111-2222-3333-444455556666}"
+        }
+
+        It "Should append to existing tracking file" {
+            $snapshot1 = [PSCustomObject]@{
+                ShadowId = "{FIRST-1234-5678-90AB-CDEF12345678}"
+                SourceVolume = "C:"
+                CreatedAt = [datetime]::Now
+            }
+            $snapshot2 = [PSCustomObject]@{
+                ShadowId = "{SECOND-ABCD-EFGH-IJKL-MNOPQRSTUVWX}"
+                SourceVolume = "D:"
+                CreatedAt = [datetime]::Now
+            }
+
+            Add-VssToTracking -SnapshotInfo $snapshot1
+            Add-VssToTracking -SnapshotInfo $snapshot2
+
+            $content = Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json
+            $content.Count | Should -Be 2
+        }
+
+        It "Should store CreatedAt in ISO 8601 format" {
+            $testDate = [datetime]"2024-06-15T14:30:45.123"
+            $snapshot = [PSCustomObject]@{
+                ShadowId = "{DATE-TEST-5678-90AB-CDEF12345678}"
+                SourceVolume = "E:"
+                CreatedAt = $testDate
+            }
+
+            Add-VssToTracking -SnapshotInfo $snapshot
+
+            $rawContent = Get-Content $script:VssTrackingFile -Raw
+            $rawContent | Should -Match "2024-06-15T14:30:45"
+        }
+
+        It "Should have correct function signature" {
+            $cmd = Get-Command Add-VssToTracking
+
+            $cmd.Parameters.ContainsKey('SnapshotInfo') | Should -Be $true
+            $cmd.Parameters['SnapshotInfo'].ParameterType.Name | Should -Be 'PSObject'
+            $cmd.Parameters['SnapshotInfo'].Attributes.Mandatory | Should -Contain $true
+        }
+    }
+
+    Context "Remove-VssFromTracking" {
+        It "Should remove snapshot from tracking file" {
+            # First add a snapshot
+            $snapshot = [PSCustomObject]@{
+                ShadowId = "{REMOVE-TEST-5678-90AB-CDEF12345678}"
+                SourceVolume = "C:"
+                CreatedAt = [datetime]::Now
+            }
+            Add-VssToTracking -SnapshotInfo $snapshot
+
+            # Verify it was added
+            $before = Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json
+            $before.ShadowId | Should -Contain "{REMOVE-TEST-5678-90AB-CDEF12345678}"
+
+            # Remove it
+            Remove-VssFromTracking -ShadowId "{REMOVE-TEST-5678-90AB-CDEF12345678}"
+
+            # Verify it was removed
+            if (Test-Path $script:VssTrackingFile) {
+                $after = Get-Content $script:VssTrackingFile -Raw
+                if ($after) {
+                    $afterParsed = $after | ConvertFrom-Json
+                    $afterParsed.ShadowId | Should -Not -Contain "{REMOVE-TEST-5678-90AB-CDEF12345678}"
+                }
+            }
+        }
+
+        It "Should not throw when tracking file does not exist" {
+            { Remove-VssFromTracking -ShadowId "{NONEXISTENT-1234-5678-90AB}" } | Should -Not -Throw
+        }
+
+        It "Should preserve other snapshots when removing one" {
+            # Add two snapshots
+            $snapshot1 = [PSCustomObject]@{
+                ShadowId = "{KEEP-ME-1234-5678-90AB-CDEF12345678}"
+                SourceVolume = "C:"
+                CreatedAt = [datetime]::Now
+            }
+            $snapshot2 = [PSCustomObject]@{
+                ShadowId = "{DELETE-ME-ABCD-EFGH-IJKL-MNOP}"
+                SourceVolume = "D:"
+                CreatedAt = [datetime]::Now
+            }
+            Add-VssToTracking -SnapshotInfo $snapshot1
+            Add-VssToTracking -SnapshotInfo $snapshot2
+
+            # Remove only the second one
+            Remove-VssFromTracking -ShadowId "{DELETE-ME-ABCD-EFGH-IJKL-MNOP}"
+
+            # First should still exist
+            $content = Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json
+            # Handle both array and single object cases
+            $shadowIds = @($content) | ForEach-Object { $_.ShadowId }
+            $shadowIds | Should -Contain "{KEEP-ME-1234-5678-90AB-CDEF12345678}"
+        }
+
+        It "Should have correct function signature" {
+            $cmd = Get-Command Remove-VssFromTracking
+
+            $cmd.Parameters.ContainsKey('ShadowId') | Should -Be $true
+            $cmd.Parameters['ShadowId'].ParameterType.Name | Should -Be 'String'
+            $cmd.Parameters['ShadowId'].Attributes.Mandatory | Should -Contain $true
+        }
+    }
+
+    Context "Clear-OrphanVssSnapshots" {
+        It "Should return 0 when tracking file does not exist" {
+            # Ensure no tracking file
+            if (Test-Path $script:VssTrackingFile) {
+                Remove-Item $script:VssTrackingFile -Force
+            }
+
+            $result = Clear-OrphanVssSnapshots
+            $result | Should -Be 0
+        }
+
+        It "Should have correct function signature" {
+            $cmd = Get-Command Clear-OrphanVssSnapshots
+            $cmd | Should -Not -BeNullOrEmpty
+        }
+
+        It "Should return 0 on non-Windows platforms" {
+            # On macOS/Linux, should return 0 gracefully
+            if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+                # Create a tracking file with some content
+                @(
+                    @{ ShadowId = "{ORPHAN-1234-5678}"; SourceVolume = "C:"; CreatedAt = "2024-01-01T00:00:00Z" }
+                ) | ConvertTo-Json | Set-Content $script:VssTrackingFile
+
+                $result = Clear-OrphanVssSnapshots
+                $result | Should -Be 0
+            }
+        }
+
+        It "Should handle empty tracking file gracefully" {
+            "" | Set-Content $script:VssTrackingFile
+
+            { Clear-OrphanVssSnapshots } | Should -Not -Throw
+        }
+
+        It "Should handle malformed JSON in tracking file" {
+            "{ invalid json" | Set-Content $script:VssTrackingFile
+
+            { Clear-OrphanVssSnapshots } | Should -Not -Throw
+        }
+    }
+}

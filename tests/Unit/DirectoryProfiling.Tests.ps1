@@ -196,6 +196,49 @@ Describe "Directory Profiling" {
 
             $cached | Should -BeNullOrEmpty
         }
+
+        It "Clear-ProfileCache should remove all entries" {
+            # Add some entries
+            $profile1 = [PSCustomObject]@{
+                Path = "C:\Test1"
+                TotalSize = 1000
+                FileCount = 1
+                DirCount = 0
+                AvgFileSize = 1000
+                LastScanned = Get-Date
+            }
+            $profile2 = [PSCustomObject]@{
+                Path = "C:\Test2"
+                TotalSize = 2000
+                FileCount = 2
+                DirCount = 0
+                AvgFileSize = 1000
+                LastScanned = Get-Date
+            }
+            Set-CachedProfile -Profile $profile1
+            Set-CachedProfile -Profile $profile2
+
+            # Verify entries exist
+            $script:ProfileCache.Count | Should -Be 2
+
+            # Clear the cache
+            Clear-ProfileCache
+
+            # Verify cache is empty
+            $script:ProfileCache.Count | Should -Be 0
+        }
+
+        It "Clear-ProfileCache should not throw on empty cache" {
+            # Ensure cache is empty
+            $script:ProfileCache.Clear()
+
+            { Clear-ProfileCache } | Should -Not -Throw
+        }
+
+        It "Clear-ProfileCache should have correct function signature" {
+            $cmd = Get-Command Clear-ProfileCache
+            $cmd | Should -Not -BeNullOrEmpty
+        }
     }
 
     Context "Get-DirectoryChildren" {
