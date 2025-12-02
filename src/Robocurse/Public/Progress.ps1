@@ -151,13 +151,12 @@ function Get-ETAEstimate {
 
     $secondsRemaining = $bytesRemaining / $bytesPerSecond
 
-    # Cap at reasonable maximum (30 days) to prevent overflow
+    # Cap at reasonable maximum (30 days = 2,592,000 seconds) to prevent unreasonable ETA
+    # This is well below int32 max (2.1B), so the cast to [int] is always safe
     $maxSeconds = 30.0 * 24.0 * 60.0 * 60.0
     if ($secondsRemaining -gt $maxSeconds -or [double]::IsInfinity($secondsRemaining) -or [double]::IsNaN($secondsRemaining)) {
         $secondsRemaining = $maxSeconds
     }
 
-    # Ensure value fits in Int32 range before casting (defensive programming)
-    $safeSeconds = [Math]::Min($secondsRemaining, [int]::MaxValue)
-    return [timespan]::FromSeconds([int]$safeSeconds)
+    return [timespan]::FromSeconds([int]$secondsRemaining)
 }

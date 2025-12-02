@@ -152,9 +152,11 @@ function ConvertFrom-GlobalSettings {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
+        [ValidateNotNull()]
         [PSCustomObject]$RawGlobal,
 
         [Parameter(Mandatory)]
+        [ValidateNotNull()]
         [PSCustomObject]$Config
     )
 

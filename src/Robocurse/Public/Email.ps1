@@ -234,6 +234,7 @@ function Save-SmtpCredential {
         [string]$Target = "Robocurse-SMTP",
 
         [Parameter(Mandatory)]
+        [ValidateNotNull()]
         [PSCredential]$Credential
     )
 

@@ -156,6 +156,33 @@ namespace Robocurse
             return Interlocked.Add(ref _completedChunkFiles, files);
         }
 
+        // Skipped chunk tracking (for checkpoint resume - not added to CompletedChunks queue)
+        private int _skippedChunkCount;
+        public int SkippedChunkCount
+        {
+            get { return Interlocked.CompareExchange(ref _skippedChunkCount, 0, 0); }
+            set { Interlocked.Exchange(ref _skippedChunkCount, value); }
+        }
+
+        /// <summary>Atomically increment skipped chunk count</summary>
+        public int IncrementSkippedCount()
+        {
+            return Interlocked.Increment(ref _skippedChunkCount);
+        }
+
+        private long _skippedChunkBytes;
+        public long SkippedChunkBytes
+        {
+            get { return Interlocked.Read(ref _skippedChunkBytes); }
+            set { Interlocked.Exchange(ref _skippedChunkBytes, value); }
+        }
+
+        /// <summary>Atomically add bytes from a skipped chunk</summary>
+        public long AddSkippedChunkBytes(long bytes)
+        {
+            return Interlocked.Add(ref _skippedChunkBytes, bytes);
+        }
+
         // Snapshot of files at profile start (for per-profile file counting)
         private long _profileStartFiles;
         public long ProfileStartFiles
@@ -279,6 +306,8 @@ namespace Robocurse
             Interlocked.Exchange(ref _completedChunkBytes, 0);
             Interlocked.Exchange(ref _completedChunkFiles, 0);
             Interlocked.Exchange(ref _profileStartFiles, 0);
+            Interlocked.Exchange(ref _skippedChunkCount, 0);
+            Interlocked.Exchange(ref _skippedChunkBytes, 0);
 
             // Reset volatile flags
             _stopRequested = false;
@@ -310,6 +339,8 @@ namespace Robocurse
             Interlocked.Exchange(ref _bytesComplete, 0);
             Interlocked.Exchange(ref _completedChunkBytes, 0);
             Interlocked.Exchange(ref _completedChunkFiles, 0);
+            Interlocked.Exchange(ref _skippedChunkCount, 0);
+            Interlocked.Exchange(ref _skippedChunkBytes, 0);
 
             ChunkQueue = new ConcurrentQueue<object>();
             ActiveJobs.Clear();
@@ -871,10 +902,13 @@ function Invoke-ReplicationTick {
             if ($script:CurrentCheckpoint -and (Test-ChunkAlreadyCompleted -Chunk $chunk -Checkpoint $script:CurrentCheckpoint)) {
                 # Skip this chunk - DON'T enqueue to CompletedChunks to prevent memory leak
                 # The chunk is already tracked in the checkpoint file, no need to hold in memory
+                # Track separately for accurate reporting (skipped vs actually completed this run)
                 $chunk.Status = 'Skipped'
                 $state.IncrementCompletedCount()
+                $state.IncrementSkippedCount()
                 if ($chunk.EstimatedSize) {
                     $state.AddCompletedChunkBytes($chunk.EstimatedSize)
+                    $state.AddSkippedChunkBytes($chunk.EstimatedSize)
                 }
                 Write-RobocurseLog -Message "Chunk $($chunk.ChunkId) skipped (already completed in previous run)" `
                     -Level 'Debug' -Component 'Checkpoint'
@@ -1112,22 +1146,31 @@ function Complete-CurrentProfile {
     # Calculate profile statistics before clearing
     $completedChunksArray = $state.CompletedChunks.ToArray()
     $failedChunksArray = $state.FailedChunks.ToArray()
+    $skippedChunkCount = $state.SkippedChunkCount
+    $skippedChunkBytes = $state.SkippedChunkBytes
 
+    # Calculate bytes: sum from queue (actually copied this run) + skipped (from checkpoint)
     $profileBytesCopied = 0
     foreach ($chunk in $completedChunksArray) {
         if ($chunk.EstimatedSize) {
             $profileBytesCopied += $chunk.EstimatedSize
         }
     }
+    # Add bytes from skipped chunks (already completed in previous run)
+    $profileBytesCopied += $skippedChunkBytes
 
     # Calculate files copied for this profile (delta from profile start)
     $profileFilesCopied = $state.CompletedChunkFiles - $state.ProfileStartFiles
+
+    # Total completed = queue count (this run) + skipped (checkpoint resume)
+    $totalCompleted = $completedChunksArray.Count + $skippedChunkCount
 
     # Store profile result for email/reporting (prevents memory leak by summarizing)
     $profileResult = [PSCustomObject]@{
         Name = $state.CurrentProfile.Name
         Status = if ($failedChunksArray.Count -gt 0) { 'Warning' } else { 'Success' }
-        ChunksComplete = $completedChunksArray.Count
+        ChunksComplete = $totalCompleted
+        ChunksSkipped = $skippedChunkCount
         ChunksTotal = $state.TotalChunks
         ChunksFailed = $failedChunksArray.Count
         BytesCopied = $profileBytesCopied
@@ -1144,7 +1187,8 @@ function Complete-CurrentProfile {
 
     Write-SiemEvent -EventType 'ProfileComplete' -Data @{
         profileName = $state.CurrentProfile.Name
-        chunksCompleted = $completedChunksArray.Count
+        chunksCompleted = $totalCompleted
+        chunksSkipped = $skippedChunkCount
         chunksFailed = $failedChunksArray.Count
         durationMs = $profileDuration.TotalMilliseconds
     }

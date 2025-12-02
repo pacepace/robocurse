@@ -311,8 +311,11 @@ function Start-RobocopyJob {
 
     # Create process start info
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    # Use validated robocopy path (fallback to just "robocopy.exe" if not yet validated)
-    $psi.FileName = if ($script:RobocopyPath) { $script:RobocopyPath } else { "robocopy.exe" }
+    # Require validated robocopy path - no fallback to prevent unvalidated execution
+    if (-not $script:RobocopyPath) {
+        throw "Robocopy path not validated. Call Test-RobocopyAvailable before starting jobs."
+    }
+    $psi.FileName = $script:RobocopyPath
     $psi.Arguments = $argList -join ' '
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
