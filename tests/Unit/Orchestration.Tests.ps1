@@ -209,6 +209,81 @@ InModuleScope 'Robocurse' {
                 $script:OrchestrationState.ChunkQueue.Count | Should -Be 1
             }
 
+            It "Should skip chunks in backoff delay period" {
+                # Chunk with future RetryAfter should be re-queued, not started
+                $chunkInBackoff = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test1"
+                    DestinationPath = "D:\Test1"
+                    RetryAfter = [datetime]::Now.AddSeconds(30)  # 30 seconds in the future
+                }
+                # Chunk without RetryAfter should start normally
+                $chunkReady = [PSCustomObject]@{
+                    ChunkId = 2
+                    SourcePath = "C:\Test2"
+                    DestinationPath = "D:\Test2"
+                }
+                $script:OrchestrationState.ChunkQueue.Enqueue($chunkInBackoff)
+                $script:OrchestrationState.ChunkQueue.Enqueue($chunkReady)
+                $script:OrchestrationState.TotalChunks = 2
+
+                Mock Start-ChunkJob {
+                    param($Chunk)
+                    $mockProcess = [PSCustomObject]@{
+                        Id = Get-Random -Minimum 1000 -Maximum 9999
+                        HasExited = $false
+                    }
+                    [PSCustomObject]@{
+                        Process = $mockProcess
+                        Chunk = $Chunk
+                        StartTime = [datetime]::Now
+                        LogPath = "C:\Logs\chunk.log"
+                    }
+                }
+                Mock Update-ProgressStats { }
+
+                Invoke-ReplicationTick -MaxConcurrentJobs 4
+
+                # Only the ready chunk should have started
+                Should -Invoke Start-ChunkJob -Times 1
+                $script:OrchestrationState.ActiveJobs.Count | Should -Be 1
+                # The backoff chunk should be re-queued
+                $script:OrchestrationState.ChunkQueue.Count | Should -Be 1
+            }
+
+            It "Should start chunks after backoff period expires" {
+                # Chunk with past RetryAfter should start
+                $chunkReady = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test1"
+                    DestinationPath = "D:\Test1"
+                    RetryAfter = [datetime]::Now.AddSeconds(-5)  # 5 seconds in the past
+                }
+                $script:OrchestrationState.ChunkQueue.Enqueue($chunkReady)
+                $script:OrchestrationState.TotalChunks = 1
+
+                Mock Start-ChunkJob {
+                    param($Chunk)
+                    $mockProcess = [PSCustomObject]@{
+                        Id = Get-Random -Minimum 1000 -Maximum 9999
+                        HasExited = $false
+                    }
+                    [PSCustomObject]@{
+                        Process = $mockProcess
+                        Chunk = $Chunk
+                        StartTime = [datetime]::Now
+                        LogPath = "C:\Logs\chunk.log"
+                    }
+                }
+                Mock Update-ProgressStats { }
+
+                Invoke-ReplicationTick -MaxConcurrentJobs 4
+
+                Should -Invoke Start-ChunkJob -Times 1
+                $script:OrchestrationState.ActiveJobs.Count | Should -Be 1
+                $script:OrchestrationState.ChunkQueue.Count | Should -Be 0
+            }
+
             It "Should stop all jobs when stop requested" {
                 $script:OrchestrationState.StopRequested = $true
 
@@ -312,13 +387,48 @@ InModuleScope 'Robocurse' {
             }
         }
 
+        Context "Get-RetryBackoffDelay" {
+            It "Should return base delay for first retry" {
+                $delay = Get-RetryBackoffDelay -RetryCount 1
+
+                $delay | Should -Be $script:RetryBackoffBaseSeconds
+            }
+
+            It "Should double delay for second retry" {
+                $delay = Get-RetryBackoffDelay -RetryCount 2
+
+                # base * multiplier = 5 * 2 = 10
+                $expected = $script:RetryBackoffBaseSeconds * $script:RetryBackoffMultiplier
+                $delay | Should -Be $expected
+            }
+
+            It "Should quadruple delay for third retry" {
+                $delay = Get-RetryBackoffDelay -RetryCount 3
+
+                # base * multiplier^2 = 5 * 4 = 20
+                $expected = [math]::Ceiling($script:RetryBackoffBaseSeconds * [math]::Pow($script:RetryBackoffMultiplier, 2))
+                $delay | Should -Be $expected
+            }
+
+            It "Should cap at maximum delay" {
+                $delay = Get-RetryBackoffDelay -RetryCount 10
+
+                $delay | Should -Be $script:RetryBackoffMaxSeconds
+            }
+
+            It "Should throw for invalid retry count" {
+                { Get-RetryBackoffDelay -RetryCount 0 } | Should -Throw
+            }
+        }
+
         Context "Invoke-FailedChunkHandler" {
-            It "Should retry failed chunk up to 3 times" {
+            It "Should retry failed chunk up to 3 times with backoff delay" {
                 $chunk = [PSCustomObject]@{
                     ChunkId = 1
                     SourcePath = "C:\Test"
                     DestinationPath = "D:\Test"
                     RetryCount = 0
+                    RetryAfter = $null
                 }
                 $job = [PSCustomObject]@{ Chunk = $chunk }
                 $result = [PSCustomObject]@{
@@ -333,15 +443,18 @@ InModuleScope 'Robocurse' {
 
                 $script:OrchestrationState.ChunkQueue.Count | Should -Be 1
                 $chunk.RetryCount | Should -Be 1
+                $chunk.RetryAfter | Should -Not -BeNullOrEmpty
+                $chunk.RetryAfter | Should -BeGreaterThan ([datetime]::Now)
                 $script:OrchestrationState.FailedChunks.Count | Should -Be 0
             }
 
-            It "Should retry chunk on second failure" {
+            It "Should set increasing backoff delay for subsequent retries" {
                 $chunk = [PSCustomObject]@{
                     ChunkId = 1
                     SourcePath = "C:\Test"
                     DestinationPath = "D:\Test"
                     RetryCount = 1
+                    RetryAfter = $null
                 }
                 $job = [PSCustomObject]@{ Chunk = $chunk }
                 $result = [PSCustomObject]@{
@@ -352,10 +465,17 @@ InModuleScope 'Robocurse' {
                     }
                 }
 
+                $beforeRetry = [datetime]::Now
+
                 Invoke-FailedChunkHandler -Job $job -Result $result
 
                 $script:OrchestrationState.ChunkQueue.Count | Should -Be 1
                 $chunk.RetryCount | Should -Be 2
+                # Second retry should have longer delay than first (10s vs 5s with default settings)
+                $expectedDelay = Get-RetryBackoffDelay -RetryCount 2
+                $expectedRetryAfter = $beforeRetry.AddSeconds($expectedDelay)
+                # Allow 1 second tolerance for test execution time
+                $chunk.RetryAfter | Should -BeGreaterThan $beforeRetry.AddSeconds($expectedDelay - 1)
                 $script:OrchestrationState.FailedChunks.Count | Should -Be 0
             }
 
@@ -878,6 +998,94 @@ InModuleScope 'Robocurse' {
                 $result.Success | Should -Be $false
                 $result.ErrorRecord | Should -Not -BeNullOrEmpty
                 $result.ErrorRecord.Exception.Message | Should -Be "Test error"
+            }
+        }
+
+        Context "Health Check Functions" {
+            BeforeEach {
+                # Clear health check state
+                $script:LastHealthCheckUpdate = $null
+                # Use test-specific path
+                $script:HealthCheckStatusFile = Join-Path $TestDrive "Robocurse-Health.json"
+            }
+
+            AfterEach {
+                # Clean up
+                if (Test-Path $script:HealthCheckStatusFile) {
+                    Remove-Item $script:HealthCheckStatusFile -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            It "Should write health status to file" {
+                $script:OrchestrationState.Reset()
+                $script:OrchestrationState.Phase = "Replicating"
+
+                $result = Write-HealthCheckStatus -Force
+
+                $result.Success | Should -Be $true
+                Test-Path $script:HealthCheckStatusFile | Should -Be $true
+            }
+
+            It "Should include correct phase in health status" {
+                $script:OrchestrationState.Reset()
+                $script:OrchestrationState.Phase = "Replicating"
+
+                Write-HealthCheckStatus -Force
+
+                $status = Get-HealthCheckStatus
+
+                $status | Should -Not -BeNullOrEmpty
+                $status.Phase | Should -Be "Replicating"
+            }
+
+            It "Should respect interval when Force is not specified" {
+                $script:OrchestrationState.Reset()
+
+                Write-HealthCheckStatus -Force
+
+                # Immediate second call should be skipped (interval not elapsed)
+                $result = Write-HealthCheckStatus
+
+                $result.Data | Should -Be "Skipped - interval not elapsed"
+            }
+
+            It "Should report healthy when no failures" {
+                $script:OrchestrationState.Reset()
+                $script:OrchestrationState.Phase = "Replicating"
+
+                Write-HealthCheckStatus -Force
+                $status = Get-HealthCheckStatus
+
+                $status.Healthy | Should -Be $true
+                $status.Message | Should -Be "OK"
+            }
+
+            It "Should report unhealthy when stopped" {
+                $script:OrchestrationState.Reset()
+                $script:OrchestrationState.Phase = "Stopped"
+
+                Write-HealthCheckStatus -Force
+                $status = Get-HealthCheckStatus
+
+                $status.Healthy | Should -Be $false
+                $status.Message | Should -Be "Replication stopped"
+            }
+
+            It "Remove-HealthCheckStatus should delete file" {
+                $script:OrchestrationState.Reset()
+                Write-HealthCheckStatus -Force
+
+                Test-Path $script:HealthCheckStatusFile | Should -Be $true
+
+                Remove-HealthCheckStatus
+
+                Test-Path $script:HealthCheckStatusFile | Should -Be $false
+            }
+
+            It "Get-HealthCheckStatus should return null if file not exists" {
+                $status = Get-HealthCheckStatus
+
+                $status | Should -BeNullOrEmpty
             }
         }
     }

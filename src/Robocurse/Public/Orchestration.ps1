@@ -401,182 +401,6 @@ function Initialize-OrchestrationState {
         -Level 'Info' -Component 'Orchestrator'
 }
 
-#region ==================== CHECKPOINT/RESUME ====================
-
-$script:CheckpointFileName = "robocurse-checkpoint.json"
-
-function Get-CheckpointPath {
-    <#
-    .SYNOPSIS
-        Returns the checkpoint file path based on log directory
-    .OUTPUTS
-        Path to checkpoint file
-    #>
-    $logDir = if ($script:CurrentLogPath) {
-        Split-Path $script:CurrentLogPath -Parent
-    } else {
-        "."
-    }
-    return Join-Path $logDir $script:CheckpointFileName
-}
-
-function Save-ReplicationCheckpoint {
-    <#
-    .SYNOPSIS
-        Saves current replication progress to a checkpoint file
-    .DESCRIPTION
-        Persists the current state of replication to disk, allowing
-        resumption after a crash or interruption. Saves:
-        - Session ID
-        - Profile index and name
-        - Completed chunk paths (for skipping on resume)
-        - Start time
-        - Profiles configuration
-    .PARAMETER Force
-        Overwrite existing checkpoint without confirmation
-    .OUTPUTS
-        OperationResult indicating success/failure
-    #>
-    param(
-        [switch]$Force
-    )
-
-    if (-not $script:OrchestrationState) {
-        return New-OperationResult -Success $false -ErrorMessage "No orchestration state to checkpoint"
-    }
-
-    $state = $script:OrchestrationState
-
-    try {
-        # Build list of completed chunk paths for skip detection on resume
-        $completedPaths = @()
-        foreach ($chunk in $state.CompletedChunks.ToArray()) {
-            $completedPaths += $chunk.SourcePath
-        }
-
-        $checkpoint = [PSCustomObject]@{
-            Version = "1.0"
-            SessionId = $state.SessionId
-            SavedAt = (Get-Date).ToString('o')
-            ProfileIndex = $state.ProfileIndex
-            CurrentProfileName = if ($state.CurrentProfile) { $state.CurrentProfile.Name } else { "" }
-            CompletedChunkPaths = $completedPaths
-            CompletedCount = $state.CompletedCount
-            FailedCount = $state.FailedChunks.Count
-            BytesComplete = $state.BytesComplete
-            StartTime = if ($state.StartTime) { $state.StartTime.ToString('o') } else { $null }
-        }
-
-        $checkpointPath = Get-CheckpointPath
-
-        # Create directory if needed
-        $checkpointDir = Split-Path $checkpointPath -Parent
-        if ($checkpointDir -and -not (Test-Path $checkpointDir)) {
-            New-Item -ItemType Directory -Path $checkpointDir -Force | Out-Null
-        }
-
-        $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $checkpointPath -Encoding UTF8
-
-        Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
-            -Level 'Info' -Component 'Checkpoint'
-
-        return New-OperationResult -Success $true -Data $checkpointPath
-    }
-    catch {
-        Write-RobocurseLog -Message "Failed to save checkpoint: $($_.Exception.Message)" `
-            -Level 'Error' -Component 'Checkpoint'
-        return New-OperationResult -Success $false -ErrorMessage "Failed to save checkpoint: $($_.Exception.Message)" -ErrorRecord $_
-    }
-}
-
-function Get-ReplicationCheckpoint {
-    <#
-    .SYNOPSIS
-        Loads a checkpoint file if one exists
-    .OUTPUTS
-        Checkpoint object or $null if no checkpoint exists
-    #>
-
-    $checkpointPath = Get-CheckpointPath
-
-    if (-not (Test-Path $checkpointPath)) {
-        return $null
-    }
-
-    try {
-        $content = Get-Content -Path $checkpointPath -Raw -Encoding UTF8
-        $checkpoint = $content | ConvertFrom-Json
-
-        Write-RobocurseLog -Message "Found checkpoint: $($checkpoint.CompletedChunkPaths.Count) chunks completed at $($checkpoint.SavedAt)" `
-            -Level 'Info' -Component 'Checkpoint'
-
-        return $checkpoint
-    }
-    catch {
-        Write-RobocurseLog -Message "Failed to load checkpoint: $($_.Exception.Message)" `
-            -Level 'Warning' -Component 'Checkpoint'
-        return $null
-    }
-}
-
-function Remove-ReplicationCheckpoint {
-    <#
-    .SYNOPSIS
-        Removes the checkpoint file after successful completion
-    .OUTPUTS
-        $true if removed, $false otherwise
-    #>
-
-    $checkpointPath = Get-CheckpointPath
-
-    if (Test-Path $checkpointPath) {
-        try {
-            Remove-Item -Path $checkpointPath -Force
-            Write-RobocurseLog -Message "Checkpoint file removed (replication complete)" `
-                -Level 'Debug' -Component 'Checkpoint'
-            return $true
-        }
-        catch {
-            Write-RobocurseLog -Message "Failed to remove checkpoint file: $($_.Exception.Message)" `
-                -Level 'Warning' -Component 'Checkpoint'
-        }
-    }
-    return $false
-}
-
-function Test-ChunkAlreadyCompleted {
-    <#
-    .SYNOPSIS
-        Checks if a chunk was completed in a previous run
-    .PARAMETER Chunk
-        Chunk object to check
-    .PARAMETER Checkpoint
-        Checkpoint object from previous run
-    .OUTPUTS
-        $true if chunk should be skipped, $false otherwise
-    #>
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject]$Chunk,
-
-        [PSCustomObject]$Checkpoint
-    )
-
-    if (-not $Checkpoint -or -not $Checkpoint.CompletedChunkPaths) {
-        return $false
-    }
-
-    # Case-insensitive check for Windows paths
-    $normalizedChunkPath = $Chunk.SourcePath.ToLowerInvariant()
-    foreach ($completedPath in $Checkpoint.CompletedChunkPaths) {
-        if ($completedPath.ToLowerInvariant() -eq $normalizedChunkPath) {
-            return $true
-        }
-    }
-
-    return $false
-}
-
 function Start-ReplicationRun {
     <#
     .SYNOPSIS
@@ -982,6 +806,9 @@ function Invoke-ReplicationTick {
     }
 
     # Start new jobs - use TryDequeue for thread-safe queue access
+    # Keep a list of chunks that need to be re-queued due to backoff delay
+    $chunksToRequeue = [System.Collections.Generic.List[object]]::new()
+
     while (($state.ActiveJobs.Count -lt $MaxConcurrentJobs) -and
            ($state.ChunkQueue.Count -gt 0)) {
         $chunk = $null
@@ -1000,9 +827,21 @@ function Invoke-ReplicationTick {
                 continue
             }
 
+            # Check if chunk is in backoff delay period (exponential backoff for retries)
+            if ($chunk.RetryAfter -and [datetime]::Now -lt $chunk.RetryAfter) {
+                # Not ready yet - re-queue for later
+                $chunksToRequeue.Add($chunk)
+                continue
+            }
+
             $job = Start-ChunkJob -Chunk $chunk
             $state.ActiveJobs[$job.Process.Id] = $job
         }
+    }
+
+    # Re-queue any chunks that were in backoff delay
+    foreach ($chunk in $chunksToRequeue) {
+        $state.ChunkQueue.Enqueue($chunk)
     }
 
     # Check if profile complete
@@ -1012,6 +851,9 @@ function Invoke-ReplicationTick {
 
     # Update progress
     Update-ProgressStats
+
+    # Update health check status file (respects interval internally)
+    Write-HealthCheckStatus | Out-Null
 
     # Invoke progress callback
     if ($script:OnProgress) {
@@ -1072,10 +914,49 @@ function Complete-RobocopyJob {
     }
 }
 
+function Get-RetryBackoffDelay {
+    <#
+    .SYNOPSIS
+        Calculates exponential backoff delay for retry attempts
+    .DESCRIPTION
+        Uses exponential backoff formula: base * (multiplier ^ retryCount)
+        with a maximum cap to prevent excessively long waits.
+    .PARAMETER RetryCount
+        Current retry attempt (1-based)
+    .OUTPUTS
+        Delay in seconds (integer)
+    .EXAMPLE
+        Get-RetryBackoffDelay -RetryCount 1  # Returns 5 (base delay)
+        Get-RetryBackoffDelay -RetryCount 2  # Returns 10 (5 * 2^1)
+        Get-RetryBackoffDelay -RetryCount 3  # Returns 20 (5 * 2^2)
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateRange(1, 100)]
+        [int]$RetryCount
+    )
+
+    $base = $script:RetryBackoffBaseSeconds
+    $multiplier = $script:RetryBackoffMultiplier
+    $maxDelay = $script:RetryBackoffMaxSeconds
+
+    # Calculate: base * (multiplier ^ (retryCount - 1))
+    # RetryCount 1 = base * 1 = base seconds
+    # RetryCount 2 = base * multiplier
+    # RetryCount 3 = base * multiplier^2
+    $delay = [math]::Ceiling($base * [math]::Pow($multiplier, $RetryCount - 1))
+
+    # Cap at maximum
+    return [math]::Min($delay, $maxDelay)
+}
+
 function Invoke-FailedChunkHandler {
     <#
     .SYNOPSIS
         Processes a failed chunk - retry or mark as permanently failed
+    .DESCRIPTION
+        Uses exponential backoff for retries to be gentler on infrastructure
+        during transient failures. Backoff delays: 5s -> 10s -> 20s (capped at 120s)
     .PARAMETER Job
         Failed job object
     .PARAMETER Result
@@ -1092,10 +973,16 @@ function Invoke-FailedChunkHandler {
     $chunk.RetryCount++
 
     if ($chunk.RetryCount -lt $script:MaxChunkRetries -and $Result.ExitMeaning.ShouldRetry) {
-        # Re-queue for retry (thread-safe ConcurrentQueue)
-        Write-RobocurseLog -Message "Chunk $($chunk.ChunkId) failed, retrying ($($chunk.RetryCount)/$script:MaxChunkRetries)" `
+        # Calculate exponential backoff delay
+        $backoffDelay = Get-RetryBackoffDelay -RetryCount $chunk.RetryCount
+
+        Write-RobocurseLog -Message "Chunk $($chunk.ChunkId) failed, retrying in ${backoffDelay}s ($($chunk.RetryCount)/$script:MaxChunkRetries)" `
             -Level 'Warning' -Component 'Orchestrator'
 
+        # Store retry time on chunk for delayed re-queue
+        $chunk.RetryAfter = [datetime]::Now.AddSeconds($backoffDelay)
+
+        # Re-queue for retry (thread-safe ConcurrentQueue)
         $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
     }
     else {
@@ -1215,6 +1102,10 @@ function Complete-CurrentProfile {
         # Remove checkpoint file on successful completion
         Remove-ReplicationCheckpoint | Out-Null
 
+        # Write final health status and clean up
+        Write-HealthCheckStatus -Force | Out-Null
+        Remove-HealthCheckStatus
+
         Write-RobocurseLog -Message "All profiles complete in $($totalDuration.ToString('hh\:mm\:ss'))" `
             -Level 'Info' -Component 'Orchestrator'
 
@@ -1302,3 +1193,178 @@ function Request-Resume {
     Write-RobocurseLog -Message "Resume requested" `
         -Level 'Info' -Component 'Orchestrator'
 }
+
+#region Health Check Functions
+
+# Track last health check update time
+$script:LastHealthCheckUpdate = $null
+
+function Write-HealthCheckStatus {
+    <#
+    .SYNOPSIS
+        Writes current orchestration status to a JSON file for external monitoring
+    .DESCRIPTION
+        Creates a health check file that can be read by external monitoring systems
+        to track the status of running replication jobs. The file includes:
+        - Current phase (Idle, Profiling, Replicating, Complete, Stopped)
+        - Active job count and queue depth
+        - Progress statistics (chunks completed, bytes copied)
+        - Current profile being processed
+        - Last update timestamp
+        - ETA estimate
+
+        The file is written atomically to prevent partial reads.
+    .PARAMETER Force
+        Write immediately regardless of interval setting
+    .OUTPUTS
+        OperationResult - Success=$true if file written, Success=$false with ErrorMessage on failure
+    .EXAMPLE
+        Write-HealthCheckStatus
+        # Updates health file if interval has elapsed
+    .EXAMPLE
+        Write-HealthCheckStatus -Force
+        # Updates health file immediately
+    #>
+    [CmdletBinding()]
+    param(
+        [switch]$Force
+    )
+
+    # Check if enough time has elapsed since last update
+    $now = [datetime]::Now
+    if (-not $Force -and $script:LastHealthCheckUpdate) {
+        $elapsed = ($now - $script:LastHealthCheckUpdate).TotalSeconds
+        if ($elapsed -lt $script:HealthCheckIntervalSeconds) {
+            return New-OperationResult -Success $true -Data "Skipped - interval not elapsed"
+        }
+    }
+
+    try {
+        $state = $script:OrchestrationState
+        if ($null -eq $state) {
+            # No orchestration state - write idle status
+            $healthStatus = [PSCustomObject]@{
+                Timestamp = $now.ToString('o')
+                Phase = 'Idle'
+                CurrentProfile = $null
+                ProfileIndex = 0
+                ProfileCount = 0
+                ChunksCompleted = 0
+                ChunksTotal = 0
+                ChunksPending = 0
+                ChunksFailed = 0
+                ActiveJobs = 0
+                BytesCompleted = 0
+                EtaSeconds = $null
+                SessionId = $null
+                Healthy = $true
+                Message = 'No active replication'
+            }
+        }
+        else {
+            # Get ETA estimate
+            $eta = Get-ETAEstimate
+            $etaSeconds = if ($eta) { [int]$eta.TotalSeconds } else { $null }
+
+            # Calculate health status
+            $failedCount = $state.FailedChunks.Count
+            $isHealthy = $state.Phase -ne 'Stopped' -and $failedCount -eq 0
+
+            $healthStatus = [PSCustomObject]@{
+                Timestamp = $now.ToString('o')
+                Phase = $state.Phase
+                CurrentProfile = if ($state.CurrentProfile) { $state.CurrentProfile.Name } else { $null }
+                ProfileIndex = $state.ProfileIndex
+                ProfileCount = if ($state.Profiles) { $state.Profiles.Count } else { 0 }
+                ChunksCompleted = $state.CompletedCount
+                ChunksTotal = $state.TotalChunks
+                ChunksPending = $state.ChunkQueue.Count
+                ChunksFailed = $failedCount
+                ActiveJobs = $state.ActiveJobs.Count
+                BytesCompleted = $state.BytesComplete
+                EtaSeconds = $etaSeconds
+                SessionId = $state.SessionId
+                Healthy = $isHealthy
+                Message = if (-not $isHealthy) {
+                    if ($state.Phase -eq 'Stopped') { 'Replication stopped' }
+                    elseif ($failedCount -gt 0) { "$failedCount chunks failed" }
+                    else { 'OK' }
+                } else { 'OK' }
+            }
+        }
+
+        # Write atomically by writing to temp file then renaming
+        $tempPath = "$($script:HealthCheckStatusFile).tmp"
+        $healthStatus | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
+
+        # Rename is atomic on most filesystems
+        Move-Item -Path $tempPath -Destination $script:HealthCheckStatusFile -Force
+
+        $script:LastHealthCheckUpdate = $now
+
+        return New-OperationResult -Success $true -Data $script:HealthCheckStatusFile
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to write health check status: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to write health check: $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+function Get-HealthCheckStatus {
+    <#
+    .SYNOPSIS
+        Reads the health check status file
+    .DESCRIPTION
+        Reads and returns the current health check status from the JSON file.
+        Useful for external monitoring scripts or GUI status checks.
+    .OUTPUTS
+        PSCustomObject with health status, or $null if file doesn't exist
+    .EXAMPLE
+        $status = Get-HealthCheckStatus
+        if ($status -and -not $status.Healthy) {
+            Send-Alert "Robocurse issue: $($status.Message)"
+        }
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not (Test-Path $script:HealthCheckStatusFile)) {
+        return $null
+    }
+
+    try {
+        $content = Get-Content -Path $script:HealthCheckStatusFile -Raw -ErrorAction Stop
+        return $content | ConvertFrom-Json
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to read health check status: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
+        return $null
+    }
+}
+
+function Remove-HealthCheckStatus {
+    <#
+    .SYNOPSIS
+        Removes the health check status file
+    .DESCRIPTION
+        Cleans up the health check file when replication is complete or on shutdown.
+    .EXAMPLE
+        Remove-HealthCheckStatus
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (Test-Path $script:HealthCheckStatusFile) {
+        try {
+            Remove-Item -Path $script:HealthCheckStatusFile -Force -ErrorAction Stop
+            Write-RobocurseLog -Message "Removed health check status file" -Level 'Debug' -Component 'Health'
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to remove health check status file: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
+        }
+    }
+
+    $script:LastHealthCheckUpdate = $null
+}
+
+#endregion

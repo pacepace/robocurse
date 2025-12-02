@@ -71,21 +71,26 @@ InModuleScope 'Robocurse' {
         }
 
         Context "XAML Definition Tests" {
-            It "Should have MainWindowXaml defined" {
-                $script:MainWindowXaml | Should -Not -BeNullOrEmpty
+            BeforeAll {
+                # Load XAML from resource file using the new approach
+                $script:TestXamlContent = Get-XamlResource -ResourceName 'MainWindow.xaml'
+            }
+
+            It "Should load MainWindow XAML via Get-XamlResource" {
+                $script:TestXamlContent | Should -Not -BeNullOrEmpty
             }
 
             It "Should have valid XML structure" {
-                { [xml]$script:MainWindowXaml } | Should -Not -Throw
+                { [xml]$script:TestXamlContent } | Should -Not -Throw
             }
 
             It "Should have Window as root element" {
-                $xaml = [xml]$script:MainWindowXaml
+                $xaml = [xml]$script:TestXamlContent
                 $xaml.DocumentElement.LocalName | Should -Be "Window"
             }
 
             It "Should have dark theme background color" {
-                $script:MainWindowXaml | Should -Match '#1E1E1E'
+                $script:TestXamlContent | Should -Match '#1E1E1E'
             }
 
             It "Should have required controls defined" {
@@ -104,21 +109,25 @@ InModuleScope 'Robocurse' {
                 )
 
                 foreach ($control in $requiredControls) {
-                    $script:MainWindowXaml | Should -Match "x:Name=`"$control`""
+                    $script:TestXamlContent | Should -Match "x:Name=`"$control`""
                 }
             }
 
             It "Should have tooltips defined" {
-                $script:MainWindowXaml | Should -Match 'ToolTip='
+                $script:TestXamlContent | Should -Match 'ToolTip='
             }
 
             It "Should have dark theme styles defined" {
-                $script:MainWindowXaml | Should -Match 'DarkLabel'
-                $script:MainWindowXaml | Should -Match 'DarkTextBox'
-                $script:MainWindowXaml | Should -Match 'DarkButton'
-                $script:MainWindowXaml | Should -Match 'StopButton'
-                $script:MainWindowXaml | Should -Match 'DarkCheckBox'
-                $script:MainWindowXaml | Should -Match 'DarkListBox'
+                $script:TestXamlContent | Should -Match 'DarkLabel'
+                $script:TestXamlContent | Should -Match 'DarkTextBox'
+                $script:TestXamlContent | Should -Match 'DarkButton'
+                $script:TestXamlContent | Should -Match 'StopButton'
+                $script:TestXamlContent | Should -Match 'DarkCheckBox'
+                $script:TestXamlContent | Should -Match 'DarkListBox'
+            }
+
+            It "Should have Get-XamlResource function" {
+                Get-Command Get-XamlResource -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
             }
         }
 

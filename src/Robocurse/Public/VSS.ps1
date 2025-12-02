@@ -85,7 +85,12 @@ function Clear-OrphanVssSnapshots {
     .EXAMPLE
         $cleaned = Clear-OrphanVssSnapshots
         if ($cleaned -gt 0) { Write-Host "Cleaned up $cleaned orphan snapshots" }
+    .EXAMPLE
+        Clear-OrphanVssSnapshots -WhatIf
+        # Shows what snapshots would be cleaned without actually removing them
     #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
 
     # Skip if not Windows
     if (-not (Test-IsWindowsPlatform)) {
@@ -102,16 +107,20 @@ function Clear-OrphanVssSnapshots {
 
         foreach ($snapshot in $trackedSnapshots) {
             if ($snapshot.ShadowId) {
-                $removeResult = Remove-VssSnapshot -ShadowId $snapshot.ShadowId
-                if ($removeResult.Success) {
-                    Write-RobocurseLog -Message "Cleaned up orphan VSS snapshot: $($snapshot.ShadowId)" -Level 'Info' -Component 'VSS'
-                    $cleaned++
+                if ($PSCmdlet.ShouldProcess($snapshot.ShadowId, "Remove orphan VSS snapshot")) {
+                    $removeResult = Remove-VssSnapshot -ShadowId $snapshot.ShadowId
+                    if ($removeResult.Success) {
+                        Write-RobocurseLog -Message "Cleaned up orphan VSS snapshot: $($snapshot.ShadowId)" -Level 'Info' -Component 'VSS'
+                        $cleaned++
+                    }
                 }
             }
         }
 
         # Clear the tracking file after cleanup
-        Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+        if ($PSCmdlet.ShouldProcess($script:VssTrackingFile, "Remove VSS tracking file")) {
+            Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+        }
     }
     catch {
         Write-RobocurseLog -Message "Error during orphan VSS cleanup: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
@@ -404,7 +413,11 @@ function Remove-VssSnapshot {
     .EXAMPLE
         $result = Remove-VssSnapshot -ShadowId "{12345678-1234-1234-1234-123456789012}"
         if ($result.Success) { "Snapshot deleted" }
+    .EXAMPLE
+        Remove-VssSnapshot -ShadowId $id -WhatIf
+        # Shows what would happen without actually deleting
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)]
         [string]$ShadowId
@@ -415,16 +428,20 @@ function Remove-VssSnapshot {
 
         $shadow = Get-CimInstance -ClassName Win32_ShadowCopy | Where-Object { $_.ID -eq $ShadowId }
         if ($shadow) {
-            Remove-CimInstance -InputObject $shadow
-            Write-RobocurseLog -Message "Deleted VSS snapshot: $ShadowId" -Level 'Info' -Component 'VSS'
-            # Remove from tracking file
-            Remove-VssFromTracking -ShadowId $ShadowId
+            if ($PSCmdlet.ShouldProcess($ShadowId, "Remove VSS Snapshot")) {
+                Remove-CimInstance -InputObject $shadow
+                Write-RobocurseLog -Message "Deleted VSS snapshot: $ShadowId" -Level 'Info' -Component 'VSS'
+                # Remove from tracking file
+                Remove-VssFromTracking -ShadowId $ShadowId
+            }
             return New-OperationResult -Success $true -Data $ShadowId
         }
         else {
             Write-RobocurseLog -Message "VSS snapshot not found: $ShadowId (may have been already deleted)" -Level 'Warning' -Component 'VSS'
             # Remove from tracking even if not found (cleanup)
-            Remove-VssFromTracking -ShadowId $ShadowId
+            if ($PSCmdlet.ShouldProcess($ShadowId, "Remove from VSS tracking")) {
+                Remove-VssFromTracking -ShadowId $ShadowId
+            }
             # Still return success since the snapshot is gone (idempotent operation)
             return New-OperationResult -Success $true -Data $ShadowId
         }

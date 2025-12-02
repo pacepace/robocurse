@@ -26,6 +26,19 @@ $script:DefaultMinChunkSizeBytes = 100MB
 # 3 retries handles transient network issues without indefinite loops.
 $script:MaxChunkRetries = 3
 
+# Exponential backoff settings for chunk retries.
+# Base delay in seconds for first retry. Subsequent retries use: base * (multiplier ^ retryCount)
+# Example with base=5, multiplier=2: 5s -> 10s -> 20s
+$script:RetryBackoffBaseSeconds = 5
+
+# Multiplier for exponential backoff calculation.
+# 2.0 doubles the delay each retry, providing good balance between retry speed and backoff.
+$script:RetryBackoffMultiplier = 2.0
+
+# Maximum delay cap in seconds to prevent excessively long waits.
+# 120 seconds (2 minutes) is the upper bound regardless of retry count.
+$script:RetryBackoffMaxSeconds = 120
+
 # Number of times robocopy will retry a failed file copy (maps to /R: parameter).
 # 3 retries is sufficient for transient file locks or network glitches.
 $script:RobocopyRetryCount = 3
@@ -93,6 +106,15 @@ $script:HeadlessProgressIntervalSeconds = 10
 # 10 chunks balances disk I/O with recovery granularity.
 $script:CheckpointSaveFrequency = 10
 
+# Health check settings
+# Interval in seconds between health status file updates during replication.
+# 30 seconds provides good monitoring granularity without excessive I/O.
+$script:HealthCheckIntervalSeconds = 30
+
+# Path to health check status file. Uses temp directory for cross-platform compatibility.
+$script:HealthCheckTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
+$script:HealthCheckStatusFile = Join-Path $script:HealthCheckTempDir "Robocurse-Health.json"
+
 # Dry-run mode state (set during replication, used by Start-ChunkJob)
 $script:DryRunMode = $false
 #endregion
@@ -117,7 +139,6 @@ foreach ($function in $privateFunctions) {
 }
 
 # Load public functions (in dependency order)
-# Note: Checkpoint functions are now part of Orchestration.ps1
 $publicFunctionOrder = @(
     'Utility.ps1'
     'Configuration.ps1'
@@ -125,6 +146,7 @@ $publicFunctionOrder = @(
     'DirectoryProfiling.ps1'
     'Chunking.ps1'
     'Robocopy.ps1'
+    'Checkpoint.ps1'       # Checkpoint/resume (before Orchestration)
     'Orchestration.ps1'
     'Progress.ps1'
     'VSS.ps1'

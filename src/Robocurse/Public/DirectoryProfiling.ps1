@@ -292,3 +292,213 @@ function Clear-ProfileCache {
     $script:ProfileCache.Clear()
     Write-RobocurseLog "Cleared profile cache ($count entries removed)" -Level Debug
 }
+
+function Get-DirectoryProfilesParallel {
+    <#
+    .SYNOPSIS
+        Profiles multiple directories in parallel using runspaces
+    .DESCRIPTION
+        Profiles multiple directories concurrently for improved performance.
+        Uses PowerShell runspaces for parallelism (works in PS 5.1+).
+
+        For small numbers of directories (< 3), falls back to sequential
+        profiling as the overhead of parallelism isn't worth it.
+    .PARAMETER Paths
+        Array of directory paths to profile
+    .PARAMETER MaxDegreeOfParallelism
+        Maximum concurrent profiling operations (default: 4)
+    .PARAMETER UseCache
+        Check cache before scanning (default: true)
+    .OUTPUTS
+        Hashtable mapping paths to profile objects
+    .EXAMPLE
+        $profiles = Get-DirectoryProfilesParallel -Paths @("C:\Data1", "C:\Data2", "C:\Data3")
+        $profiles["C:\Data1"].TotalSize  # Access individual profile
+    .EXAMPLE
+        # Profile with higher parallelism for many directories
+        $profiles = Get-DirectoryProfilesParallel -Paths $manyPaths -MaxDegreeOfParallelism 8
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Paths,
+
+        [ValidateRange(1, 32)]
+        [int]$MaxDegreeOfParallelism = 4,
+
+        [bool]$UseCache = $true
+    )
+
+    $results = @{}
+
+    # For small path counts, sequential is faster (avoids runspace overhead)
+    if ($Paths.Count -lt 3) {
+        foreach ($path in $Paths) {
+            $results[$path] = Get-DirectoryProfile -Path $path -UseCache $UseCache
+        }
+        return $results
+    }
+
+    Write-RobocurseLog "Starting parallel profiling of $($Paths.Count) directories (max parallelism: $MaxDegreeOfParallelism)" -Level Debug
+
+    # Check cache first for any paths that are already cached
+    $pathsToProfile = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in $Paths) {
+        $normalizedPath = $path.TrimEnd('\')
+        if ($UseCache) {
+            $cached = Get-CachedProfile -Path $normalizedPath -MaxAgeHours $script:ProfileCacheMaxAgeHours
+            if ($null -ne $cached) {
+                $results[$path] = $cached
+                continue
+            }
+        }
+        $pathsToProfile.Add($path)
+    }
+
+    # If all paths were cached, return early
+    if ($pathsToProfile.Count -eq 0) {
+        Write-RobocurseLog "All $($Paths.Count) directories found in cache" -Level Debug
+        return $results
+    }
+
+    Write-RobocurseLog "Profiling $($pathsToProfile.Count) directories (cached: $($results.Count))" -Level Debug
+
+    try {
+        # Create runspace pool
+        $runspacePool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(
+            1,
+            $MaxDegreeOfParallelism
+        )
+        $runspacePool.Open()
+
+        $jobs = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+        # The script block to execute in each runspace
+        $scriptBlock = {
+            param($Path)
+
+            try {
+                # Run robocopy in list mode
+                $output = & robocopy $Path "\\?\NULL" /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
+
+                $totalSize = 0
+                $fileCount = 0
+                $dirCount = 0
+
+                foreach ($line in $output) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    if ($line -match '^\s+(\d+)\s+(.+)$') {
+                        $size = [int64]$matches[1]
+                        $filePath = $matches[2].Trim()
+                        if ($filePath.EndsWith('\')) {
+                            $dirCount++
+                        }
+                        else {
+                            $fileCount++
+                            $totalSize += $size
+                        }
+                    }
+                }
+
+                $avgFileSize = if ($fileCount -gt 0) { [math]::Round($totalSize / $fileCount, 0) } else { 0 }
+
+                return [PSCustomObject]@{
+                    Success = $true
+                    Path = $Path.TrimEnd('\')
+                    TotalSize = $totalSize
+                    FileCount = $fileCount
+                    DirCount = $dirCount
+                    AvgFileSize = $avgFileSize
+                    LastScanned = Get-Date
+                }
+            }
+            catch {
+                return [PSCustomObject]@{
+                    Success = $false
+                    Path = $Path.TrimEnd('\')
+                    TotalSize = 0
+                    FileCount = 0
+                    DirCount = 0
+                    AvgFileSize = 0
+                    LastScanned = Get-Date
+                    Error = $_.Exception.Message
+                }
+            }
+        }
+
+        # Start jobs for each path
+        foreach ($path in $pathsToProfile) {
+            $powershell = [System.Management.Automation.PowerShell]::Create()
+            $powershell.RunspacePool = $runspacePool
+            [void]$powershell.AddScript($scriptBlock)
+            [void]$powershell.AddArgument($path)
+
+            $jobs.Add([PSCustomObject]@{
+                PowerShell = $powershell
+                Handle = $powershell.BeginInvoke()
+                Path = $path
+            })
+        }
+
+        # Wait for all jobs to complete and collect results
+        foreach ($job in $jobs) {
+            try {
+                $result = $job.PowerShell.EndInvoke($job.Handle)
+
+                if ($result -and $result.Count -gt 0) {
+                    $profile = $result[0]
+                    if ($profile.Success) {
+                        # Remove Success property before storing
+                        $profileObj = [PSCustomObject]@{
+                            Path = $profile.Path
+                            TotalSize = $profile.TotalSize
+                            FileCount = $profile.FileCount
+                            DirCount = $profile.DirCount
+                            AvgFileSize = $profile.AvgFileSize
+                            LastScanned = $profile.LastScanned
+                        }
+                        $results[$job.Path] = $profileObj
+                        # Store in cache
+                        Set-CachedProfile -Profile $profileObj
+                    }
+                    else {
+                        Write-RobocurseLog "Error profiling '$($job.Path)': $($profile.Error)" -Level Warning
+                        # Return empty profile on error
+                        $results[$job.Path] = [PSCustomObject]@{
+                            Path = $job.Path.TrimEnd('\')
+                            TotalSize = 0
+                            FileCount = 0
+                            DirCount = 0
+                            AvgFileSize = 0
+                            LastScanned = Get-Date
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-RobocurseLog "Error completing profile job for '$($job.Path)': $_" -Level Warning
+                $results[$job.Path] = [PSCustomObject]@{
+                    Path = $job.Path.TrimEnd('\')
+                    TotalSize = 0
+                    FileCount = 0
+                    DirCount = 0
+                    AvgFileSize = 0
+                    LastScanned = Get-Date
+                }
+            }
+            finally {
+                $job.PowerShell.Dispose()
+            }
+        }
+
+        Write-RobocurseLog "Completed parallel profiling of $($pathsToProfile.Count) directories" -Level Debug
+    }
+    finally {
+        if ($runspacePool) {
+            $runspacePool.Close()
+            $runspacePool.Dispose()
+        }
+    }
+
+    return $results
+}

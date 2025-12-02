@@ -220,7 +220,14 @@ $output.ToString() | Set-Content -Path $OutputPath -Encoding UTF8
 $fileSize = (Get-Item $OutputPath).Length
 $fileSizeKB = [math]::Round($fileSize / 1KB, 1)
 
+# Generate SHA256 hash for integrity verification
+$fileHash = Get-FileHash -Path $OutputPath -Algorithm SHA256
+$hashPath = "$OutputPath.sha256"
+"$($fileHash.Hash)  $(Split-Path $OutputPath -Leaf)" | Set-Content -Path $hashPath -Encoding UTF8
+
 Write-Host ""
 Write-Host "Build complete!" -ForegroundColor Green
 Write-Host "  Output: $OutputPath" -ForegroundColor Gray
 Write-Host "  Size: $fileSizeKB KB" -ForegroundColor Gray
+Write-Host "  SHA256: $($fileHash.Hash)" -ForegroundColor Gray
+Write-Host "  Hash file: $hashPath" -ForegroundColor Gray

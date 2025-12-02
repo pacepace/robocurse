@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-01 19:49:26
+    Built: 2025-12-01 21:16:14
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -95,6 +95,55 @@ function Test-IsWindowsPlatform {
 
 # Cached path to robocopy.exe (validated once at startup)
 $script:RobocopyPath = $null
+# User-provided override path (set via Set-RobocopyPath)
+$script:RobocopyPathOverride = $null
+
+function Set-RobocopyPath {
+    <#
+    .SYNOPSIS
+        Sets an explicit path to robocopy.exe
+    .DESCRIPTION
+        Allows overriding the automatic robocopy detection with a specific path.
+        Useful for portable installations, development environments, or when
+        robocopy is installed in a non-standard location.
+    .PARAMETER Path
+        Full path to robocopy.exe
+    .OUTPUTS
+        OperationResult - Success=$true if path is valid, Success=$false if not found
+    .EXAMPLE
+        Set-RobocopyPath -Path "D:\Tools\robocopy.exe"
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -Path $Path -PathType Leaf)) {
+        return New-OperationResult -Success $false -ErrorMessage "Robocopy not found at specified path: $Path"
+    }
+
+    # Verify it's actually robocopy by checking file name
+    $fileName = [System.IO.Path]::GetFileName($Path)
+    if ($fileName -ne 'robocopy.exe') {
+        return New-OperationResult -Success $false -ErrorMessage "Specified path does not point to robocopy.exe: $Path"
+    }
+
+    $script:RobocopyPathOverride = $Path
+    $script:RobocopyPath = $Path
+    Write-RobocurseLog -Message "Robocopy path set to: $Path" -Level 'Info' -Component 'Utility'
+    return New-OperationResult -Success $true -Data $Path
+}
+
+function Clear-RobocopyPath {
+    <#
+    .SYNOPSIS
+        Clears the robocopy path override, reverting to automatic detection
+    #>
+    $script:RobocopyPathOverride = $null
+    $script:RobocopyPath = $null
+    Write-RobocurseLog -Message "Robocopy path override cleared, reverting to auto-detection" -Level 'Info' -Component 'Utility'
+}
 
 function Test-RobocopyAvailable {
     <#
@@ -102,8 +151,9 @@ function Test-RobocopyAvailable {
         Validates that robocopy.exe is available on the system
     .DESCRIPTION
         Checks for robocopy.exe in the following order:
-        1. System32 directory (most reliable, Windows only)
-        2. PATH environment variable
+        1. User-specified override path (set via Set-RobocopyPath)
+        2. System32 directory (most reliable, Windows only)
+        3. PATH environment variable
         Caches the validated path in $script:RobocopyPath for use by Start-RobocopyJob.
         On non-Windows systems, returns failure (robocopy is Windows-only).
     .OUTPUTS
@@ -116,6 +166,18 @@ function Test-RobocopyAvailable {
     # Return cached result if already validated
     if ($script:RobocopyPath) {
         return New-OperationResult -Success $true -Data $script:RobocopyPath
+    }
+
+    # Check user-provided override first
+    if ($script:RobocopyPathOverride) {
+        if (Test-Path -Path $script:RobocopyPathOverride -PathType Leaf) {
+            $script:RobocopyPath = $script:RobocopyPathOverride
+            return New-OperationResult -Success $true -Data $script:RobocopyPath
+        }
+        else {
+            # Override set but file no longer exists
+            return New-OperationResult -Success $false -ErrorMessage "Robocopy override path no longer valid: $($script:RobocopyPathOverride)"
+        }
     }
 
     # Check System32 first (most reliable location on Windows)
@@ -137,7 +199,7 @@ function Test-RobocopyAvailable {
 
     # Not found - provide helpful error message
     $expectedPath = if ($env:SystemRoot) { "$env:SystemRoot\System32\robocopy.exe" } else { "System32\robocopy.exe (Windows only)" }
-    return New-OperationResult -Success $false -ErrorMessage "robocopy.exe not found. Expected at '$expectedPath' or in PATH. Robocopy is a Windows-only utility."
+    return New-OperationResult -Success $false -ErrorMessage "robocopy.exe not found. Expected at '$expectedPath' or in PATH. Use Set-RobocopyPath to specify a custom location."
 }
 
 function New-OperationResult {
@@ -654,6 +716,12 @@ function ConvertFrom-ProfileSources {
     $expandedProfiles = @()
     $description = if ($RawProfile.description) { $RawProfile.description } else { "" }
 
+    # Handle null or missing sources array
+    if ($null -eq $RawProfile.sources -or $RawProfile.sources.Count -eq 0) {
+        Write-RobocurseLog -Message "Profile '$ProfileName' has no sources defined, skipping" -Level 'Warning' -Component 'Config'
+        return $expandedProfiles
+    }
+
     for ($i = 0; $i -lt $RawProfile.sources.Count; $i++) {
         $sourceInfo = $RawProfile.sources[$i]
         $expandedProfile = [PSCustomObject]@{
@@ -1022,6 +1090,30 @@ function Test-RobocurseConfig {
             if (($propertyNames -contains 'Destination') -and -not [string]::IsNullOrWhiteSpace($profile.Destination)) {
                 if (-not (Test-PathFormat -Path $profile.Destination)) {
                     $errors += "$profilePrefix.Destination has invalid path format: $($profile.Destination)"
+                }
+            }
+
+            # Validate chunk configuration if present
+            if ($propertyNames -contains 'ChunkMaxFiles') {
+                $maxFiles = $profile.ChunkMaxFiles
+                if ($null -ne $maxFiles -and ($maxFiles -lt 1 -or $maxFiles -gt 10000000)) {
+                    $errors += "$profilePrefix.ChunkMaxFiles must be between 1 and 10000000 (current: $maxFiles)"
+                }
+            }
+
+            if ($propertyNames -contains 'ChunkMaxSizeGB') {
+                $maxSizeGB = $profile.ChunkMaxSizeGB
+                if ($null -ne $maxSizeGB -and ($maxSizeGB -lt 0.001 -or $maxSizeGB -gt 1024)) {
+                    $errors += "$profilePrefix.ChunkMaxSizeGB must be between 0.001 and 1024 (current: $maxSizeGB)"
+                }
+            }
+
+            # Validate that ChunkMaxSizeGB > ChunkMinSizeGB if both are specified
+            if (($propertyNames -contains 'ChunkMaxSizeGB') -and ($propertyNames -contains 'ChunkMinSizeGB')) {
+                $maxSizeGB = $profile.ChunkMaxSizeGB
+                $minSizeGB = $profile.ChunkMinSizeGB
+                if ($null -ne $maxSizeGB -and $null -ne $minSizeGB -and $maxSizeGB -le $minSizeGB) {
+                    $errors += "$profilePrefix.ChunkMaxSizeGB ($maxSizeGB) must be greater than ChunkMinSizeGB ($minSizeGB)"
                 }
             }
         }
@@ -1760,6 +1852,216 @@ function Clear-ProfileCache {
     Write-RobocurseLog "Cleared profile cache ($count entries removed)" -Level Debug
 }
 
+function Get-DirectoryProfilesParallel {
+    <#
+    .SYNOPSIS
+        Profiles multiple directories in parallel using runspaces
+    .DESCRIPTION
+        Profiles multiple directories concurrently for improved performance.
+        Uses PowerShell runspaces for parallelism (works in PS 5.1+).
+
+        For small numbers of directories (< 3), falls back to sequential
+        profiling as the overhead of parallelism isn't worth it.
+    .PARAMETER Paths
+        Array of directory paths to profile
+    .PARAMETER MaxDegreeOfParallelism
+        Maximum concurrent profiling operations (default: 4)
+    .PARAMETER UseCache
+        Check cache before scanning (default: true)
+    .OUTPUTS
+        Hashtable mapping paths to profile objects
+    .EXAMPLE
+        $profiles = Get-DirectoryProfilesParallel -Paths @("C:\Data1", "C:\Data2", "C:\Data3")
+        $profiles["C:\Data1"].TotalSize  # Access individual profile
+    .EXAMPLE
+        # Profile with higher parallelism for many directories
+        $profiles = Get-DirectoryProfilesParallel -Paths $manyPaths -MaxDegreeOfParallelism 8
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Paths,
+
+        [ValidateRange(1, 32)]
+        [int]$MaxDegreeOfParallelism = 4,
+
+        [bool]$UseCache = $true
+    )
+
+    $results = @{}
+
+    # For small path counts, sequential is faster (avoids runspace overhead)
+    if ($Paths.Count -lt 3) {
+        foreach ($path in $Paths) {
+            $results[$path] = Get-DirectoryProfile -Path $path -UseCache $UseCache
+        }
+        return $results
+    }
+
+    Write-RobocurseLog "Starting parallel profiling of $($Paths.Count) directories (max parallelism: $MaxDegreeOfParallelism)" -Level Debug
+
+    # Check cache first for any paths that are already cached
+    $pathsToProfile = [System.Collections.Generic.List[string]]::new()
+    foreach ($path in $Paths) {
+        $normalizedPath = $path.TrimEnd('\')
+        if ($UseCache) {
+            $cached = Get-CachedProfile -Path $normalizedPath -MaxAgeHours $script:ProfileCacheMaxAgeHours
+            if ($null -ne $cached) {
+                $results[$path] = $cached
+                continue
+            }
+        }
+        $pathsToProfile.Add($path)
+    }
+
+    # If all paths were cached, return early
+    if ($pathsToProfile.Count -eq 0) {
+        Write-RobocurseLog "All $($Paths.Count) directories found in cache" -Level Debug
+        return $results
+    }
+
+    Write-RobocurseLog "Profiling $($pathsToProfile.Count) directories (cached: $($results.Count))" -Level Debug
+
+    try {
+        # Create runspace pool
+        $runspacePool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(
+            1,
+            $MaxDegreeOfParallelism
+        )
+        $runspacePool.Open()
+
+        $jobs = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+        # The script block to execute in each runspace
+        $scriptBlock = {
+            param($Path)
+
+            try {
+                # Run robocopy in list mode
+                $output = & robocopy $Path "\\?\NULL" /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
+
+                $totalSize = 0
+                $fileCount = 0
+                $dirCount = 0
+
+                foreach ($line in $output) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    if ($line -match '^\s+(\d+)\s+(.+)$') {
+                        $size = [int64]$matches[1]
+                        $filePath = $matches[2].Trim()
+                        if ($filePath.EndsWith('\')) {
+                            $dirCount++
+                        }
+                        else {
+                            $fileCount++
+                            $totalSize += $size
+                        }
+                    }
+                }
+
+                $avgFileSize = if ($fileCount -gt 0) { [math]::Round($totalSize / $fileCount, 0) } else { 0 }
+
+                return [PSCustomObject]@{
+                    Success = $true
+                    Path = $Path.TrimEnd('\')
+                    TotalSize = $totalSize
+                    FileCount = $fileCount
+                    DirCount = $dirCount
+                    AvgFileSize = $avgFileSize
+                    LastScanned = Get-Date
+                }
+            }
+            catch {
+                return [PSCustomObject]@{
+                    Success = $false
+                    Path = $Path.TrimEnd('\')
+                    TotalSize = 0
+                    FileCount = 0
+                    DirCount = 0
+                    AvgFileSize = 0
+                    LastScanned = Get-Date
+                    Error = $_.Exception.Message
+                }
+            }
+        }
+
+        # Start jobs for each path
+        foreach ($path in $pathsToProfile) {
+            $powershell = [System.Management.Automation.PowerShell]::Create()
+            $powershell.RunspacePool = $runspacePool
+            [void]$powershell.AddScript($scriptBlock)
+            [void]$powershell.AddArgument($path)
+
+            $jobs.Add([PSCustomObject]@{
+                PowerShell = $powershell
+                Handle = $powershell.BeginInvoke()
+                Path = $path
+            })
+        }
+
+        # Wait for all jobs to complete and collect results
+        foreach ($job in $jobs) {
+            try {
+                $result = $job.PowerShell.EndInvoke($job.Handle)
+
+                if ($result -and $result.Count -gt 0) {
+                    $profile = $result[0]
+                    if ($profile.Success) {
+                        # Remove Success property before storing
+                        $profileObj = [PSCustomObject]@{
+                            Path = $profile.Path
+                            TotalSize = $profile.TotalSize
+                            FileCount = $profile.FileCount
+                            DirCount = $profile.DirCount
+                            AvgFileSize = $profile.AvgFileSize
+                            LastScanned = $profile.LastScanned
+                        }
+                        $results[$job.Path] = $profileObj
+                        # Store in cache
+                        Set-CachedProfile -Profile $profileObj
+                    }
+                    else {
+                        Write-RobocurseLog "Error profiling '$($job.Path)': $($profile.Error)" -Level Warning
+                        # Return empty profile on error
+                        $results[$job.Path] = [PSCustomObject]@{
+                            Path = $job.Path.TrimEnd('\')
+                            TotalSize = 0
+                            FileCount = 0
+                            DirCount = 0
+                            AvgFileSize = 0
+                            LastScanned = Get-Date
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-RobocurseLog "Error completing profile job for '$($job.Path)': $_" -Level Warning
+                $results[$job.Path] = [PSCustomObject]@{
+                    Path = $job.Path.TrimEnd('\')
+                    TotalSize = 0
+                    FileCount = 0
+                    DirCount = 0
+                    AvgFileSize = 0
+                    LastScanned = Get-Date
+                }
+            }
+            finally {
+                $job.PowerShell.Dispose()
+            }
+        }
+
+        Write-RobocurseLog "Completed parallel profiling of $($pathsToProfile.Count) directories" -Level Debug
+    }
+    finally {
+        if ($runspacePool) {
+            $runspacePool.Close()
+            $runspacePool.Dispose()
+        }
+    }
+
+    return $results
+}
+
 #endregion
 
 #region ==================== PUBLIC\CHUNKING ====================
@@ -1821,6 +2123,11 @@ function Get-DirectoryChunks {
     # Validate path exists (inside function body so mocks can intercept)
     if (-not (Test-Path -Path $Path -PathType Container)) {
         throw "Path '$Path' does not exist or is not a directory"
+    }
+
+    # Validate chunk size constraints
+    if ($MaxSizeBytes -le $MinSizeBytes) {
+        throw "MaxSizeBytes ($MaxSizeBytes) must be greater than MinSizeBytes ($MinSizeBytes)"
     }
 
     # Default SourceRoot to Path if not specified (for initial call)
@@ -2615,6 +2922,8 @@ function ConvertFrom-RobocopyLog {
     )
 
     # Initialize result with zero values
+    # ParseSuccess indicates if we successfully extracted statistics from the log
+    # ParseWarning contains any non-fatal issues encountered during parsing
     $result = [PSCustomObject]@{
         FilesCopied = 0
         FilesSkipped = 0
@@ -2625,10 +2934,13 @@ function ConvertFrom-RobocopyLog {
         BytesCopied = 0
         Speed = ""
         CurrentFile = ""
+        ParseSuccess = $false
+        ParseWarning = $null
     }
 
     # Check if log file exists
     if (-not (Test-Path $LogPath)) {
+        $result.ParseWarning = "Log file does not exist: $LogPath"
         return $result
     }
 
@@ -2641,8 +2953,9 @@ function ConvertFrom-RobocopyLog {
         $fs.Close()
     }
     catch {
-        # If we can't read the file, log the error and return zeros
-        Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level Warning
+        # If we can't read the file, log the warning and return zeros
+        $result.ParseWarning = "Failed to read log file: $($_.Exception.Message)"
+        Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level 'Warning' -Component 'Robocopy'
         return $result
     }
 
@@ -2700,6 +3013,9 @@ function ConvertFrom-RobocopyLog {
 
         # If we found at least 3 matching lines, parse them
         if ($statsLines.Count -ge 3) {
+            # Mark as successful parse (we found stats lines)
+            $result.ParseSuccess = $true
+
             # Last 3 lines: Dirs, Files, Bytes (in order)
             $dirsLine = $statsLines[$statsLines.Count - 3]
             $filesLine = $statsLines[$statsLines.Count - 2]
@@ -2762,7 +3078,20 @@ function ConvertFrom-RobocopyLog {
     }
     catch {
         # Log parsing errors but don't fail - return partial results
-        Write-RobocurseLog "Error parsing robocopy log '$LogPath': $_" -Level Warning
+        $result.ParseWarning = "Parse error: $($_.Exception.Message)"
+        Write-RobocurseLog "Error parsing robocopy log '$LogPath': $_" -Level 'Warning' -Component 'Robocopy'
+    }
+
+    # If we didn't find stats lines, this might be an in-progress job or unexpected format
+    if (-not $result.ParseSuccess) {
+        # Only warn if file had content (empty file is normal for just-started jobs)
+        if ($content -and $content.Length -gt 100) {
+            if (-not $result.ParseWarning) {
+                $result.ParseWarning = "No statistics found in log file (job may be in progress or log format unexpected)"
+            }
+            Write-RobocurseLog "Could not extract statistics from robocopy log '$LogPath' ($($content.Length) bytes) - job may still be in progress" `
+                -Level 'Debug' -Component 'Robocopy'
+        }
     }
 
     return $result
@@ -3691,6 +4020,12 @@ function Start-ChunkJob {
         Starts a robocopy process for the specified chunk, applying:
         - Profile-specific robocopy options
         - Dynamic bandwidth throttling (IPG) based on aggregate limit and active jobs
+
+        BANDWIDTH THROTTLING NOTE:
+        IPG (Inter-Packet Gap) is recalculated fresh for each job start, including retries.
+        This ensures new/retried jobs get the correct bandwidth share based on CURRENT active
+        job count. Running jobs keep their original IPG (robocopy limitation - /IPG is set
+        at process start). As jobs complete, new jobs automatically get more bandwidth.
     .PARAMETER Chunk
         Chunk object to replicate
     .OUTPUTS
@@ -3815,6 +4150,9 @@ function Invoke-ReplicationTick {
     }
 
     # Start new jobs - use TryDequeue for thread-safe queue access
+    # Keep a list of chunks that need to be re-queued due to backoff delay
+    $chunksToRequeue = [System.Collections.Generic.List[object]]::new()
+
     while (($state.ActiveJobs.Count -lt $MaxConcurrentJobs) -and
            ($state.ChunkQueue.Count -gt 0)) {
         $chunk = $null
@@ -3833,9 +4171,21 @@ function Invoke-ReplicationTick {
                 continue
             }
 
+            # Check if chunk is in backoff delay period (exponential backoff for retries)
+            if ($chunk.RetryAfter -and [datetime]::Now -lt $chunk.RetryAfter) {
+                # Not ready yet - re-queue for later
+                $chunksToRequeue.Add($chunk)
+                continue
+            }
+
             $job = Start-ChunkJob -Chunk $chunk
             $state.ActiveJobs[$job.Process.Id] = $job
         }
+    }
+
+    # Re-queue any chunks that were in backoff delay
+    foreach ($chunk in $chunksToRequeue) {
+        $state.ChunkQueue.Enqueue($chunk)
     }
 
     # Check if profile complete
@@ -3845,6 +4195,9 @@ function Invoke-ReplicationTick {
 
     # Update progress
     Update-ProgressStats
+
+    # Update health check status file (respects interval internally)
+    Write-HealthCheckStatus | Out-Null
 
     # Invoke progress callback
     if ($script:OnProgress) {
@@ -3905,10 +4258,49 @@ function Complete-RobocopyJob {
     }
 }
 
+function Get-RetryBackoffDelay {
+    <#
+    .SYNOPSIS
+        Calculates exponential backoff delay for retry attempts
+    .DESCRIPTION
+        Uses exponential backoff formula: base * (multiplier ^ retryCount)
+        with a maximum cap to prevent excessively long waits.
+    .PARAMETER RetryCount
+        Current retry attempt (1-based)
+    .OUTPUTS
+        Delay in seconds (integer)
+    .EXAMPLE
+        Get-RetryBackoffDelay -RetryCount 1  # Returns 5 (base delay)
+        Get-RetryBackoffDelay -RetryCount 2  # Returns 10 (5 * 2^1)
+        Get-RetryBackoffDelay -RetryCount 3  # Returns 20 (5 * 2^2)
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateRange(1, 100)]
+        [int]$RetryCount
+    )
+
+    $base = $script:RetryBackoffBaseSeconds
+    $multiplier = $script:RetryBackoffMultiplier
+    $maxDelay = $script:RetryBackoffMaxSeconds
+
+    # Calculate: base * (multiplier ^ (retryCount - 1))
+    # RetryCount 1 = base * 1 = base seconds
+    # RetryCount 2 = base * multiplier
+    # RetryCount 3 = base * multiplier^2
+    $delay = [math]::Ceiling($base * [math]::Pow($multiplier, $RetryCount - 1))
+
+    # Cap at maximum
+    return [math]::Min($delay, $maxDelay)
+}
+
 function Invoke-FailedChunkHandler {
     <#
     .SYNOPSIS
         Processes a failed chunk - retry or mark as permanently failed
+    .DESCRIPTION
+        Uses exponential backoff for retries to be gentler on infrastructure
+        during transient failures. Backoff delays: 5s -> 10s -> 20s (capped at 120s)
     .PARAMETER Job
         Failed job object
     .PARAMETER Result
@@ -3925,10 +4317,16 @@ function Invoke-FailedChunkHandler {
     $chunk.RetryCount++
 
     if ($chunk.RetryCount -lt $script:MaxChunkRetries -and $Result.ExitMeaning.ShouldRetry) {
-        # Re-queue for retry (thread-safe ConcurrentQueue)
-        Write-RobocurseLog -Message "Chunk $($chunk.ChunkId) failed, retrying ($($chunk.RetryCount)/$script:MaxChunkRetries)" `
+        # Calculate exponential backoff delay
+        $backoffDelay = Get-RetryBackoffDelay -RetryCount $chunk.RetryCount
+
+        Write-RobocurseLog -Message "Chunk $($chunk.ChunkId) failed, retrying in ${backoffDelay}s ($($chunk.RetryCount)/$script:MaxChunkRetries)" `
             -Level 'Warning' -Component 'Orchestrator'
 
+        # Store retry time on chunk for delayed re-queue
+        $chunk.RetryAfter = [datetime]::Now.AddSeconds($backoffDelay)
+
+        # Re-queue for retry (thread-safe ConcurrentQueue)
         $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
     }
     else {
@@ -4048,6 +4446,10 @@ function Complete-CurrentProfile {
         # Remove checkpoint file on successful completion
         Remove-ReplicationCheckpoint | Out-Null
 
+        # Write final health status and clean up
+        Write-HealthCheckStatus -Force | Out-Null
+        Remove-HealthCheckStatus
+
         Write-RobocurseLog -Message "All profiles complete in $($totalDuration.ToString('hh\:mm\:ss'))" `
             -Level 'Info' -Component 'Orchestrator'
 
@@ -4135,6 +4537,181 @@ function Request-Resume {
     Write-RobocurseLog -Message "Resume requested" `
         -Level 'Info' -Component 'Orchestrator'
 }
+
+#region Health Check Functions
+
+# Track last health check update time
+$script:LastHealthCheckUpdate = $null
+
+function Write-HealthCheckStatus {
+    <#
+    .SYNOPSIS
+        Writes current orchestration status to a JSON file for external monitoring
+    .DESCRIPTION
+        Creates a health check file that can be read by external monitoring systems
+        to track the status of running replication jobs. The file includes:
+        - Current phase (Idle, Profiling, Replicating, Complete, Stopped)
+        - Active job count and queue depth
+        - Progress statistics (chunks completed, bytes copied)
+        - Current profile being processed
+        - Last update timestamp
+        - ETA estimate
+
+        The file is written atomically to prevent partial reads.
+    .PARAMETER Force
+        Write immediately regardless of interval setting
+    .OUTPUTS
+        OperationResult - Success=$true if file written, Success=$false with ErrorMessage on failure
+    .EXAMPLE
+        Write-HealthCheckStatus
+        # Updates health file if interval has elapsed
+    .EXAMPLE
+        Write-HealthCheckStatus -Force
+        # Updates health file immediately
+    #>
+    [CmdletBinding()]
+    param(
+        [switch]$Force
+    )
+
+    # Check if enough time has elapsed since last update
+    $now = [datetime]::Now
+    if (-not $Force -and $script:LastHealthCheckUpdate) {
+        $elapsed = ($now - $script:LastHealthCheckUpdate).TotalSeconds
+        if ($elapsed -lt $script:HealthCheckIntervalSeconds) {
+            return New-OperationResult -Success $true -Data "Skipped - interval not elapsed"
+        }
+    }
+
+    try {
+        $state = $script:OrchestrationState
+        if ($null -eq $state) {
+            # No orchestration state - write idle status
+            $healthStatus = [PSCustomObject]@{
+                Timestamp = $now.ToString('o')
+                Phase = 'Idle'
+                CurrentProfile = $null
+                ProfileIndex = 0
+                ProfileCount = 0
+                ChunksCompleted = 0
+                ChunksTotal = 0
+                ChunksPending = 0
+                ChunksFailed = 0
+                ActiveJobs = 0
+                BytesCompleted = 0
+                EtaSeconds = $null
+                SessionId = $null
+                Healthy = $true
+                Message = 'No active replication'
+            }
+        }
+        else {
+            # Get ETA estimate
+            $eta = Get-ETAEstimate
+            $etaSeconds = if ($eta) { [int]$eta.TotalSeconds } else { $null }
+
+            # Calculate health status
+            $failedCount = $state.FailedChunks.Count
+            $isHealthy = $state.Phase -ne 'Stopped' -and $failedCount -eq 0
+
+            $healthStatus = [PSCustomObject]@{
+                Timestamp = $now.ToString('o')
+                Phase = $state.Phase
+                CurrentProfile = if ($state.CurrentProfile) { $state.CurrentProfile.Name } else { $null }
+                ProfileIndex = $state.ProfileIndex
+                ProfileCount = if ($state.Profiles) { $state.Profiles.Count } else { 0 }
+                ChunksCompleted = $state.CompletedCount
+                ChunksTotal = $state.TotalChunks
+                ChunksPending = $state.ChunkQueue.Count
+                ChunksFailed = $failedCount
+                ActiveJobs = $state.ActiveJobs.Count
+                BytesCompleted = $state.BytesComplete
+                EtaSeconds = $etaSeconds
+                SessionId = $state.SessionId
+                Healthy = $isHealthy
+                Message = if (-not $isHealthy) {
+                    if ($state.Phase -eq 'Stopped') { 'Replication stopped' }
+                    elseif ($failedCount -gt 0) { "$failedCount chunks failed" }
+                    else { 'OK' }
+                } else { 'OK' }
+            }
+        }
+
+        # Write atomically by writing to temp file then renaming
+        $tempPath = "$($script:HealthCheckStatusFile).tmp"
+        $healthStatus | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
+
+        # Rename is atomic on most filesystems
+        Move-Item -Path $tempPath -Destination $script:HealthCheckStatusFile -Force
+
+        $script:LastHealthCheckUpdate = $now
+
+        return New-OperationResult -Success $true -Data $script:HealthCheckStatusFile
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to write health check status: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to write health check: $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+function Get-HealthCheckStatus {
+    <#
+    .SYNOPSIS
+        Reads the health check status file
+    .DESCRIPTION
+        Reads and returns the current health check status from the JSON file.
+        Useful for external monitoring scripts or GUI status checks.
+    .OUTPUTS
+        PSCustomObject with health status, or $null if file doesn't exist
+    .EXAMPLE
+        $status = Get-HealthCheckStatus
+        if ($status -and -not $status.Healthy) {
+            Send-Alert "Robocurse issue: $($status.Message)"
+        }
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not (Test-Path $script:HealthCheckStatusFile)) {
+        return $null
+    }
+
+    try {
+        $content = Get-Content -Path $script:HealthCheckStatusFile -Raw -ErrorAction Stop
+        return $content | ConvertFrom-Json
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to read health check status: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
+        return $null
+    }
+}
+
+function Remove-HealthCheckStatus {
+    <#
+    .SYNOPSIS
+        Removes the health check status file
+    .DESCRIPTION
+        Cleans up the health check file when replication is complete or on shutdown.
+    .EXAMPLE
+        Remove-HealthCheckStatus
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (Test-Path $script:HealthCheckStatusFile) {
+        try {
+            Remove-Item -Path $script:HealthCheckStatusFile -Force -ErrorAction Stop
+            Write-RobocurseLog -Message "Removed health check status file" -Level 'Debug' -Component 'Health'
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to remove health check status file: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
+        }
+    }
+
+    $script:LastHealthCheckUpdate = $null
+}
+
+#endregion
 
 #endregion
 
@@ -4264,6 +4841,75 @@ function Get-ETAEstimate {
 $script:VssTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
 $script:VssTrackingFile = Join-Path $script:VssTempDir "Robocurse-VSS-Tracking.json"
 
+function Test-VssPrivileges {
+    <#
+    .SYNOPSIS
+        Checks if the current session has privileges required for VSS operations
+    .DESCRIPTION
+        VSS snapshot creation requires Administrator privileges on Windows.
+        This function performs a preflight check to verify privileges before
+        attempting VSS operations that would otherwise fail.
+
+        Also checks that the VSS service is running.
+    .OUTPUTS
+        OperationResult - Success=$true if all checks pass, Success=$false with details on failure
+    .EXAMPLE
+        $check = Test-VssPrivileges
+        if (-not $check.Success) {
+            Write-Warning "VSS not available: $($check.ErrorMessage)"
+        }
+    #>
+
+    # Skip if not Windows
+    if (-not (Test-IsWindowsPlatform)) {
+        return New-OperationResult -Success $false -ErrorMessage "VSS is only available on Windows platforms"
+    }
+
+    $issues = @()
+
+    # Check for Administrator privileges
+    try {
+        $currentPrincipal = [System.Security.Principal.WindowsPrincipal]::new(
+            [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        )
+        $isAdmin = $currentPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+
+        if (-not $isAdmin) {
+            $issues += "Administrator privileges required for VSS operations. Run PowerShell as Administrator."
+        }
+    }
+    catch {
+        $issues += "Unable to check administrator privileges: $($_.Exception.Message)"
+    }
+
+    # Check if VSS service is running
+    try {
+        $vssService = Get-Service -Name 'VSS' -ErrorAction SilentlyContinue
+        if ($null -eq $vssService) {
+            $issues += "VSS (Volume Shadow Copy) service not found"
+        }
+        elseif ($vssService.Status -ne 'Running') {
+            # VSS service is demand-start, so not running is OK - it will start when needed
+            # But if it's disabled, that's a problem
+            if ($vssService.StartType -eq 'Disabled') {
+                $issues += "VSS service is disabled. Enable it via services.msc or: Set-Service -Name VSS -StartupType Manual"
+            }
+        }
+    }
+    catch {
+        $issues += "Unable to check VSS service status: $($_.Exception.Message)"
+    }
+
+    if ($issues.Count -gt 0) {
+        $errorMsg = $issues -join "; "
+        Write-RobocurseLog -Message "VSS privilege check failed: $errorMsg" -Level 'Warning' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage $errorMsg
+    }
+
+    Write-RobocurseLog -Message "VSS privilege check passed" -Level 'Debug' -Component 'VSS'
+    return New-OperationResult -Success $true -Data "All VSS prerequisites met"
+}
+
 function Clear-OrphanVssSnapshots {
     <#
     .SYNOPSIS
@@ -4276,7 +4922,12 @@ function Clear-OrphanVssSnapshots {
     .EXAMPLE
         $cleaned = Clear-OrphanVssSnapshots
         if ($cleaned -gt 0) { Write-Host "Cleaned up $cleaned orphan snapshots" }
+    .EXAMPLE
+        Clear-OrphanVssSnapshots -WhatIf
+        # Shows what snapshots would be cleaned without actually removing them
     #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
 
     # Skip if not Windows
     if (-not (Test-IsWindowsPlatform)) {
@@ -4293,16 +4944,20 @@ function Clear-OrphanVssSnapshots {
 
         foreach ($snapshot in $trackedSnapshots) {
             if ($snapshot.ShadowId) {
-                $removeResult = Remove-VssSnapshot -ShadowId $snapshot.ShadowId
-                if ($removeResult.Success) {
-                    Write-RobocurseLog -Message "Cleaned up orphan VSS snapshot: $($snapshot.ShadowId)" -Level 'Info' -Component 'VSS'
-                    $cleaned++
+                if ($PSCmdlet.ShouldProcess($snapshot.ShadowId, "Remove orphan VSS snapshot")) {
+                    $removeResult = Remove-VssSnapshot -ShadowId $snapshot.ShadowId
+                    if ($removeResult.Success) {
+                        Write-RobocurseLog -Message "Cleaned up orphan VSS snapshot: $($snapshot.ShadowId)" -Level 'Info' -Component 'VSS'
+                        $cleaned++
+                    }
                 }
             }
         }
 
         # Clear the tracking file after cleanup
-        Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+        if ($PSCmdlet.ShouldProcess($script:VssTrackingFile, "Remove VSS tracking file")) {
+            Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+        }
     }
     catch {
         Write-RobocurseLog -Message "Error during orphan VSS cleanup: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
@@ -4417,8 +5072,15 @@ function New-VssSnapshot {
     .DESCRIPTION
         Creates a Volume Shadow Copy snapshot using WMI. The snapshot is created as
         "ClientAccessible" type which can be read by applications.
+
+        Supports retry logic for transient failures (lock contention, VSS busy).
+        Configurable via -RetryCount and -RetryDelaySeconds parameters.
     .PARAMETER SourcePath
         Path on the volume to snapshot (used to determine volume)
+    .PARAMETER RetryCount
+        Number of retry attempts for transient failures (default: 3)
+    .PARAMETER RetryDelaySeconds
+        Delay between retry attempts in seconds (default: 5)
     .OUTPUTS
         OperationResult - Success=$true with Data=SnapshotInfo (ShadowId, ShadowPath, SourceVolume, CreatedAt),
         Success=$false with ErrorMessage on failure
@@ -4427,6 +5089,9 @@ function New-VssSnapshot {
     .EXAMPLE
         $result = New-VssSnapshot -SourcePath "C:\Users"
         if ($result.Success) { $snapshot = $result.Data }
+    .EXAMPLE
+        $result = New-VssSnapshot -SourcePath "C:\Data" -RetryCount 5 -RetryDelaySeconds 10
+        # More aggressive retry for busy systems
     #>
     param(
         [Parameter(Mandatory)]
@@ -4440,6 +5105,80 @@ function New-VssSnapshot {
             }
             $true
         })]
+        [string]$SourcePath,
+
+        [ValidateRange(0, 10)]
+        [int]$RetryCount = 3,
+
+        [ValidateRange(1, 60)]
+        [int]$RetryDelaySeconds = 5
+    )
+
+    # Retry loop for transient VSS failures (lock contention, VSS busy, etc.)
+    $attempt = 0
+    $lastError = $null
+
+    while ($attempt -le $RetryCount) {
+        $attempt++
+        $isRetry = $attempt -gt 1
+
+        if ($isRetry) {
+            Write-RobocurseLog -Message "VSS snapshot retry $($attempt - 1)/$RetryCount for '$SourcePath' after ${RetryDelaySeconds}s delay" `
+                -Level 'Warning' -Component 'VSS'
+            Start-Sleep -Seconds $RetryDelaySeconds
+        }
+
+        $result = New-VssSnapshotInternal -SourcePath $SourcePath
+        if ($result.Success) {
+            if ($isRetry) {
+                Write-RobocurseLog -Message "VSS snapshot succeeded on retry $($attempt - 1)" -Level 'Info' -Component 'VSS'
+            }
+            return $result
+        }
+
+        $lastError = $result.ErrorMessage
+
+        # Check if error is retryable (transient failures)
+        # Non-retryable: invalid path, permissions, VSS not supported
+        # Retryable: VSS busy, lock contention, timeout
+        $retryablePatterns = @(
+            'busy',
+            'timeout',
+            'lock',
+            'in use',
+            '0x8004230F',  # Insufficient storage (might clear up)
+            '0x80042316',  # VSS service not running (might start up)
+            'try again'
+        )
+
+        $isRetryable = $false
+        foreach ($pattern in $retryablePatterns) {
+            if ($lastError -match $pattern) {
+                $isRetryable = $true
+                break
+            }
+        }
+
+        if (-not $isRetryable) {
+            Write-RobocurseLog -Message "VSS snapshot failed with non-retryable error: $lastError" -Level 'Error' -Component 'VSS'
+            return $result
+        }
+    }
+
+    # All retries exhausted
+    Write-RobocurseLog -Message "VSS snapshot failed after $RetryCount retries: $lastError" -Level 'Error' -Component 'VSS'
+    return New-OperationResult -Success $false -ErrorMessage "VSS snapshot failed after $RetryCount retries: $lastError"
+}
+
+function New-VssSnapshotInternal {
+    <#
+    .SYNOPSIS
+        Internal function that performs the actual VSS snapshot creation
+    .DESCRIPTION
+        Called by New-VssSnapshot. Separated for retry logic.
+    #>
+    param(
+        [Parameter(Mandatory)]
         [string]$SourcePath
     )
 
@@ -4511,7 +5250,11 @@ function Remove-VssSnapshot {
     .EXAMPLE
         $result = Remove-VssSnapshot -ShadowId "{12345678-1234-1234-1234-123456789012}"
         if ($result.Success) { "Snapshot deleted" }
+    .EXAMPLE
+        Remove-VssSnapshot -ShadowId $id -WhatIf
+        # Shows what would happen without actually deleting
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [Parameter(Mandatory)]
         [string]$ShadowId
@@ -4522,16 +5265,20 @@ function Remove-VssSnapshot {
 
         $shadow = Get-CimInstance -ClassName Win32_ShadowCopy | Where-Object { $_.ID -eq $ShadowId }
         if ($shadow) {
-            Remove-CimInstance -InputObject $shadow
-            Write-RobocurseLog -Message "Deleted VSS snapshot: $ShadowId" -Level 'Info' -Component 'VSS'
-            # Remove from tracking file
-            Remove-VssFromTracking -ShadowId $ShadowId
+            if ($PSCmdlet.ShouldProcess($ShadowId, "Remove VSS Snapshot")) {
+                Remove-CimInstance -InputObject $shadow
+                Write-RobocurseLog -Message "Deleted VSS snapshot: $ShadowId" -Level 'Info' -Component 'VSS'
+                # Remove from tracking file
+                Remove-VssFromTracking -ShadowId $ShadowId
+            }
             return New-OperationResult -Success $true -Data $ShadowId
         }
         else {
             Write-RobocurseLog -Message "VSS snapshot not found: $ShadowId (may have been already deleted)" -Level 'Warning' -Component 'VSS'
             # Remove from tracking even if not found (cleanup)
-            Remove-VssFromTracking -ShadowId $ShadowId
+            if ($PSCmdlet.ShouldProcess($ShadowId, "Remove from VSS tracking")) {
+                Remove-VssFromTracking -ShadowId $ShadowId
+            }
             # Still return success since the snapshot is gone (idempotent operation)
             return New-OperationResult -Success $true -Data $ShadowId
         }
@@ -4747,6 +5494,33 @@ function Invoke-WithVssSnapshot {
 # Initialize Windows Credential Manager P/Invoke types (Windows only)
 $script:CredentialManagerTypeAdded = $false
 
+# Email HTML Template CSS - extracted for easy customization
+# To customize email appearance, modify these CSS rules
+$script:EmailCssTemplate = @'
+body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+.container { max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+.header { color: white; padding: 20px; }
+.header h1 { margin: 0; font-size: 24px; }
+.content { padding: 20px; }
+.stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 20px 0; }
+.stat-box { background: #f9f9f9; padding: 15px; border-radius: 4px; }
+.stat-label { font-size: 12px; color: #666; text-transform: uppercase; }
+.stat-value { font-size: 24px; font-weight: bold; color: #333; }
+.profile-list { margin: 20px 0; }
+.profile-item { padding: 10px; border-bottom: 1px solid #eee; }
+.profile-success { border-left: 3px solid #4CAF50; }
+.profile-warning { border-left: 3px solid #FF9800; }
+.profile-failed { border-left: 3px solid #F44336; }
+.footer { background: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666; }
+'@
+
+# Status colors for email header
+$script:EmailStatusColors = @{
+    Success = '#4CAF50'  # Green
+    Warning = '#FF9800'  # Orange
+    Failed  = '#F44336'  # Red
+}
+
 function Initialize-CredentialManager {
     <#
     .SYNOPSIS
@@ -4839,10 +5613,19 @@ function Get-SmtpCredential {
     if ($envUser -and $envPass) {
         try {
             $securePass = ConvertTo-SecureString -String $envPass -AsPlainText -Force
+            # AUDIT: Log credential retrieval from environment
+            Write-RobocurseLog -Message "SMTP credential retrieved from environment variables (user: $envUser)" `
+                -Level 'Info' -Component 'Email'
+            Write-SiemEvent -EventType 'ConfigChange' -Data @{
+                action = 'CredentialRetrieved'
+                source = 'EnvironmentVariable'
+                target = $Target
+                user = $envUser
+            }
             return New-Object System.Management.Automation.PSCredential($envUser, $securePass)
         }
         catch {
-            Write-RobocurseLog -Message "Failed to read credential from environment: $_" -Level 'Debug' -Component 'Email'
+            Write-RobocurseLog -Message "Failed to read credential from environment: $_" -Level 'Warning' -Component 'Email'
         }
     }
 
@@ -4871,6 +5654,16 @@ function Get-SmtpCredential {
                         # immediately after SecureString creation. See README Security Considerations.
                         $password = [System.Text.Encoding]::Unicode.GetString($passwordBytes)
                         $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
+
+                        # AUDIT: Log credential retrieval from Windows Credential Manager
+                        Write-RobocurseLog -Message "SMTP credential retrieved from Windows Credential Manager (target: $Target, user: $($credential.UserName))" `
+                            -Level 'Info' -Component 'Email'
+                        Write-SiemEvent -EventType 'ConfigChange' -Data @{
+                            action = 'CredentialRetrieved'
+                            source = 'WindowsCredentialManager'
+                            target = $Target
+                            user = $credential.UserName
+                        }
 
                         return New-Object System.Management.Automation.PSCredential($credential.UserName, $securePassword)
                     }
@@ -4982,7 +5775,11 @@ function Remove-SmtpCredential {
     .EXAMPLE
         $result = Remove-SmtpCredential -Target "CustomSMTP"
         if (-not $result.Success) { Write-Warning $result.ErrorMessage }
+    .EXAMPLE
+        Remove-SmtpCredential -WhatIf
+        # Shows what would be removed without actually deleting
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [string]$Target = "Robocurse-SMTP"
     )
@@ -5000,16 +5797,19 @@ function Remove-SmtpCredential {
             return New-OperationResult -Success $false -ErrorMessage "Credential Manager types not available"
         }
 
-        $success = [CredentialManager]::CredDelete($Target, [CredentialManager]::CRED_TYPE_GENERIC, 0)
+        if ($PSCmdlet.ShouldProcess($Target, "Remove SMTP credential from Credential Manager")) {
+            $success = [CredentialManager]::CredDelete($Target, [CredentialManager]::CRED_TYPE_GENERIC, 0)
 
-        if ($success) {
-            Write-RobocurseLog -Message "Credential removed from Credential Manager: $Target" -Level 'Info' -Component 'Email'
-            return New-OperationResult -Success $true -Data $Target
+            if ($success) {
+                Write-RobocurseLog -Message "Credential removed from Credential Manager: $Target" -Level 'Info' -Component 'Email'
+                return New-OperationResult -Success $true -Data $Target
+            }
+            else {
+                Write-RobocurseLog -Message "Credential not found or could not be deleted: $Target" -Level 'Warning' -Component 'Email'
+                return New-OperationResult -Success $false -ErrorMessage "Credential not found or could not be deleted: $Target"
+            }
         }
-        else {
-            Write-RobocurseLog -Message "Credential not found or could not be deleted: $Target" -Level 'Warning' -Component 'Email'
-            return New-OperationResult -Success $false -ErrorMessage "Credential not found or could not be deleted: $Target"
-        }
+        return New-OperationResult -Success $true -Data $Target
     }
     catch {
         Write-RobocurseLog -Message "Failed to remove credential: $_" -Level 'Error' -Component 'Email'
@@ -5099,11 +5899,7 @@ function New-CompletionEmailBody {
         [string]$Status
     )
 
-    $statusColor = switch ($Status) {
-        'Success' { '#4CAF50' }  # Green
-        'Warning' { '#FF9800' }  # Orange
-        'Failed'  { '#F44336' }  # Red
-    }
+    $statusColor = $script:EmailStatusColors[$Status]
 
     # Format duration
     $durationStr = if ($Results.Duration) {
@@ -5178,26 +5974,15 @@ $additionalErrors
     $completionTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $computerName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { $env:HOSTNAME }
 
+    # Use the template CSS and inject the status-specific header background color
+    $cssWithStatusColor = $script:EmailCssTemplate + "`n.header { background: $statusColor; }"
+
     $html = @"
 <!DOCTYPE html>
 <html>
 <head>
     <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
-        .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .header { background: $statusColor; color: white; padding: 20px; }
-        .header h1 { margin: 0; font-size: 24px; }
-        .content { padding: 20px; }
-        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 20px 0; }
-        .stat-box { background: #f9f9f9; padding: 15px; border-radius: 4px; }
-        .stat-label { font-size: 12px; color: #666; text-transform: uppercase; }
-        .stat-value { font-size: 24px; font-weight: bold; color: #333; }
-        .profile-list { margin: 20px 0; }
-        .profile-item { padding: 10px; border-bottom: 1px solid #eee; }
-        .profile-success { border-left: 3px solid #4CAF50; }
-        .profile-warning { border-left: 3px solid #FF9800; }
-        .profile-failed { border-left: 3px solid #F44336; }
-        .footer { background: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666; }
+        $cssWithStatusColor
     </style>
 </head>
 <body>
@@ -5305,7 +6090,7 @@ function Send-CompletionEmail {
     # Get credential
     $credential = Get-SmtpCredential -Target $Config.CredentialTarget
     if (-not $credential) {
-        Write-RobocurseLog -Message "SMTP credential not found: $($Config.CredentialTarget)" -Level 'Error' -Component 'Email'
+        Write-RobocurseLog -Message "SMTP credential not found: $($Config.CredentialTarget)" -Level 'Warning' -Component 'Email'
         return New-OperationResult -Success $false -ErrorMessage "SMTP credential not found: $($Config.CredentialTarget)"
     }
 
@@ -5544,7 +6329,11 @@ function Unregister-RobocurseTask {
     .EXAMPLE
         $result = Unregister-RobocurseTask -TaskName "Custom-Task"
         if (-not $result.Success) { Write-Error $result.ErrorMessage }
+    .EXAMPLE
+        Unregister-RobocurseTask -WhatIf
+        # Shows what would be removed without actually deleting
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [string]$TaskName = "Robocurse-Replication"
     )
@@ -5556,8 +6345,10 @@ function Unregister-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
-        Write-RobocurseLog -Message "Scheduled task '$TaskName' removed" -Level 'Info' -Component 'Scheduler'
+        if ($PSCmdlet.ShouldProcess($TaskName, "Unregister scheduled task")) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+            Write-RobocurseLog -Message "Scheduled task '$TaskName' removed" -Level 'Info' -Component 'Scheduler'
+        }
         return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
@@ -5699,7 +6490,11 @@ function Disable-RobocurseTask {
     .EXAMPLE
         $result = Disable-RobocurseTask
         if ($result.Success) { "Task disabled" }
+    .EXAMPLE
+        Disable-RobocurseTask -WhatIf
+        # Shows what would be disabled without actually disabling
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [string]$TaskName = "Robocurse-Replication"
     )
@@ -5711,8 +6506,10 @@ function Disable-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
-        Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
-        Write-RobocurseLog -Message "Disabled task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        if ($PSCmdlet.ShouldProcess($TaskName, "Disable scheduled task")) {
+            Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
+            Write-RobocurseLog -Message "Disabled task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        }
         return New-OperationResult -Success $true -Data $TaskName
     }
     catch {

@@ -1,0 +1,40 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Configure Schedule"
+        Height="350" Width="450"
+        WindowStartupLocation="CenterScreen"
+        Background="#1E1E1E">
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <CheckBox x:Name="chkEnabled" Content="Enable Scheduled Runs" Foreground="#E0E0E0" FontWeight="Bold"/>
+
+        <StackPanel Grid.Row="1" Margin="0,15,0,0">
+            <Label Content="Run Time (HH:MM):" Foreground="#E0E0E0"/>
+            <TextBox x:Name="txtTime" Background="#2D2D2D" Foreground="#E0E0E0" Padding="5" Text="02:00" Width="100" HorizontalAlignment="Left"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" Margin="0,15,0,0">
+            <Label Content="Frequency:" Foreground="#E0E0E0"/>
+            <ComboBox x:Name="cmbFrequency" Background="#2D2D2D" Foreground="#E0E0E0" Width="150" HorizontalAlignment="Left">
+                <ComboBoxItem Content="Daily" IsSelected="True"/>
+                <ComboBoxItem Content="Weekdays"/>
+                <ComboBoxItem Content="Hourly"/>
+            </ComboBox>
+        </StackPanel>
+
+        <TextBlock Grid.Row="3" x:Name="txtStatus" Foreground="#808080" Margin="0,15,0,0" TextWrapping="Wrap"/>
+
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="btnOk" Content="Apply" Width="80" Margin="0,0,10,0" Background="#0078D4" Foreground="White" Padding="10,5"/>
+            <Button x:Name="btnCancel" Content="Cancel" Width="80" Background="#4A4A4A" Foreground="White" Padding="10,5"/>
+        </StackPanel>
+    </Grid>
+</Window>

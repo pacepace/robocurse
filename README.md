@@ -25,6 +25,11 @@ Robocurse is a PowerShell-based tool designed to manage multiple robocopy instan
 - **Configurable Mismatch Severity**: Control how robocopy exit code 4 (mismatches) is treated
 - **GUI State Persistence**: Window position, size, and settings remembered between sessions
 - **Real-Time Error Display**: Errors from background replication shown immediately in GUI
+- **Exponential Backoff**: Failed chunks retry with increasing delays (5s → 10s → 20s, capped at 120s)
+- **Health Check Endpoint**: JSON status file for external monitoring systems
+- **Parallel Directory Profiling**: Concurrent directory scanning for multi-source profiles
+- **WhatIf Support**: Preview destructive operations before execution
+- **Build Artifact Integrity**: SHA256 hash generated for built monolith
 
 ## Prerequisites
 

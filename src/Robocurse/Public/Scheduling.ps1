@@ -150,7 +150,11 @@ function Unregister-RobocurseTask {
     .EXAMPLE
         $result = Unregister-RobocurseTask -TaskName "Custom-Task"
         if (-not $result.Success) { Write-Error $result.ErrorMessage }
+    .EXAMPLE
+        Unregister-RobocurseTask -WhatIf
+        # Shows what would be removed without actually deleting
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [string]$TaskName = "Robocurse-Replication"
     )
@@ -162,8 +166,10 @@ function Unregister-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
-        Write-RobocurseLog -Message "Scheduled task '$TaskName' removed" -Level 'Info' -Component 'Scheduler'
+        if ($PSCmdlet.ShouldProcess($TaskName, "Unregister scheduled task")) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
+            Write-RobocurseLog -Message "Scheduled task '$TaskName' removed" -Level 'Info' -Component 'Scheduler'
+        }
         return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
@@ -305,7 +311,11 @@ function Disable-RobocurseTask {
     .EXAMPLE
         $result = Disable-RobocurseTask
         if ($result.Success) { "Task disabled" }
+    .EXAMPLE
+        Disable-RobocurseTask -WhatIf
+        # Shows what would be disabled without actually disabling
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [string]$TaskName = "Robocurse-Replication"
     )
@@ -317,8 +327,10 @@ function Disable-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
-        Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
-        Write-RobocurseLog -Message "Disabled task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        if ($PSCmdlet.ShouldProcess($TaskName, "Disable scheduled task")) {
+            Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
+            Write-RobocurseLog -Message "Disabled task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        }
         return New-OperationResult -Success $true -Data $TaskName
     }
     catch {

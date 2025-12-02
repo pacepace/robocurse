@@ -2,6 +2,33 @@
 # Initialize Windows Credential Manager P/Invoke types (Windows only)
 $script:CredentialManagerTypeAdded = $false
 
+# Email HTML Template CSS - extracted for easy customization
+# To customize email appearance, modify these CSS rules
+$script:EmailCssTemplate = @'
+body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+.container { max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+.header { color: white; padding: 20px; }
+.header h1 { margin: 0; font-size: 24px; }
+.content { padding: 20px; }
+.stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 20px 0; }
+.stat-box { background: #f9f9f9; padding: 15px; border-radius: 4px; }
+.stat-label { font-size: 12px; color: #666; text-transform: uppercase; }
+.stat-value { font-size: 24px; font-weight: bold; color: #333; }
+.profile-list { margin: 20px 0; }
+.profile-item { padding: 10px; border-bottom: 1px solid #eee; }
+.profile-success { border-left: 3px solid #4CAF50; }
+.profile-warning { border-left: 3px solid #FF9800; }
+.profile-failed { border-left: 3px solid #F44336; }
+.footer { background: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666; }
+'@
+
+# Status colors for email header
+$script:EmailStatusColors = @{
+    Success = '#4CAF50'  # Green
+    Warning = '#FF9800'  # Orange
+    Failed  = '#F44336'  # Red
+}
+
 function Initialize-CredentialManager {
     <#
     .SYNOPSIS
@@ -256,7 +283,11 @@ function Remove-SmtpCredential {
     .EXAMPLE
         $result = Remove-SmtpCredential -Target "CustomSMTP"
         if (-not $result.Success) { Write-Warning $result.ErrorMessage }
+    .EXAMPLE
+        Remove-SmtpCredential -WhatIf
+        # Shows what would be removed without actually deleting
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [string]$Target = "Robocurse-SMTP"
     )
@@ -274,16 +305,19 @@ function Remove-SmtpCredential {
             return New-OperationResult -Success $false -ErrorMessage "Credential Manager types not available"
         }
 
-        $success = [CredentialManager]::CredDelete($Target, [CredentialManager]::CRED_TYPE_GENERIC, 0)
+        if ($PSCmdlet.ShouldProcess($Target, "Remove SMTP credential from Credential Manager")) {
+            $success = [CredentialManager]::CredDelete($Target, [CredentialManager]::CRED_TYPE_GENERIC, 0)
 
-        if ($success) {
-            Write-RobocurseLog -Message "Credential removed from Credential Manager: $Target" -Level 'Info' -Component 'Email'
-            return New-OperationResult -Success $true -Data $Target
+            if ($success) {
+                Write-RobocurseLog -Message "Credential removed from Credential Manager: $Target" -Level 'Info' -Component 'Email'
+                return New-OperationResult -Success $true -Data $Target
+            }
+            else {
+                Write-RobocurseLog -Message "Credential not found or could not be deleted: $Target" -Level 'Warning' -Component 'Email'
+                return New-OperationResult -Success $false -ErrorMessage "Credential not found or could not be deleted: $Target"
+            }
         }
-        else {
-            Write-RobocurseLog -Message "Credential not found or could not be deleted: $Target" -Level 'Warning' -Component 'Email'
-            return New-OperationResult -Success $false -ErrorMessage "Credential not found or could not be deleted: $Target"
-        }
+        return New-OperationResult -Success $true -Data $Target
     }
     catch {
         Write-RobocurseLog -Message "Failed to remove credential: $_" -Level 'Error' -Component 'Email'
@@ -373,11 +407,7 @@ function New-CompletionEmailBody {
         [string]$Status
     )
 
-    $statusColor = switch ($Status) {
-        'Success' { '#4CAF50' }  # Green
-        'Warning' { '#FF9800' }  # Orange
-        'Failed'  { '#F44336' }  # Red
-    }
+    $statusColor = $script:EmailStatusColors[$Status]
 
     # Format duration
     $durationStr = if ($Results.Duration) {
@@ -452,26 +482,15 @@ $additionalErrors
     $completionTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $computerName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { $env:HOSTNAME }
 
+    # Use the template CSS and inject the status-specific header background color
+    $cssWithStatusColor = $script:EmailCssTemplate + "`n.header { background: $statusColor; }"
+
     $html = @"
 <!DOCTYPE html>
 <html>
 <head>
     <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
-        .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .header { background: $statusColor; color: white; padding: 20px; }
-        .header h1 { margin: 0; font-size: 24px; }
-        .content { padding: 20px; }
-        .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin: 20px 0; }
-        .stat-box { background: #f9f9f9; padding: 15px; border-radius: 4px; }
-        .stat-label { font-size: 12px; color: #666; text-transform: uppercase; }
-        .stat-value { font-size: 24px; font-weight: bold; color: #333; }
-        .profile-list { margin: 20px 0; }
-        .profile-item { padding: 10px; border-bottom: 1px solid #eee; }
-        .profile-success { border-left: 3px solid #4CAF50; }
-        .profile-warning { border-left: 3px solid #FF9800; }
-        .profile-failed { border-left: 3px solid #F44336; }
-        .footer { background: #f5f5f5; padding: 15px; text-align: center; font-size: 12px; color: #666; }
+        $cssWithStatusColor
     </style>
 </head>
 <body>
