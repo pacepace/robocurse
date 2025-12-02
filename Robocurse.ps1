@@ -2224,38 +2224,262 @@ function Wait-RobocopyJob {
 
 #region ==================== ORCHESTRATION ====================
 
-# Script-scoped orchestration state (using concurrent collections for thread safety)
-$script:OrchestrationState = [PSCustomObject]@{
-    SessionId        = ""
-    CurrentProfile   = $null
-    Phase            = "Idle"  # Idle, Scanning, Replicating, Complete, Stopped
-    Profiles         = @()     # All profiles to process
-    ProfileIndex     = 0       # Current profile index
+# Thread-safe orchestration state class (compiled C# for proper cross-thread access)
+# This class ensures all scalar property access is properly synchronized while
+# leveraging .NET's concurrent collections for queue/dictionary operations.
+if (-not ([System.Management.Automation.PSTypeName]'Robocurse.OrchestrationState').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Threading;
 
-    # Current profile state (thread-safe collections)
-    ChunkQueue       = [System.Collections.Concurrent.ConcurrentQueue[PSCustomObject]]::new()
-    ActiveJobs       = [System.Collections.Concurrent.ConcurrentDictionary[int,PSCustomObject]]::new()  # ProcessId -> Job
-    CompletedChunks  = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
-    FailedChunks     = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+namespace Robocurse
+{
+    /// <summary>
+    /// Thread-safe orchestration state for cross-runspace communication.
+    /// Scalar properties use locking, collections use concurrent types.
+    /// </summary>
+    public class OrchestrationState
+    {
+        private readonly object _lock = new object();
 
-    # Profile-specific robocopy options (set by Start-ProfileReplication)
-    CurrentRobocopyOptions = @{}
+        // Session identity (set once, read many - but locked for safety)
+        private string _sessionId;
+        public string SessionId
+        {
+            get { lock (_lock) { return _sessionId; } }
+            set { lock (_lock) { _sessionId = value; } }
+        }
 
-    # VSS snapshot for current profile (if UseVSS is enabled)
-    CurrentVssSnapshot = $null  # Holds snapshot info from New-VssSnapshot
+        // Current execution phase: Idle, Scanning, Replicating, Complete, Stopped
+        private string _phase = "Idle";
+        public string Phase
+        {
+            get { lock (_lock) { return _phase; } }
+            set { lock (_lock) { _phase = value; } }
+        }
 
-    # Statistics
-    TotalChunks      = 0
-    CompletedCount   = 0
-    TotalBytes       = 0
-    BytesComplete    = 0
-    StartTime        = $null
-    ProfileStartTime = $null
+        // Current profile being processed (PSCustomObject from PowerShell)
+        private object _currentProfile;
+        public object CurrentProfile
+        {
+            get { lock (_lock) { return _currentProfile; } }
+            set { lock (_lock) { _currentProfile = value; } }
+        }
 
-    # Control
-    StopRequested    = $false
-    PauseRequested   = $false
+        // Index into Profiles array
+        private int _profileIndex;
+        public int ProfileIndex
+        {
+            get { lock (_lock) { return _profileIndex; } }
+            set { lock (_lock) { _profileIndex = value; } }
+        }
+
+        // Total chunks for current profile
+        private int _totalChunks;
+        public int TotalChunks
+        {
+            get { lock (_lock) { return _totalChunks; } }
+            set { lock (_lock) { _totalChunks = value; } }
+        }
+
+        // Completed chunk count (use Interlocked for atomic increment)
+        private int _completedCount;
+        public int CompletedCount
+        {
+            get { return Interlocked.CompareExchange(ref _completedCount, 0, 0); }
+            set { Interlocked.Exchange(ref _completedCount, value); }
+        }
+
+        /// <summary>Atomically increment CompletedCount and return new value</summary>
+        public int IncrementCompletedCount()
+        {
+            return Interlocked.Increment(ref _completedCount);
+        }
+
+        // Total bytes for current profile
+        private long _totalBytes;
+        public long TotalBytes
+        {
+            get { return Interlocked.Read(ref _totalBytes); }
+            set { Interlocked.Exchange(ref _totalBytes, value); }
+        }
+
+        // Bytes completed (use Interlocked for atomic add)
+        private long _bytesComplete;
+        public long BytesComplete
+        {
+            get { return Interlocked.Read(ref _bytesComplete); }
+            set { Interlocked.Exchange(ref _bytesComplete, value); }
+        }
+
+        /// <summary>Atomically add to BytesComplete and return new value</summary>
+        public long AddBytesComplete(long bytes)
+        {
+            return Interlocked.Add(ref _bytesComplete, bytes);
+        }
+
+        // Timing (nullable DateTime via object boxing)
+        private object _startTime;
+        public object StartTime
+        {
+            get { lock (_lock) { return _startTime; } }
+            set { lock (_lock) { _startTime = value; } }
+        }
+
+        private object _profileStartTime;
+        public object ProfileStartTime
+        {
+            get { lock (_lock) { return _profileStartTime; } }
+            set { lock (_lock) { _profileStartTime = value; } }
+        }
+
+        // Control flags (volatile for cross-thread visibility)
+        private volatile bool _stopRequested;
+        public bool StopRequested
+        {
+            get { return _stopRequested; }
+            set { _stopRequested = value; }
+        }
+
+        private volatile bool _pauseRequested;
+        public bool PauseRequested
+        {
+            get { return _pauseRequested; }
+            set { _pauseRequested = value; }
+        }
+
+        // Arrays set once per run (protected by lock for reference safety)
+        private object[] _profiles;
+        public object[] Profiles
+        {
+            get { lock (_lock) { return _profiles; } }
+            set { lock (_lock) { _profiles = value; } }
+        }
+
+        // Per-profile configuration (set once per profile, read during execution)
+        private object _currentRobocopyOptions;
+        public object CurrentRobocopyOptions
+        {
+            get { lock (_lock) { return _currentRobocopyOptions; } }
+            set { lock (_lock) { _currentRobocopyOptions = value; } }
+        }
+
+        private object _currentVssSnapshot;
+        public object CurrentVssSnapshot
+        {
+            get { lock (_lock) { return _currentVssSnapshot; } }
+            set { lock (_lock) { _currentVssSnapshot = value; } }
+        }
+
+        // Thread-safe collections (no additional locking needed)
+        public ConcurrentQueue<object> ChunkQueue { get; private set; }
+        public ConcurrentDictionary<int, object> ActiveJobs { get; private set; }
+        public ConcurrentQueue<object> CompletedChunks { get; private set; }  // Queue for ordering
+        public ConcurrentQueue<object> FailedChunks { get; private set; }     // Queue for consistency
+        public ConcurrentQueue<object> ProfileResults { get; private set; }   // Accumulated results
+
+        /// <summary>Create a new orchestration state with fresh collections</summary>
+        public OrchestrationState()
+        {
+            _sessionId = Guid.NewGuid().ToString();
+            ChunkQueue = new ConcurrentQueue<object>();
+            ActiveJobs = new ConcurrentDictionary<int, object>();
+            CompletedChunks = new ConcurrentQueue<object>();
+            FailedChunks = new ConcurrentQueue<object>();
+            ProfileResults = new ConcurrentQueue<object>();
+        }
+
+        /// <summary>Reset state for a new replication run</summary>
+        public void Reset()
+        {
+            lock (_lock)
+            {
+                _sessionId = Guid.NewGuid().ToString();
+                _phase = "Idle";
+                _currentProfile = null;
+                _profileIndex = 0;
+                _totalChunks = 0;
+                _totalBytes = 0;
+                _startTime = null;
+                _profileStartTime = null;
+                _profiles = null;
+                _currentRobocopyOptions = null;
+                _currentVssSnapshot = null;
+            }
+
+            // Reset atomic counters
+            Interlocked.Exchange(ref _completedCount, 0);
+            Interlocked.Exchange(ref _bytesComplete, 0);
+
+            // Reset volatile flags
+            _stopRequested = false;
+            _pauseRequested = false;
+
+            // Clear concurrent collections
+            ChunkQueue = new ConcurrentQueue<object>();
+            ActiveJobs.Clear();
+            CompletedChunks = new ConcurrentQueue<object>();
+            FailedChunks = new ConcurrentQueue<object>();
+            ProfileResults = new ConcurrentQueue<object>();
+        }
+
+        /// <summary>Reset collections for a new profile within the same run</summary>
+        public void ResetForNewProfile()
+        {
+            lock (_lock)
+            {
+                _currentProfile = null;
+                _profileStartTime = null;
+                _totalChunks = 0;
+                _totalBytes = 0;
+                _currentRobocopyOptions = null;
+                _currentVssSnapshot = null;
+            }
+
+            Interlocked.Exchange(ref _completedCount, 0);
+            Interlocked.Exchange(ref _bytesComplete, 0);
+
+            ChunkQueue = new ConcurrentQueue<object>();
+            ActiveJobs.Clear();
+            CompletedChunks = new ConcurrentQueue<object>();
+            FailedChunks = new ConcurrentQueue<object>();
+            // Note: ProfileResults is NOT cleared - accumulates across profiles
+        }
+
+        /// <summary>Clear just the chunk collections (used between profiles)</summary>
+        public void ClearChunkCollections()
+        {
+            ChunkQueue = new ConcurrentQueue<object>();
+            ActiveJobs.Clear();
+            CompletedChunks = new ConcurrentQueue<object>();
+            FailedChunks = new ConcurrentQueue<object>();
+        }
+
+        /// <summary>Get ProfileResults as an array for PowerShell enumeration</summary>
+        public object[] GetProfileResultsArray()
+        {
+            return ProfileResults.ToArray();
+        }
+
+        /// <summary>Get CompletedChunks as an array for PowerShell enumeration</summary>
+        public object[] GetCompletedChunksArray()
+        {
+            return CompletedChunks.ToArray();
+        }
+
+        /// <summary>Get FailedChunks as an array for PowerShell enumeration</summary>
+        public object[] GetFailedChunksArray()
+        {
+            return FailedChunks.ToArray();
+        }
+    }
 }
+'@ -ErrorAction Stop
+}
+
+# Create the singleton orchestration state instance
+$script:OrchestrationState = [Robocurse.OrchestrationState]::new()
 
 # Script-scoped callback handlers
 $script:OnProgress = $null
@@ -2267,37 +2491,12 @@ function Initialize-OrchestrationState {
     .SYNOPSIS
         Resets orchestration state for a new run
     .DESCRIPTION
-        Initializes or resets the orchestration state object
+        Resets the thread-safe orchestration state object for a new replication run.
+        Uses the C# class's Reset() method to properly clear all state.
     #>
 
-    $script:OrchestrationState = [PSCustomObject]@{
-        SessionId        = [guid]::NewGuid().ToString()
-        CurrentProfile   = $null
-        Phase            = "Idle"
-        Profiles         = @()
-        ProfileIndex     = 0
-
-        # Thread-safe collections for cross-runspace access
-        ChunkQueue       = [System.Collections.Concurrent.ConcurrentQueue[PSCustomObject]]::new()
-        ActiveJobs       = [System.Collections.Concurrent.ConcurrentDictionary[int,PSCustomObject]]::new()
-        CompletedChunks  = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
-        FailedChunks     = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
-
-        CurrentRobocopyOptions = @{}
-
-        # VSS snapshot for current profile (if UseVSS is enabled)
-        CurrentVssSnapshot = $null
-
-        TotalChunks      = 0
-        CompletedCount   = 0
-        TotalBytes       = 0
-        BytesComplete    = 0
-        StartTime        = $null
-        ProfileStartTime = $null
-
-        StopRequested    = $false
-        PauseRequested   = $false
-    }
+    # Reset the existing state object (don't create a new one - that breaks cross-thread sharing)
+    $script:OrchestrationState.Reset()
 
     Write-RobocurseLog -Message "Orchestration state initialized: $($script:OrchestrationState.SessionId)" `
         -Level 'Info' -Component 'Orchestrator'
@@ -2307,10 +2506,18 @@ function Start-ReplicationRun {
     <#
     .SYNOPSIS
         Starts replication for specified profiles
+    .DESCRIPTION
+        Initializes orchestration state (unless SkipInitialization is set) and begins
+        replication of the specified profiles. Use SkipInitialization when the state
+        has already been initialized by the caller (e.g., GUI mode where state is
+        shared across threads).
     .PARAMETER Profiles
         Array of profile objects from config
     .PARAMETER MaxConcurrentJobs
         Maximum parallel robocopy processes
+    .PARAMETER SkipInitialization
+        Skip state initialization. Use when state was pre-initialized by caller
+        (e.g., GUI mode for cross-thread state sharing)
     .PARAMETER OnProgress
         Scriptblock called on progress updates
     .PARAMETER OnChunkComplete
@@ -2343,13 +2550,17 @@ function Start-ReplicationRun {
         [ValidateRange(1, 128)]
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs,
 
+        [switch]$SkipInitialization,
+
         [scriptblock]$OnProgress,
         [scriptblock]$OnChunkComplete,
         [scriptblock]$OnProfileComplete
     )
 
-    # Initialize state
-    Initialize-OrchestrationState
+    # Initialize state (unless caller already did - e.g., GUI cross-thread scenario)
+    if (-not $SkipInitialization) {
+        Initialize-OrchestrationState
+    }
 
     # Store callbacks
     $script:OnProgress = $OnProgress
@@ -2493,10 +2704,8 @@ function Start-ProfileReplication {
         }
     }
 
-    # Initialize fresh concurrent collections (ConcurrentQueue/Bag don't have Clear())
-    $state.ChunkQueue = [System.Collections.Concurrent.ConcurrentQueue[PSCustomObject]]::new()
-    $state.CompletedChunks = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
-    $state.FailedChunks = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+    # Clear chunk collections for the new profile using the C# class method
+    $state.ClearChunkCollections()
 
     # Enqueue all chunks (RetryCount is now part of New-Chunk)
     foreach ($chunk in $chunks) {
@@ -2592,9 +2801,9 @@ function Invoke-ReplicationTick {
                 Invoke-FailedChunkHandler -Job $job -Result $result
             }
             else {
-                $state.CompletedChunks.Add($job.Chunk)
+                $state.CompletedChunks.Enqueue($job.Chunk)
             }
-            $state.CompletedCount++
+            $state.IncrementCompletedCount()
 
             # Invoke callback
             if ($script:OnChunkComplete) {
@@ -2707,9 +2916,9 @@ function Invoke-FailedChunkHandler {
         $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
     }
     else {
-        # Mark as permanently failed (thread-safe ConcurrentBag)
+        # Mark as permanently failed (thread-safe ConcurrentQueue)
         $chunk.Status = 'Failed'
-        $script:OrchestrationState.FailedChunks.Add($chunk)
+        $script:OrchestrationState.FailedChunks.Enqueue($chunk)
 
         Write-RobocurseLog -Message "Chunk $($chunk.ChunkId) failed permanently after $($chunk.RetryCount) attempts" `
             -Level 'Error' -Component 'Orchestrator'
@@ -2764,11 +2973,8 @@ function Complete-CurrentProfile {
         Errors = @($failedChunksArray | ForEach-Object { "Chunk $($_.ChunkId): $($_.SourcePath)" })
     }
 
-    # Initialize ProfileResults array if needed
-    if ($null -eq $state.ProfileResults) {
-        $state | Add-Member -MemberType NoteProperty -Name 'ProfileResults' -Value @() -Force
-    }
-    $state.ProfileResults += $profileResult
+    # Add to ProfileResults (thread-safe ConcurrentQueue)
+    $state.ProfileResults.Enqueue($profileResult)
 
     Write-RobocurseLog -Message "Profile complete: $($state.CurrentProfile.Name) in $($profileDuration.ToString('hh\:mm\:ss'))" `
         -Level 'Info' -Component 'Orchestrator'
@@ -2803,10 +3009,8 @@ function Complete-CurrentProfile {
         & $script:OnProfileComplete $state.CurrentProfile
     }
 
-    # Clear completed/failed chunks to prevent memory leak during multi-profile runs
-    # Results are preserved in ProfileResults for email/reporting
-    $state.CompletedChunks = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
-    $state.FailedChunks = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+    # Clear chunk collections for next profile (results already preserved in ProfileResults)
+    $state.ClearChunkCollections()
 
     # Move to next profile
     $state.ProfileIndex++
@@ -2824,7 +3028,7 @@ function Complete-CurrentProfile {
         Write-SiemEvent -EventType 'SessionEnd' -Data @{
             profileCount = $state.Profiles.Count
             totalChunks = $state.CompletedCount
-            failedChunks = ($state.ProfileResults | Measure-Object -Property ChunksFailed -Sum).Sum
+            failedChunks = ($state.GetProfileResultsArray() | Measure-Object -Property ChunksFailed -Sum).Sum
             durationMs = $totalDuration.TotalMilliseconds
         }
     }
@@ -2917,7 +3121,7 @@ function Update-ProgressStats {
     $state = $script:OrchestrationState
 
     # Calculate bytes complete from completed chunks + in-progress
-    # Use ToArray() for thread-safe snapshot of ConcurrentBag
+    # Use ToArray() for thread-safe snapshot of ConcurrentQueue
     $bytesFromCompleted = 0
     foreach ($chunk in $state.CompletedChunks.ToArray()) {
         if ($chunk.EstimatedSize) {
@@ -5038,17 +5242,18 @@ function Start-GuiReplication {
     }
 
     $runspace = [runspacefactory]::CreateRunspace()
-    $runspace.ApartmentState = [System.Threading.ApartmentState]::STA
+    # Use MTA for background I/O work (STA is only needed for COM/UI operations)
+    $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
     $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
     $runspace.Open()
 
     # Execute replication in background
-    # We dot-source the script to load functions, pass the shared state, and run
+    # We dot-source the script to load all functions into the runspace
     $powershell = [powershell]::Create()
     $powershell.Runspace = $runspace
 
     # Build a script that loads the main script and runs replication
-    # Note: We pass the orchestration state as a reference so both threads share it
+    # Note: We pass the C# OrchestrationState object which is inherently thread-safe
     # Callbacks are intentionally NOT shared - GUI uses timer-based polling instead
     $backgroundScript = @"
         param(`$ScriptPath, `$SharedState, `$Profiles, `$MaxWorkers, `$ConfigPath)
@@ -5056,8 +5261,8 @@ function Start-GuiReplication {
         # Load the script to get all functions (with -Help to prevent main execution)
         . `$ScriptPath -Help
 
-        # Override the script-scoped state with our shared instance
-        # This is safe because ConcurrentDictionary/ConcurrentQueue/ConcurrentBag are thread-safe
+        # Use the shared C# OrchestrationState instance (thread-safe by design)
+        # The C# class handles all locking internally
         `$script:OrchestrationState = `$SharedState
 
         # Clear callbacks - GUI mode uses timer-based polling, not callbacks
@@ -5066,8 +5271,8 @@ function Start-GuiReplication {
         `$script:OnChunkComplete = `$null
         `$script:OnProfileComplete = `$null
 
-        # Start replication
-        Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers
+        # Start replication with -SkipInitialization since UI thread already initialized
+        Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
 
         # Run the orchestration loop until complete
         while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
@@ -5580,18 +5785,20 @@ function Invoke-HeadlessReplication {
 
     # Get final status
     $status = Get-OrchestrationStatus
-    $totalFailed = if ($script:OrchestrationState.ProfileResults) {
-        ($script:OrchestrationState.ProfileResults | Measure-Object -Property ChunksFailed -Sum).Sum
+    $profileResultsArray = $script:OrchestrationState.GetProfileResultsArray()
+
+    $totalFailed = if ($profileResultsArray.Count -gt 0) {
+        ($profileResultsArray | Measure-Object -Property ChunksFailed -Sum).Sum
     } else { $status.ChunksFailed }
 
     # Build results object for email
-    $totalBytesCopied = if ($script:OrchestrationState.ProfileResults) {
-        ($script:OrchestrationState.ProfileResults | Measure-Object -Property BytesCopied -Sum).Sum
+    $totalBytesCopied = if ($profileResultsArray.Count -gt 0) {
+        ($profileResultsArray | Measure-Object -Property BytesCopied -Sum).Sum
     } else { $status.BytesComplete }
 
     $allErrors = @()
-    if ($script:OrchestrationState.ProfileResults) {
-        foreach ($pr in $script:OrchestrationState.ProfileResults) {
+    if ($profileResultsArray.Count -gt 0) {
+        foreach ($pr in $profileResultsArray) {
             $allErrors += $pr.Errors
         }
     }
@@ -5601,7 +5808,7 @@ function Invoke-HeadlessReplication {
         TotalBytesCopied = $totalBytesCopied
         TotalFilesCopied = 0  # Would need chunk-level tracking
         TotalErrors = $totalFailed
-        Profiles = $script:OrchestrationState.ProfileResults
+        Profiles = $profileResultsArray
         Errors = $allErrors
     }
 
@@ -5621,9 +5828,9 @@ function Invoke-HeadlessReplication {
     Write-Host "  Total chunks failed: $totalFailed"
     Write-Host ""
 
-    if ($script:OrchestrationState.ProfileResults) {
+    if ($profileResultsArray.Count -gt 0) {
         Write-Host "Profile Summary:"
-        foreach ($pr in $script:OrchestrationState.ProfileResults) {
+        foreach ($pr in $profileResultsArray) {
             $prStatus = if ($pr.ChunksFailed -gt 0) { "[WARN]" } else { "[OK]" }
             Write-Host "  $prStatus $($pr.Name): $($pr.ChunksComplete)/$($pr.ChunksTotal) chunks, $(Format-FileSize -Bytes $pr.BytesCopied)"
         }

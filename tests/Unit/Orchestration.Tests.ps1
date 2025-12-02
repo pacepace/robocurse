@@ -7,32 +7,9 @@ BeforeAll {
 
 Describe "Orchestration" {
     BeforeEach {
-        # Reset state before each test (using concurrent collections to match main script)
-        $script:OrchestrationState = [PSCustomObject]@{
-            SessionId        = ""
-            CurrentProfile   = $null
-            Phase            = "Idle"
-            Profiles         = @()
-            ProfileIndex     = 0
-
-            ChunkQueue       = [System.Collections.Concurrent.ConcurrentQueue[PSCustomObject]]::new()
-            ActiveJobs       = [System.Collections.Concurrent.ConcurrentDictionary[int,PSCustomObject]]::new()
-            CompletedChunks  = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
-            FailedChunks     = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
-
-            CurrentRobocopyOptions = @{}
-            CurrentVssSnapshot = $null
-
-            TotalChunks      = 0
-            CompletedCount   = 0
-            TotalBytes       = 0
-            BytesComplete    = 0
-            StartTime        = $null
-            ProfileStartTime = $null
-
-            StopRequested    = $false
-            PauseRequested   = $false
-        }
+        # Reset state before each test using the C# class's Reset() method
+        # This ensures tests use the same thread-safe OrchestrationState as production
+        $script:OrchestrationState.Reset()
 
         # Clear callbacks
         $script:OnProgress = $null
@@ -508,8 +485,8 @@ Describe "Orchestration" {
                 ChunkId = 2
                 EstimatedSize = 2000000
             }
-            $script:OrchestrationState.CompletedChunks.Add($chunk1)
-            $script:OrchestrationState.CompletedChunks.Add($chunk2)
+            $script:OrchestrationState.CompletedChunks.Enqueue($chunk1)
+            $script:OrchestrationState.CompletedChunks.Enqueue($chunk2)
 
             Mock Get-RobocopyProgress { }
 
@@ -523,7 +500,7 @@ Describe "Orchestration" {
                 ChunkId = 1
                 EstimatedSize = 1000000
             }
-            $script:OrchestrationState.CompletedChunks.Add($chunk1)
+            $script:OrchestrationState.CompletedChunks.Enqueue($chunk1)
 
             # Mock active job
             $mockProcess = [PSCustomObject]@{ Id = 1234 }
@@ -707,19 +684,19 @@ Describe "Orchestration" {
             $script:OrchestrationState.Profiles = @($script:OrchestrationState.CurrentProfile)
 
             # Add some completed chunks
-            $script:OrchestrationState.CompletedChunks.Add([PSCustomObject]@{
+            $script:OrchestrationState.CompletedChunks.Enqueue([PSCustomObject]@{
                 ChunkId = 1
                 SourcePath = "C:\Source\Dir1"
                 EstimatedSize = 1000000
             })
-            $script:OrchestrationState.CompletedChunks.Add([PSCustomObject]@{
+            $script:OrchestrationState.CompletedChunks.Enqueue([PSCustomObject]@{
                 ChunkId = 2
                 SourcePath = "C:\Source\Dir2"
                 EstimatedSize = 2000000
             })
 
             # Add a failed chunk
-            $script:OrchestrationState.FailedChunks.Add([PSCustomObject]@{
+            $script:OrchestrationState.FailedChunks.Enqueue([PSCustomObject]@{
                 ChunkId = 3
                 SourcePath = "C:\Source\Dir3"
             })
@@ -728,10 +705,11 @@ Describe "Orchestration" {
         It "Should create ProfileResults with statistics" {
             Complete-CurrentProfile
 
-            $script:OrchestrationState.ProfileResults | Should -Not -BeNullOrEmpty
-            $script:OrchestrationState.ProfileResults.Count | Should -Be 1
+            $results = $script:OrchestrationState.GetProfileResultsArray()
+            $results | Should -Not -BeNullOrEmpty
+            $results.Count | Should -Be 1
 
-            $pr = $script:OrchestrationState.ProfileResults[0]
+            $pr = $results[0]
             $pr.Name | Should -Be "TestProfile"
             $pr.ChunksComplete | Should -Be 2
             $pr.ChunksFailed | Should -Be 1
@@ -757,16 +735,29 @@ Describe "Orchestration" {
         It "Should set status to Warning when there are failed chunks" {
             Complete-CurrentProfile
 
-            $script:OrchestrationState.ProfileResults[0].Status | Should -Be 'Warning'
+            $results = $script:OrchestrationState.GetProfileResultsArray()
+            $results[0].Status | Should -Be 'Warning'
         }
 
         It "Should set status to Success when all chunks succeed" {
-            # Clear failed chunks
-            $script:OrchestrationState.FailedChunks = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+            # Clear failed chunks using the C# class method
+            $script:OrchestrationState.ClearChunkCollections()
+            # Re-add the completed chunks after clearing
+            $script:OrchestrationState.CompletedChunks.Enqueue([PSCustomObject]@{
+                ChunkId = 1
+                SourcePath = "C:\Source\Dir1"
+                EstimatedSize = 1000000
+            })
+            $script:OrchestrationState.CompletedChunks.Enqueue([PSCustomObject]@{
+                ChunkId = 2
+                SourcePath = "C:\Source\Dir2"
+                EstimatedSize = 2000000
+            })
 
             Complete-CurrentProfile
 
-            $script:OrchestrationState.ProfileResults[0].Status | Should -Be 'Success'
+            $results = $script:OrchestrationState.GetProfileResultsArray()
+            $results[0].Status | Should -Be 'Success'
         }
 
         It "Should invoke OnProfileComplete callback" {
