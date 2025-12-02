@@ -1264,15 +1264,21 @@ function Stop-AllJobs {
         -Level 'Warning' -Component 'Orchestrator'
 
     foreach ($job in $state.ActiveJobs.Values) {
-        # Check HasExited property - only kill if process is still running
-        if (-not $job.Process.HasExited) {
-            try {
+        try {
+            # Check HasExited property - only kill if process is still running
+            if (-not $job.Process.HasExited) {
                 $job.Process.Kill()
+                # Wait briefly for process to exit before disposing
+                $job.Process.WaitForExit(5000)
                 Write-RobocurseLog -Message "Killed chunk $($job.Chunk.ChunkId)" -Level 'Warning' -Component 'Orchestrator'
             }
-            catch {
-                Write-RobocurseLog -Message "Failed to kill chunk $($job.Chunk.ChunkId): $_" -Level 'Error' -Component 'Orchestrator'
-            }
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to kill chunk $($job.Chunk.ChunkId): $_" -Level 'Error' -Component 'Orchestrator'
+        }
+        finally {
+            # Always dispose the process object to release handles
+            try { $job.Process.Dispose() } catch { }
         }
     }
 
@@ -1282,11 +1288,19 @@ function Stop-AllJobs {
     # Clean up VSS snapshot if one exists
     if ($state.CurrentVssSnapshot) {
         Write-RobocurseLog -Message "Cleaning up VSS snapshot after stop: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
-        $removeResult = Remove-VssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId
-        if (-not $removeResult.Success) {
-            Write-RobocurseLog -Message "Failed to clean up VSS snapshot: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+        try {
+            $removeResult = Remove-VssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId
+            if (-not $removeResult.Success) {
+                Write-RobocurseLog -Message "Failed to clean up VSS snapshot: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
         }
-        $state.CurrentVssSnapshot = $null
+        catch {
+            Write-RobocurseLog -Message "Exception during VSS snapshot cleanup: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        }
+        finally {
+            # Always clear the reference to prevent retry attempts on stale snapshot
+            $state.CurrentVssSnapshot = $null
+        }
     }
 
     Write-SiemEvent -EventType 'SessionEnd' -Data @{

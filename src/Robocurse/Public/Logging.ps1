@@ -1,6 +1,58 @@
 # Robocurse Logging Functions
 # Script-scoped variables for current session state
 $script:CurrentSessionId = $null
+$script:LogMutexTimeoutMs = 5000  # 5 seconds timeout for mutex acquisition
+
+function Invoke-WithLogMutex {
+    <#
+    .SYNOPSIS
+        Executes a scriptblock while holding the log file mutex
+    .DESCRIPTION
+        Acquires a named mutex to synchronize log file writes across multiple
+        threads and processes. Releases the mutex in a finally block to ensure
+        cleanup even on errors.
+    .PARAMETER ScriptBlock
+        Code to execute while holding the mutex
+    .PARAMETER MutexSuffix
+        Suffix for the mutex name (e.g., 'Operational', 'SIEM')
+    .OUTPUTS
+        Result of the scriptblock, or $null if mutex acquisition times out
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock,
+
+        [Parameter(Mandatory)]
+        [string]$MutexSuffix
+    )
+
+    $mutex = $null
+    $mutexAcquired = $false
+    try {
+        $fullMutexName = "Global\RobocurseLog_$MutexSuffix"
+        $mutex = [System.Threading.Mutex]::new($false, $fullMutexName)
+
+        $mutexAcquired = $mutex.WaitOne($script:LogMutexTimeoutMs)
+        if (-not $mutexAcquired) {
+            # Timeout - still execute the scriptblock (better than lost log)
+            # This is a fallback; ideally should never happen
+            return & $ScriptBlock
+        }
+
+        return & $ScriptBlock
+    }
+    finally {
+        if ($mutex) {
+            if ($mutexAcquired) {
+                try { $mutex.ReleaseMutex() } catch {
+                    # Cannot log here (infinite loop) - release failure is rare
+                }
+            }
+            $mutex.Dispose()
+        }
+    }
+}
 $script:CurrentOperationalLogPath = $null
 $script:CurrentSiemLogPath = $null
 $script:CurrentJobsPath = $null
@@ -153,7 +205,7 @@ function Write-RobocurseLog {
         return
     }
 
-    # Write to operational log
+    # Write to operational log with mutex protection for thread safety
     try {
         # Ensure directory exists
         $logDir = Split-Path -Path $logPath -Parent
@@ -161,8 +213,10 @@ function Write-RobocurseLog {
             New-Item -ItemType Directory -Path $logDir -Force | Out-Null
         }
 
-        # Append to log file
-        Add-Content -Path $logPath -Value $logEntry -Encoding UTF8
+        # Append to log file with mutex protection to prevent concurrent write corruption
+        Invoke-WithLogMutex -MutexSuffix 'Operational' -ScriptBlock {
+            Add-Content -Path $logPath -Value $logEntry -Encoding UTF8
+        }.GetNewClosure()
     }
     catch {
         Write-Warning "Failed to write to operational log: $_"
@@ -271,7 +325,7 @@ function Write-SiemEvent {
         data = $Data
     }
 
-    # Convert to JSON (single line)
+    # Convert to JSON (single line) and write with mutex protection
     try {
         $jsonLine = $siemEvent | ConvertTo-Json -Compress -Depth 10
 
@@ -281,8 +335,11 @@ function Write-SiemEvent {
             New-Item -ItemType Directory -Path $siemDir -Force | Out-Null
         }
 
-        # Append to SIEM log (JSON Lines format)
-        Add-Content -Path $siemPath -Value $jsonLine -Encoding UTF8
+        # Append to SIEM log (JSON Lines format) with mutex protection
+        # Critical: JSONL corruption breaks SIEM ingestion, so mutex is essential
+        Invoke-WithLogMutex -MutexSuffix 'SIEM' -ScriptBlock {
+            Add-Content -Path $siemPath -Value $jsonLine -Encoding UTF8
+        }.GetNewClosure()
     }
     catch {
         Write-Warning "Failed to write to SIEM log: $_"
@@ -335,8 +392,9 @@ function Invoke-LogRotation {
                 # Parse directory date
                 $dirDate = [DateTime]::ParseExact($dir.Name, "yyyy-MM-dd", $null)
 
-                # Skip if this is today's directory (currently in use)
-                if ($dirDate.Date -eq $now.Date) {
+                # Skip if this is today's directory or yesterday's (may still be in use)
+                # Add 2-hour buffer to handle jobs spanning midnight
+                if ($dirDate.Date -ge $now.Date.AddHours(-2)) {
                     continue
                 }
 

@@ -30,7 +30,11 @@ function Invoke-WithVssTrackingMutex {
     $mutex = $null
     $mutexAcquired = $false
     try {
-        $mutexName = "Global\RobocurseVssTracking"
+        # Include session ID in mutex name to isolate different user sessions
+        # This prevents DoS attacks on multi-user systems where another user
+        # could create the mutex first
+        $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        $mutexName = "Global\RobocurseVssTracking_Session$sessionId"
         $mutex = [System.Threading.Mutex]::new($false, $mutexName)
 
         $mutexAcquired = $mutex.WaitOne($TimeoutMs)
@@ -44,7 +48,10 @@ function Invoke-WithVssTrackingMutex {
     finally {
         if ($mutex) {
             if ($mutexAcquired) {
-                try { $mutex.ReleaseMutex() } catch { }
+                try { $mutex.ReleaseMutex() } catch {
+                    # Log release failures - may indicate logic bugs (releasing unowned mutex)
+                    Write-RobocurseLog -Message "Failed to release VSS tracking mutex: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+                }
             }
             $mutex.Dispose()
         }

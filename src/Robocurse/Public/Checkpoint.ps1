@@ -82,12 +82,10 @@ function Save-ReplicationCheckpoint {
         $tempPath = "$checkpointPath.tmp"
         $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
 
-        # Atomic rename (on NTFS this is atomic)
-        # Remove existing checkpoint first if it exists (Move-Item with -Force doesn't overwrite on all platforms)
-        if (Test-Path $checkpointPath) {
-            Remove-Item -Path $checkpointPath -Force
-        }
-        Move-Item -Path $tempPath -Destination $checkpointPath -Force
+        # Use .NET File.Move with overwrite for atomic replacement
+        # This avoids TOCTOU race between Test-Path/Remove-Item/Move-Item
+        # On NTFS, this is an atomic operation
+        [System.IO.File]::Move($tempPath, $checkpointPath, $true)
 
         Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
             -Level 'Info' -Component 'Checkpoint'
@@ -120,6 +118,14 @@ function Get-ReplicationCheckpoint {
     try {
         $content = Get-Content -Path $checkpointPath -Raw -Encoding UTF8
         $checkpoint = $content | ConvertFrom-Json
+
+        # Validate checkpoint version for forward compatibility
+        $expectedVersion = "1.0"
+        if ($checkpoint.Version -and $checkpoint.Version -ne $expectedVersion) {
+            Write-RobocurseLog -Message "Checkpoint version mismatch: found '$($checkpoint.Version)', expected '$expectedVersion'. Starting fresh." `
+                -Level 'Warning' -Component 'Checkpoint'
+            return $null
+        }
 
         Write-RobocurseLog -Message "Found checkpoint: $($checkpoint.CompletedChunkPaths.Count) chunks completed at $($checkpoint.SavedAt)" `
             -Level 'Info' -Component 'Checkpoint'

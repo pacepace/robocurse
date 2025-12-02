@@ -430,9 +430,12 @@ function Invoke-WindowClosingHandler {
         Stop-AllJobs
     }
 
-    # Stop the progress timer
+    # Stop and dispose the progress timer to prevent memory leaks
     if ($script:ProgressTimer) {
         $script:ProgressTimer.Stop()
+        # DispatcherTimer doesn't implement IDisposable, but we should null the reference
+        # to allow the event handler closure to be garbage collected
+        $script:ProgressTimer = $null
     }
 
     # Clean up background runspace to prevent memory leaks
@@ -469,6 +472,7 @@ function Close-ReplicationRunspace {
     # all other threads will get $null and exit early
     $psInstance = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationPowerShell, $null)
     $handle = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationHandle, $null)
+    $runspace = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationRunspace, $null)
 
     # If another thread already claimed the instance, exit
     if (-not $psInstance) { return }
@@ -959,6 +963,7 @@ function Complete-GuiReplication {
         finally {
             $script:ReplicationPowerShell = $null
             $script:ReplicationHandle = $null
+            $script:ReplicationRunspace = $null  # Clear runspace reference for GC
         }
     }
 
@@ -1193,10 +1198,12 @@ function Write-GuiLog {
         $script:GuiLogBuffer.RemoveAt(0)
     }
 
-    # Use Dispatcher for thread safety - rebuild text from buffer
-    $script:Window.Dispatcher.Invoke([Action]{
-        # Join all lines - more efficient than repeated concatenation
-        $script:Controls.txtLog.Text = $script:GuiLogBuffer -join "`n"
+    # Use Dispatcher.BeginInvoke for thread safety - non-blocking async update
+    # Using Invoke (synchronous) could cause deadlocks if called from background thread
+    # while UI thread is busy
+    $logText = $script:GuiLogBuffer -join "`n"
+    $script:Window.Dispatcher.BeginInvoke([Action]{
+        $script:Controls.txtLog.Text = $logText
         $script:Controls.svLog.ScrollToEnd()
     })
 }

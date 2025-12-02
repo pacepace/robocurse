@@ -252,8 +252,13 @@ function Save-SmtpCredential {
         }
 
         $username = $Credential.UserName
+        # Note: GetNetworkCredential().Password unavoidably creates a plaintext string
+        # We clear the byte array below, and null the reference to reduce exposure window
         $password = $Credential.GetNetworkCredential().Password
         $passwordBytes = [System.Text.Encoding]::Unicode.GetBytes($password)
+        # Clear the password reference immediately after getting bytes
+        # (string content remains in memory until GC, but this reduces reference count)
+        $password = $null
 
         $credPtr = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($passwordBytes.Length)
         try {

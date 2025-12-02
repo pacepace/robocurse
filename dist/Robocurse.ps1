@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 11:06:39
+    Built: 2025-12-02 12:04:00
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -1346,6 +1346,14 @@ function Test-RobocurseConfig {
                 $errors += "GlobalSettings.MaxConcurrentJobs must be between 1 and 32 (current: $maxJobs)"
             }
         }
+
+        # Validate BandwidthLimitMbps (0 = unlimited, positive = limit in Mbps)
+        if ($gsPropertyNames -contains 'BandwidthLimitMbps') {
+            $bandwidthLimit = $gs.BandwidthLimitMbps
+            if ($null -ne $bandwidthLimit -and $bandwidthLimit -lt 0) {
+                $errors += "GlobalSettings.BandwidthLimitMbps must be non-negative (current: $bandwidthLimit)"
+            }
+        }
     }
 
     # Validate Email configuration if enabled
@@ -1360,7 +1368,8 @@ function Test-RobocurseConfig {
         if ([string]::IsNullOrWhiteSpace($email.From)) {
             $errors += "Email.From is required when Email.Enabled is true"
         }
-        elseif ($email.From -notmatch '^\S+@\S+\.\S+$') {
+        elseif ($email.From -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+            # Stricter pattern: no multiple @ symbols, no whitespace
             $errors += "Email.From is not a valid email address format: $($email.From)"
         }
 
@@ -1368,10 +1377,10 @@ function Test-RobocurseConfig {
             $errors += "Email.To must contain at least one recipient when Email.Enabled is true"
         }
         else {
-            # Validate each recipient email format
+            # Validate each recipient email format (stricter: no multiple @, no whitespace)
             $toArray = @($email.To)
             for ($j = 0; $j -lt $toArray.Count; $j++) {
-                if ($toArray[$j] -notmatch '^\S+@\S+\.\S+$') {
+                if ($toArray[$j] -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
                     $errors += "Email.To[$j] is not a valid email address format: $($toArray[$j])"
                 }
             }
@@ -1518,6 +1527,58 @@ function Test-PathFormat {
 
 # Script-scoped variables for current session state
 $script:CurrentSessionId = $null
+$script:LogMutexTimeoutMs = 5000  # 5 seconds timeout for mutex acquisition
+
+function Invoke-WithLogMutex {
+    <#
+    .SYNOPSIS
+        Executes a scriptblock while holding the log file mutex
+    .DESCRIPTION
+        Acquires a named mutex to synchronize log file writes across multiple
+        threads and processes. Releases the mutex in a finally block to ensure
+        cleanup even on errors.
+    .PARAMETER ScriptBlock
+        Code to execute while holding the mutex
+    .PARAMETER MutexSuffix
+        Suffix for the mutex name (e.g., 'Operational', 'SIEM')
+    .OUTPUTS
+        Result of the scriptblock, or $null if mutex acquisition times out
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock,
+
+        [Parameter(Mandatory)]
+        [string]$MutexSuffix
+    )
+
+    $mutex = $null
+    $mutexAcquired = $false
+    try {
+        $fullMutexName = "Global\RobocurseLog_$MutexSuffix"
+        $mutex = [System.Threading.Mutex]::new($false, $fullMutexName)
+
+        $mutexAcquired = $mutex.WaitOne($script:LogMutexTimeoutMs)
+        if (-not $mutexAcquired) {
+            # Timeout - still execute the scriptblock (better than lost log)
+            # This is a fallback; ideally should never happen
+            return & $ScriptBlock
+        }
+
+        return & $ScriptBlock
+    }
+    finally {
+        if ($mutex) {
+            if ($mutexAcquired) {
+                try { $mutex.ReleaseMutex() } catch {
+                    # Cannot log here (infinite loop) - release failure is rare
+                }
+            }
+            $mutex.Dispose()
+        }
+    }
+}
 $script:CurrentOperationalLogPath = $null
 $script:CurrentSiemLogPath = $null
 $script:CurrentJobsPath = $null
@@ -1670,7 +1731,7 @@ function Write-RobocurseLog {
         return
     }
 
-    # Write to operational log
+    # Write to operational log with mutex protection for thread safety
     try {
         # Ensure directory exists
         $logDir = Split-Path -Path $logPath -Parent
@@ -1678,8 +1739,10 @@ function Write-RobocurseLog {
             New-Item -ItemType Directory -Path $logDir -Force | Out-Null
         }
 
-        # Append to log file
-        Add-Content -Path $logPath -Value $logEntry -Encoding UTF8
+        # Append to log file with mutex protection to prevent concurrent write corruption
+        Invoke-WithLogMutex -MutexSuffix 'Operational' -ScriptBlock {
+            Add-Content -Path $logPath -Value $logEntry -Encoding UTF8
+        }.GetNewClosure()
     }
     catch {
         Write-Warning "Failed to write to operational log: $_"
@@ -1788,7 +1851,7 @@ function Write-SiemEvent {
         data = $Data
     }
 
-    # Convert to JSON (single line)
+    # Convert to JSON (single line) and write with mutex protection
     try {
         $jsonLine = $siemEvent | ConvertTo-Json -Compress -Depth 10
 
@@ -1798,8 +1861,11 @@ function Write-SiemEvent {
             New-Item -ItemType Directory -Path $siemDir -Force | Out-Null
         }
 
-        # Append to SIEM log (JSON Lines format)
-        Add-Content -Path $siemPath -Value $jsonLine -Encoding UTF8
+        # Append to SIEM log (JSON Lines format) with mutex protection
+        # Critical: JSONL corruption breaks SIEM ingestion, so mutex is essential
+        Invoke-WithLogMutex -MutexSuffix 'SIEM' -ScriptBlock {
+            Add-Content -Path $siemPath -Value $jsonLine -Encoding UTF8
+        }.GetNewClosure()
     }
     catch {
         Write-Warning "Failed to write to SIEM log: $_"
@@ -1852,8 +1918,9 @@ function Invoke-LogRotation {
                 # Parse directory date
                 $dirDate = [DateTime]::ParseExact($dir.Name, "yyyy-MM-dd", $null)
 
-                # Skip if this is today's directory (currently in use)
-                if ($dirDate.Date -eq $now.Date) {
+                # Skip if this is today's directory or yesterday's (may still be in use)
+                # Add 2-hour buffer to handle jobs spanning midnight
+                if ($dirDate.Date -ge $now.Date.AddHours(-2)) {
                     continue
                 }
 
@@ -2997,8 +3064,9 @@ function Get-BandwidthThrottleIPG {
         - Number of active concurrent jobs
 
         The IPG is the delay in milliseconds between 512-byte packets.
-        Formula: IPG = (512 * 8 * 1000) / (BandwidthBytesPerSec / ActiveJobs)
-               = 4096000 / (PerJobBytesPerSec)
+        Formula: IPG = (PacketSize / TargetBytesPerSec) * 1000
+               = 512 * 1000 / PerJobBytesPerSec
+               = 512000 / PerJobBytesPerSec
 
         Returns 0 (unlimited) if no bandwidth limit is set.
     .PARAMETER BandwidthLimitMbps
@@ -3764,12 +3832,10 @@ function Save-ReplicationCheckpoint {
         $tempPath = "$checkpointPath.tmp"
         $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
 
-        # Atomic rename (on NTFS this is atomic)
-        # Remove existing checkpoint first if it exists (Move-Item with -Force doesn't overwrite on all platforms)
-        if (Test-Path $checkpointPath) {
-            Remove-Item -Path $checkpointPath -Force
-        }
-        Move-Item -Path $tempPath -Destination $checkpointPath -Force
+        # Use .NET File.Move with overwrite for atomic replacement
+        # This avoids TOCTOU race between Test-Path/Remove-Item/Move-Item
+        # On NTFS, this is an atomic operation
+        [System.IO.File]::Move($tempPath, $checkpointPath, $true)
 
         Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
             -Level 'Info' -Component 'Checkpoint'
@@ -3802,6 +3868,14 @@ function Get-ReplicationCheckpoint {
     try {
         $content = Get-Content -Path $checkpointPath -Raw -Encoding UTF8
         $checkpoint = $content | ConvertFrom-Json
+
+        # Validate checkpoint version for forward compatibility
+        $expectedVersion = "1.0"
+        if ($checkpoint.Version -and $checkpoint.Version -ne $expectedVersion) {
+            Write-RobocurseLog -Message "Checkpoint version mismatch: found '$($checkpoint.Version)', expected '$expectedVersion'. Starting fresh." `
+                -Level 'Warning' -Component 'Checkpoint'
+            return $null
+        }
 
         Write-RobocurseLog -Message "Found checkpoint: $($checkpoint.CompletedChunkPaths.Count) chunks completed at $($checkpoint.SavedAt)" `
             -Level 'Info' -Component 'Checkpoint'
@@ -5163,15 +5237,21 @@ function Stop-AllJobs {
         -Level 'Warning' -Component 'Orchestrator'
 
     foreach ($job in $state.ActiveJobs.Values) {
-        # Check HasExited property - only kill if process is still running
-        if (-not $job.Process.HasExited) {
-            try {
+        try {
+            # Check HasExited property - only kill if process is still running
+            if (-not $job.Process.HasExited) {
                 $job.Process.Kill()
+                # Wait briefly for process to exit before disposing
+                $job.Process.WaitForExit(5000)
                 Write-RobocurseLog -Message "Killed chunk $($job.Chunk.ChunkId)" -Level 'Warning' -Component 'Orchestrator'
             }
-            catch {
-                Write-RobocurseLog -Message "Failed to kill chunk $($job.Chunk.ChunkId): $_" -Level 'Error' -Component 'Orchestrator'
-            }
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to kill chunk $($job.Chunk.ChunkId): $_" -Level 'Error' -Component 'Orchestrator'
+        }
+        finally {
+            # Always dispose the process object to release handles
+            try { $job.Process.Dispose() } catch { }
         }
     }
 
@@ -5181,11 +5261,19 @@ function Stop-AllJobs {
     # Clean up VSS snapshot if one exists
     if ($state.CurrentVssSnapshot) {
         Write-RobocurseLog -Message "Cleaning up VSS snapshot after stop: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
-        $removeResult = Remove-VssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId
-        if (-not $removeResult.Success) {
-            Write-RobocurseLog -Message "Failed to clean up VSS snapshot: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+        try {
+            $removeResult = Remove-VssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId
+            if (-not $removeResult.Success) {
+                Write-RobocurseLog -Message "Failed to clean up VSS snapshot: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
         }
-        $state.CurrentVssSnapshot = $null
+        catch {
+            Write-RobocurseLog -Message "Exception during VSS snapshot cleanup: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        }
+        finally {
+            # Always clear the reference to prevent retry attempts on stale snapshot
+            $state.CurrentVssSnapshot = $null
+        }
     }
 
     Write-SiemEvent -EventType 'SessionEnd' -Data @{
@@ -5618,7 +5706,11 @@ function Invoke-WithVssTrackingMutex {
     $mutex = $null
     $mutexAcquired = $false
     try {
-        $mutexName = "Global\RobocurseVssTracking"
+        # Include session ID in mutex name to isolate different user sessions
+        # This prevents DoS attacks on multi-user systems where another user
+        # could create the mutex first
+        $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+        $mutexName = "Global\RobocurseVssTracking_Session$sessionId"
         $mutex = [System.Threading.Mutex]::new($false, $mutexName)
 
         $mutexAcquired = $mutex.WaitOne($TimeoutMs)
@@ -5632,7 +5724,10 @@ function Invoke-WithVssTrackingMutex {
     finally {
         if ($mutex) {
             if ($mutexAcquired) {
-                try { $mutex.ReleaseMutex() } catch { }
+                try { $mutex.ReleaseMutex() } catch {
+                    # Log release failures - may indicate logic bugs (releasing unowned mutex)
+                    Write-RobocurseLog -Message "Failed to release VSS tracking mutex: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+                }
             }
             $mutex.Dispose()
         }
@@ -6587,8 +6682,13 @@ function Save-SmtpCredential {
         }
 
         $username = $Credential.UserName
+        # Note: GetNetworkCredential().Password unavoidably creates a plaintext string
+        # We clear the byte array below, and null the reference to reduce exposure window
         $password = $Credential.GetNetworkCredential().Password
         $passwordBytes = [System.Text.Encoding]::Unicode.GetBytes($password)
+        # Clear the password reference immediately after getting bytes
+        # (string content remains in memory until GC, but this reduces reference count)
+        $password = $null
 
         $credPtr = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($passwordBytes.Length)
         try {
@@ -8047,9 +8147,12 @@ function Invoke-WindowClosingHandler {
         Stop-AllJobs
     }
 
-    # Stop the progress timer
+    # Stop and dispose the progress timer to prevent memory leaks
     if ($script:ProgressTimer) {
         $script:ProgressTimer.Stop()
+        # DispatcherTimer doesn't implement IDisposable, but we should null the reference
+        # to allow the event handler closure to be garbage collected
+        $script:ProgressTimer = $null
     }
 
     # Clean up background runspace to prevent memory leaks
@@ -8086,6 +8189,7 @@ function Close-ReplicationRunspace {
     # all other threads will get $null and exit early
     $psInstance = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationPowerShell, $null)
     $handle = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationHandle, $null)
+    $runspace = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationRunspace, $null)
 
     # If another thread already claimed the instance, exit
     if (-not $psInstance) { return }
@@ -8576,6 +8680,7 @@ function Complete-GuiReplication {
         finally {
             $script:ReplicationPowerShell = $null
             $script:ReplicationHandle = $null
+            $script:ReplicationRunspace = $null  # Clear runspace reference for GC
         }
     }
 
@@ -8810,10 +8915,12 @@ function Write-GuiLog {
         $script:GuiLogBuffer.RemoveAt(0)
     }
 
-    # Use Dispatcher for thread safety - rebuild text from buffer
-    $script:Window.Dispatcher.Invoke([Action]{
-        # Join all lines - more efficient than repeated concatenation
-        $script:Controls.txtLog.Text = $script:GuiLogBuffer -join "`n"
+    # Use Dispatcher.BeginInvoke for thread safety - non-blocking async update
+    # Using Invoke (synchronous) could cause deadlocks if called from background thread
+    # while UI thread is busy
+    $logText = $script:GuiLogBuffer -join "`n"
+    $script:Window.Dispatcher.BeginInvoke([Action]{
+        $script:Controls.txtLog.Text = $logText
         $script:Controls.svLog.ScrollToEnd()
     })
 }

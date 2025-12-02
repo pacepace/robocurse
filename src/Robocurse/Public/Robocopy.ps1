@@ -12,8 +12,9 @@ function Get-BandwidthThrottleIPG {
         - Number of active concurrent jobs
 
         The IPG is the delay in milliseconds between 512-byte packets.
-        Formula: IPG = (512 * 8 * 1000) / (BandwidthBytesPerSec / ActiveJobs)
-               = 4096000 / (PerJobBytesPerSec)
+        Formula: IPG = (PacketSize / TargetBytesPerSec) * 1000
+               = 512 * 1000 / PerJobBytesPerSec
+               = 512000 / PerJobBytesPerSec
 
         Returns 0 (unlimited) if no bandwidth limit is set.
     .PARAMETER BandwidthLimitMbps

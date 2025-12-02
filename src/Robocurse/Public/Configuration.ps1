@@ -551,6 +551,14 @@ function Test-RobocurseConfig {
                 $errors += "GlobalSettings.MaxConcurrentJobs must be between 1 and 32 (current: $maxJobs)"
             }
         }
+
+        # Validate BandwidthLimitMbps (0 = unlimited, positive = limit in Mbps)
+        if ($gsPropertyNames -contains 'BandwidthLimitMbps') {
+            $bandwidthLimit = $gs.BandwidthLimitMbps
+            if ($null -ne $bandwidthLimit -and $bandwidthLimit -lt 0) {
+                $errors += "GlobalSettings.BandwidthLimitMbps must be non-negative (current: $bandwidthLimit)"
+            }
+        }
     }
 
     # Validate Email configuration if enabled
@@ -565,7 +573,8 @@ function Test-RobocurseConfig {
         if ([string]::IsNullOrWhiteSpace($email.From)) {
             $errors += "Email.From is required when Email.Enabled is true"
         }
-        elseif ($email.From -notmatch '^\S+@\S+\.\S+$') {
+        elseif ($email.From -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+            # Stricter pattern: no multiple @ symbols, no whitespace
             $errors += "Email.From is not a valid email address format: $($email.From)"
         }
 
@@ -573,10 +582,10 @@ function Test-RobocurseConfig {
             $errors += "Email.To must contain at least one recipient when Email.Enabled is true"
         }
         else {
-            # Validate each recipient email format
+            # Validate each recipient email format (stricter: no multiple @, no whitespace)
             $toArray = @($email.To)
             for ($j = 0; $j -lt $toArray.Count; $j++) {
-                if ($toArray[$j] -notmatch '^\S+@\S+\.\S+$') {
+                if ($toArray[$j] -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
                     $errors += "Email.To[$j] is not a valid email address format: $($toArray[$j])"
                 }
             }
