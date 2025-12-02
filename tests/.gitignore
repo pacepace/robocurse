@@ -1,0 +1,16 @@
+# Test artifacts - generated during test runs
+# These directories are created by integration tests for real robocopy testing
+
+# Test fixture output directories
+Fixtures/Output/
+Fixtures/Logs/
+
+# Temporary test directories that may escape cleanup
+**/temp-test-*
+**/Robocurse-Test-*
+
+# Any .log files in the test directory (robocopy logs)
+*.log
+
+# Pester output files
+TestResults*.xml

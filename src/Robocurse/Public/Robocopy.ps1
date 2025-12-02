@@ -132,10 +132,17 @@ function New-RobocopyArguments {
 
         [hashtable]$RobocopyOptions = @{},
 
-        [string[]]$ChunkArgs = @(),
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$ChunkArgs,
 
         [switch]$DryRun
     )
+
+    # Handle null ChunkArgs (PS 5.1 unwraps empty arrays to null)
+    if ($null -eq $ChunkArgs) {
+        $ChunkArgs = @()
+    }
 
     # Validate paths for command injection before using them
     $safeSourcePath = Get-SanitizedPath -Path $SourcePath -ParameterName "SourcePath"
