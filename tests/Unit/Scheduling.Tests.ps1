@@ -81,7 +81,7 @@ Describe "Scheduling" {
 
             $result = Register-RobocurseTask -ConfigPath "C:\test\config.json" -Schedule "Daily" -Time "03:00"
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke Register-ScheduledTask -Times 1 -ParameterFilter {
                 $TaskName -eq "Robocurse-Replication" -and
                 $Description -eq "Robocurse automatic directory replication"
@@ -98,7 +98,7 @@ Describe "Scheduling" {
 
             $result = Register-RobocurseTask -ConfigPath "C:\test\config.json" -Schedule "Weekly" -DaysOfWeek @('Monday', 'Friday')
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke New-ScheduledTaskTrigger -Times 1 -ParameterFilter {
                 $Weekly -eq $true -and
                 $DaysOfWeek -contains 'Monday' -and
@@ -116,7 +116,7 @@ Describe "Scheduling" {
 
             $result = Register-RobocurseTask -ConfigPath "C:\test\config.json" -Schedule "Hourly" -Time "10:00"
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke New-ScheduledTaskTrigger -Times 1 -ParameterFilter {
                 $Once -eq $true -and
                 $RepetitionInterval -ne $null
@@ -133,7 +133,7 @@ Describe "Scheduling" {
 
             $result = Register-RobocurseTask -ConfigPath "C:\test\config.json" -RunAsSystem
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke New-ScheduledTaskPrincipal -Times 1 -ParameterFilter {
                 $UserId -eq "SYSTEM" -and
                 $LogonType -eq "ServiceAccount"
@@ -150,7 +150,7 @@ Describe "Scheduling" {
 
             $result = Register-RobocurseTask -ConfigPath "C:\test\config.json"
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke New-ScheduledTaskPrincipal -Times 1 -ParameterFilter {
                 $UserId -eq $env:USERNAME -and
                 $LogonType -eq "S4U"
@@ -188,7 +188,7 @@ Describe "Scheduling" {
 
             $result = Register-RobocurseTask -ConfigPath "C:\test\config.json"
 
-            $result | Should -Be $false
+            $result.Success | Should -Be $false
             Should -Invoke Write-RobocurseLog -Times 1 -ParameterFilter {
                 $Level -eq "Error" -and
                 $Component -eq "Scheduler"
@@ -205,7 +205,7 @@ Describe "Scheduling" {
 
             $result = Register-RobocurseTask -TaskName "Custom-Task" -ConfigPath "C:\test\config.json"
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke Register-ScheduledTask -Times 1 -ParameterFilter {
                 $TaskName -eq "Custom-Task"
             }
@@ -219,7 +219,7 @@ Describe "Scheduling" {
 
             $result = Unregister-RobocurseTask
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke Unregister-ScheduledTask -Times 1 -ParameterFilter {
                 $TaskName -eq "Robocurse-Replication" -and
                 $Confirm -eq $false
@@ -232,7 +232,7 @@ Describe "Scheduling" {
 
             $result = Unregister-RobocurseTask -TaskName "Custom-Task"
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke Unregister-ScheduledTask -Times 1 -ParameterFilter {
                 $TaskName -eq "Custom-Task"
             }
@@ -244,7 +244,7 @@ Describe "Scheduling" {
 
             $result = Unregister-RobocurseTask
 
-            $result | Should -Be $false
+            $result.Success | Should -Be $false
             Should -Invoke Write-RobocurseLog -Times 1 -ParameterFilter {
                 $Level -eq "Error"
             }
@@ -373,7 +373,7 @@ Describe "Scheduling" {
 
             $result = Start-RobocurseTask
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke Start-ScheduledTask -Times 1 -ParameterFilter {
                 $TaskName -eq "Robocurse-Replication"
             }
@@ -385,7 +385,7 @@ Describe "Scheduling" {
 
             $result = Start-RobocurseTask -TaskName "Custom-Task"
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke Start-ScheduledTask -Times 1 -ParameterFilter {
                 $TaskName -eq "Custom-Task"
             }
@@ -397,7 +397,7 @@ Describe "Scheduling" {
 
             $result = Start-RobocurseTask
 
-            $result | Should -Be $false
+            $result.Success | Should -Be $false
         }
     }
 
@@ -408,7 +408,7 @@ Describe "Scheduling" {
 
             $result = Enable-RobocurseTask
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke Enable-ScheduledTask -Times 1 -ParameterFilter {
                 $TaskName -eq "Robocurse-Replication"
             }
@@ -420,7 +420,7 @@ Describe "Scheduling" {
 
             $result = Enable-RobocurseTask -TaskName "Custom-Task"
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke Enable-ScheduledTask -Times 1 -ParameterFilter {
                 $TaskName -eq "Custom-Task"
             }
@@ -432,7 +432,7 @@ Describe "Scheduling" {
 
             $result = Enable-RobocurseTask
 
-            $result | Should -Be $false
+            $result.Success | Should -Be $false
         }
     }
 
@@ -443,7 +443,7 @@ Describe "Scheduling" {
 
             $result = Disable-RobocurseTask
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke Disable-ScheduledTask -Times 1 -ParameterFilter {
                 $TaskName -eq "Robocurse-Replication"
             }
@@ -455,7 +455,7 @@ Describe "Scheduling" {
 
             $result = Disable-RobocurseTask -TaskName "Custom-Task"
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Should -Invoke Disable-ScheduledTask -Times 1 -ParameterFilter {
                 $TaskName -eq "Custom-Task"
             }
@@ -467,7 +467,7 @@ Describe "Scheduling" {
 
             $result = Disable-RobocurseTask
 
-            $result | Should -Be $false
+            $result.Success | Should -Be $false
         }
     }
 
@@ -519,7 +519,7 @@ Describe "Scheduling" {
 
                 $result = Register-RobocurseTask -ConfigPath "C:\test\config.json"
 
-                $result | Should -Be $false
+                $result.Success | Should -Be $false
                 Should -Invoke Write-RobocurseLog -Times 1 -ParameterFilter {
                     $Level -eq "Warning" -and
                     $Message -match "Windows"
@@ -533,7 +533,7 @@ Describe "Scheduling" {
 
                 $result = Unregister-RobocurseTask
 
-                $result | Should -Be $false
+                $result.Success | Should -Be $false
             }
         }
 

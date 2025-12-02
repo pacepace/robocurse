@@ -600,17 +600,14 @@ function Save-RobocurseConfig {
     .PARAMETER Path
         Path to save the configuration file. Defaults to .\Robocurse.config.json
     .OUTPUTS
-        Boolean - $true on success, $false on failure
-    .NOTES
-        Error Behavior: Returns $false on error. Never throws.
-        Use -Verbose to see error details.
+        OperationResult - Success=$true with Data=$Path on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
         $config = New-DefaultConfig
-        Save-RobocurseConfig -Config $config
-        Saves configuration to default path
+        $result = Save-RobocurseConfig -Config $config
+        if ($result.Success) { "Saved to $($result.Data)" }
     .EXAMPLE
-        Save-RobocurseConfig -Config $config -Path "C:\Configs\custom.json"
-        Saves configuration to custom path
+        $result = Save-RobocurseConfig -Config $config -Path "C:\Configs\custom.json"
+        if (-not $result.Success) { Write-Error $result.ErrorMessage }
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -635,11 +632,11 @@ function Save-RobocurseConfig {
         $jsonContent | Set-Content -Path $Path -Encoding UTF8 -ErrorAction Stop
 
         Write-Verbose "Configuration saved successfully to '$Path'"
-        return $true
+        return New-OperationResult -Success $true -Data $Path
     }
     catch {
         Write-Verbose "Failed to save configuration to '$Path': $($_.Exception.Message)"
-        return $false
+        return New-OperationResult -Success $false -ErrorMessage "Failed to save configuration to '$Path': $($_.Exception.Message)" -ErrorRecord $_
     }
 }
 
@@ -978,7 +975,8 @@ function Write-SiemEvent {
     param(
         [Parameter(Mandatory)]
         [ValidateSet('SessionStart', 'SessionEnd', 'ProfileStart', 'ProfileComplete',
-                     'ChunkStart', 'ChunkComplete', 'ChunkError', 'ConfigChange')]
+                     'ChunkStart', 'ChunkComplete', 'ChunkError', 'ConfigChange', 'EmailSent',
+                     'VssSnapshotCreated', 'VssSnapshotRemoved')]
         [string]$EventType,
 
         [hashtable]$Data = @{},
@@ -2431,9 +2429,11 @@ function Start-ProfileReplication {
 
     if ($Profile.UseVSS) {
         if (Test-VssSupported -Path $Profile.Source) {
-            try {
-                Write-RobocurseLog -Message "Creating VSS snapshot for: $($Profile.Source)" -Level 'Info' -Component 'VSS'
-                $snapshot = New-VssSnapshot -SourcePath $Profile.Source
+            Write-RobocurseLog -Message "Creating VSS snapshot for: $($Profile.Source)" -Level 'Info' -Component 'VSS'
+            $snapshotResult = New-VssSnapshot -SourcePath $Profile.Source
+
+            if ($snapshotResult.Success) {
+                $snapshot = $snapshotResult.Data
                 $state.CurrentVssSnapshot = $snapshot
 
                 # Convert source path to use VSS shadow copy
@@ -2446,8 +2446,8 @@ function Start-ProfileReplication {
                     shadowPath = $snapshot.ShadowPath
                 }
             }
-            catch {
-                Write-RobocurseLog -Message "Failed to create VSS snapshot, continuing without VSS: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+            else {
+                Write-RobocurseLog -Message "Failed to create VSS snapshot, continuing without VSS: $($snapshotResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
                 $state.CurrentVssSnapshot = $null
                 $effectiveSource = $Profile.Source
             }
@@ -2782,21 +2782,20 @@ function Complete-CurrentProfile {
 
     # Clean up VSS snapshot if one was created for this profile
     if ($state.CurrentVssSnapshot) {
-        try {
-            Write-RobocurseLog -Message "Cleaning up VSS snapshot: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
-            Remove-VssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId
+        Write-RobocurseLog -Message "Cleaning up VSS snapshot: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
+        $removeResult = Remove-VssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId
 
+        if ($removeResult.Success) {
             Write-SiemEvent -EventType 'VssSnapshotRemoved' -Data @{
                 profileName = $state.CurrentProfile.Name
                 shadowId = $state.CurrentVssSnapshot.ShadowId
             }
         }
-        catch {
-            Write-RobocurseLog -Message "Failed to clean up VSS snapshot: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+        else {
+            Write-RobocurseLog -Message "Failed to clean up VSS snapshot: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
         }
-        finally {
-            $state.CurrentVssSnapshot = $null
-        }
+
+        $state.CurrentVssSnapshot = $null
     }
 
     # Invoke callback
@@ -2858,16 +2857,12 @@ function Stop-AllJobs {
 
     # Clean up VSS snapshot if one exists
     if ($state.CurrentVssSnapshot) {
-        try {
-            Write-RobocurseLog -Message "Cleaning up VSS snapshot after stop: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
-            Remove-VssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId
+        Write-RobocurseLog -Message "Cleaning up VSS snapshot after stop: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
+        $removeResult = Remove-VssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId
+        if (-not $removeResult.Success) {
+            Write-RobocurseLog -Message "Failed to clean up VSS snapshot: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
         }
-        catch {
-            Write-RobocurseLog -Message "Failed to clean up VSS snapshot: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
-        }
-        finally {
-            $state.CurrentVssSnapshot = $null
-        }
+        $state.CurrentVssSnapshot = $null
     }
 
     Write-SiemEvent -EventType 'SessionEnd' -Data @{
@@ -3061,13 +3056,13 @@ function New-VssSnapshot {
     .PARAMETER SourcePath
         Path on the volume to snapshot (used to determine volume)
     .OUTPUTS
-        PSCustomObject with ShadowId, ShadowPath, SourceVolume, CreatedAt
+        OperationResult - Success=$true with Data=SnapshotInfo (ShadowId, ShadowPath, SourceVolume, CreatedAt),
+        Success=$false with ErrorMessage on failure
     .NOTES
-        Error Behavior: Throws exception with context on failure.
         Requires Administrator privileges.
     .EXAMPLE
-        $snapshot = New-VssSnapshot -SourcePath "C:\Users"
-        Returns object with shadow copy details
+        $result = New-VssSnapshot -SourcePath "C:\Users"
+        if ($result.Success) { $snapshot = $result.Data }
     #>
     param(
         [Parameter(Mandatory)]
@@ -3088,7 +3083,7 @@ function New-VssSnapshot {
         # Determine volume from path
         $volume = Get-VolumeFromPath -Path $SourcePath
         if (-not $volume) {
-            throw "Cannot create VSS snapshot: Unable to determine volume from path '$SourcePath'"
+            return New-OperationResult -Success $false -ErrorMessage "Cannot create VSS snapshot: Unable to determine volume from path '$SourcePath'"
         }
 
         Write-RobocurseLog -Message "Creating VSS snapshot for volume $volume (from path: $SourcePath)" -Level 'Info' -Component 'VSS'
@@ -3106,7 +3101,7 @@ function New-VssSnapshot {
             # 0x80042316 - VSS service not running
             # 0x80042302 - Volume not supported for shadow copies
             $errorCode = "0x{0:X8}" -f $result.ReturnValue
-            throw "Failed to create shadow copy: Error $errorCode (ReturnValue: $($result.ReturnValue))"
+            return New-OperationResult -Success $false -ErrorMessage "Failed to create shadow copy: Error $errorCode (ReturnValue: $($result.ReturnValue))"
         }
 
         # Get shadow copy details
@@ -3115,7 +3110,7 @@ function New-VssSnapshot {
 
         $shadow = Get-CimInstance -ClassName Win32_ShadowCopy | Where-Object { $_.ID -eq $shadowId }
         if (-not $shadow) {
-            throw "Shadow copy created but could not retrieve details for ID: $shadowId"
+            return New-OperationResult -Success $false -ErrorMessage "Shadow copy created but could not retrieve details for ID: $shadowId"
         }
 
         $snapshotInfo = [PSCustomObject]@{
@@ -3127,15 +3122,11 @@ function New-VssSnapshot {
 
         Write-RobocurseLog -Message "VSS snapshot ready. Shadow path: $($snapshotInfo.ShadowPath)" -Level 'Info' -Component 'VSS'
 
-        return $snapshotInfo
+        return New-OperationResult -Success $true -Data $snapshotInfo
     }
     catch {
         Write-RobocurseLog -Message "Failed to create VSS snapshot for '$SourcePath': $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
-        $contextError = [System.Exception]::new(
-            "Failed to create VSS snapshot for '$SourcePath': $($_.Exception.Message)",
-            $_.Exception
-        )
-        throw $contextError
+        return New-OperationResult -Success $false -ErrorMessage "Failed to create VSS snapshot for '$SourcePath': $($_.Exception.Message)" -ErrorRecord $_
     }
 }
 
@@ -3148,10 +3139,11 @@ function Remove-VssSnapshot {
         used by the snapshot.
     .PARAMETER ShadowId
         ID of shadow copy to delete (GUID string)
-    .NOTES
-        Error Behavior: Throws exception with context on failure.
+    .OUTPUTS
+        OperationResult - Success=$true with Data=$ShadowId on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
-        Remove-VssSnapshot -ShadowId "{12345678-1234-1234-1234-123456789012}"
+        $result = Remove-VssSnapshot -ShadowId "{12345678-1234-1234-1234-123456789012}"
+        if ($result.Success) { "Snapshot deleted" }
     #>
     param(
         [Parameter(Mandatory)]
@@ -3165,18 +3157,17 @@ function Remove-VssSnapshot {
         if ($shadow) {
             Remove-CimInstance -InputObject $shadow
             Write-RobocurseLog -Message "Deleted VSS snapshot: $ShadowId" -Level 'Info' -Component 'VSS'
+            return New-OperationResult -Success $true -Data $ShadowId
         }
         else {
             Write-RobocurseLog -Message "VSS snapshot not found: $ShadowId (may have been already deleted)" -Level 'Warning' -Component 'VSS'
+            # Still return success since the snapshot is gone (idempotent operation)
+            return New-OperationResult -Success $true -Data $ShadowId
         }
     }
     catch {
         Write-RobocurseLog -Message "Error deleting VSS snapshot $ShadowId : $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
-        $contextError = [System.Exception]::new(
-            "Failed to delete VSS snapshot '$ShadowId': $($_.Exception.Message)",
-            $_.Exception
-        )
-        throw $contextError
+        return New-OperationResult -Success $false -ErrorMessage "Failed to delete VSS snapshot '$ShadowId': $($_.Exception.Message)" -ErrorRecord $_
     }
 }
 
@@ -3325,15 +3316,16 @@ function Invoke-WithVssSnapshot {
         Path to snapshot
     .PARAMETER ScriptBlock
         Code to execute (receives $VssPath parameter)
+    .OUTPUTS
+        OperationResult - Success=$true with Data=scriptblock result, Success=$false with ErrorMessage on failure
     .NOTES
-        Error Behavior: Throws exception with context on failure.
         Cleanup is guaranteed via finally block.
     .EXAMPLE
-        Invoke-WithVssSnapshot -SourcePath "C:\Users" -ScriptBlock {
+        $result = Invoke-WithVssSnapshot -SourcePath "C:\Users" -ScriptBlock {
             param($VssPath)
-            # Copy files from $VssPath (snapshot)
             Copy-Item -Path "$VssPath\*" -Destination "D:\Backup" -Recurse
         }
+        if (-not $result.Success) { Write-Error $result.ErrorMessage }
     #>
     param(
         [Parameter(Mandatory)]
@@ -3346,31 +3338,32 @@ function Invoke-WithVssSnapshot {
     $snapshot = $null
     try {
         Write-RobocurseLog -Message "Creating VSS snapshot for $SourcePath" -Level 'Info' -Component 'VSS'
-        $snapshot = New-VssSnapshot -SourcePath $SourcePath
+        $snapshotResult = New-VssSnapshot -SourcePath $SourcePath
 
+        if (-not $snapshotResult.Success) {
+            return New-OperationResult -Success $false -ErrorMessage "Failed to create VSS snapshot: $($snapshotResult.ErrorMessage)" -ErrorRecord $snapshotResult.ErrorRecord
+        }
+
+        $snapshot = $snapshotResult.Data
         $vssPath = Get-VssPath -OriginalPath $SourcePath -VssSnapshot $snapshot
 
         Write-RobocurseLog -Message "VSS path: $vssPath" -Level 'Debug' -Component 'VSS'
 
         # Execute the scriptblock with the VSS path
-        & $ScriptBlock -VssPath $vssPath
+        $scriptResult = & $ScriptBlock -VssPath $vssPath
+
+        return New-OperationResult -Success $true -Data $scriptResult
     }
     catch {
         Write-RobocurseLog -Message "Error during VSS snapshot operation for '$SourcePath': $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
-        $contextError = [System.Exception]::new(
-            "Failed to execute VSS snapshot operation for '$SourcePath': $($_.Exception.Message)",
-            $_.Exception
-        )
-        throw $contextError
+        return New-OperationResult -Success $false -ErrorMessage "Failed to execute VSS snapshot operation for '$SourcePath': $($_.Exception.Message)" -ErrorRecord $_
     }
     finally {
         if ($snapshot) {
             Write-RobocurseLog -Message "Cleaning up VSS snapshot" -Level 'Info' -Component 'VSS'
-            try {
-                Remove-VssSnapshot -ShadowId $snapshot.ShadowId
-            }
-            catch {
-                Write-RobocurseLog -Message "Failed to cleanup VSS snapshot: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+            $removeResult = Remove-VssSnapshot -ShadowId $snapshot.ShadowId
+            if (-not $removeResult.Success) {
+                Write-RobocurseLog -Message "Failed to cleanup VSS snapshot: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
             }
         }
     }
@@ -3531,9 +3524,12 @@ function Save-SmtpCredential {
         Credential target name (default: Robocurse-SMTP)
     .PARAMETER Credential
         PSCredential to save
+    .OUTPUTS
+        OperationResult - Success=$true with Data=$Target on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
         $cred = Get-Credential
-        Save-SmtpCredential -Credential $cred
+        $result = Save-SmtpCredential -Credential $cred
+        if ($result.Success) { "Credential saved" }
     #>
     param(
         [string]$Target = "Robocurse-SMTP",
@@ -3545,14 +3541,14 @@ function Save-SmtpCredential {
     # Check if running on non-Windows
     if (-not (Test-IsWindowsPlatform)) {
         Write-RobocurseLog -Message "Credential Manager not available on non-Windows platforms. Use environment variables ROBOCURSE_SMTP_USER and ROBOCURSE_SMTP_PASS instead." -Level 'Warning' -Component 'Email'
-        return
+        return New-OperationResult -Success $false -ErrorMessage "Credential Manager not available on non-Windows platforms. Use environment variables ROBOCURSE_SMTP_USER and ROBOCURSE_SMTP_PASS instead."
     }
 
     try {
         Initialize-CredentialManager
 
         if (-not $script:CredentialManagerTypeAdded) {
-            throw "Credential Manager types not available"
+            return New-OperationResult -Success $false -ErrorMessage "Credential Manager types not available"
         }
 
         $username = $Credential.UserName
@@ -3576,9 +3572,11 @@ function Save-SmtpCredential {
 
             if ($success) {
                 Write-RobocurseLog -Message "Credential saved to Credential Manager: $Target" -Level 'Info' -Component 'Email'
+                return New-OperationResult -Success $true -Data $Target
             }
             else {
-                throw "CredWrite failed with error: $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+                $errorCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+                return New-OperationResult -Success $false -ErrorMessage "CredWrite failed with error code: $errorCode"
             }
         }
         finally {
@@ -3589,7 +3587,7 @@ function Save-SmtpCredential {
     }
     catch {
         Write-RobocurseLog -Message "Failed to save credential: $_" -Level 'Error' -Component 'Email'
-        throw
+        return New-OperationResult -Success $false -ErrorMessage "Failed to save credential: $($_.Exception.Message)" -ErrorRecord $_
     }
 }
 
@@ -3601,9 +3599,14 @@ function Remove-SmtpCredential {
         Uses P/Invoke to advapi32.dll CredDelete to remove stored credentials.
     .PARAMETER Target
         Credential target name (default: Robocurse-SMTP)
+    .OUTPUTS
+        OperationResult - Success=$true with Data=$Target on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
-        Remove-SmtpCredential
-        Remove-SmtpCredential -Target "CustomSMTP"
+        $result = Remove-SmtpCredential
+        if ($result.Success) { "Credential removed" }
+    .EXAMPLE
+        $result = Remove-SmtpCredential -Target "CustomSMTP"
+        if (-not $result.Success) { Write-Warning $result.ErrorMessage }
     #>
     param(
         [string]$Target = "Robocurse-SMTP"
@@ -3612,28 +3615,30 @@ function Remove-SmtpCredential {
     # Check if running on non-Windows
     if (-not (Test-IsWindowsPlatform)) {
         Write-RobocurseLog -Message "Credential Manager not available on non-Windows platforms." -Level 'Warning' -Component 'Email'
-        return
+        return New-OperationResult -Success $false -ErrorMessage "Credential Manager not available on non-Windows platforms."
     }
 
     try {
         Initialize-CredentialManager
 
         if (-not $script:CredentialManagerTypeAdded) {
-            throw "Credential Manager types not available"
+            return New-OperationResult -Success $false -ErrorMessage "Credential Manager types not available"
         }
 
         $success = [CredentialManager]::CredDelete($Target, [CredentialManager]::CRED_TYPE_GENERIC, 0)
 
         if ($success) {
             Write-RobocurseLog -Message "Credential removed from Credential Manager: $Target" -Level 'Info' -Component 'Email'
+            return New-OperationResult -Success $true -Data $Target
         }
         else {
             Write-RobocurseLog -Message "Credential not found or could not be deleted: $Target" -Level 'Warning' -Component 'Email'
+            return New-OperationResult -Success $false -ErrorMessage "Credential not found or could not be deleted: $Target"
         }
     }
     catch {
         Write-RobocurseLog -Message "Failed to remove credential: $_" -Level 'Error' -Component 'Email'
-        throw
+        return New-OperationResult -Success $false -ErrorMessage "Failed to remove credential: $($_.Exception.Message)" -ErrorRecord $_
     }
 }
 
@@ -3871,15 +3876,17 @@ function Send-CompletionEmail {
     .DESCRIPTION
         Sends an HTML email with replication results. Checks if email is enabled,
         retrieves credentials, builds HTML body, and sends via SMTP with TLS.
-        Errors are logged but do not throw exceptions.
     .PARAMETER Config
         Email configuration from Robocurse config
     .PARAMETER Results
         Replication results summary
     .PARAMETER Status
         Overall status: Success, Warning, Failed
+    .OUTPUTS
+        OperationResult - Success=$true on send success, Success=$false with ErrorMessage on failure
     .EXAMPLE
-        Send-CompletionEmail -Config $config.Email -Results $results -Status 'Success'
+        $result = Send-CompletionEmail -Config $config.Email -Results $results -Status 'Success'
+        if (-not $result.Success) { Write-Warning $result.ErrorMessage }
     #>
     param(
         [Parameter(Mandatory)]
@@ -3896,34 +3903,34 @@ function Send-CompletionEmail {
 
     # Validate Config has required properties
     if ($null -eq $Config.Enabled) {
-        throw "Config.Enabled property is required"
+        return New-OperationResult -Success $false -ErrorMessage "Config.Enabled property is required"
     }
 
     # Check if email is enabled
     if (-not $Config.Enabled) {
         Write-RobocurseLog -Message "Email notifications disabled" -Level 'Debug' -Component 'Email'
-        return
+        return New-OperationResult -Success $true -Data "Email notifications disabled - skipped"
     }
 
     # Validate required configuration properties
     if ([string]::IsNullOrWhiteSpace($Config.SmtpServer)) {
-        throw "Config.SmtpServer is required when email is enabled"
+        return New-OperationResult -Success $false -ErrorMessage "Config.SmtpServer is required when email is enabled"
     }
     if ([string]::IsNullOrWhiteSpace($Config.From)) {
-        throw "Config.From is required when email is enabled"
+        return New-OperationResult -Success $false -ErrorMessage "Config.From is required when email is enabled"
     }
     if ($null -eq $Config.To -or $Config.To.Count -eq 0) {
-        throw "Config.To must contain at least one email address when email is enabled"
+        return New-OperationResult -Success $false -ErrorMessage "Config.To must contain at least one email address when email is enabled"
     }
     if ($null -eq $Config.Port -or $Config.Port -le 0) {
-        throw "Config.Port must be a valid port number when email is enabled"
+        return New-OperationResult -Success $false -ErrorMessage "Config.Port must be a valid port number when email is enabled"
     }
 
     # Get credential
     $credential = Get-SmtpCredential -Target $Config.CredentialTarget
     if (-not $credential) {
         Write-RobocurseLog -Message "SMTP credential not found: $($Config.CredentialTarget)" -Level 'Error' -Component 'Email'
-        return
+        return New-OperationResult -Success $false -ErrorMessage "SMTP credential not found: $($Config.CredentialTarget)"
     }
 
     # Build email
@@ -3955,9 +3962,11 @@ function Send-CompletionEmail {
 
         Write-RobocurseLog -Message "Completion email sent to $($Config.To -join ', ')" -Level 'Info' -Component 'Email'
         Write-SiemEvent -EventType 'EmailSent' -Data @{ recipients = $Config.To; status = $Status }
+        return New-OperationResult -Success $true -Data ($Config.To -join ', ')
     }
     catch {
         Write-RobocurseLog -Message "Failed to send email: $($_.Exception.Message)" -Level 'Error' -Component 'Email'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to send email: $($_.Exception.Message)" -ErrorRecord $_
     }
 }
 
@@ -3971,10 +3980,10 @@ function Test-EmailConfiguration {
     .PARAMETER Config
         Email configuration
     .OUTPUTS
-        $true if successful, error message string if failed
+        OperationResult - Success=$true if test email sent, Success=$false with ErrorMessage on failure
     .EXAMPLE
         $result = Test-EmailConfiguration -Config $config.Email
-        if ($result -eq $true) { Write-Host "Email test passed" }
+        if ($result.Success) { Write-Host "Email test passed" }
     #>
     param(
         [Parameter(Mandatory)]
@@ -4000,13 +4009,8 @@ function Test-EmailConfiguration {
         Errors = @()
     }
 
-    try {
-        Send-CompletionEmail -Config $Config -Results $testResults -Status 'Success'
-        return $true
-    }
-    catch {
-        return "Failed: $($_.Exception.Message)"
-    }
+    $sendResult = Send-CompletionEmail -Config $Config -Results $testResults -Status 'Success'
+    return $sendResult
 }
 
 #endregion
@@ -4033,11 +4037,13 @@ function Register-RobocurseTask {
     .PARAMETER RunAsSystem
         Run as SYSTEM account (requires admin). Default: $false
     .OUTPUTS
-        Boolean indicating success or failure
+        OperationResult - Success=$true with Data=$TaskName on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
-        Register-RobocurseTask -ConfigPath "C:\config.json" -Schedule Daily -Time "03:00"
+        $result = Register-RobocurseTask -ConfigPath "C:\config.json" -Schedule Daily -Time "03:00"
+        if ($result.Success) { "Task registered: $($result.Data)" }
     .EXAMPLE
-        Register-RobocurseTask -ConfigPath "C:\config.json" -Schedule Weekly -DaysOfWeek @('Monday', 'Friday') -RunAsSystem
+        $result = Register-RobocurseTask -ConfigPath "C:\config.json" -Schedule Weekly -DaysOfWeek @('Monday', 'Friday') -RunAsSystem
+        if (-not $result.Success) { Write-Error $result.ErrorMessage }
     #>
     param(
         [ValidateNotNullOrEmpty()]
@@ -4064,12 +4070,12 @@ function Register-RobocurseTask {
         # Check if running on Windows
         if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
-            return $false
+            return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
         # Validate config path exists (inside function body so mocks can intercept)
         if (-not (Test-Path -Path $ConfigPath -PathType Leaf)) {
-            throw "ConfigPath '$ConfigPath' does not exist or is not a file"
+            return New-OperationResult -Success $false -ErrorMessage "ConfigPath '$ConfigPath' does not exist or is not a file"
         }
 
         # Get script path
@@ -4138,11 +4144,11 @@ function Register-RobocurseTask {
 
         Register-ScheduledTask @taskParams | Out-Null
         Write-RobocurseLog -Message "Scheduled task '$TaskName' registered successfully" -Level 'Info' -Component 'Scheduler'
-        return $true
+        return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
         Write-RobocurseLog -Message "Failed to register scheduled task: $_" -Level 'Error' -Component 'Scheduler'
-        return $false
+        return New-OperationResult -Success $false -ErrorMessage "Failed to register scheduled task: $($_.Exception.Message)" -ErrorRecord $_
     }
 }
 
@@ -4155,11 +4161,13 @@ function Unregister-RobocurseTask {
     .PARAMETER TaskName
         Name of task to remove. Default: "Robocurse-Replication"
     .OUTPUTS
-        Boolean indicating success or failure
+        OperationResult - Success=$true with Data=$TaskName on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
-        Unregister-RobocurseTask
+        $result = Unregister-RobocurseTask
+        if ($result.Success) { "Task removed" }
     .EXAMPLE
-        Unregister-RobocurseTask -TaskName "Custom-Task"
+        $result = Unregister-RobocurseTask -TaskName "Custom-Task"
+        if (-not $result.Success) { Write-Error $result.ErrorMessage }
     #>
     param(
         [string]$TaskName = "Robocurse-Replication"
@@ -4169,16 +4177,16 @@ function Unregister-RobocurseTask {
         # Check if running on Windows
         if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
-            return $false
+            return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
         Write-RobocurseLog -Message "Scheduled task '$TaskName' removed" -Level 'Info' -Component 'Scheduler'
-        return $true
+        return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
         Write-RobocurseLog -Message "Failed to remove scheduled task: $_" -Level 'Error' -Component 'Scheduler'
-        return $false
+        return New-OperationResult -Success $false -ErrorMessage "Failed to remove scheduled task '$TaskName': $($_.Exception.Message)" -ErrorRecord $_
     }
 }
 
@@ -4240,9 +4248,10 @@ function Start-RobocurseTask {
     .PARAMETER TaskName
         Name of task to start. Default: "Robocurse-Replication"
     .OUTPUTS
-        Boolean indicating success or failure
+        OperationResult - Success=$true with Data=$TaskName on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
-        Start-RobocurseTask
+        $result = Start-RobocurseTask
+        if ($result.Success) { "Task started" }
     #>
     param(
         [string]$TaskName = "Robocurse-Replication"
@@ -4252,16 +4261,16 @@ function Start-RobocurseTask {
         # Check if running on Windows
         if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
-            return $false
+            return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
         Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
         Write-RobocurseLog -Message "Manually triggered task '$TaskName'" -Level 'Info' -Component 'Scheduler'
-        return $true
+        return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
         Write-RobocurseLog -Message "Failed to start task: $_" -Level 'Error' -Component 'Scheduler'
-        return $false
+        return New-OperationResult -Success $false -ErrorMessage "Failed to start task '$TaskName': $($_.Exception.Message)" -ErrorRecord $_
     }
 }
 
@@ -4274,9 +4283,10 @@ function Enable-RobocurseTask {
     .PARAMETER TaskName
         Name of task to enable. Default: "Robocurse-Replication"
     .OUTPUTS
-        Boolean indicating success or failure
+        OperationResult - Success=$true with Data=$TaskName on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
-        Enable-RobocurseTask
+        $result = Enable-RobocurseTask
+        if ($result.Success) { "Task enabled" }
     #>
     param(
         [string]$TaskName = "Robocurse-Replication"
@@ -4286,16 +4296,16 @@ function Enable-RobocurseTask {
         # Check if running on Windows
         if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
-            return $false
+            return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
         Enable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
         Write-RobocurseLog -Message "Enabled task '$TaskName'" -Level 'Info' -Component 'Scheduler'
-        return $true
+        return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
         Write-RobocurseLog -Message "Failed to enable task: $_" -Level 'Error' -Component 'Scheduler'
-        return $false
+        return New-OperationResult -Success $false -ErrorMessage "Failed to enable task '$TaskName': $($_.Exception.Message)" -ErrorRecord $_
     }
 }
 
@@ -4309,9 +4319,10 @@ function Disable-RobocurseTask {
     .PARAMETER TaskName
         Name of task to disable. Default: "Robocurse-Replication"
     .OUTPUTS
-        Boolean indicating success or failure
+        OperationResult - Success=$true with Data=$TaskName on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
-        Disable-RobocurseTask
+        $result = Disable-RobocurseTask
+        if ($result.Success) { "Task disabled" }
     #>
     param(
         [string]$TaskName = "Robocurse-Replication"
@@ -4321,16 +4332,16 @@ function Disable-RobocurseTask {
         # Check if running on Windows
         if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
-            return $false
+            return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
         Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
         Write-RobocurseLog -Message "Disabled task '$TaskName'" -Level 'Info' -Component 'Scheduler'
-        return $true
+        return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
         Write-RobocurseLog -Message "Failed to disable task: $_" -Level 'Error' -Component 'Scheduler'
-        return $false
+        return New-OperationResult -Success $false -ErrorMessage "Failed to disable task '$TaskName': $($_.Exception.Message)" -ErrorRecord $_
     }
 }
 
@@ -4762,7 +4773,10 @@ function Initialize-EventHandlers {
             Stop-AllJobs
         }
         $script:ProgressTimer.Stop()
-        Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
+        $saveResult = Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
+        if (-not $saveResult.Success) {
+            Write-GuiLog "Warning: Failed to save config on exit: $($saveResult.ErrorMessage)"
+        }
     })
 }
 
@@ -5394,19 +5408,12 @@ function Show-ScheduleDialog {
                     # Register/update the task
                     Write-GuiLog "Registering scheduled task..."
 
-                    # Get the script path for the scheduled task
-                    $scriptPath = $PSCommandPath
-                    if (-not $scriptPath) {
-                        $scriptPath = Join-Path (Get-Location) "Robocurse.ps1"
-                    }
-
                     $result = Register-RobocurseTask `
-                        -ScriptPath $scriptPath `
                         -ConfigPath $ConfigPath `
-                        -ScheduleType $scheduleType `
+                        -Schedule $scheduleType `
                         -Time "$($hour.ToString('00')):$($minute.ToString('00'))"
 
-                    if ($result) {
+                    if ($result.Success) {
                         Write-GuiLog "Scheduled task registered successfully"
                         [System.Windows.MessageBox]::Show(
                             "Scheduled task has been registered.`n`nThe task will run $scheduleType at $($txtTime.Text).",
@@ -5416,9 +5423,9 @@ function Show-ScheduleDialog {
                         )
                     }
                     else {
-                        Write-GuiLog "Failed to register scheduled task"
+                        Write-GuiLog "Failed to register scheduled task: $($result.ErrorMessage)"
                         [System.Windows.MessageBox]::Show(
-                            "Failed to register scheduled task.`nCheck that you have administrator privileges.",
+                            "Failed to register scheduled task.`n$($result.ErrorMessage)",
                             "Error",
                             "OK",
                             "Error"
@@ -5430,7 +5437,7 @@ function Show-ScheduleDialog {
                     if ($taskExists) {
                         Write-GuiLog "Removing scheduled task..."
                         $result = Unregister-RobocurseTask
-                        if ($result) {
+                        if ($result.Success) {
                             Write-GuiLog "Scheduled task removed"
                             [System.Windows.MessageBox]::Show(
                                 "Scheduled task has been removed.",
@@ -5440,12 +5447,15 @@ function Show-ScheduleDialog {
                             )
                         }
                         else {
-                            Write-GuiLog "Failed to remove scheduled task"
+                            Write-GuiLog "Failed to remove scheduled task: $($result.ErrorMessage)"
                         }
                     }
                 }
 
-                Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
+                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
+                if (-not $saveResult.Success) {
+                    Write-GuiLog "Warning: Failed to save config: $($saveResult.ErrorMessage)"
+                }
                 $dialog.Close()
             }
             catch {
@@ -5623,12 +5633,12 @@ function Invoke-HeadlessReplication {
     # Send email notification if configured
     if ($Config.Email -and $Config.Email.Enabled) {
         Write-Host "Sending completion email..."
-        try {
-            Send-CompletionEmail -Config $Config.Email -Results $results -Status $emailStatus
+        $emailResult = Send-CompletionEmail -Config $Config.Email -Results $results -Status $emailStatus
+        if ($emailResult.Success) {
             Write-Host "Email sent successfully."
         }
-        catch {
-            Write-Warning "Failed to send email: $($_.Exception.Message)"
+        else {
+            Write-Warning "Failed to send email: $($emailResult.ErrorMessage)"
         }
     }
 

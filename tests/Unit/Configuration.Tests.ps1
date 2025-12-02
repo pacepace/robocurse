@@ -55,7 +55,7 @@ Describe "Configuration Management" {
             # Test JSON serialization round-trip
             $tempPath = Join-Path $script:TestDir "sync-profiles-test.json"
             $saved = Save-RobocurseConfig -Config $config -Path $tempPath
-            $saved | Should -Be $true
+            $saved.Success | Should -Be $true
 
             # Verify the JSON file contains an empty array
             $jsonContent = Get-Content $tempPath -Raw
@@ -129,7 +129,7 @@ Describe "Configuration Management" {
             $config = New-DefaultConfig
             $result = Save-RobocurseConfig -Config $config -Path $script:TestConfigPath
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Test-Path $script:TestConfigPath | Should -Be $true
         }
 
@@ -156,17 +156,17 @@ Describe "Configuration Management" {
 
             $result = Save-RobocurseConfig -Config $config -Path $nestedPath
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
             Test-Path $nestedPath | Should -Be $true
         }
 
-        It "Should return false on save failure" {
-            # Test with invalid path (root with no write permissions would fail, but hard to test reliably)
-            # Instead, we test that the function handles errors properly by testing return value
+        It "Should return OperationResult on save" {
+            # Test that the function returns an OperationResult with expected properties
             $config = New-DefaultConfig
             $result = Save-RobocurseConfig -Config $config -Path $script:TestConfigPath
 
-            $result | Should -BeOfType [bool]
+            $result.PSObject.Properties.Name | Should -Contain "Success"
+            $result.Success | Should -Be $true
         }
     }
 

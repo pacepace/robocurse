@@ -18,52 +18,63 @@ Describe "Email Notifications" {
             } | Should -Throw "*Results*"
         }
 
-        It "Should throw when Config.Enabled is null" {
+        It "Should return error when Config.Enabled is null" {
             $config = [PSCustomObject]@{ SmtpServer = "smtp.test.com" }
             $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
-            {
-                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
-            } | Should -Throw "*Enabled*"
+
+            $result = Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "Enabled"
         }
 
-        It "Should return without error when email is disabled" {
+        It "Should return success when email is disabled" {
             $config = [PSCustomObject]@{ Enabled = $false }
             $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
-            {
-                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
-            } | Should -Not -Throw
+
+            $result = Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+
+            $result.Success | Should -Be $true
         }
 
-        It "Should throw when Config.SmtpServer is missing and email is enabled" {
+        It "Should return error when Config.SmtpServer is missing and email is enabled" {
             $config = [PSCustomObject]@{ Enabled = $true; From = "test@test.com"; To = @("user@test.com"); Port = 587 }
             $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
-            {
-                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
-            } | Should -Throw "*SmtpServer*"
+
+            $result = Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "SmtpServer"
         }
 
-        It "Should throw when Config.From is missing and email is enabled" {
+        It "Should return error when Config.From is missing and email is enabled" {
             $config = [PSCustomObject]@{ Enabled = $true; SmtpServer = "smtp.test.com"; To = @("user@test.com"); Port = 587 }
             $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
-            {
-                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
-            } | Should -Throw "*From*"
+
+            $result = Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "From"
         }
 
-        It "Should throw when Config.To is missing and email is enabled" {
+        It "Should return error when Config.To is missing and email is enabled" {
             $config = [PSCustomObject]@{ Enabled = $true; SmtpServer = "smtp.test.com"; From = "test@test.com"; Port = 587 }
             $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
-            {
-                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
-            } | Should -Throw "*To*"
+
+            $result = Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "To"
         }
 
-        It "Should throw when Config.Port is missing and email is enabled" {
+        It "Should return error when Config.Port is missing and email is enabled" {
             $config = [PSCustomObject]@{ Enabled = $true; SmtpServer = "smtp.test.com"; From = "test@test.com"; To = @("user@test.com") }
             $results = [PSCustomObject]@{ Duration = [timespan]::Zero }
-            {
-                Send-CompletionEmail -Config $config -Results $results -Status 'Success'
-            } | Should -Throw "*Port*"
+
+            $result = Send-CompletionEmail -Config $config -Results $results -Status 'Success'
+
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "Port"
         }
     }
 
@@ -234,11 +245,14 @@ Describe "Email Notifications" {
             Should -Not -Invoke Send-MailMessage
         }
 
-        It "Should handle missing credential gracefully" {
+        It "Should return error on missing credential" {
             Mock Get-SmtpCredential { $null }
             Mock Send-MailMessage { }
 
-            { Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Success' } | Should -Not -Throw
+            $result = Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Success'
+
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "credential"
             Should -Not -Invoke Send-MailMessage
         }
 
@@ -283,15 +297,18 @@ Describe "Email Notifications" {
             }
         }
 
-        It "Should handle send failure gracefully" {
+        It "Should return error on send failure" {
             $mockCred = New-Object System.Management.Automation.PSCredential("user", (ConvertTo-SecureString "pass" -AsPlainText -Force))
             Mock Get-SmtpCredential { $mockCred }
             Mock Send-MailMessage { throw "SMTP connection failed" }
 
-            { Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Success' } | Should -Not -Throw
+            $result = Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Success'
+
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "SMTP connection failed"
         }
 
-        It "Should throw with incomplete configuration (empty SmtpServer)" {
+        It "Should return error with incomplete configuration (empty SmtpServer)" {
             Mock Get-SmtpCredential { }
             Mock Send-MailMessage { }
 
@@ -305,9 +322,10 @@ Describe "Email Notifications" {
                 To = @("user@test.com")
             }
 
-            {
-                Send-CompletionEmail -Config $incompleteConfig -Results $script:mockResults -Status 'Success'
-            } | Should -Throw "*SmtpServer*"
+            $result = Send-CompletionEmail -Config $incompleteConfig -Results $script:mockResults -Status 'Success'
+
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "SmtpServer"
         }
     }
 
@@ -343,28 +361,25 @@ Describe "Email Notifications" {
             }
         }
 
-        It "Should return true on successful send" {
+        It "Should return success on successful send" {
             $mockCred = New-Object System.Management.Automation.PSCredential("user", (ConvertTo-SecureString "pass" -AsPlainText -Force))
             Mock Get-SmtpCredential { $mockCred }
             Mock Send-MailMessage { }
 
             $result = Test-EmailConfiguration -Config $script:testConfig
 
-            $result | Should -Be $true
+            $result.Success | Should -Be $true
         }
 
-        It "Should return true even when Send-MailMessage fails (errors logged internally)" {
-            # Since Send-CompletionEmail catches exceptions internally and logs them,
-            # Test-EmailConfiguration will still return $true even if sending fails
+        It "Should return error when Send-MailMessage fails" {
             $mockCred = New-Object System.Management.Automation.PSCredential("user", (ConvertTo-SecureString "pass" -AsPlainText -Force))
             Mock Get-SmtpCredential { $mockCred }
             Mock Send-MailMessage { throw "Connection refused" }
 
             $result = Test-EmailConfiguration -Config $script:testConfig
 
-            # The function doesn't throw, so it returns $true
-            # The actual error is logged via Write-RobocurseLog
-            $result | Should -Be $true
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "Connection refused"
         }
 
         It "Should send test email with dummy results" {

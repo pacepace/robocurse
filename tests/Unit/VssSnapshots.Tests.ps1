@@ -190,22 +190,23 @@ Describe "VSS Snapshots - Platform Independent Tests" {
 
         It "Should execute scriptblock with VSS path parameter" {
             Mock New-VssSnapshot {
-                return [PSCustomObject]@{
+                return New-OperationResult -Success $true -Data ([PSCustomObject]@{
                     ShadowId     = "{12345678-1234-1234-1234-123456789012}"
                     ShadowPath   = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1"
                     SourceVolume = "C:"
                     CreatedAt    = [datetime]::Now
-                }
+                })
             }
-            Mock Remove-VssSnapshot { }
+            Mock Remove-VssSnapshot { New-OperationResult -Success $true -Data $ShadowId }
 
-            Invoke-WithVssSnapshot -SourcePath "C:\Test" -ScriptBlock {
+            $result = Invoke-WithVssSnapshot -SourcePath "C:\Test" -ScriptBlock {
                 param($VssPath)
                 $script:executed = $true
                 $script:receivedVssPath = $VssPath
                 $VssPath | Should -Not -BeNullOrEmpty
             }
 
+            $result.Success | Should -Be $true
             $script:executed | Should -Be $true
             $script:receivedVssPath | Should -Match "HarddiskVolumeShadowCopy1"
             Should -Invoke Remove-VssSnapshot -Times 1
@@ -213,107 +214,108 @@ Describe "VSS Snapshots - Platform Independent Tests" {
 
         It "Should cleanup VSS snapshot after successful execution" {
             Mock New-VssSnapshot {
-                return [PSCustomObject]@{
+                return New-OperationResult -Success $true -Data ([PSCustomObject]@{
                     ShadowId     = "{ABCD1234-5678-90AB-CDEF-123456789012}"
                     ShadowPath   = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy2"
                     SourceVolume = "D:"
                     CreatedAt    = [datetime]::Now
-                }
+                })
             }
-            Mock Remove-VssSnapshot { $script:cleanedUp = $true }
+            Mock Remove-VssSnapshot { $script:cleanedUp = $true; New-OperationResult -Success $true -Data $ShadowId }
 
-            Invoke-WithVssSnapshot -SourcePath "D:\Data" -ScriptBlock {
+            $result = Invoke-WithVssSnapshot -SourcePath "D:\Data" -ScriptBlock {
                 param($VssPath)
                 # Successful operation
                 $script:executed = $true
             }
 
+            $result.Success | Should -Be $true
             $script:executed | Should -Be $true
             Should -Invoke Remove-VssSnapshot -Times 1 -ParameterFilter {
                 $ShadowId -eq "{ABCD1234-5678-90AB-CDEF-123456789012}"
             }
         }
 
-        It "Should cleanup VSS snapshot even on error" {
+        It "Should cleanup VSS snapshot even on error in scriptblock" {
             Mock New-VssSnapshot {
-                return [PSCustomObject]@{
+                return New-OperationResult -Success $true -Data ([PSCustomObject]@{
                     ShadowId     = "{ERROR123-1234-1234-1234-123456789012}"
                     ShadowPath   = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy3"
                     SourceVolume = "C:"
                     CreatedAt    = [datetime]::Now
-                }
+                })
             }
-            Mock Remove-VssSnapshot { }
+            Mock Remove-VssSnapshot { New-OperationResult -Success $true -Data $ShadowId }
 
-            {
-                Invoke-WithVssSnapshot -SourcePath "C:\Test" -ScriptBlock {
-                    throw "Simulated error during processing"
-                }
-            } | Should -Throw "*Simulated error during processing*"
+            $result = Invoke-WithVssSnapshot -SourcePath "C:\Test" -ScriptBlock {
+                throw "Simulated error during processing"
+            }
 
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "Simulated error during processing"
             Should -Invoke Remove-VssSnapshot -Times 1
         }
 
         It "Should not attempt cleanup if snapshot creation fails" {
             Mock New-VssSnapshot {
-                throw "Failed to create VSS snapshot"
+                return New-OperationResult -Success $false -ErrorMessage "Failed to create VSS snapshot"
             }
-            Mock Remove-VssSnapshot { }
+            Mock Remove-VssSnapshot { New-OperationResult -Success $true -Data $ShadowId }
 
-            {
-                Invoke-WithVssSnapshot -SourcePath "C:\Test" -ScriptBlock {
-                    param($VssPath)
-                    # This should never execute
-                    $script:executed = $true
-                }
-            } | Should -Throw "*Failed to create VSS snapshot*"
+            $result = Invoke-WithVssSnapshot -SourcePath "C:\Test" -ScriptBlock {
+                param($VssPath)
+                # This should never execute
+                $script:executed = $true
+            }
 
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "Failed to create VSS snapshot"
             $script:executed | Should -Be $false
             Should -Invoke Remove-VssSnapshot -Times 0
         }
 
         It "Should pass correct VSS path to scriptblock" {
             Mock New-VssSnapshot {
-                return [PSCustomObject]@{
+                return New-OperationResult -Success $true -Data ([PSCustomObject]@{
                     ShadowId     = "{PATH-TEST-1234-1234-123456789012}"
                     ShadowPath   = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy10"
                     SourceVolume = "E:"
                     CreatedAt    = [datetime]::Now
-                }
+                })
             }
-            Mock Remove-VssSnapshot { }
+            Mock Remove-VssSnapshot { New-OperationResult -Success $true -Data $ShadowId }
 
             $script:capturedPath = $null
-            Invoke-WithVssSnapshot -SourcePath "E:\Projects\MyApp" -ScriptBlock {
+            $result = Invoke-WithVssSnapshot -SourcePath "E:\Projects\MyApp" -ScriptBlock {
                 param($VssPath)
                 $script:capturedPath = $VssPath
             }
 
+            $result.Success | Should -Be $true
             $script:capturedPath | Should -Be "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy10\Projects\MyApp"
             Should -Invoke Remove-VssSnapshot -Times 1
         }
 
         It "Should handle cleanup failure gracefully" {
             Mock New-VssSnapshot {
-                return [PSCustomObject]@{
+                return New-OperationResult -Success $true -Data ([PSCustomObject]@{
                     ShadowId     = "{CLEANUP-FAIL-1234-1234-123456789012}"
                     ShadowPath   = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy7"
                     SourceVolume = "C:"
                     CreatedAt    = [datetime]::Now
-                }
+                })
             }
             Mock Remove-VssSnapshot {
-                throw "Failed to delete snapshot"
+                return New-OperationResult -Success $false -ErrorMessage "Failed to delete snapshot"
             }
 
-            # Should not throw even if cleanup fails
-            {
-                Invoke-WithVssSnapshot -SourcePath "C:\Test" -ScriptBlock {
-                    param($VssPath)
-                    $script:executed = $true
-                }
-            } | Should -Not -Throw
+            # Should still return success since the scriptblock succeeded
+            $result = Invoke-WithVssSnapshot -SourcePath "C:\Test" -ScriptBlock {
+                param($VssPath)
+                $script:executed = $true
+            }
 
+            $result.Success | Should -Be $true
             $script:executed | Should -Be $true
             Should -Invoke Remove-VssSnapshot -Times 1
         }

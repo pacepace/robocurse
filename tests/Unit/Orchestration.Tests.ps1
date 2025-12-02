@@ -700,6 +700,7 @@ Describe "Orchestration" {
                 Destination = "D:\Dest"
             }
             $script:OrchestrationState.ProfileStartTime = [datetime]::Now.AddMinutes(-5)
+            $script:OrchestrationState.StartTime = [datetime]::Now.AddMinutes(-10)
             $script:OrchestrationState.Phase = "Replicating"
             $script:OrchestrationState.TotalChunks = 10
             $script:OrchestrationState.ProfileIndex = 0
