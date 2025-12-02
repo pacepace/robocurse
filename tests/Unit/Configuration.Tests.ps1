@@ -671,4 +671,152 @@ Describe "Configuration Management" {
             $result.SyncProfiles[1].RobocopyOptions.ExcludeDirs | Should -Contain "cache"
         }
     }
+
+    Context "Config Helper Functions" {
+        Context "ConvertTo-RobocopyOptionsInternal" {
+            It "Should return empty options when input is null" {
+                $result = ConvertTo-RobocopyOptionsInternal -RawRobocopy $null
+
+                $result.Switches | Should -BeNullOrEmpty
+                $result.ExcludeFiles | Should -BeNullOrEmpty
+                $result.ExcludeDirs | Should -BeNullOrEmpty
+            }
+
+            It "Should convert switches array" {
+                $raw = [PSCustomObject]@{
+                    switches = @("/COPYALL", "/DCOPY:DAT")
+                }
+                $result = ConvertTo-RobocopyOptionsInternal -RawRobocopy $raw
+
+                $result.Switches | Should -Contain "/COPYALL"
+                $result.Switches | Should -Contain "/DCOPY:DAT"
+            }
+
+            It "Should convert exclude patterns" {
+                $raw = [PSCustomObject]@{
+                    excludeFiles = @("*.tmp", "*.log")
+                    excludeDirs = @("temp", "cache")
+                }
+                $result = ConvertTo-RobocopyOptionsInternal -RawRobocopy $raw
+
+                $result.ExcludeFiles | Should -Contain "*.tmp"
+                $result.ExcludeDirs | Should -Contain "cache"
+            }
+
+            It "Should convert retry policy" {
+                $raw = [PSCustomObject]@{
+                    retryPolicy = [PSCustomObject]@{
+                        count = 5
+                        wait = 30
+                    }
+                }
+                $result = ConvertTo-RobocopyOptionsInternal -RawRobocopy $raw
+
+                $result.RetryCount | Should -Be 5
+                $result.RetryWait | Should -Be 30
+            }
+        }
+
+        Context "ConvertTo-ChunkSettingsInternal" {
+            It "Should apply chunking settings to profile" {
+                $profile = [PSCustomObject]@{
+                    ScanMode = "Smart"
+                    ChunkMaxSizeGB = 10
+                    ChunkMaxFiles = 50000
+                    ChunkMaxDepth = 5
+                }
+                $rawChunking = [PSCustomObject]@{
+                    maxChunkSizeGB = 50
+                    maxDepthToScan = 8
+                    strategy = "flat"
+                }
+
+                ConvertTo-ChunkSettingsInternal -Profile $profile -RawChunking $rawChunking
+
+                $profile.ChunkMaxSizeGB | Should -Be 50
+                $profile.ChunkMaxDepth | Should -Be 8
+                $profile.ScanMode | Should -Be "Flat"
+            }
+
+            It "Should handle null chunking gracefully" {
+                $profile = [PSCustomObject]@{
+                    ScanMode = "Smart"
+                    ChunkMaxSizeGB = 10
+                }
+
+                ConvertTo-ChunkSettingsInternal -Profile $profile -RawChunking $null
+
+                # Should remain unchanged
+                $profile.ScanMode | Should -Be "Smart"
+                $profile.ChunkMaxSizeGB | Should -Be 10
+            }
+
+            It "Should map strategy values correctly" {
+                $testCases = @(
+                    @{ Strategy = "auto"; Expected = "Smart" }
+                    @{ Strategy = "balanced"; Expected = "Smart" }
+                    @{ Strategy = "aggressive"; Expected = "Smart" }
+                    @{ Strategy = "flat"; Expected = "Flat" }
+                    @{ Strategy = "unknown"; Expected = "Smart" }
+                )
+
+                foreach ($case in $testCases) {
+                    $profile = [PSCustomObject]@{ ScanMode = "Initial" }
+                    $rawChunking = [PSCustomObject]@{ strategy = $case.Strategy }
+
+                    ConvertTo-ChunkSettingsInternal -Profile $profile -RawChunking $rawChunking
+
+                    $profile.ScanMode | Should -Be $case.Expected -Because "Strategy '$($case.Strategy)' should map to '$($case.Expected)'"
+                }
+            }
+        }
+
+        Context "Get-DestinationPathFromRaw" {
+            It "Should extract path from object with path property" {
+                $raw = [PSCustomObject]@{ path = "D:\Backup" }
+                $result = Get-DestinationPathFromRaw -RawDestination $raw
+
+                $result | Should -Be "D:\Backup"
+            }
+
+            It "Should handle string destination directly" {
+                $result = Get-DestinationPathFromRaw -RawDestination "E:\Replicas"
+
+                $result | Should -Be "E:\Replicas"
+            }
+
+            It "Should return empty string for null input" {
+                $result = Get-DestinationPathFromRaw -RawDestination $null
+
+                $result | Should -Be ""
+            }
+        }
+    }
+
+    Context "Get-NormalizedCacheKey" {
+        It "Should remove trailing backslashes" {
+            $result = Get-NormalizedCacheKey -Path "C:\Data\"
+            $result | Should -Be "C:\Data"
+        }
+
+        It "Should convert forward slashes to backslashes" {
+            $result = Get-NormalizedCacheKey -Path "C:/Data/Folder"
+            $result | Should -Be "C:\Data\Folder"
+        }
+
+        It "Should preserve case (case is handled by dictionary comparer)" {
+            $result = Get-NormalizedCacheKey -Path "C:\DATA\Folder"
+            $result | Should -Be "C:\DATA\Folder"
+        }
+
+        It "Should handle UNC paths" {
+            $result = Get-NormalizedCacheKey -Path "\\server\share\"
+            $result | Should -Be "\\server\share"
+        }
+
+        It "Should handle mixed slashes" {
+            $result = Get-NormalizedCacheKey -Path "\\server/share/folder\"
+            $result | Should -Be "\\server\share\folder"
+        }
+    }
 }

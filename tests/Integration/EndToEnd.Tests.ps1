@@ -19,6 +19,11 @@ BeforeAll {
     # Initialize log session for tests
     Initialize-LogSession -LogRoot $script:LogDir | Out-Null
 
+    # Mock Test-RobocopyAvailable for cross-platform testing (robocopy is Windows-only)
+    Mock -ModuleName $null Test-RobocopyAvailable {
+        return New-OperationResult -Success $true -Data "robocopy.exe"
+    }
+
     # Mock Start-RobocopyJob for cross-platform testing
     Mock -ModuleName $null Start-RobocopyJob {
         param($Chunk, $LogPath, $ThreadsPerJob)

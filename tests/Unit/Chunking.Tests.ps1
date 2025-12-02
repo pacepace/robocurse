@@ -280,6 +280,33 @@ Describe "Recursive Chunking" {
         }
     }
 
+    Context "Get-NormalizedPath" {
+        It "Should convert to lowercase for case-insensitive comparison" {
+            $result = Get-NormalizedPath -Path "\\SERVER\Share$"
+            $result | Should -Be "\\server\share$"
+        }
+
+        It "Should remove trailing backslashes" {
+            $result = Get-NormalizedPath -Path "\\server\share\"
+            $result | Should -Be "\\server\share"
+        }
+
+        It "Should convert forward slashes to backslashes" {
+            $result = Get-NormalizedPath -Path "\\server/share/folder"
+            $result | Should -Be "\\server\share\folder"
+        }
+
+        It "Should handle multiple trailing slashes" {
+            $result = Get-NormalizedPath -Path "C:\Data\\\\"
+            $result | Should -Be "c:\data"
+        }
+
+        It "Should handle mixed slashes" {
+            $result = Get-NormalizedPath -Path "\\SERVER/Share$\Folder/"
+            $result | Should -Be "\\server\share$\folder"
+        }
+    }
+
     Context "Convert-ToDestinationPath" {
         It "Should correctly map UNC to local path" {
             $result = Convert-ToDestinationPath `
@@ -324,6 +351,33 @@ Describe "Recursive Chunking" {
                 -DestRoot "E:\Backup"
 
             $result | Should -Be "E:\Backup\Projects\MyProject"
+        }
+
+        It "Should handle case mismatch in UNC paths" {
+            $result = Convert-ToDestinationPath `
+                -SourcePath "\\SERVER\Share$\Data\Files" `
+                -SourceRoot "\\server\share$" `
+                -DestRoot "D:\Backup"
+
+            $result | Should -Be "D:\Backup\Data\Files"
+        }
+
+        It "Should handle mixed case with admin shares" {
+            $result = Convert-ToDestinationPath `
+                -SourcePath "\\FILESERVER01\Users$\JohnDoe" `
+                -SourceRoot "\\fileserver01\users$" `
+                -DestRoot "E:\Replicas"
+
+            $result | Should -Be "E:\Replicas\JohnDoe"
+        }
+
+        It "Should handle forward slashes in source path" {
+            $result = Convert-ToDestinationPath `
+                -SourcePath "\\server/share/folder/subfolder" `
+                -SourceRoot "\\server\share" `
+                -DestRoot "D:\Backup"
+
+            $result | Should -Match "D:\\Backup.*folder.*subfolder"
         }
     }
 

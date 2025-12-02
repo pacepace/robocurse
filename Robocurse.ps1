@@ -156,6 +156,53 @@ function Test-IsWindowsPlatform {
     return $IsWindows
 }
 
+# Cached path to robocopy.exe (validated once at startup)
+$script:RobocopyPath = $null
+
+function Test-RobocopyAvailable {
+    <#
+    .SYNOPSIS
+        Validates that robocopy.exe is available on the system
+    .DESCRIPTION
+        Checks for robocopy.exe in the following order:
+        1. System32 directory (most reliable, Windows only)
+        2. PATH environment variable
+        Caches the validated path in $script:RobocopyPath for use by Start-RobocopyJob.
+        On non-Windows systems, returns failure (robocopy is Windows-only).
+    .OUTPUTS
+        OperationResult - Success=$true with Data=path to robocopy.exe, Success=$false if not found
+    .EXAMPLE
+        $result = Test-RobocopyAvailable
+        if (-not $result.Success) { throw "Robocopy not found: $($result.ErrorMessage)" }
+    #>
+
+    # Return cached result if already validated
+    if ($script:RobocopyPath) {
+        return New-OperationResult -Success $true -Data $script:RobocopyPath
+    }
+
+    # Check System32 first (most reliable location on Windows)
+    # Only check if SystemRoot is defined (Windows only)
+    if ($env:SystemRoot) {
+        $system32Path = Join-Path $env:SystemRoot "System32\robocopy.exe"
+        if (Test-Path -Path $system32Path -PathType Leaf) {
+            $script:RobocopyPath = $system32Path
+            return New-OperationResult -Success $true -Data $script:RobocopyPath
+        }
+    }
+
+    # Fallback: Check if robocopy is in PATH
+    $pathRobocopy = Get-Command -Name "robocopy.exe" -ErrorAction SilentlyContinue
+    if ($pathRobocopy) {
+        $script:RobocopyPath = $pathRobocopy.Source
+        return New-OperationResult -Success $true -Data $script:RobocopyPath
+    }
+
+    # Not found - provide helpful error message
+    $expectedPath = if ($env:SystemRoot) { "$env:SystemRoot\System32\robocopy.exe" } else { "System32\robocopy.exe (Windows only)" }
+    return New-OperationResult -Success $false -ErrorMessage "robocopy.exe not found. Expected at '$expectedPath' or in PATH. Robocopy is a Windows-only utility."
+}
+
 function New-OperationResult {
     <#
     .SYNOPSIS
@@ -272,6 +319,90 @@ function New-DefaultConfig {
     return $config
 }
 
+function ConvertTo-RobocopyOptionsInternal {
+    <#
+    .SYNOPSIS
+        Helper to convert raw robocopy config to internal options format
+    #>
+    param([PSCustomObject]$RawRobocopy)
+
+    $options = @{
+        Switches = @()
+        ExcludeFiles = @()
+        ExcludeDirs = @()
+    }
+
+    if ($RawRobocopy) {
+        if ($RawRobocopy.switches) {
+            $options.Switches = @($RawRobocopy.switches)
+        }
+        if ($RawRobocopy.excludeFiles) {
+            $options.ExcludeFiles = @($RawRobocopy.excludeFiles)
+        }
+        if ($RawRobocopy.excludeDirs) {
+            $options.ExcludeDirs = @($RawRobocopy.excludeDirs)
+        }
+        if ($RawRobocopy.retryPolicy) {
+            if ($RawRobocopy.retryPolicy.count) {
+                $options.RetryCount = $RawRobocopy.retryPolicy.count
+            }
+            if ($RawRobocopy.retryPolicy.wait) {
+                $options.RetryWait = $RawRobocopy.retryPolicy.wait
+            }
+        }
+    }
+
+    return $options
+}
+
+function ConvertTo-ChunkSettingsInternal {
+    <#
+    .SYNOPSIS
+        Helper to apply chunking settings from raw config to a profile
+    #>
+    param(
+        [PSCustomObject]$Profile,
+        [PSCustomObject]$RawChunking
+    )
+
+    if ($RawChunking) {
+        if ($RawChunking.maxChunkSizeGB) {
+            $Profile.ChunkMaxSizeGB = $RawChunking.maxChunkSizeGB
+        }
+        if ($RawChunking.parallelChunks) {
+            $Profile | Add-Member -MemberType NoteProperty -Name 'ParallelChunks' -Value $RawChunking.parallelChunks -Force
+        }
+        if ($RawChunking.maxDepthToScan) {
+            $Profile.ChunkMaxDepth = $RawChunking.maxDepthToScan
+        }
+        if ($RawChunking.strategy) {
+            $Profile.ScanMode = switch ($RawChunking.strategy) {
+                'auto' { 'Smart' }
+                'balanced' { 'Smart' }
+                'aggressive' { 'Smart' }
+                'flat' { 'Flat' }
+                default { 'Smart' }
+            }
+        }
+    }
+}
+
+function Get-DestinationPathFromRaw {
+    <#
+    .SYNOPSIS
+        Helper to extract destination path from raw config (handles multiple formats)
+    #>
+    param([object]$RawDestination)
+
+    if ($RawDestination -and $RawDestination.path) {
+        return $RawDestination.path
+    }
+    elseif ($RawDestination -is [string]) {
+        return $RawDestination
+    }
+    return ""
+}
+
 function ConvertFrom-ConfigFileFormat {
     <#
     .SYNOPSIS
@@ -284,6 +415,9 @@ function ConvertFrom-ConfigFileFormat {
         This function converts to the internal format with:
         - "SyncProfiles" as an array of profile objects
         - "GlobalSettings" with flattened settings
+
+        Helper functions (ConvertTo-RobocopyOptionsInternal, ConvertTo-ChunkSettingsInternal,
+        Get-DestinationPathFromRaw) handle common conversion logic to reduce duplication.
     .PARAMETER RawConfig
         Raw config object loaded from JSON
     .OUTPUTS
@@ -388,65 +522,19 @@ function ConvertFrom-ConfigFileFormat {
                             Name = "$profileName-Source$($i + 1)"
                             Description = "$($syncProfile.Description) (Source $($i + 1))"
                             Source = $sourceInfo.path
-                            Destination = ""  # Will be set below
+                            Destination = Get-DestinationPathFromRaw -RawDestination $rawProfile.destination
                             UseVss = if ($sourceInfo.useVss) { $true } else { $false }
                             ScanMode = "Smart"
                             ChunkMaxSizeGB = 10
                             ChunkMaxFiles = 50000
                             ChunkMaxDepth = 5
-                            RobocopyOptions = @{}
+                            RobocopyOptions = ConvertTo-RobocopyOptionsInternal -RawRobocopy $rawProfile.robocopy
                             Enabled = $true
                             ParentProfile = $profileName  # Track origin for logging
                         }
 
-                        # Handle destination (shared across all sources in the profile)
-                        if ($rawProfile.destination -and $rawProfile.destination.path) {
-                            $expandedProfile.Destination = $rawProfile.destination.path
-                        }
-                        elseif ($rawProfile.destination -is [string]) {
-                            $expandedProfile.Destination = $rawProfile.destination
-                        }
-
-                        # Copy chunking settings
-                        if ($rawProfile.chunking) {
-                            if ($rawProfile.chunking.maxChunkSizeGB) {
-                                $expandedProfile.ChunkMaxSizeGB = $rawProfile.chunking.maxChunkSizeGB
-                            }
-                            if ($rawProfile.chunking.parallelChunks) {
-                                $expandedProfile | Add-Member -MemberType NoteProperty -Name 'ParallelChunks' -Value $rawProfile.chunking.parallelChunks -Force
-                            }
-                            if ($rawProfile.chunking.maxDepthToScan) {
-                                $expandedProfile.ChunkMaxDepth = $rawProfile.chunking.maxDepthToScan
-                            }
-                            if ($rawProfile.chunking.strategy) {
-                                $expandedProfile.ScanMode = switch ($rawProfile.chunking.strategy) {
-                                    'auto' { 'Smart' }
-                                    'balanced' { 'Smart' }
-                                    'aggressive' { 'Smart' }
-                                    'flat' { 'Flat' }
-                                    default { 'Smart' }
-                                }
-                            }
-                        }
-
-                        # Copy robocopy options
-                        $expandedRobocopyOptions = @{
-                            Switches = @()
-                            ExcludeFiles = @()
-                            ExcludeDirs = @()
-                        }
-                        if ($rawProfile.robocopy) {
-                            if ($rawProfile.robocopy.switches) {
-                                $expandedRobocopyOptions.Switches = @($rawProfile.robocopy.switches)
-                            }
-                            if ($rawProfile.robocopy.excludeFiles) {
-                                $expandedRobocopyOptions.ExcludeFiles = @($rawProfile.robocopy.excludeFiles)
-                            }
-                            if ($rawProfile.robocopy.excludeDirs) {
-                                $expandedRobocopyOptions.ExcludeDirs = @($rawProfile.robocopy.excludeDirs)
-                            }
-                        }
-                        $expandedProfile.RobocopyOptions = $expandedRobocopyOptions
+                        # Apply chunking settings using helper
+                        ConvertTo-ChunkSettingsInternal -Profile $expandedProfile -RawChunking $rawProfile.chunking
 
                         $syncProfiles += $expandedProfile
                     }
@@ -458,58 +546,16 @@ function ConvertFrom-ConfigFileFormat {
                 $syncProfile.Source = $rawProfile.source
             }
 
-            # Handle destination
-            if ($rawProfile.destination -and $rawProfile.destination.path) {
-                $syncProfile.Destination = $rawProfile.destination.path
-            }
-            elseif ($rawProfile.destination -is [string]) {
-                $syncProfile.Destination = $rawProfile.destination
-            }
+            # Handle destination using helper
+            $syncProfile.Destination = Get-DestinationPathFromRaw -RawDestination $rawProfile.destination
 
-            # Handle chunking settings
-            if ($rawProfile.chunking) {
-                if ($rawProfile.chunking.maxChunkSizeGB) {
-                    $syncProfile.ChunkMaxSizeGB = $rawProfile.chunking.maxChunkSizeGB
-                }
-                if ($rawProfile.chunking.parallelChunks) {
-                    # This is actually max concurrent, but store for reference
-                    $syncProfile | Add-Member -MemberType NoteProperty -Name 'ParallelChunks' -Value $rawProfile.chunking.parallelChunks -Force
-                }
-                if ($rawProfile.chunking.maxDepthToScan) {
-                    $syncProfile.ChunkMaxDepth = $rawProfile.chunking.maxDepthToScan
-                }
-                # Handle strategy -> ScanMode mapping
-                if ($rawProfile.chunking.strategy) {
-                    $syncProfile.ScanMode = switch ($rawProfile.chunking.strategy) {
-                        'auto' { 'Smart' }
-                        'balanced' { 'Smart' }
-                        'aggressive' { 'Smart' }
-                        'flat' { 'Flat' }
-                        default { 'Smart' }
-                    }
-                }
-            }
+            # Apply chunking settings using helper
+            ConvertTo-ChunkSettingsInternal -Profile $syncProfile -RawChunking $rawProfile.chunking
 
-            # Handle robocopy settings
-            $robocopyOptions = @{
-                Switches = @()
-                ExcludeFiles = @()
-                ExcludeDirs = @()
-            }
+            # Handle robocopy settings using helper
+            $robocopyOptions = ConvertTo-RobocopyOptionsInternal -RawRobocopy $rawProfile.robocopy
 
-            if ($rawProfile.robocopy) {
-                if ($rawProfile.robocopy.switches) {
-                    $robocopyOptions.Switches = @($rawProfile.robocopy.switches)
-                }
-                if ($rawProfile.robocopy.excludeFiles) {
-                    $robocopyOptions.ExcludeFiles = @($rawProfile.robocopy.excludeFiles)
-                }
-                if ($rawProfile.robocopy.excludeDirs) {
-                    $robocopyOptions.ExcludeDirs = @($rawProfile.robocopy.excludeDirs)
-                }
-            }
-
-            # Handle retry policy
+            # Handle retry policy (alternative location in config)
             if ($rawProfile.retryPolicy) {
                 if ($rawProfile.retryPolicy.maxRetries) {
                     $robocopyOptions.RetryCount = $rawProfile.retryPolicy.maxRetries
@@ -1181,7 +1227,11 @@ function Get-LogPath {
 #region ==================== DIRECTORY PROFILING ====================
 
 # Script-level cache for directory profiles (thread-safe)
-$script:ProfileCache = [System.Collections.Concurrent.ConcurrentDictionary[string, PSCustomObject]]::new()
+# Uses OrdinalIgnoreCase comparer for Windows-style case-insensitive path matching
+# This is more correct than ToLowerInvariant() for international characters
+$script:ProfileCache = [System.Collections.Concurrent.ConcurrentDictionary[string, PSCustomObject]]::new(
+    [System.StringComparer]::OrdinalIgnoreCase
+)
 
 function Invoke-RobocopyList {
     <#
@@ -1368,9 +1418,14 @@ function Get-NormalizedCacheKey {
         Normalizes a path for use as a cache key
     .DESCRIPTION
         Creates a consistent cache key from a path by:
-        - Converting to lowercase (Windows paths are case-insensitive)
         - Removing trailing slashes
-        - Normalizing path separators
+        - Converting forward slashes to backslashes
+
+        Note: Case normalization is NOT done here because the ProfileCache
+        uses StringComparer.OrdinalIgnoreCase, which handles case-insensitive
+        matching correctly for international characters. This is more accurate
+        than ToLowerInvariant() which can have issues with certain Unicode
+        characters (e.g., Turkish i, German ß).
     .PARAMETER Path
         Path to normalize
     .OUTPUTS
@@ -1381,12 +1436,11 @@ function Get-NormalizedCacheKey {
         [string]$Path
     )
 
-    # Remove trailing slashes and normalize
-    $normalized = $Path.TrimEnd('\', '/')
+    # Convert forward slashes to backslashes for consistency
+    $normalized = $Path.Replace('/', '\')
 
-    # Convert to lowercase for case-insensitive matching on Windows
-    # This ensures C:\Users and c:\users hit the same cache entry
-    $normalized = $normalized.ToLowerInvariant()
+    # Remove trailing slashes
+    $normalized = $normalized.TrimEnd('\')
 
     return $normalized
 }
@@ -1772,10 +1826,50 @@ function New-SmartChunks {
         -MaxDepth $MaxDepth
 }
 
+function Get-NormalizedPath {
+    <#
+    .SYNOPSIS
+        Normalizes a Windows path for consistent comparison
+    .DESCRIPTION
+        Handles UNC paths, drive letters, and various edge cases:
+        - Removes trailing slashes
+        - Normalizes case (Windows is case-insensitive)
+        - Handles \\server\share vs \\SERVER\Share$
+        - Converts forward slashes to backslashes
+    .PARAMETER Path
+        Path to normalize
+    .OUTPUTS
+        Normalized path string
+    .EXAMPLE
+        Get-NormalizedPath -Path "\\SERVER\Share$\"
+        # Returns: "\\server\share$"
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    # Convert forward slashes to backslashes
+    $normalized = $Path.Replace('/', '\')
+
+    # Remove trailing slashes
+    $normalized = $normalized.TrimEnd('\')
+
+    # Lowercase for case-insensitive comparison on Windows
+    $normalized = $normalized.ToLowerInvariant()
+
+    return $normalized
+}
+
 function Convert-ToDestinationPath {
     <#
     .SYNOPSIS
         Converts source path to destination path
+    .DESCRIPTION
+        Maps a source path to its equivalent destination path by:
+        - Normalizing both paths for consistent comparison (case, slashes)
+        - Extracting the relative portion after SourceRoot
+        - Appending it to DestRoot
     .PARAMETER SourcePath
         Full source path
     .PARAMETER SourceRoot
@@ -1785,6 +1879,9 @@ function Convert-ToDestinationPath {
     .EXAMPLE
         Convert-ToDestinationPath -SourcePath "\\server\users$\john\docs" -SourceRoot "\\server\users$" -DestRoot "D:\Backup"
         # Returns: "D:\Backup\john\docs"
+    .EXAMPLE
+        Convert-ToDestinationPath -SourcePath "\\SERVER\Share$\Data" -SourceRoot "\\server\share$" -DestRoot "E:\Replicas"
+        # Returns: "E:\Replicas\Data" (handles case mismatch)
     .OUTPUTS
         String - destination path
     #>
@@ -1799,20 +1896,21 @@ function Convert-ToDestinationPath {
         [string]$DestRoot
     )
 
-    # Normalize paths - remove trailing slashes for consistent comparison
-    $normalizedSource = $SourcePath.TrimEnd('\', '/')
-    $normalizedSourceRoot = $SourceRoot.TrimEnd('\', '/')
+    # Normalize paths for comparison (handles case, trailing slashes, forward slashes)
+    $normalizedSource = Get-NormalizedPath -Path $SourcePath
+    $normalizedSourceRoot = Get-NormalizedPath -Path $SourceRoot
     $normalizedDestRoot = $DestRoot.TrimEnd('\', '/')
 
-    # Check if SourcePath starts with SourceRoot
-    if (-not $normalizedSource.StartsWith($normalizedSourceRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    # Check if SourcePath starts with SourceRoot (using normalized versions for comparison)
+    if (-not $normalizedSource.StartsWith($normalizedSourceRoot, [StringComparison]::Ordinal)) {
         Write-RobocurseLog "SourcePath '$SourcePath' does not start with SourceRoot '$SourceRoot'" -Level Warning
         # If they don't match, just append source to dest
-        return Join-Path $normalizedDestRoot (Split-Path $normalizedSource -Leaf)
+        return Join-Path $normalizedDestRoot (Split-Path $SourcePath -Leaf)
     }
 
-    # Get the relative path
-    $relativePath = $normalizedSource.Substring($normalizedSourceRoot.Length).TrimStart('\', '/')
+    # Get the relative path (using original SourcePath to preserve original casing in output)
+    # We need to calculate the substring length from the normalized root
+    $relativePath = $SourcePath.Substring($SourceRoot.TrimEnd('\', '/').Length).TrimStart('\', '/')
 
     # Build destination path
     if ([string]::IsNullOrEmpty($relativePath)) {
@@ -1829,6 +1927,140 @@ function Convert-ToDestinationPath {
 #endregion
 
 #region ==================== ROBOCOPY WRAPPER ====================
+
+function New-RobocopyArguments {
+    <#
+    .SYNOPSIS
+        Builds robocopy command-line arguments from options
+    .DESCRIPTION
+        Constructs the argument array for robocopy based on:
+        - Source and destination paths
+        - Copy mode (mirror vs regular)
+        - Custom switches from RobocopyOptions
+        - Threading, retry, and logging settings
+        - Exclusion patterns
+        - Chunk-specific arguments
+
+        This function is separated from Start-RobocopyJob for:
+        - Easier unit testing of argument generation
+        - Reusability for displaying planned operations
+        - Cleaner separation of concerns
+    .PARAMETER SourcePath
+        Source directory path
+    .PARAMETER DestinationPath
+        Destination directory path
+    .PARAMETER LogPath
+        Path for robocopy log file
+    .PARAMETER ThreadsPerJob
+        Number of threads for robocopy (/MT:n)
+    .PARAMETER RobocopyOptions
+        Hashtable of robocopy options (see Start-RobocopyJob for details)
+    .PARAMETER ChunkArgs
+        Additional arguments specific to the chunk (e.g., /LEV:1)
+    .OUTPUTS
+        String[] - Array of robocopy arguments ready to join
+    .EXAMPLE
+        $args = New-RobocopyArguments -SourcePath "C:\Source" -DestinationPath "D:\Dest" -LogPath "C:\log.txt"
+        $argString = $args -join ' '
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DestinationPath,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LogPath,
+
+        [ValidateRange(1, 128)]
+        [int]$ThreadsPerJob = $script:DefaultThreadsPerJob,
+
+        [hashtable]$RobocopyOptions = @{},
+
+        [string[]]$ChunkArgs = @()
+    )
+
+    # Extract options with defaults
+    $retryCount = if ($RobocopyOptions.RetryCount) { $RobocopyOptions.RetryCount } else { $script:RobocopyRetryCount }
+    $retryWait = if ($RobocopyOptions.RetryWait) { $RobocopyOptions.RetryWait } else { $script:RobocopyRetryWaitSeconds }
+    $skipJunctions = if ($RobocopyOptions.ContainsKey('SkipJunctions')) { $RobocopyOptions.SkipJunctions } else { $true }
+    $noMirror = if ($RobocopyOptions.NoMirror) { $true } else { $false }
+    $interPacketGapMs = if ($RobocopyOptions.InterPacketGapMs) { [int]$RobocopyOptions.InterPacketGapMs } else { $null }
+
+    # Build argument list
+    $argList = [System.Collections.Generic.List[string]]::new()
+
+    # Source and destination (quoted for paths with spaces)
+    $argList.Add("`"$SourcePath`"")
+    $argList.Add("`"$DestinationPath`"")
+
+    # Copy mode: /MIR (mirror with delete) or /E (copy subdirs including empty)
+    $argList.Add($(if ($noMirror) { "/E" } else { "/MIR" }))
+
+    # Profile-specified switches or defaults
+    if ($RobocopyOptions.Switches -and $RobocopyOptions.Switches.Count -gt 0) {
+        # Filter out switches we handle separately
+        $customSwitches = $RobocopyOptions.Switches | Where-Object {
+            $_ -notmatch '^/(MT|R|W|LOG|MIR|E|TEE|NP|BYTES)' -and
+            $_ -notmatch '^/LOG:'
+        }
+        foreach ($sw in $customSwitches) {
+            $argList.Add($sw)
+        }
+    }
+    else {
+        # Default copy options
+        $argList.Add("/COPY:DAT")
+        $argList.Add("/DCOPY:T")
+    }
+
+    # Threading, retry, and logging (always applied)
+    $argList.Add("/MT:$ThreadsPerJob")
+    $argList.Add("/R:$retryCount")
+    $argList.Add("/W:$retryWait")
+    $argList.Add("/LOG:`"$LogPath`"")
+    $argList.Add("/TEE")
+    $argList.Add("/NP")
+    $argList.Add("/BYTES")
+
+    # Junction handling
+    if ($skipJunctions) {
+        $argList.Add("/XJD")
+        $argList.Add("/XJF")
+    }
+
+    # Bandwidth throttling
+    if ($interPacketGapMs -and $interPacketGapMs -gt 0) {
+        $argList.Add("/IPG:$interPacketGapMs")
+    }
+
+    # Exclude files
+    if ($RobocopyOptions.ExcludeFiles -and $RobocopyOptions.ExcludeFiles.Count -gt 0) {
+        $argList.Add("/XF")
+        foreach ($pattern in $RobocopyOptions.ExcludeFiles) {
+            $argList.Add("`"$pattern`"")
+        }
+    }
+
+    # Exclude directories
+    if ($RobocopyOptions.ExcludeDirs -and $RobocopyOptions.ExcludeDirs.Count -gt 0) {
+        $argList.Add("/XD")
+        foreach ($dir in $RobocopyOptions.ExcludeDirs) {
+            $argList.Add("`"$dir`"")
+        }
+    }
+
+    # Chunk-specific arguments (e.g., /LEV:1 for files-only chunks)
+    foreach ($arg in $ChunkArgs) {
+        $argList.Add($arg)
+    }
+
+    return $argList.ToArray()
+}
 
 function Start-RobocopyJob {
     <#
@@ -1849,6 +2081,9 @@ function Start-RobocopyJob {
         - RetryWait: Override default retry wait seconds
         - NoMirror: Set to $true to use /E instead of /MIR (copy without deleting)
         - SkipJunctions: Set to $false to include junction points (default: skip)
+        - InterPacketGapMs: Bandwidth throttling - milliseconds between packets (robocopy /IPG:n)
+          Use this to limit network bandwidth consumption. Higher values = slower transfer.
+          Example: 50 gives roughly 40 Mbps per job, 100 gives roughly 20 Mbps.
     .OUTPUTS
         PSCustomObject with Process, Chunk, StartTime, LogPath
     .EXAMPLE
@@ -1857,6 +2092,7 @@ function Start-RobocopyJob {
             ExcludeFiles = @("*.tmp", "*.log")
             ExcludeDirs = @("temp", "cache")
             NoMirror = $true
+            InterPacketGapMs = 50  # Throttle bandwidth
         }
         Start-RobocopyJob -Chunk $chunk -LogPath $logPath -RobocopyOptions $options
     #>
@@ -1883,79 +2119,20 @@ function Start-RobocopyJob {
         throw "Chunk.DestinationPath is required and cannot be null or empty"
     }
 
-    # Extract options with defaults
-    $retryCount = if ($RobocopyOptions.RetryCount) { $RobocopyOptions.RetryCount } else { $script:RobocopyRetryCount }
-    $retryWait = if ($RobocopyOptions.RetryWait) { $RobocopyOptions.RetryWait } else { $script:RobocopyRetryWaitSeconds }
-    $skipJunctions = if ($RobocopyOptions.ContainsKey('SkipJunctions')) { $RobocopyOptions.SkipJunctions } else { $true }
-    $noMirror = if ($RobocopyOptions.NoMirror) { $true } else { $false }
-
-    # Build base argument list (source, dest, essential logging)
-    $argList = @(
-        "`"$($Chunk.SourcePath)`"",
-        "`"$($Chunk.DestinationPath)`""
-    )
-
-    # Add copy mode: /MIR (mirror with delete) or /E (copy subdirs including empty)
-    if ($noMirror) {
-        $argList += "/E"
-    }
-    else {
-        $argList += "/MIR"
-    }
-
-    # Add profile-specified switches if provided, otherwise use defaults
-    if ($RobocopyOptions.Switches -and $RobocopyOptions.Switches.Count -gt 0) {
-        # Filter out switches we handle separately (/MT, /R, /W, /LOG, /MIR, /E)
-        $customSwitches = $RobocopyOptions.Switches | Where-Object {
-            $_ -notmatch '^/(MT|R|W|LOG|MIR|E|TEE|NP|BYTES)' -and
-            $_ -notmatch '^/LOG:'
-        }
-        $argList += $customSwitches
-    }
-    else {
-        # Default copy options when none specified
-        $argList += @(
-            "/COPY:DAT",
-            "/DCOPY:T"
-        )
-    }
-
-    # Threading, retry, and logging (always applied)
-    $argList += @(
-        "/MT:$ThreadsPerJob",
-        "/R:$retryCount",
-        "/W:$retryWait",
-        "/LOG:`"$LogPath`"",
-        "/TEE",
-        "/NP",
-        "/BYTES"
-    )
-
-    # Junction handling
-    if ($skipJunctions) {
-        $argList += @("/XJD", "/XJF")
-    }
-
-    # Exclude files
-    if ($RobocopyOptions.ExcludeFiles -and $RobocopyOptions.ExcludeFiles.Count -gt 0) {
-        $argList += "/XF"
-        $argList += $RobocopyOptions.ExcludeFiles | ForEach-Object { "`"$_`"" }
-    }
-
-    # Exclude directories
-    if ($RobocopyOptions.ExcludeDirs -and $RobocopyOptions.ExcludeDirs.Count -gt 0) {
-        $argList += "/XD"
-        $argList += $RobocopyOptions.ExcludeDirs | ForEach-Object { "`"$_`"" }
-    }
-
-    # Add chunk-specific arguments (like /LEV:1 for files-only chunks)
-    if ($Chunk.RobocopyArgs) {
-        $argList += $Chunk.RobocopyArgs
-    }
+    # Build arguments using the dedicated function
+    $chunkArgs = if ($Chunk.RobocopyArgs) { @($Chunk.RobocopyArgs) } else { @() }
+    $argList = New-RobocopyArguments `
+        -SourcePath $Chunk.SourcePath `
+        -DestinationPath $Chunk.DestinationPath `
+        -LogPath $LogPath `
+        -ThreadsPerJob $ThreadsPerJob `
+        -RobocopyOptions $RobocopyOptions `
+        -ChunkArgs $chunkArgs
 
     # Create process start info
     $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = "robocopy.exe"
+    # Use validated robocopy path (fallback to just "robocopy.exe" if not yet validated)
+    $psi.FileName = if ($script:RobocopyPath) { $script:RobocopyPath } else { "robocopy.exe" }
     $psi.Arguments = $argList -join ' '
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
@@ -2319,6 +2496,21 @@ namespace Robocurse
             return Interlocked.Add(ref _bytesComplete, bytes);
         }
 
+        // Cumulative bytes from completed chunks (avoids iterating CompletedChunks queue)
+        // This is the running total of EstimatedSize from all completed chunks
+        private long _completedChunkBytes;
+        public long CompletedChunkBytes
+        {
+            get { return Interlocked.Read(ref _completedChunkBytes); }
+            set { Interlocked.Exchange(ref _completedChunkBytes, value); }
+        }
+
+        /// <summary>Atomically add bytes from a completed chunk</summary>
+        public long AddCompletedChunkBytes(long bytes)
+        {
+            return Interlocked.Add(ref _completedChunkBytes, bytes);
+        }
+
         // Timing (nullable DateTime via object boxing)
         private object _startTime;
         public object StartTime
@@ -2411,6 +2603,7 @@ namespace Robocurse
             // Reset atomic counters
             Interlocked.Exchange(ref _completedCount, 0);
             Interlocked.Exchange(ref _bytesComplete, 0);
+            Interlocked.Exchange(ref _completedChunkBytes, 0);
 
             // Reset volatile flags
             _stopRequested = false;
@@ -2439,6 +2632,7 @@ namespace Robocurse
 
             Interlocked.Exchange(ref _completedCount, 0);
             Interlocked.Exchange(ref _bytesComplete, 0);
+            Interlocked.Exchange(ref _completedChunkBytes, 0);
 
             ChunkQueue = new ConcurrentQueue<object>();
             ActiveJobs.Clear();
@@ -2561,6 +2755,13 @@ function Start-ReplicationRun {
     if (-not $SkipInitialization) {
         Initialize-OrchestrationState
     }
+
+    # Validate robocopy is available before starting
+    $robocopyCheck = Test-RobocopyAvailable
+    if (-not $robocopyCheck.Success) {
+        throw "Cannot start replication: $($robocopyCheck.ErrorMessage)"
+    }
+    Write-RobocurseLog -Message "Using robocopy from: $($robocopyCheck.Data)" -Level 'Debug' -Component 'Orchestrator'
 
     # Store callbacks
     $script:OnProgress = $OnProgress
@@ -2802,6 +3003,10 @@ function Invoke-ReplicationTick {
             }
             else {
                 $state.CompletedChunks.Enqueue($job.Chunk)
+                # Track cumulative bytes from completed chunks (avoids O(n) iteration in Update-ProgressStats)
+                if ($job.Chunk.EstimatedSize) {
+                    $state.AddCompletedChunkBytes($job.Chunk.EstimatedSize)
+                }
             }
             $state.IncrementCompletedCount()
 
@@ -3117,19 +3322,17 @@ function Update-ProgressStats {
     <#
     .SYNOPSIS
         Updates progress statistics from active jobs
+    .DESCRIPTION
+        Uses the cumulative CompletedChunkBytes counter for O(1) completed bytes lookup
+        instead of iterating the CompletedChunks queue (which could be O(n) with 10,000+ chunks).
+        Only active jobs need to be iterated for in-progress bytes.
     #>
     $state = $script:OrchestrationState
 
-    # Calculate bytes complete from completed chunks + in-progress
-    # Use ToArray() for thread-safe snapshot of ConcurrentQueue
-    $bytesFromCompleted = 0
-    foreach ($chunk in $state.CompletedChunks.ToArray()) {
-        if ($chunk.EstimatedSize) {
-            $bytesFromCompleted += $chunk.EstimatedSize
-        }
-    }
+    # Get cumulative bytes from completed chunks (O(1) - pre-calculated counter)
+    $bytesFromCompleted = $state.CompletedChunkBytes
 
-    # Snapshot ActiveJobs for safe iteration
+    # Snapshot ActiveJobs for safe iteration (typically < MaxConcurrentJobs, so small)
     $bytesFromActive = 0
     foreach ($kvp in $state.ActiveJobs.ToArray()) {
         $progress = Get-RobocopyProgress -Job $kvp.Value
@@ -3698,6 +3901,10 @@ function Get-SmtpCredential {
                     if ($credential.CredentialBlobSize -gt 0) {
                         $passwordBytes = New-Object byte[] $credential.CredentialBlobSize
                         [System.Runtime.InteropServices.Marshal]::Copy($credential.CredentialBlob, $passwordBytes, 0, $credential.CredentialBlobSize)
+                        # SECURITY NOTE: The password exists briefly as a plaintext string before
+                        # conversion to SecureString. This is unavoidable when reading from Windows
+                        # Credential Manager via P/Invoke. The plaintext string is eligible for GC
+                        # immediately after SecureString creation. See README Security Considerations.
                         $password = [System.Text.Encoding]::Unicode.GetString($passwordBytes)
                         $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
 
@@ -4977,6 +5184,29 @@ function Initialize-EventHandlers {
             Stop-AllJobs
         }
         $script:ProgressTimer.Stop()
+
+        # Clean up background runspace to prevent memory leaks
+        # This handles cases where the user closes the window mid-replication or after an exception
+        if ($script:ReplicationPowerShell) {
+            try {
+                if ($script:ReplicationHandle -and -not $script:ReplicationHandle.IsCompleted) {
+                    $script:ReplicationPowerShell.Stop()
+                }
+                if ($script:ReplicationPowerShell.Runspace) {
+                    $script:ReplicationPowerShell.Runspace.Close()
+                    $script:ReplicationPowerShell.Runspace.Dispose()
+                }
+                $script:ReplicationPowerShell.Dispose()
+            }
+            catch {
+                # Silently ignore cleanup errors during window close
+            }
+            finally {
+                $script:ReplicationPowerShell = $null
+                $script:ReplicationHandle = $null
+            }
+        }
+
         $saveResult = Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
         if (-not $saveResult.Success) {
             Write-GuiLog "Warning: Failed to save config on exit: $($saveResult.ErrorMessage)"
@@ -5216,6 +5446,9 @@ function Start-GuiReplication {
     $script:Controls.btnStop.IsEnabled = $true
     $script:Controls.txtStatus.Text = "Replication in progress..."
 
+    # Reset GUI progress cache for fresh display
+    $script:LastGuiUpdateState = $null
+
     Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
 
     # Get worker count
@@ -5357,20 +5590,29 @@ function Complete-GuiReplication {
     Write-GuiLog "Replication completed: $($status.ChunksComplete)/$($status.ChunksTotal) chunks, $($status.ChunksFailed) failed"
 }
 
+# Cache for GUI progress updates - avoids unnecessary rebuilds
+$script:LastGuiUpdateState = $null
+
 function Update-GuiProgress {
     <#
     .SYNOPSIS
         Called by timer to update GUI from orchestration state
+    .DESCRIPTION
+        Optimized for performance with large chunk counts:
+        - Only rebuilds display list when chunk counts change
+        - Uses efficient ToArray() snapshot for thread-safe iteration
+        - Limits displayed items to prevent UI sluggishness
+        - Tracks last state to skip redundant updates
     #>
 
     try {
         $status = Get-OrchestrationStatus
 
-        # Update progress bars
+        # Update progress bars (always - lightweight)
         $script:Controls.pbProfile.Value = $status.ProfileProgress
         $script:Controls.pbOverall.Value = $status.OverallProgress
 
-        # Update text
+        # Update text (always - lightweight)
         $profileName = if ($status.CurrentProfile) { $status.CurrentProfile } else { "--" }
         $script:Controls.txtProfileProgress.Text = "Profile: $profileName - $($status.ProfileProgress)%"
         $script:Controls.txtOverallProgress.Text = "Overall: $($status.OverallProgress)%"
@@ -5392,46 +5634,75 @@ function Update-GuiProgress {
 
         $script:Controls.txtChunks.Text = "Chunks: $($status.ChunksComplete)/$($status.ChunksTotal)"
 
-        # Update chunk grid (prepare display objects from orchestration state)
+        # Update chunk grid - optimized for performance
         if ($script:OrchestrationState) {
-            $chunkDisplayItems = @()
-
-            # Add active jobs
-            foreach ($job in $script:OrchestrationState.ActiveJobs.Values) {
-                $chunkDisplayItems += [PSCustomObject]@{
-                    ChunkId = $job.Chunk.ChunkId
-                    SourcePath = $job.Chunk.SourcePath
-                    Status = "Running"
-                    Progress = if ($job.Progress) { $job.Progress } else { 0 }
-                    Speed = "--"
-                }
+            # Check if we need to rebuild the display list
+            # Only rebuild when active job count, completed count, or failed count changes
+            $currentState = @{
+                ActiveCount = $script:OrchestrationState.ActiveJobs.Count
+                CompletedCount = $script:OrchestrationState.CompletedCount
+                FailedCount = $script:OrchestrationState.FailedChunks.Count
             }
 
-            # Add completed chunks (show last 10)
-            $completed = $script:OrchestrationState.CompletedChunks | Select-Object -Last 10
-            foreach ($chunk in $completed) {
-                $chunkDisplayItems += [PSCustomObject]@{
-                    ChunkId = $chunk.ChunkId
-                    SourcePath = $chunk.SourcePath
-                    Status = "Complete"
-                    Progress = 100
-                    Speed = "--"
-                }
+            $needsRebuild = $false
+            if (-not $script:LastGuiUpdateState) {
+                $needsRebuild = $true
+            }
+            elseif ($script:LastGuiUpdateState.ActiveCount -ne $currentState.ActiveCount -or
+                    $script:LastGuiUpdateState.CompletedCount -ne $currentState.CompletedCount -or
+                    $script:LastGuiUpdateState.FailedCount -ne $currentState.FailedCount) {
+                $needsRebuild = $true
             }
 
-            # Add failed chunks
-            foreach ($chunk in $script:OrchestrationState.FailedChunks) {
-                $chunkDisplayItems += [PSCustomObject]@{
-                    ChunkId = $chunk.ChunkId
-                    SourcePath = $chunk.SourcePath
-                    Status = "Failed"
-                    Progress = 0
-                    Speed = "--"
-                }
-            }
+            if ($needsRebuild) {
+                $script:LastGuiUpdateState = $currentState
 
-            # Update DataGrid
-            $script:Controls.dgChunks.ItemsSource = $chunkDisplayItems
+                # Use List for efficient building
+                $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+                # Add active jobs (typically small - MaxConcurrentJobs)
+                # Use ToArray() for thread-safe snapshot of ConcurrentDictionary
+                foreach ($kvp in $script:OrchestrationState.ActiveJobs.ToArray()) {
+                    $job = $kvp.Value
+                    $chunkDisplayItems.Add([PSCustomObject]@{
+                        ChunkId = $job.Chunk.ChunkId
+                        SourcePath = $job.Chunk.SourcePath
+                        Status = "Running"
+                        Progress = if ($job.Progress) { $job.Progress } else { 0 }
+                        Speed = "--"
+                    })
+                }
+
+                # Add failed chunks (show all - usually small or indicates problems)
+                # Use ToArray() for thread-safe snapshot
+                foreach ($chunk in $script:OrchestrationState.FailedChunks.ToArray()) {
+                    $chunkDisplayItems.Add([PSCustomObject]@{
+                        ChunkId = $chunk.ChunkId
+                        SourcePath = $chunk.SourcePath
+                        Status = "Failed"
+                        Progress = 0
+                        Speed = "--"
+                    })
+                }
+
+                # Add completed chunks - limit to last 20 to prevent UI lag
+                # Take a snapshot and get last N efficiently
+                $completedSnapshot = $script:OrchestrationState.CompletedChunks.ToArray()
+                $startIndex = [Math]::Max(0, $completedSnapshot.Length - 20)
+                for ($i = $startIndex; $i -lt $completedSnapshot.Length; $i++) {
+                    $chunk = $completedSnapshot[$i]
+                    $chunkDisplayItems.Add([PSCustomObject]@{
+                        ChunkId = $chunk.ChunkId
+                        SourcePath = $chunk.SourcePath
+                        Status = "Complete"
+                        Progress = 100
+                        Speed = "--"
+                    })
+                }
+
+                # Update DataGrid
+                $script:Controls.dgChunks.ItemsSource = $chunkDisplayItems.ToArray()
+            }
         }
 
         # Check if complete
@@ -5967,12 +6238,9 @@ if ($Help) {
     exit 0
 }
 
-# Detect if we're being dot-sourced by checking the call stack
-# When dot-sourced, there will be additional stack frames from the calling script
-$callStack = Get-PSCallStack
-$isBeingDotSourced = $callStack.Count -gt 2
-
-if (-not $isBeingDotSourced) {
+# Use the Test-IsBeingDotSourced function to detect dot-sourcing
+# This avoids duplicating the call stack detection logic
+if (-not (Test-IsBeingDotSourced)) {
     $exitCode = Start-RobocurseMain -Headless:$Headless -ConfigPath $ConfigPath -ProfileName $Profile -AllProfiles:$AllProfiles -ShowHelp:$Help
     exit $exitCode
 }

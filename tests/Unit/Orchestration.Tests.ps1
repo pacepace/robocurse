@@ -109,6 +109,44 @@ Describe "Orchestration" {
 
             $sessionId1 | Should -Not -Be $sessionId2
         }
+
+        It "Should reset CompletedChunkBytes counter" {
+            # Set a value
+            $script:OrchestrationState.AddCompletedChunkBytes(1000000)
+            $script:OrchestrationState.CompletedChunkBytes | Should -BeGreaterThan 0
+
+            # Reset should clear it
+            Initialize-OrchestrationState
+            $script:OrchestrationState.CompletedChunkBytes | Should -Be 0
+        }
+    }
+
+    Context "OrchestrationState - CompletedChunkBytes Counter" {
+        It "Should atomically add completed chunk bytes" {
+            $script:OrchestrationState.CompletedChunkBytes | Should -Be 0
+
+            $result = $script:OrchestrationState.AddCompletedChunkBytes(1000000)
+
+            $result | Should -Be 1000000
+            $script:OrchestrationState.CompletedChunkBytes | Should -Be 1000000
+        }
+
+        It "Should accumulate multiple adds" {
+            $script:OrchestrationState.AddCompletedChunkBytes(1000)
+            $script:OrchestrationState.AddCompletedChunkBytes(2000)
+            $script:OrchestrationState.AddCompletedChunkBytes(3000)
+
+            $script:OrchestrationState.CompletedChunkBytes | Should -Be 6000
+        }
+
+        It "Should reset via CompletedChunkBytes setter" {
+            $script:OrchestrationState.AddCompletedChunkBytes(5000)
+            $script:OrchestrationState.CompletedChunkBytes | Should -Be 5000
+
+            $script:OrchestrationState.CompletedChunkBytes = 0
+
+            $script:OrchestrationState.CompletedChunkBytes | Should -Be 0
+        }
     }
 
     Context "Invoke-ReplicationTick" {
@@ -477,6 +515,8 @@ Describe "Orchestration" {
 
     Context "Update-ProgressStats" {
         It "Should calculate bytes from completed chunks" {
+            # Simulate chunk completion - add to both queue AND counter
+            # (In production, Invoke-ReplicationTick does both when a chunk completes)
             $chunk1 = [PSCustomObject]@{
                 ChunkId = 1
                 EstimatedSize = 1000000
@@ -486,7 +526,9 @@ Describe "Orchestration" {
                 EstimatedSize = 2000000
             }
             $script:OrchestrationState.CompletedChunks.Enqueue($chunk1)
+            $script:OrchestrationState.AddCompletedChunkBytes($chunk1.EstimatedSize)
             $script:OrchestrationState.CompletedChunks.Enqueue($chunk2)
+            $script:OrchestrationState.AddCompletedChunkBytes($chunk2.EstimatedSize)
 
             Mock Get-RobocopyProgress { }
 
@@ -496,11 +538,13 @@ Describe "Orchestration" {
         }
 
         It "Should include bytes from active jobs" {
+            # Simulate a completed chunk - add to both queue AND counter
             $chunk1 = [PSCustomObject]@{
                 ChunkId = 1
                 EstimatedSize = 1000000
             }
             $script:OrchestrationState.CompletedChunks.Enqueue($chunk1)
+            $script:OrchestrationState.AddCompletedChunkBytes($chunk1.EstimatedSize)
 
             # Mock active job
             $mockProcess = [PSCustomObject]@{ Id = 1234 }

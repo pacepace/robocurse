@@ -102,6 +102,7 @@ Each profile can specify `RobocopyOptions` to customize robocopy behavior:
 | `SkipJunctions` | bool | `true` | Skip junction points (`/XJD /XJF`) |
 | `RetryCount` | int | `3` | Retry count for failed files (`/R:`) |
 | `RetryWait` | int | `10` | Wait seconds between retries (`/W:`) |
+| `InterPacketGapMs` | int | `null` | Bandwidth throttling - ms between packets (`/IPG:`) |
 
 **Note**: Threading (`/MT:`), logging (`/LOG:`), and progress (`/TEE /BYTES`) flags are always applied by Robocurse and cannot be overridden.
 
@@ -249,6 +250,26 @@ VSS operations require administrator privileges. Run PowerShell as Administrator
 ### Robocopy Exit Codes
 
 Robocopy uses bit-flag exit codes. Consult the `Get-RobocopyExitMeaning` function for interpretation.
+
+## Security Considerations
+
+### SMTP Credentials
+
+When retrieving SMTP credentials from Windows Credential Manager, the password briefly exists as a plaintext string in memory before being converted to a `SecureString`. This is an unavoidable limitation of the Windows Credential Manager P/Invoke API.
+
+**Mitigations:**
+- The plaintext string is immediately eligible for garbage collection after `SecureString` creation
+- Credentials are only retrieved when sending email notifications (not at startup)
+- The credential retrieval code runs in the main PowerShell process, not persisted to disk
+
+**Recommendations:**
+- Use a dedicated SMTP account with limited permissions for Robocurse notifications
+- Consider using an application-specific password if your email provider supports it
+- On high-security systems, disable email notifications and use log file monitoring instead
+
+### Network Share Credentials
+
+For network share access, Robocurse relies on the Windows security context of the executing user. Use a service account with minimal required permissions when running as a scheduled task.
 
 ## License
 

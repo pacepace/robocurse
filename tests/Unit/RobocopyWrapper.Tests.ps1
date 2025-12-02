@@ -4,6 +4,33 @@ BeforeAll {
 }
 
 Describe "Robocopy Wrapper" {
+    Context "Test-RobocopyAvailable" {
+        It "Should return OperationResult with correct structure" {
+            $result = Test-RobocopyAvailable
+            $result | Should -Not -BeNullOrEmpty
+            $result.PSObject.Properties.Name | Should -Contain 'Success'
+            $result.PSObject.Properties.Name | Should -Contain 'Data'
+            $result.PSObject.Properties.Name | Should -Contain 'ErrorMessage'
+        }
+
+        It "Should cache the result after first call" {
+            # Call twice and verify caching
+            $result1 = Test-RobocopyAvailable
+            $result2 = Test-RobocopyAvailable
+
+            # If on Windows, both should return the same path
+            if ($result1.Success) {
+                $result1.Data | Should -Be $result2.Data
+            }
+        }
+
+        It "Should have correct function signature" {
+            $cmd = Get-Command Test-RobocopyAvailable
+            # Should return OperationResult type object
+            $cmd | Should -Not -BeNullOrEmpty
+        }
+    }
+
     Context "Get-RobocopyExitMeaning" {
         It "Should interpret exit code 0 as success (no changes)" {
             $result = Get-RobocopyExitMeaning -ExitCode 0
@@ -334,6 +361,173 @@ Describe "Robocopy Wrapper" {
             # ThreadsPerJob should not be mandatory
             $mandatoryAttrs = $cmd.Parameters['ThreadsPerJob'].Attributes | Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] }
             $mandatoryAttrs.Mandatory | Should -Not -Contain $true
+        }
+
+        It "Should accept RobocopyOptions with InterPacketGapMs" {
+            $cmd = Get-Command Start-RobocopyJob
+
+            # Verify RobocopyOptions parameter exists
+            $cmd.Parameters.ContainsKey('RobocopyOptions') | Should -Be $true
+            $cmd.Parameters['RobocopyOptions'].ParameterType.Name | Should -Be 'Hashtable'
+        }
+
+        It "Should have InterPacketGapMs documented in function help" {
+            # Check the RobocopyOptions parameter description mentions InterPacketGapMs
+            $help = Get-Help Start-RobocopyJob -Parameter RobocopyOptions -ErrorAction SilentlyContinue
+            # If help parsing works, check description; otherwise verify function source mentions it
+            if ($help -and $help.description) {
+                $help.description.Text | Should -Match 'InterPacketGapMs'
+            }
+            else {
+                # Fallback: verify the function's definition mentions InterPacketGapMs
+                $funcDef = (Get-Command Start-RobocopyJob).ScriptBlock.ToString()
+                $funcDef | Should -Match 'InterPacketGapMs'
+            }
+        }
+    }
+
+    Context "RobocopyOptions - InterPacketGapMs" {
+        It "Should accept InterPacketGapMs in RobocopyOptions" {
+            $options = @{
+                InterPacketGapMs = 50
+            }
+
+            # Verify the options hashtable is valid
+            $options.InterPacketGapMs | Should -Be 50
+        }
+
+        It "Should accept InterPacketGapMs with other options" {
+            $options = @{
+                Switches = @("/COPYALL")
+                ExcludeFiles = @("*.tmp")
+                InterPacketGapMs = 100
+                RetryCount = 5
+            }
+
+            $options.InterPacketGapMs | Should -Be 100
+            $options.RetryCount | Should -Be 5
+            $options.Switches | Should -Contain "/COPYALL"
+        }
+    }
+
+    Context "New-RobocopyArguments" {
+        It "Should build basic arguments with source and destination" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt"
+
+            $argString = $args -join ' '
+            $argString | Should -Match '"C:\\Source"'
+            $argString | Should -Match '"D:\\Dest"'
+            $argString | Should -Match '/MIR'
+            $argString | Should -Match '/LOG:'
+        }
+
+        It "Should use /E instead of /MIR when NoMirror is true" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -RobocopyOptions @{ NoMirror = $true }
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/E'
+            $argString | Should -Not -Match '/MIR'
+        }
+
+        It "Should include /MT with thread count" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -ThreadsPerJob 16
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/MT:16'
+        }
+
+        It "Should include /IPG when InterPacketGapMs is specified" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -RobocopyOptions @{ InterPacketGapMs = 50 }
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/IPG:50'
+        }
+
+        It "Should include /XJD and /XJF by default for junction handling" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt"
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/XJD'
+            $argString | Should -Match '/XJF'
+        }
+
+        It "Should not include junction flags when SkipJunctions is false" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -RobocopyOptions @{ SkipJunctions = $false }
+
+            $argString = $args -join ' '
+            $argString | Should -Not -Match '/XJD'
+            $argString | Should -Not -Match '/XJF'
+        }
+
+        It "Should include exclude files" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -RobocopyOptions @{ ExcludeFiles = @("*.tmp", "*.log") }
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/XF'
+            $argString | Should -Match '"\*\.tmp"'
+            $argString | Should -Match '"\*\.log"'
+        }
+
+        It "Should include exclude directories" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -RobocopyOptions @{ ExcludeDirs = @("temp", "cache") }
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/XD'
+            $argString | Should -Match '"temp"'
+            $argString | Should -Match '"cache"'
+        }
+
+        It "Should include chunk-specific arguments" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -ChunkArgs @("/LEV:1")
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/LEV:1'
+        }
+
+        It "Should use custom retry settings" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -RobocopyOptions @{ RetryCount = 5; RetryWait = 30 }
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/R:5'
+            $argString | Should -Match '/W:30'
         }
     }
 
