@@ -235,12 +235,6 @@ function Test-IsBeingDotSourced {
         }
     }
 
-    # Method 5: Check if -Help was passed (explicit signal to skip main execution)
-    # This is handled separately at the call site, but we include it as a fallback
-    if ($Help) {
-        return $true
-    }
-
     return $false
 }
 

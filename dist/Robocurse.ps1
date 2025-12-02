@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 10:43:37
+    Built: 2025-12-02 11:06:39
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -306,12 +306,6 @@ function Test-IsBeingDotSourced {
         if ($caller.ScriptName -and $caller.ScriptName -ne $ourScript) {
             return $true
         }
-    }
-
-    # Method 5: Check if -Help was passed (explicit signal to skip main execution)
-    # This is handled separately at the call site, but we include it as a fallback
-    if ($Help) {
-        return $true
     }
 
     return $false
@@ -1569,14 +1563,12 @@ function Initialize-LogSession {
     $logDirectory = Join-Path $LogRoot $dateFolder
 
     # Create the directory and Jobs subdirectory
-    if (-not (Test-Path $logDirectory)) {
-        New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
-    }
+    # Using New-Item -Force directly avoids TOCTOU race condition between Test-Path and New-Item
+    # -Force succeeds silently if directory already exists
+    New-Item -ItemType Directory -Path $logDirectory -Force -ErrorAction SilentlyContinue | Out-Null
 
     $jobsDirectory = Join-Path $logDirectory "Jobs"
-    if (-not (Test-Path $jobsDirectory)) {
-        New-Item -ItemType Directory -Path $jobsDirectory -Force | Out-Null
-    }
+    New-Item -ItemType Directory -Path $jobsDirectory -Force -ErrorAction SilentlyContinue | Out-Null
 
     # Define log file paths
     $operationalLogPath = Join-Path $logDirectory "Session_${sessionId}.log"
@@ -5444,9 +5436,14 @@ function Update-ProgressStats {
     # Snapshot ActiveJobs for safe iteration (typically < MaxConcurrentJobs, so small)
     $bytesFromActive = 0
     foreach ($kvp in $state.ActiveJobs.ToArray()) {
-        $progress = Get-RobocopyProgress -Job $kvp.Value
-        if ($progress) {
-            $bytesFromActive += $progress.BytesCopied
+        try {
+            $progress = Get-RobocopyProgress -Job $kvp.Value
+            if ($progress) {
+                $bytesFromActive += $progress.BytesCopied
+            }
+        }
+        catch {
+            # Progress parsing failure shouldn't break the update loop - just skip this job
         }
     }
 

@@ -46,14 +46,12 @@ function Initialize-LogSession {
     $logDirectory = Join-Path $LogRoot $dateFolder
 
     # Create the directory and Jobs subdirectory
-    if (-not (Test-Path $logDirectory)) {
-        New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
-    }
+    # Using New-Item -Force directly avoids TOCTOU race condition between Test-Path and New-Item
+    # -Force succeeds silently if directory already exists
+    New-Item -ItemType Directory -Path $logDirectory -Force -ErrorAction SilentlyContinue | Out-Null
 
     $jobsDirectory = Join-Path $logDirectory "Jobs"
-    if (-not (Test-Path $jobsDirectory)) {
-        New-Item -ItemType Directory -Path $jobsDirectory -Force | Out-Null
-    }
+    New-Item -ItemType Directory -Path $jobsDirectory -Force -ErrorAction SilentlyContinue | Out-Null
 
     # Define log file paths
     $operationalLogPath = Join-Path $logDirectory "Session_${sessionId}.log"

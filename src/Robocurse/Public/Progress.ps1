@@ -19,9 +19,14 @@ function Update-ProgressStats {
     # Snapshot ActiveJobs for safe iteration (typically < MaxConcurrentJobs, so small)
     $bytesFromActive = 0
     foreach ($kvp in $state.ActiveJobs.ToArray()) {
-        $progress = Get-RobocopyProgress -Job $kvp.Value
-        if ($progress) {
-            $bytesFromActive += $progress.BytesCopied
+        try {
+            $progress = Get-RobocopyProgress -Job $kvp.Value
+            if ($progress) {
+                $bytesFromActive += $progress.BytesCopied
+            }
+        }
+        catch {
+            # Progress parsing failure shouldn't break the update loop - just skip this job
         }
     }
 
