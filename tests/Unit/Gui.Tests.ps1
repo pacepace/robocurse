@@ -481,5 +481,157 @@ InModuleScope 'Robocurse' {
                 $index | Should -Be 0
             }
         }
+
+        Context "Headless WPF Instantiation Tests" -Skip:(-not (Test-IsWindowsPlatform)) {
+            BeforeAll {
+                # Path to test config file
+                $script:GuiTestConfigPath = Join-Path $PSScriptRoot "..\Integration\Fixtures\GuiTest.config.json"
+
+                # Ensure config exists
+                if (-not (Test-Path $script:GuiTestConfigPath)) {
+                    throw "GUI test config not found at: $script:GuiTestConfigPath"
+                }
+
+                # Load WPF assemblies
+                Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
+                Add-Type -AssemblyName PresentationCore -ErrorAction Stop
+                Add-Type -AssemblyName WindowsBase -ErrorAction Stop
+            }
+
+            AfterEach {
+                # Clean up any window that was created
+                if ($script:TestWindow) {
+                    try {
+                        $script:TestWindow.Close()
+                    }
+                    catch {
+                        # Window may already be closed
+                    }
+                    $script:TestWindow = $null
+                }
+            }
+
+            It "Should return a Window object from Initialize-RobocurseGui" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $script:TestWindow | Should -Not -BeNullOrEmpty
+                $script:TestWindow | Should -BeOfType [System.Windows.Window]
+            }
+
+            It "Should find all required controls by name" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $script:TestWindow | Should -Not -BeNullOrEmpty
+
+                $requiredControls = @(
+                    'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
+                    'txtProfileName', 'txtSource', 'txtDest',
+                    'btnBrowseSource', 'btnBrowseDest',
+                    'chkUseVss', 'cmbScanMode',
+                    'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+                    'sldWorkers', 'txtWorkerCount',
+                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
+                    'dgChunks', 'pbProfile', 'pbOverall',
+                    'txtProfileProgress', 'txtOverallProgress',
+                    'txtEta', 'txtSpeed', 'txtChunks',
+                    'txtStatus', 'txtLog', 'svLog'
+                )
+
+                foreach ($controlName in $requiredControls) {
+                    $control = $script:TestWindow.FindName($controlName)
+                    $control | Should -Not -BeNullOrEmpty -Because "Control '$controlName' should exist"
+                }
+            }
+
+            It "Should have Stop button initially disabled" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $btnStop = $script:TestWindow.FindName('btnStop')
+                $btnStop.IsEnabled | Should -Be $false
+            }
+
+            It "Should have Run buttons initially enabled" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $btnRunAll = $script:TestWindow.FindName('btnRunAll')
+                $btnRunSelected = $script:TestWindow.FindName('btnRunSelected')
+
+                $btnRunAll.IsEnabled | Should -Be $true
+                $btnRunSelected.IsEnabled | Should -Be $true
+            }
+
+            It "Should load profiles from config into profile list" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $lstProfiles = $script:TestWindow.FindName('lstProfiles')
+
+                # Config has 2 profiles
+                $lstProfiles.Items.Count | Should -Be 2
+            }
+
+            It "Should set default worker count from slider" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $sldWorkers = $script:TestWindow.FindName('sldWorkers')
+                $txtWorkerCount = $script:TestWindow.FindName('txtWorkerCount')
+
+                $sldWorkers.Value | Should -BeGreaterOrEqual 1
+                $sldWorkers.Value | Should -BeLessOrEqual 16
+            }
+
+            It "Should have correct window title" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $script:TestWindow.Title | Should -Match "Robocurse"
+            }
+
+            It "Should initialize progress bars at zero" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $pbProfile = $script:TestWindow.FindName('pbProfile')
+                $pbOverall = $script:TestWindow.FindName('pbOverall')
+
+                $pbProfile.Value | Should -Be 0
+                $pbOverall.Value | Should -Be 0
+            }
+
+            It "Should have scan mode combo box with Smart and Quick options" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $cmbScanMode = $script:TestWindow.FindName('cmbScanMode')
+
+                $cmbScanMode.Items.Count | Should -Be 2
+            }
+        }
+
+        Context "Schedule Dialog Headless Tests" -Skip:(-not (Test-IsWindowsPlatform)) {
+            BeforeAll {
+                Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
+                Add-Type -AssemblyName PresentationCore -ErrorAction Stop
+                Add-Type -AssemblyName WindowsBase -ErrorAction Stop
+            }
+
+            It "Should load ScheduleDialog XAML without error" {
+                $xaml = Get-XamlResource -ResourceName 'ScheduleDialog.xaml'
+                $xaml | Should -Not -BeNullOrEmpty
+
+                # Parse the XAML
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog | Should -BeOfType [System.Windows.Window]
+                $dialog.Title | Should -Match "Schedule"
+
+                # Clean up
+                $dialog.Close()
+            }
+
+            It "Should have required schedule dialog controls" {
+                $xaml = Get-XamlResource -ResourceName 'ScheduleDialog.xaml'
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog.FindName('chkEnabled') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtTime') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('cmbFrequency') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('btnOk') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('btnCancel') | Should -Not -BeNullOrEmpty
+
+                $dialog.Close()
+            }
+        }
     }
 }
