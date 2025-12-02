@@ -172,11 +172,31 @@ function Write-RobocurseLog {
 
     # Write to SIEM if requested
     if ($WriteSiem) {
-        # Map log level to appropriate SIEM event type
+        # Map log level and component to appropriate SIEM event type
+        # Use component context to determine the most accurate event type
         $eventType = switch ($Level) {
-            'Error'   { 'ChunkError' }
-            'Warning' { 'ChunkError' }  # Warnings should also use ChunkError, not SessionStart
-            default   { 'ChunkError' }  # Fallback for any SIEM-worthy level
+            'Error' {
+                switch -Wildcard ($Component) {
+                    'Chunk*'      { 'ChunkError' }
+                    'Robocopy'    { 'ChunkError' }
+                    'Config*'     { 'ConfigChange' }
+                    'Email'       { 'EmailSent' }
+                    'VSS'         { 'VssSnapshotRemoved' }
+                    'Session'     { 'SessionEnd' }
+                    'Profile'     { 'ProfileComplete' }
+                    default       { 'ChunkError' }
+                }
+            }
+            'Warning' {
+                switch -Wildcard ($Component) {
+                    'Chunk*'      { 'ChunkError' }
+                    'Robocopy'    { 'ChunkError' }
+                    'Config*'     { 'ConfigChange' }
+                    'VSS'         { 'VssSnapshotRemoved' }
+                    default       { 'ChunkError' }
+                }
+            }
+            default { 'ChunkError' }  # Fallback for unexpected levels routed to SIEM
         }
         Write-SiemEvent -EventType $eventType -Data @{
             Level = $Level

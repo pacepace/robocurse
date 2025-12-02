@@ -30,6 +30,9 @@
     CompatiblePSEditions = @('Desktop', 'Core')
 
     # Functions to export from this module
+    # Note: Internal helper functions (e.g., Get-CachedProfile, New-Chunk, Test-PathFormat, etc.)
+    # are intentionally NOT exported. They remain accessible within the module but are not part
+    # of the public API. Only functions intended for external use are listed below.
     FunctionsToExport = @(
         # Utility
         'Test-IsWindowsPlatform'

@@ -512,7 +512,7 @@ function Test-DestinationDiskSpace {
 
     try {
         # For UNC paths, we can't easily check disk space without mounting
-        # Just verify the path is writable
+        # Just verify the path or parent exists
         if ($Path -match '^\\\\') {
             # Ensure parent path exists or can be created
             if (-not (Test-Path -Path $Path)) {
@@ -522,7 +522,8 @@ function Test-DestinationDiskSpace {
                         -ErrorMessage "Destination path parent does not exist: '$parentPath'"
                 }
             }
-            # Can't check disk space on UNC without more complex logic
+            # Can't check disk space on UNC without complex WMI calls to remote server
+            # Write access will be validated when robocopy actually runs
             return New-OperationResult -Success $true -Data "UNC path - disk space check skipped"
         }
 

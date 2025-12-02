@@ -285,7 +285,8 @@ function Set-CachedProfile {
             }
             else {
                 # Large cache - take random sample for approximate LRU
-                $random = [System.Random]::new()
+                # Note: Get-Random uses proper internal seeding on PS 5.1+, no need
+                # to create a System.Random instance
                 $sample = $allEntries | Get-Random -Count $sampleSize
             }
 

@@ -263,6 +263,12 @@ function Register-RobocurseTask {
 
         # If credentials provided, add them to task registration
         # This is required for Password logon type to enable network access
+        #
+        # SECURITY NOTE: GetNetworkCredential().Password returns plaintext. This is UNAVOIDABLE
+        # when using Register-ScheduledTask with password-based authentication - the Windows API
+        # requires the plaintext password to store in the credential vault. The password is
+        # passed directly to the Windows Task Scheduler service which encrypts it internally.
+        # There is no way to pass a SecureString to Register-ScheduledTask.
         if ($Credential) {
             $taskParams['User'] = $Credential.UserName
             $taskParams['Password'] = $Credential.GetNetworkCredential().Password

@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 09:51:37
+    Built: 2025-12-02 10:22:30
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -585,7 +585,7 @@ function Test-DestinationDiskSpace {
 
     try {
         # For UNC paths, we can't easily check disk space without mounting
-        # Just verify the path is writable
+        # Just verify the path or parent exists
         if ($Path -match '^\\\\') {
             # Ensure parent path exists or can be created
             if (-not (Test-Path -Path $Path)) {
@@ -595,7 +595,8 @@ function Test-DestinationDiskSpace {
                         -ErrorMessage "Destination path parent does not exist: '$parentPath'"
                 }
             }
-            # Can't check disk space on UNC without more complex logic
+            # Can't check disk space on UNC without complex WMI calls to remote server
+            # Write access will be validated when robocopy actually runs
             return New-OperationResult -Success $true -Data "UNC path - disk space check skipped"
         }
 
@@ -1354,6 +1355,7 @@ function Test-RobocurseConfig {
     # Validate Email configuration if enabled
     if (($configPropertyNames -contains 'Email') -and $Config.Email.Enabled -eq $true) {
         $email = $Config.Email
+        $emailPropertyNames = if ($email.PSObject) { $email.PSObject.Properties.Name } else { @() }
 
         if ([string]::IsNullOrWhiteSpace($email.SmtpServer)) {
             $errors += "Email.SmtpServer is required when Email.Enabled is true"
@@ -1362,9 +1364,28 @@ function Test-RobocurseConfig {
         if ([string]::IsNullOrWhiteSpace($email.From)) {
             $errors += "Email.From is required when Email.Enabled is true"
         }
+        elseif ($email.From -notmatch '^\S+@\S+\.\S+$') {
+            $errors += "Email.From is not a valid email address format: $($email.From)"
+        }
 
         if (-not $email.To -or $email.To.Count -eq 0) {
             $errors += "Email.To must contain at least one recipient when Email.Enabled is true"
+        }
+        else {
+            # Validate each recipient email format
+            $toArray = @($email.To)
+            for ($j = 0; $j -lt $toArray.Count; $j++) {
+                if ($toArray[$j] -notmatch '^\S+@\S+\.\S+$') {
+                    $errors += "Email.To[$j] is not a valid email address format: $($toArray[$j])"
+                }
+            }
+        }
+
+        # Validate port if specified
+        if ($emailPropertyNames -contains 'Port' -and $null -ne $email.Port) {
+            if ($email.Port -lt 1 -or $email.Port -gt 65535) {
+                $errors += "Email.Port must be between 1 and 65535 (current: $($email.Port))"
+            }
         }
     }
 
@@ -1462,8 +1483,13 @@ function Test-PathFormat {
         [string]$Path
     )
 
+    # Empty or whitespace paths are invalid
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+
     # Check for invalid characters that are not allowed in Windows paths
-    # Valid paths can be: UNC (\\server\share) or local (C:\path or .\path)
+    # Valid paths can be: UNC (\\server\share) or local (C:\path or .\path or relative)
     $invalidChars = [System.IO.Path]::GetInvalidPathChars() + @('|', '>', '<', '"', '?', '*')
 
     foreach ($char in $invalidChars) {
@@ -1474,11 +1500,16 @@ function Test-PathFormat {
 
     # Basic format validation for UNC or local paths
     # UNC: \\server\share or \\server\share\path
-    # Local: C:\ or C:\path or .\ or .\path
-    if ($Path -match '^\\\\[^\\]+\\[^\\]+' -or     # UNC path
-        $Path -match '^[a-zA-Z]:\\' -or             # Absolute local path
-        $Path -match '^\.\\' -or                    # Relative path
-        $Path -match '^\.\.\\') {                   # Parent relative path
+    # Absolute: C:\ or C:\path
+    # Relative explicit: .\ or .\path or ..\ or ..\path
+    # Relative implicit: folder\subfolder or folder (no leading specifier)
+    if ($Path -match '^\\\\[^\\]+\\[^\\]+' -or     # UNC path (\\server\share...)
+        $Path -match '^[a-zA-Z]:\\' -or             # Absolute local path (C:\...)
+        $Path -match '^[a-zA-Z]:$' -or              # Drive root without backslash (C:)
+        $Path -match '^\.\\' -or                    # Explicit relative path (.\...)
+        $Path -match '^\.\.[\\]?' -or               # Parent relative path (..\... or ..)
+        $Path -match '^\.$' -or                     # Current directory (.)
+        $Path -match '^[a-zA-Z0-9_\-]') {           # Implicit relative path (folder\... or folder)
         return $true
     }
 
@@ -1662,11 +1693,31 @@ function Write-RobocurseLog {
 
     # Write to SIEM if requested
     if ($WriteSiem) {
-        # Map log level to appropriate SIEM event type
+        # Map log level and component to appropriate SIEM event type
+        # Use component context to determine the most accurate event type
         $eventType = switch ($Level) {
-            'Error'   { 'ChunkError' }
-            'Warning' { 'ChunkError' }  # Warnings should also use ChunkError, not SessionStart
-            default   { 'ChunkError' }  # Fallback for any SIEM-worthy level
+            'Error' {
+                switch -Wildcard ($Component) {
+                    'Chunk*'      { 'ChunkError' }
+                    'Robocopy'    { 'ChunkError' }
+                    'Config*'     { 'ConfigChange' }
+                    'Email'       { 'EmailSent' }
+                    'VSS'         { 'VssSnapshotRemoved' }
+                    'Session'     { 'SessionEnd' }
+                    'Profile'     { 'ProfileComplete' }
+                    default       { 'ChunkError' }
+                }
+            }
+            'Warning' {
+                switch -Wildcard ($Component) {
+                    'Chunk*'      { 'ChunkError' }
+                    'Robocopy'    { 'ChunkError' }
+                    'Config*'     { 'ConfigChange' }
+                    'VSS'         { 'VssSnapshotRemoved' }
+                    default       { 'ChunkError' }
+                }
+            }
+            default { 'ChunkError' }  # Fallback for unexpected levels routed to SIEM
         }
         Write-SiemEvent -EventType $eventType -Data @{
             Level = $Level
@@ -2205,7 +2256,8 @@ function Set-CachedProfile {
             }
             else {
                 # Large cache - take random sample for approximate LRU
-                $random = [System.Random]::new()
+                # Note: Get-Random uses proper internal seeding on PS 5.1+, no need
+                # to create a System.Random instance
                 $sample = $allEntries | Get-Random -Count $sampleSize
             }
 
@@ -7235,6 +7287,12 @@ function Register-RobocurseTask {
 
         # If credentials provided, add them to task registration
         # This is required for Password logon type to enable network access
+        #
+        # SECURITY NOTE: GetNetworkCredential().Password returns plaintext. This is UNAVOIDABLE
+        # when using Register-ScheduledTask with password-based authentication - the Windows API
+        # requires the plaintext password to store in the credential vault. The password is
+        # passed directly to the Windows Task Scheduler service which encrypts it internally.
+        # There is no way to pass a SecureString to Register-ScheduledTask.
         if ($Credential) {
             $taskParams['User'] = $Credential.UserName
             $taskParams['Password'] = $Credential.GetNetworkCredential().Password
@@ -7841,7 +7899,7 @@ function Initialize-EventHandlers {
         Invoke-SafeEventHandler -HandlerName "ProfileSelection" -ScriptBlock {
             $selected = $script:Controls.lstProfiles.SelectedItem
             if ($selected) {
-                Load-ProfileToForm -Profile $selected
+                Import-ProfileToForm -Profile $selected
             }
         }
     })
@@ -8048,12 +8106,12 @@ function Update-ProfileList {
     }
 }
 
-function Load-ProfileToForm {
+function Import-ProfileToForm {
     <#
     .SYNOPSIS
-        Loads selected profile data into form fields
+        Imports selected profile data into form fields
     .PARAMETER Profile
-        Profile object to load
+        Profile object to import
     #>
     [CmdletBinding()]
     param([PSCustomObject]$Profile)

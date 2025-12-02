@@ -554,6 +554,7 @@ function Test-RobocurseConfig {
     # Validate Email configuration if enabled
     if (($configPropertyNames -contains 'Email') -and $Config.Email.Enabled -eq $true) {
         $email = $Config.Email
+        $emailPropertyNames = if ($email.PSObject) { $email.PSObject.Properties.Name } else { @() }
 
         if ([string]::IsNullOrWhiteSpace($email.SmtpServer)) {
             $errors += "Email.SmtpServer is required when Email.Enabled is true"
@@ -562,9 +563,28 @@ function Test-RobocurseConfig {
         if ([string]::IsNullOrWhiteSpace($email.From)) {
             $errors += "Email.From is required when Email.Enabled is true"
         }
+        elseif ($email.From -notmatch '^\S+@\S+\.\S+$') {
+            $errors += "Email.From is not a valid email address format: $($email.From)"
+        }
 
         if (-not $email.To -or $email.To.Count -eq 0) {
             $errors += "Email.To must contain at least one recipient when Email.Enabled is true"
+        }
+        else {
+            # Validate each recipient email format
+            $toArray = @($email.To)
+            for ($j = 0; $j -lt $toArray.Count; $j++) {
+                if ($toArray[$j] -notmatch '^\S+@\S+\.\S+$') {
+                    $errors += "Email.To[$j] is not a valid email address format: $($toArray[$j])"
+                }
+            }
+        }
+
+        # Validate port if specified
+        if ($emailPropertyNames -contains 'Port' -and $null -ne $email.Port) {
+            if ($email.Port -lt 1 -or $email.Port -gt 65535) {
+                $errors += "Email.Port must be between 1 and 65535 (current: $($email.Port))"
+            }
         }
     }
 
@@ -662,8 +682,13 @@ function Test-PathFormat {
         [string]$Path
     )
 
+    # Empty or whitespace paths are invalid
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+
     # Check for invalid characters that are not allowed in Windows paths
-    # Valid paths can be: UNC (\\server\share) or local (C:\path or .\path)
+    # Valid paths can be: UNC (\\server\share) or local (C:\path or .\path or relative)
     $invalidChars = [System.IO.Path]::GetInvalidPathChars() + @('|', '>', '<', '"', '?', '*')
 
     foreach ($char in $invalidChars) {
@@ -674,11 +699,16 @@ function Test-PathFormat {
 
     # Basic format validation for UNC or local paths
     # UNC: \\server\share or \\server\share\path
-    # Local: C:\ or C:\path or .\ or .\path
-    if ($Path -match '^\\\\[^\\]+\\[^\\]+' -or     # UNC path
-        $Path -match '^[a-zA-Z]:\\' -or             # Absolute local path
-        $Path -match '^\.\\' -or                    # Relative path
-        $Path -match '^\.\.\\') {                   # Parent relative path
+    # Absolute: C:\ or C:\path
+    # Relative explicit: .\ or .\path or ..\ or ..\path
+    # Relative implicit: folder\subfolder or folder (no leading specifier)
+    if ($Path -match '^\\\\[^\\]+\\[^\\]+' -or     # UNC path (\\server\share...)
+        $Path -match '^[a-zA-Z]:\\' -or             # Absolute local path (C:\...)
+        $Path -match '^[a-zA-Z]:$' -or              # Drive root without backslash (C:)
+        $Path -match '^\.\\' -or                    # Explicit relative path (.\...)
+        $Path -match '^\.\.[\\]?' -or               # Parent relative path (..\... or ..)
+        $Path -match '^\.$' -or                     # Current directory (.)
+        $Path -match '^[a-zA-Z0-9_\-]') {           # Implicit relative path (folder\... or folder)
         return $true
     }
 

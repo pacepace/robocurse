@@ -25,8 +25,8 @@ InModuleScope 'Robocurse' {
                 Get-Command Update-ProfileList -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
             }
 
-            It "Should have Load-ProfileToForm function" {
-                Get-Command Load-ProfileToForm -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            It "Should have Import-ProfileToForm function" {
+                Get-Command Import-ProfileToForm -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
             }
 
             It "Should have Save-ProfileFromForm function" {

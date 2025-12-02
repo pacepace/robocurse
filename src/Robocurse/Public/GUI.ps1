@@ -328,7 +328,7 @@ function Initialize-EventHandlers {
         Invoke-SafeEventHandler -HandlerName "ProfileSelection" -ScriptBlock {
             $selected = $script:Controls.lstProfiles.SelectedItem
             if ($selected) {
-                Load-ProfileToForm -Profile $selected
+                Import-ProfileToForm -Profile $selected
             }
         }
     })
@@ -535,12 +535,12 @@ function Update-ProfileList {
     }
 }
 
-function Load-ProfileToForm {
+function Import-ProfileToForm {
     <#
     .SYNOPSIS
-        Loads selected profile data into form fields
+        Imports selected profile data into form fields
     .PARAMETER Profile
-        Profile object to load
+        Profile object to import
     #>
     [CmdletBinding()]
     param([PSCustomObject]$Profile)
