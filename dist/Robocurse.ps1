@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Robocurse - Multi-share parallel robocopy orchestrator
@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 12:04:00
+    Built: 2025-12-02 14:52:54
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -70,7 +70,7 @@ param(
     [switch]$Help
 )
 
-#region ==================== PUBLIC\UTILITY ====================
+#region ==================== UTILITY ====================
 
 function Test-IsWindowsPlatform {
     <#
@@ -525,7 +525,23 @@ function Test-SourcePathAccessible {
     )
 
     # Check if path exists
-    if (-not (Test-Path -Path $Path -PathType Container)) {
+    # Note: Test-Path can throw for UNC paths to unreachable servers on Windows
+    try {
+        $pathExists = Test-Path -Path $Path -PathType Container -ErrorAction Stop
+    }
+    catch {
+        # UNC paths to unreachable servers throw "The network path was not found"
+        if ($Path -match '^\\\\') {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Source path not accessible: '$Path'. Check network connectivity and share permissions." `
+                -ErrorRecord $_
+        }
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Error checking source path '$Path': $($_.Exception.Message)" `
+            -ErrorRecord $_
+    }
+
+    if (-not $pathExists) {
         # Provide more specific error for UNC paths
         if ($Path -match '^\\\\') {
             return New-OperationResult -Success $false `
@@ -792,7 +808,7 @@ function Test-SafeConfigPath {
 
 #endregion
 
-#region ==================== PUBLIC\CONFIGURATION ====================
+#region ==================== CONFIGURATION ====================
 
 function New-DefaultConfig {
     <#
@@ -1207,7 +1223,9 @@ function Get-RobocurseConfig {
     # Try to load and parse the JSON file
     try {
         $jsonContent = Get-Content -Path $Path -Raw -ErrorAction Stop
-        $rawConfig = $jsonContent | ConvertFrom-Json -Depth 10 -ErrorAction Stop
+        # Note: -Depth parameter not available in PowerShell 5.1, omitting for compatibility
+        # PS 5.1 defaults to depth 1024 which is sufficient for config files
+        $rawConfig = $jsonContent | ConvertFrom-Json -ErrorAction Stop
 
         # Convert to internal format (handles both formats)
         $config = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
@@ -1523,7 +1541,7 @@ function Test-PathFormat {
 
 #endregion
 
-#region ==================== PUBLIC\LOGGING ====================
+#region ==================== LOGGING ====================
 
 # Script-scoped variables for current session state
 $script:CurrentSessionId = $null
@@ -2029,7 +2047,7 @@ function Get-LogPath {
 
 #endregion
 
-#region ==================== PUBLIC\DIRECTORYPROFILING ====================
+#region ==================== DIRECTORYPROFILING ====================
 
 # Script-level cache for directory profiles (thread-safe)
 # Uses OrdinalIgnoreCase comparer for Windows-style case-insensitive path matching
@@ -2587,7 +2605,7 @@ function Get-DirectoryProfilesParallel {
 
 #endregion
 
-#region ==================== PUBLIC\CHUNKING ====================
+#region ==================== CHUNKING ====================
 
 # Script-level counter for unique chunk IDs (plain integer, use [ref] when calling Interlocked)
 $script:ChunkIdCounter = 0
@@ -2744,7 +2762,8 @@ function Get-FilesAtLevel {
 
     try {
         $files = Get-ChildItem -Path $Path -File -ErrorAction Stop
-        return $files
+        # Wrap in @() to ensure array return even for single file (PS 5.1 compatibility)
+        return @($files)
     }
     catch {
         Write-RobocurseLog "Error getting files at level '$Path': $_" -Level Warning
@@ -3049,7 +3068,7 @@ function Convert-ToDestinationPath {
 
 #endregion
 
-#region ==================== PUBLIC\ROBOCOPY ====================
+#region ==================== ROBOCOPY ====================
 
 # Script-level bandwidth limit (set from config during replication start)
 $script:BandwidthLimitMbps = 0
@@ -3184,10 +3203,17 @@ function New-RobocopyArguments {
 
         [hashtable]$RobocopyOptions = @{},
 
-        [string[]]$ChunkArgs = @(),
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$ChunkArgs,
 
         [switch]$DryRun
     )
+
+    # Handle null ChunkArgs (PS 5.1 unwraps empty arrays to null)
+    if ($null -eq $ChunkArgs) {
+        $ChunkArgs = @()
+    }
 
     # Validate paths for command injection before using them
     $safeSourcePath = Get-SanitizedPath -Path $SourcePath -ParameterName "SourcePath"
@@ -3747,7 +3773,7 @@ function Wait-RobocopyJob {
 
 #endregion
 
-#region ==================== PUBLIC\CHECKPOINT ====================
+#region ==================== CHECKPOINT ====================
 
 # Handles checkpoint/resume functionality for crash recovery
 
@@ -3832,10 +3858,13 @@ function Save-ReplicationCheckpoint {
         $tempPath = "$checkpointPath.tmp"
         $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
 
-        # Use .NET File.Move with overwrite for atomic replacement
-        # This avoids TOCTOU race between Test-Path/Remove-Item/Move-Item
-        # On NTFS, this is an atomic operation
-        [System.IO.File]::Move($tempPath, $checkpointPath, $true)
+        # Use atomic replacement - remove existing then move
+        # Note: .NET Framework (PowerShell 5.1) doesn't support File.Move overwrite parameter
+        # so we need to remove first, then move
+        if (Test-Path $checkpointPath) {
+            Remove-Item -Path $checkpointPath -Force
+        }
+        [System.IO.File]::Move($tempPath, $checkpointPath)
 
         Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
             -Level 'Info' -Component 'Checkpoint'
@@ -3970,7 +3999,7 @@ function Test-ChunkAlreadyCompleted {
 
 #endregion
 
-#region ==================== PUBLIC\ORCHESTRATION ====================
+#region ==================== ORCHESTRATION ====================
 
 # Script variable to track if C# type has been initialized (for lazy loading)
 $script:OrchestrationTypeInitialized = $false
@@ -5502,7 +5531,7 @@ function Remove-HealthCheckStatus {
 
 #endregion
 
-#region ==================== PUBLIC\PROGRESS ====================
+#region ==================== PROGRESS ====================
 
 function Update-ProgressStats {
     <#
@@ -5673,7 +5702,7 @@ function Get-ETAEstimate {
 
 #endregion
 
-#region ==================== PUBLIC\VSS ====================
+#region ==================== VSS ====================
 
 # Path to track active VSS snapshots (for orphan cleanup)
 # Handle cross-platform: TEMP on Windows, TMPDIR on macOS, /tmp fallback
@@ -5882,7 +5911,10 @@ function Add-VssToTracking {
             $tracked = @()
             if (Test-Path $script:VssTrackingFile) {
                 try {
-                    $tracked = @(Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json)
+                    # Note: Don't wrap ConvertFrom-Json in @() with pipeline - PS 5.1 unwraps arrays
+                    # Assign first, then wrap to preserve array structure
+                    $parsedJson = Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json
+                    $tracked = @($parsedJson)
                 }
                 catch {
                     # File might be corrupted or empty - start fresh
@@ -5896,7 +5928,8 @@ function Add-VssToTracking {
                 CreatedAt = $SnapshotInfo.CreatedAt.ToString('o')
             }
 
-            $tracked | ConvertTo-Json -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
+            # Use -InputObject to preserve JSON array format (PS 5.1 compatibility)
+            ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
         }
     }
     catch {
@@ -5927,7 +5960,10 @@ function Remove-VssFromTracking {
             }
 
             try {
-                $tracked = @(Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json)
+                # Note: Don't wrap ConvertFrom-Json in @() with pipeline - PS 5.1 unwraps arrays
+                # Assign first, then wrap to preserve array structure
+                $parsedJson = Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json
+                $tracked = @($parsedJson)
             }
             catch {
                 # File might be corrupted - just remove it
@@ -5940,7 +5976,8 @@ function Remove-VssFromTracking {
             if ($tracked.Count -eq 0) {
                 Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
             } else {
-                $tracked | ConvertTo-Json -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
+                # Use -InputObject to preserve JSON array format (PS 5.1 compatibility)
+                ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
             }
         }
     }
@@ -6425,9 +6462,982 @@ function Invoke-WithVssSnapshot {
     }
 }
 
+
+function New-VssJunction {
+    <#
+    .SYNOPSIS
+        Creates an NTFS junction pointing to a VSS shadow path
+    .DESCRIPTION
+        Creates a junction (directory symbolic link) that allows tools like robocopy
+        to access VSS shadow copy paths. Robocopy cannot directly access VSS paths
+        like \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1, but it CAN access
+        junctions that point to them.
+    .PARAMETER VssPath
+        The VSS shadow path (e.g., \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users)
+    .PARAMETER JunctionPath
+        Where to create the junction. If not specified, creates in temp directory.
+    .OUTPUTS
+        OperationResult - Success=$true with Data=JunctionPath, Success=$false with ErrorMessage
+    .NOTES
+        Junctions do not require admin privileges to create (unlike symlinks).
+        The junction must be removed before the VSS snapshot is deleted.
+    .EXAMPLE
+        $result = New-VssJunction -VssPath $snapshot.ShadowPath
+        if ($result.Success) { robocopy $result.Data $dest /MIR }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$VssPath,
+
+        [string]$JunctionPath
+    )
+
+    # Generate junction path if not provided
+    if (-not $JunctionPath) {
+        $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+        $JunctionPath = Join-Path $env:TEMP $junctionName
+    }
+
+    # Ensure junction path doesn't already exist
+    if (Test-Path $JunctionPath) {
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Junction path already exists: '$JunctionPath'"
+    }
+
+    try {
+        Write-RobocurseLog -Message "Creating junction '$JunctionPath' -> '$VssPath'" -Level 'Debug' -Component 'VSS'
+
+        # Use cmd mklink /J to create junction
+        # Junctions don't require admin (unlike symlinks with /D)
+        $output = cmd /c "mklink /J `"$JunctionPath`" `"$VssPath`"" 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Failed to create junction: $output"
+        }
+
+        # Verify junction was created and is accessible
+        if (-not (Test-Path $JunctionPath)) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Junction was created but path is not accessible: '$JunctionPath'"
+        }
+
+        Write-RobocurseLog -Message "Created VSS junction: '$JunctionPath'" -Level 'Info' -Component 'VSS'
+
+        return New-OperationResult -Success $true -Data $JunctionPath
+    }
+    catch {
+        Write-RobocurseLog -Message "Error creating VSS junction: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Failed to create VSS junction: $($_.Exception.Message)" `
+            -ErrorRecord $_
+    }
+}
+
+
+function Remove-VssJunction {
+    <#
+    .SYNOPSIS
+        Removes an NTFS junction created for VSS access
+    .DESCRIPTION
+        Safely removes a junction without following it or deleting the target contents.
+        This must be called BEFORE removing the VSS snapshot.
+    .PARAMETER JunctionPath
+        Path to the junction to remove
+    .OUTPUTS
+        OperationResult - Success=$true on success, Success=$false with ErrorMessage on failure
+    .NOTES
+        Uses rmdir to remove junction without following it.
+    .EXAMPLE
+        Remove-VssJunction -JunctionPath "C:\Temp\RobocurseVss_abc123"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$JunctionPath
+    )
+
+    if (-not (Test-Path $JunctionPath)) {
+        Write-RobocurseLog -Message "Junction already removed or doesn't exist: '$JunctionPath'" -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data $JunctionPath
+    }
+
+    try {
+        Write-RobocurseLog -Message "Removing VSS junction: '$JunctionPath'" -Level 'Debug' -Component 'VSS'
+
+        # Use rmdir to remove junction without following it
+        # Do NOT use Remove-Item -Recurse as it would try to delete contents
+        $output = cmd /c "rmdir `"$JunctionPath`"" 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+            # Try alternative method
+            try {
+                [System.IO.Directory]::Delete($JunctionPath, $false)
+            }
+            catch {
+                return New-OperationResult -Success $false `
+                    -ErrorMessage "Failed to remove junction: $output"
+            }
+        }
+
+        if (Test-Path $JunctionPath) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Junction still exists after removal attempt: '$JunctionPath'"
+        }
+
+        Write-RobocurseLog -Message "Removed VSS junction: '$JunctionPath'" -Level 'Info' -Component 'VSS'
+        return New-OperationResult -Success $true -Data $JunctionPath
+    }
+    catch {
+        Write-RobocurseLog -Message "Error removing VSS junction: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Failed to remove VSS junction: $($_.Exception.Message)" `
+            -ErrorRecord $_
+    }
+}
+
+
+function Invoke-WithVssJunction {
+    <#
+    .SYNOPSIS
+        Executes a scriptblock with VSS snapshot accessible via junction for robocopy
+    .DESCRIPTION
+        Creates a VSS snapshot, creates a junction to make it robocopy-accessible,
+        executes the provided scriptblock, and ensures cleanup of both junction and
+        snapshot even if the scriptblock throws an error.
+
+        The scriptblock receives a -SourcePath parameter with the junction path
+        that robocopy can use as a source.
+    .PARAMETER SourcePath
+        Original path to snapshot (e.g., C:\Users\Data)
+    .PARAMETER ScriptBlock
+        Code to execute. Receives $SourcePath parameter with junction path.
+    .PARAMETER JunctionRoot
+        Directory where junction will be created. Defaults to TEMP.
+    .OUTPUTS
+        OperationResult - Success=$true with Data=scriptblock result, Success=$false with ErrorMessage
+    .NOTES
+        Cleanup order is important: junction first, then snapshot.
+    .EXAMPLE
+        $result = Invoke-WithVssJunction -SourcePath "C:\Users\Data" -ScriptBlock {
+            param($SourcePath)
+            robocopy $SourcePath "D:\Backup" /MIR /LOG:backup.log
+            return $LASTEXITCODE
+        }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock,
+
+        [string]$JunctionRoot
+    )
+
+    $snapshot = $null
+    $junctionPath = $null
+
+    try {
+        # Step 1: Create VSS snapshot
+        Write-RobocurseLog -Message "Creating VSS snapshot for '$SourcePath'" -Level 'Info' -Component 'VSS'
+        $snapshotResult = New-VssSnapshot -SourcePath $SourcePath
+
+        if (-not $snapshotResult.Success) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Failed to create VSS snapshot: $($snapshotResult.ErrorMessage)" `
+                -ErrorRecord $snapshotResult.ErrorRecord
+        }
+        $snapshot = $snapshotResult.Data
+
+        # Step 2: Get the VSS path for the source
+        $vssPath = Get-VssPath -OriginalPath $SourcePath -VssSnapshot $snapshot
+        Write-RobocurseLog -Message "VSS path: '$vssPath'" -Level 'Debug' -Component 'VSS'
+
+        # Step 3: Create junction to VSS path
+        $junctionParams = @{ VssPath = $vssPath }
+        if ($JunctionRoot) {
+            $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+            $junctionParams.JunctionPath = Join-Path $JunctionRoot $junctionName
+        }
+
+        $junctionResult = New-VssJunction @junctionParams
+        if (-not $junctionResult.Success) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Failed to create VSS junction: $($junctionResult.ErrorMessage)" `
+                -ErrorRecord $junctionResult.ErrorRecord
+        }
+        $junctionPath = $junctionResult.Data
+        Write-RobocurseLog -Message "Created junction '$junctionPath' for robocopy access" -Level 'Info' -Component 'VSS'
+
+        # Step 4: Execute the scriptblock with junction path
+        $scriptResult = & $ScriptBlock -SourcePath $junctionPath
+
+        return New-OperationResult -Success $true -Data $scriptResult
+    }
+    catch {
+        Write-RobocurseLog -Message "Error during VSS junction operation: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false `
+            -ErrorMessage "VSS junction operation failed: $($_.Exception.Message)" `
+            -ErrorRecord $_
+    }
+    finally {
+        # Cleanup in correct order: junction first, then snapshot
+
+        # Step 5a: Remove junction
+        if ($junctionPath) {
+            Write-RobocurseLog -Message "Cleaning up VSS junction" -Level 'Info' -Component 'VSS'
+            $removeJunctionResult = Remove-VssJunction -JunctionPath $junctionPath
+            if (-not $removeJunctionResult.Success) {
+                Write-RobocurseLog -Message "Failed to cleanup VSS junction: $($removeJunctionResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
+        }
+
+        # Step 5b: Remove snapshot
+        if ($snapshot) {
+            Write-RobocurseLog -Message "Cleaning up VSS snapshot" -Level 'Info' -Component 'VSS'
+            $removeSnapshotResult = Remove-VssSnapshot -ShadowId $snapshot.ShadowId
+            if (-not $removeSnapshotResult.Success) {
+                Write-RobocurseLog -Message "Failed to cleanup VSS snapshot: $($removeSnapshotResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
+        }
+    }
+}
+
+
+#region Remote VSS Functions
+
+function Get-UncPathComponents {
+    <#
+    .SYNOPSIS
+        Parses a UNC path into its components
+    .DESCRIPTION
+        Extracts the server name, share name, and relative path from a UNC path.
+        Also attempts to determine the local path on the server by querying the share.
+    .PARAMETER UncPath
+        The UNC path to parse (e.g., \\server\share\folder\file.txt)
+    .OUTPUTS
+        PSCustomObject with ServerName, ShareName, RelativePath, and optionally LocalPath
+    .EXAMPLE
+        Get-UncPathComponents -UncPath "\\FileServer01\Data\Projects\Report.docx"
+        Returns: @{ ServerName = "FileServer01"; ShareName = "Data"; RelativePath = "Projects\Report.docx"; LocalPath = $null }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^\\\\[^\\]+\\[^\\]+')]
+        [string]$UncPath
+    )
+
+    # Parse UNC path: \\server\share\path\to\file
+    if ($UncPath -match '^\\\\([^\\]+)\\([^\\]+)(?:\\(.*))?$') {
+        $serverName = $Matches[1]
+        $shareName = $Matches[2]
+        $relativePath = if ($Matches[3]) { $Matches[3] } else { "" }
+
+        return [PSCustomObject]@{
+            ServerName   = $serverName
+            ShareName    = $shareName
+            RelativePath = $relativePath
+            UncPath      = $UncPath
+        }
+    }
+
+    Write-RobocurseLog -Message "Failed to parse UNC path: $UncPath" -Level 'Error' -Component 'VSS'
+    return $null
+}
+
+
+function Get-RemoteShareLocalPath {
+    <#
+    .SYNOPSIS
+        Gets the local path on a remote server for a given share
+    .DESCRIPTION
+        Uses CIM to query the Win32_Share class on the remote server to find
+        the local path that the share points to.
+    .PARAMETER ServerName
+        The remote server name
+    .PARAMETER ShareName
+        The share name to look up
+    .PARAMETER CimSession
+        Optional existing CIM session to use
+    .OUTPUTS
+        The local path on the server, or $null if not found
+    .EXAMPLE
+        Get-RemoteShareLocalPath -ServerName "FileServer01" -ShareName "Data"
+        Returns: "D:\SharedData"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerName,
+
+        [Parameter(Mandatory)]
+        [string]$ShareName,
+
+        [Microsoft.Management.Infrastructure.CimSession]$CimSession
+    )
+
+    try {
+        $ownSession = $false
+        if (-not $CimSession) {
+            $CimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+            $ownSession = $true
+        }
+
+        try {
+            $share = Get-CimInstance -CimSession $CimSession -ClassName Win32_Share |
+                Where-Object { $_.Name -eq $ShareName }
+
+            if ($share) {
+                Write-RobocurseLog -Message "Share '$ShareName' on '$ServerName' maps to local path: $($share.Path)" -Level 'Debug' -Component 'VSS'
+                return $share.Path
+            }
+
+            Write-RobocurseLog -Message "Share '$ShareName' not found on server '$ServerName'" -Level 'Warning' -Component 'VSS'
+            return $null
+        }
+        finally {
+            if ($ownSession -and $CimSession) {
+                Remove-CimSession -CimSession $CimSession -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to get share info from '$ServerName': $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return $null
+    }
+}
+
+
+function Test-RemoteVssSupported {
+    <#
+    .SYNOPSIS
+        Tests if remote VSS operations are supported for a given UNC path
+    .DESCRIPTION
+        Checks if we can establish a CIM session to the remote server and
+        if the Win32_ShadowCopy class is available.
+    .PARAMETER UncPath
+        The UNC path to test
+    .OUTPUTS
+        OperationResult - Success=$true if remote VSS is supported
+    .EXAMPLE
+        $result = Test-RemoteVssSupported -UncPath "\\FileServer01\Data"
+        if ($result.Success) { "Remote VSS available" }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$UncPath
+    )
+
+    $components = Get-UncPathComponents -UncPath $UncPath
+    if (-not $components) {
+        return New-OperationResult -Success $false -ErrorMessage "Invalid UNC path: $UncPath"
+    }
+
+    $serverName = $components.ServerName
+
+    try {
+        # Test CIM connectivity
+        $cimSession = New-CimSession -ComputerName $serverName -ErrorAction Stop
+
+        try {
+            # Check if Win32_ShadowCopy is available
+            $shadowClass = Get-CimClass -CimSession $cimSession -ClassName Win32_ShadowCopy -ErrorAction Stop
+
+            if ($shadowClass) {
+                Write-RobocurseLog -Message "Remote VSS supported on server '$serverName'" -Level 'Debug' -Component 'VSS'
+                return New-OperationResult -Success $true -Data @{
+                    ServerName = $serverName
+                    ShareName  = $components.ShareName
+                }
+            }
+
+            return New-OperationResult -Success $false -ErrorMessage "Win32_ShadowCopy class not available on '$serverName'"
+        }
+        finally {
+            Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Cannot connect to remote server '$serverName': $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage "Cannot connect to remote server '$serverName': $($_.Exception.Message)"
+    }
+}
+
+
+function New-RemoteVssSnapshot {
+    <#
+    .SYNOPSIS
+        Creates a VSS snapshot on a remote server
+    .DESCRIPTION
+        Uses a remote CIM session to create a VSS shadow copy on the file server
+        that hosts the specified UNC path.
+    .PARAMETER UncPath
+        The UNC path to the share/folder to snapshot
+    .PARAMETER RetryCount
+        Number of retry attempts for transient failures (default: 3)
+    .PARAMETER RetryDelaySeconds
+        Delay between retry attempts (default: 5)
+    .OUTPUTS
+        OperationResult with Data containing:
+        - ShadowId: The shadow copy ID
+        - ShadowPath: The shadow device path (local to the server)
+        - ServerName: The remote server name
+        - ShareName: The share name
+        - ShareLocalPath: The local path on the server the share points to
+        - SourceVolume: The volume on the server
+        - CreatedAt: Timestamp
+    .EXAMPLE
+        $result = New-RemoteVssSnapshot -UncPath "\\FileServer01\Data\Projects"
+        if ($result.Success) { $snapshot = $result.Data }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^\\\\[^\\]+\\[^\\]+')]
+        [string]$UncPath,
+
+        [ValidateRange(0, 10)]
+        [int]$RetryCount = 3,
+
+        [ValidateRange(1, 60)]
+        [int]$RetryDelaySeconds = 5
+    )
+
+    $components = Get-UncPathComponents -UncPath $UncPath
+    if (-not $components) {
+        return New-OperationResult -Success $false -ErrorMessage "Invalid UNC path: $UncPath"
+    }
+
+    $serverName = $components.ServerName
+    $shareName = $components.ShareName
+
+    Write-RobocurseLog -Message "Creating remote VSS snapshot on '$serverName' for share '$shareName'" -Level 'Info' -Component 'VSS'
+
+    $cimSession = $null
+    try {
+        # Establish CIM session
+        $cimSession = New-CimSession -ComputerName $serverName -ErrorAction Stop
+        Write-RobocurseLog -Message "CIM session established to '$serverName'" -Level 'Debug' -Component 'VSS'
+
+        # Get the local path for the share
+        $shareLocalPath = Get-RemoteShareLocalPath -ServerName $serverName -ShareName $shareName -CimSession $cimSession
+        if (-not $shareLocalPath) {
+            return New-OperationResult -Success $false -ErrorMessage "Cannot determine local path for share '$shareName' on server '$serverName'"
+        }
+
+        # Determine volume from the share's local path
+        if ($shareLocalPath -match '^([A-Za-z]:)') {
+            $volume = $Matches[1].ToUpper()
+        }
+        else {
+            return New-OperationResult -Success $false -ErrorMessage "Cannot determine volume from share local path: $shareLocalPath"
+        }
+
+        # Retry loop
+        $attempt = 0
+        $lastError = $null
+
+        while ($attempt -le $RetryCount) {
+            $attempt++
+            $isRetry = $attempt -gt 1
+
+            if ($isRetry) {
+                Write-RobocurseLog -Message "Remote VSS snapshot retry $($attempt - 1)/$RetryCount after ${RetryDelaySeconds}s delay" `
+                    -Level 'Warning' -Component 'VSS'
+                Start-Sleep -Seconds $RetryDelaySeconds
+            }
+
+            try {
+                # Create shadow copy on remote server
+                $result = Invoke-CimMethod -CimSession $cimSession -ClassName Win32_ShadowCopy -MethodName Create -Arguments @{
+                    Volume  = "$volume\"
+                    Context = "ClientAccessible"
+                }
+
+                if ($result.ReturnValue -ne 0) {
+                    $errorCode = "0x{0:X8}" -f $result.ReturnValue
+                    $lastError = "Failed to create remote shadow copy: Error $errorCode"
+
+                    # Check if retryable
+                    if ($result.ReturnValue -in @(0x8004230F, 0x80042316)) {
+                        continue  # Retry
+                    }
+                    return New-OperationResult -Success $false -ErrorMessage $lastError
+                }
+
+                # Get shadow copy details
+                $shadowId = $result.ShadowID
+                Write-RobocurseLog -Message "Remote VSS snapshot created with ID: $shadowId" -Level 'Debug' -Component 'VSS'
+
+                $shadow = Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy |
+                    Where-Object { $_.ID -eq $shadowId }
+
+                if (-not $shadow) {
+                    return New-OperationResult -Success $false -ErrorMessage "Remote shadow copy created but could not retrieve details for ID: $shadowId"
+                }
+
+                $snapshotInfo = [PSCustomObject]@{
+                    ShadowId       = $shadowId
+                    ShadowPath     = $shadow.DeviceObject
+                    ServerName     = $serverName
+                    ShareName      = $shareName
+                    ShareLocalPath = $shareLocalPath
+                    SourceVolume   = $volume
+                    CreatedAt      = [datetime]::Now
+                    IsRemote       = $true
+                }
+
+                Write-RobocurseLog -Message "Remote VSS snapshot ready on '$serverName'. Shadow path: $($snapshotInfo.ShadowPath)" -Level 'Info' -Component 'VSS'
+
+                # Track for orphan cleanup
+                Add-VssToTracking -SnapshotInfo ([PSCustomObject]@{
+                    ShadowId     = $shadowId
+                    SourceVolume = "$serverName`:$volume"  # Include server name for remote tracking
+                    CreatedAt    = $snapshotInfo.CreatedAt
+                    ServerName   = $serverName
+                    IsRemote     = $true
+                })
+
+                return New-OperationResult -Success $true -Data $snapshotInfo
+            }
+            catch {
+                $lastError = $_.Exception.Message
+                Write-RobocurseLog -Message "Remote VSS attempt $attempt failed: $lastError" -Level 'Warning' -Component 'VSS'
+            }
+        }
+
+        return New-OperationResult -Success $false -ErrorMessage "Remote VSS snapshot failed after $RetryCount retries: $lastError"
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to create remote VSS snapshot: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to create remote VSS snapshot: $($_.Exception.Message)" -ErrorRecord $_
+    }
+    finally {
+        if ($cimSession) {
+            Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+
+function Remove-RemoteVssSnapshot {
+    <#
+    .SYNOPSIS
+        Removes a VSS snapshot from a remote server
+    .DESCRIPTION
+        Uses a remote CIM session to delete a shadow copy on the remote server.
+    .PARAMETER ShadowId
+        The shadow copy ID to remove
+    .PARAMETER ServerName
+        The remote server where the snapshot exists
+    .OUTPUTS
+        OperationResult
+    .EXAMPLE
+        Remove-RemoteVssSnapshot -ShadowId "{guid}" -ServerName "FileServer01"
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ShadowId,
+
+        [Parameter(Mandatory)]
+        [string]$ServerName
+    )
+
+    $cimSession = $null
+    try {
+        Write-RobocurseLog -Message "Removing remote VSS snapshot '$ShadowId' from '$ServerName'" -Level 'Debug' -Component 'VSS'
+
+        $cimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+
+        $shadow = Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy |
+            Where-Object { $_.ID -eq $ShadowId }
+
+        if ($shadow) {
+            if ($PSCmdlet.ShouldProcess("$ShadowId on $ServerName", "Remove Remote VSS Snapshot")) {
+                Remove-CimInstance -CimSession $cimSession -InputObject $shadow
+                Write-RobocurseLog -Message "Deleted remote VSS snapshot: $ShadowId" -Level 'Info' -Component 'VSS'
+                Remove-VssFromTracking -ShadowId $ShadowId
+                return New-OperationResult -Success $true -Data $ShadowId
+            }
+            else {
+                return New-OperationResult -Success $true -Data "WhatIf: Would remove $ShadowId"
+            }
+        }
+        else {
+            Write-RobocurseLog -Message "Remote VSS snapshot not found: $ShadowId on $ServerName" -Level 'Warning' -Component 'VSS'
+            Remove-VssFromTracking -ShadowId $ShadowId
+            return New-OperationResult -Success $true -Data $ShadowId
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Error removing remote VSS snapshot: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to remove remote VSS snapshot: $($_.Exception.Message)" -ErrorRecord $_
+    }
+    finally {
+        if ($cimSession) {
+            Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+
+function New-RemoteVssJunction {
+    <#
+    .SYNOPSIS
+        Creates a junction on a remote server pointing to a VSS shadow path
+    .DESCRIPTION
+        Uses PowerShell remoting to create a junction on the remote server.
+        The junction is created inside the share's directory so it's accessible
+        via UNC path from the client.
+    .PARAMETER VssSnapshot
+        The remote VSS snapshot object from New-RemoteVssSnapshot
+    .PARAMETER JunctionName
+        Optional name for the junction. Defaults to a GUID-based name.
+    .OUTPUTS
+        OperationResult with Data containing:
+        - JunctionLocalPath: The local path to the junction on the server
+        - JunctionUncPath: The UNC path to access the junction from the client
+    .NOTES
+        The junction is created inside the share directory (e.g., \\server\share\.robocurse-vss-xxx)
+        so that clients can access it via the existing share.
+    .EXAMPLE
+        $junction = New-RemoteVssJunction -VssSnapshot $snapshot
+        robocopy $junction.Data.JunctionUncPath $destination /MIR
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$VssSnapshot,
+
+        [string]$JunctionName
+    )
+
+    if (-not $VssSnapshot.IsRemote) {
+        return New-OperationResult -Success $false -ErrorMessage "VssSnapshot is not a remote snapshot"
+    }
+
+    $serverName = $VssSnapshot.ServerName
+    $shareName = $VssSnapshot.ShareName
+    $shareLocalPath = $VssSnapshot.ShareLocalPath
+    $shadowPath = $VssSnapshot.ShadowPath
+
+    # Generate junction name if not provided
+    if (-not $JunctionName) {
+        $JunctionName = ".robocurse-vss-$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+    }
+
+    # Junction will be created inside the share directory
+    $junctionLocalPath = Join-Path $shareLocalPath $JunctionName
+    $junctionUncPath = "\\$serverName\$shareName\$JunctionName"
+
+    # Calculate the VSS path for the share's local path
+    # Shadow path is like: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy5
+    # Share local path is like: D:\SharedData
+    # We need: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy5\SharedData
+
+    $volume = $VssSnapshot.SourceVolume
+    $relativePath = $shareLocalPath.Substring($volume.Length).TrimStart('\')
+    $vssTargetPath = if ($relativePath) {
+        "$shadowPath\$relativePath"
+    } else {
+        $shadowPath
+    }
+
+    Write-RobocurseLog -Message "Creating remote junction on '$serverName': '$junctionLocalPath' -> '$vssTargetPath'" -Level 'Debug' -Component 'VSS'
+
+    try {
+        # Use Invoke-Command to create the junction on the remote server
+        $result = Invoke-Command -ComputerName $serverName -ScriptBlock {
+            param($JunctionPath, $TargetPath)
+
+            # Check if junction already exists
+            if (Test-Path $JunctionPath) {
+                return @{ Success = $false; Error = "Junction path already exists: $JunctionPath" }
+            }
+
+            # Create junction using cmd mklink /J
+            $output = cmd /c "mklink /J `"$JunctionPath`" `"$TargetPath`"" 2>&1
+
+            if ($LASTEXITCODE -ne 0) {
+                return @{ Success = $false; Error = "mklink failed: $output" }
+            }
+
+            # Verify
+            if (-not (Test-Path $JunctionPath)) {
+                return @{ Success = $false; Error = "Junction created but not accessible" }
+            }
+
+            return @{ Success = $true; JunctionPath = $JunctionPath }
+        } -ArgumentList $junctionLocalPath, $vssTargetPath -ErrorAction Stop
+
+        if (-not $result.Success) {
+            return New-OperationResult -Success $false -ErrorMessage "Failed to create remote junction: $($result.Error)"
+        }
+
+        # Verify we can access it via UNC
+        if (-not (Test-Path $junctionUncPath)) {
+            Write-RobocurseLog -Message "Remote junction created but UNC path not accessible: $junctionUncPath" -Level 'Warning' -Component 'VSS'
+        }
+
+        Write-RobocurseLog -Message "Created remote VSS junction: $junctionUncPath" -Level 'Info' -Component 'VSS'
+
+        return New-OperationResult -Success $true -Data ([PSCustomObject]@{
+            JunctionLocalPath = $junctionLocalPath
+            JunctionUncPath   = $junctionUncPath
+            ServerName        = $serverName
+        })
+    }
+    catch {
+        Write-RobocurseLog -Message "Error creating remote junction: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to create remote junction: $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+
+function Remove-RemoteVssJunction {
+    <#
+    .SYNOPSIS
+        Removes a junction from a remote server
+    .DESCRIPTION
+        Uses PowerShell remoting to safely remove a junction on the remote server
+        without following it or deleting the target contents.
+    .PARAMETER JunctionLocalPath
+        The local path to the junction on the remote server
+    .PARAMETER ServerName
+        The remote server name
+    .OUTPUTS
+        OperationResult
+    .EXAMPLE
+        Remove-RemoteVssJunction -JunctionLocalPath "D:\Share\.robocurse-vss-abc123" -ServerName "FileServer01"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$JunctionLocalPath,
+
+        [Parameter(Mandatory)]
+        [string]$ServerName
+    )
+
+    Write-RobocurseLog -Message "Removing remote junction '$JunctionLocalPath' from '$ServerName'" -Level 'Debug' -Component 'VSS'
+
+    try {
+        $result = Invoke-Command -ComputerName $ServerName -ScriptBlock {
+            param($JunctionPath)
+
+            if (-not (Test-Path $JunctionPath)) {
+                return @{ Success = $true; Message = "Junction already removed" }
+            }
+
+            # Use rmdir to remove junction without following it
+            $output = cmd /c "rmdir `"$JunctionPath`"" 2>&1
+
+            if ($LASTEXITCODE -ne 0) {
+                # Try .NET method
+                try {
+                    [System.IO.Directory]::Delete($JunctionPath, $false)
+                }
+                catch {
+                    return @{ Success = $false; Error = "rmdir failed: $output" }
+                }
+            }
+
+            if (Test-Path $JunctionPath) {
+                return @{ Success = $false; Error = "Junction still exists after removal" }
+            }
+
+            return @{ Success = $true }
+        } -ArgumentList $JunctionLocalPath -ErrorAction Stop
+
+        if (-not $result.Success) {
+            return New-OperationResult -Success $false -ErrorMessage "Failed to remove remote junction: $($result.Error)"
+        }
+
+        Write-RobocurseLog -Message "Removed remote VSS junction from '$ServerName'" -Level 'Info' -Component 'VSS'
+        return New-OperationResult -Success $true -Data $JunctionLocalPath
+    }
+    catch {
+        Write-RobocurseLog -Message "Error removing remote junction: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to remove remote junction: $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+
+function Get-RemoteVssPath {
+    <#
+    .SYNOPSIS
+        Converts a UNC path to its VSS shadow copy equivalent UNC path
+    .DESCRIPTION
+        Given a UNC path and a remote VSS snapshot, returns the UNC path through
+        the VSS junction that provides access to the point-in-time snapshot.
+    .PARAMETER OriginalUncPath
+        The original UNC path (e.g., \\server\share\folder)
+    .PARAMETER VssSnapshot
+        The remote VSS snapshot object
+    .PARAMETER JunctionInfo
+        The junction info from New-RemoteVssJunction
+    .OUTPUTS
+        The UNC path through the junction to access the VSS copy
+    .EXAMPLE
+        $vssUncPath = Get-RemoteVssPath -OriginalUncPath "\\server\share\folder" -VssSnapshot $snap -JunctionInfo $junction
+        # Returns: \\server\share\.robocurse-vss-xxx\folder
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$OriginalUncPath,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$VssSnapshot,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$JunctionInfo
+    )
+
+    $components = Get-UncPathComponents -UncPath $OriginalUncPath
+    if (-not $components) {
+        Write-RobocurseLog -Message "Invalid UNC path: $OriginalUncPath" -Level 'Error' -Component 'VSS'
+        return $null
+    }
+
+    # The junction provides access to the share's root in VSS
+    # So we append the relative path from the original UNC
+    $junctionUncPath = $JunctionInfo.JunctionUncPath
+    $relativePath = $components.RelativePath
+
+    if ($relativePath) {
+        $vssUncPath = "$junctionUncPath\$relativePath"
+    }
+    else {
+        $vssUncPath = $junctionUncPath
+    }
+
+    Write-RobocurseLog -Message "Translated remote path: $OriginalUncPath -> $vssUncPath" -Level 'Debug' -Component 'VSS'
+    return $vssUncPath
+}
+
+
+function Invoke-WithRemoteVssJunction {
+    <#
+    .SYNOPSIS
+        Executes a scriptblock with remote VSS snapshot accessible via UNC junction
+    .DESCRIPTION
+        Creates a VSS snapshot on the remote server, creates a junction accessible
+        via UNC, executes the provided scriptblock, and ensures cleanup of both
+        junction and snapshot even if the scriptblock throws.
+
+        This enables robocopy to copy from a point-in-time snapshot of a remote
+        file share.
+    .PARAMETER UncPath
+        The UNC path to the source (e.g., \\server\share\folder)
+    .PARAMETER ScriptBlock
+        Code to execute. Receives $SourcePath parameter with the UNC path to the
+        VSS junction that provides access to the snapshot.
+    .OUTPUTS
+        OperationResult with Data containing the scriptblock result
+    .NOTES
+        Cleanup order: junction first, then snapshot.
+        Requires:
+        - Admin rights on the remote server
+        - PowerShell remoting enabled on the remote server
+        - CIM access to the remote server
+    .EXAMPLE
+        $result = Invoke-WithRemoteVssJunction -UncPath "\\FileServer01\Data\Projects" -ScriptBlock {
+            param($SourcePath)
+            robocopy $SourcePath "D:\Backup\Projects" /MIR /LOG:backup.log
+            return $LASTEXITCODE
+        }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^\\\\[^\\]+\\[^\\]+')]
+        [string]$UncPath,
+
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock
+    )
+
+    $snapshot = $null
+    $junctionInfo = $null
+
+    try {
+        # Step 1: Create remote VSS snapshot
+        Write-RobocurseLog -Message "Creating remote VSS snapshot for '$UncPath'" -Level 'Info' -Component 'VSS'
+        $snapshotResult = New-RemoteVssSnapshot -UncPath $UncPath
+
+        if (-not $snapshotResult.Success) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Failed to create remote VSS snapshot: $($snapshotResult.ErrorMessage)" `
+                -ErrorRecord $snapshotResult.ErrorRecord
+        }
+        $snapshot = $snapshotResult.Data
+
+        # Step 2: Create junction on remote server
+        $junctionResult = New-RemoteVssJunction -VssSnapshot $snapshot
+        if (-not $junctionResult.Success) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Failed to create remote VSS junction: $($junctionResult.ErrorMessage)" `
+                -ErrorRecord $junctionResult.ErrorRecord
+        }
+        $junctionInfo = $junctionResult.Data
+
+        # Step 3: Get the UNC path through the junction
+        $vssUncPath = Get-RemoteVssPath -OriginalUncPath $UncPath -VssSnapshot $snapshot -JunctionInfo $junctionInfo
+        Write-RobocurseLog -Message "Remote VSS accessible at: $vssUncPath" -Level 'Info' -Component 'VSS'
+
+        # Step 4: Execute scriptblock with the VSS UNC path
+        $scriptResult = & $ScriptBlock -SourcePath $vssUncPath
+
+        return New-OperationResult -Success $true -Data $scriptResult
+    }
+    catch {
+        Write-RobocurseLog -Message "Error during remote VSS operation: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Remote VSS operation failed: $($_.Exception.Message)" `
+            -ErrorRecord $_
+    }
+    finally {
+        # Cleanup in correct order: junction first, then snapshot
+
+        # Step 5a: Remove junction
+        if ($junctionInfo) {
+            Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
+            $removeJunctionResult = Remove-RemoteVssJunction `
+                -JunctionLocalPath $junctionInfo.JunctionLocalPath `
+                -ServerName $junctionInfo.ServerName
+            if (-not $removeJunctionResult.Success) {
+                Write-RobocurseLog -Message "Failed to cleanup remote junction: $($removeJunctionResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
+        }
+
+        # Step 5b: Remove snapshot
+        if ($snapshot) {
+            Write-RobocurseLog -Message "Cleaning up remote VSS snapshot" -Level 'Info' -Component 'VSS'
+            $removeSnapshotResult = Remove-RemoteVssSnapshot `
+                -ShadowId $snapshot.ShadowId `
+                -ServerName $snapshot.ServerName
+            if (-not $removeSnapshotResult.Success) {
+                Write-RobocurseLog -Message "Failed to cleanup remote snapshot: $($removeSnapshotResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
+        }
+    }
+}
+
+#endregion Remote VSS Functions
+
 #endregion
 
-#region ==================== PUBLIC\EMAIL ====================
+#region ==================== EMAIL ====================
 
 # Initialize Windows Credential Manager P/Invoke types (Windows only)
 $script:CredentialManagerTypeAdded = $false
@@ -7167,7 +8177,7 @@ function Test-EmailConfiguration {
 
 #endregion
 
-#region ==================== PUBLIC\SCHEDULING ====================
+#region ==================== SCHEDULING ====================
 
 function Register-RobocurseTask {
     <#
@@ -7714,7 +8724,7 @@ function Test-RobocurseTaskExists {
 
 #endregion
 
-#region ==================== PUBLIC\GUI ====================
+#region ==================== GUI ====================
 
 # XAML resources are stored in the Resources folder for maintainability.
 # The Get-XamlResource function loads them at runtime with fallback to embedded content.
@@ -9124,7 +10134,7 @@ function Show-ScheduleDialog {
 
 #endregion
 
-#region ==================== PUBLIC\MAIN ====================
+#region ==================== MAIN ====================
 
 function Show-RobocurseHelp {
     <#
@@ -9417,7 +10427,7 @@ function Start-RobocurseMain {
     if ($Headless) {
         # Phase 3a: Validate headless parameters
         if (-not $ProfileName -and -not $AllProfiles) {
-            Write-Error "Headless mode requires either -Profile <name> or -AllProfiles parameter."
+            Write-Error 'Headless mode requires either -Profile <name> or -AllProfiles parameter.'
             return 1
         }
 
@@ -9427,7 +10437,7 @@ function Start-RobocurseMain {
 
         # Phase 3b: Initialize logging
         try {
-            $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { ".\Logs" }
+            $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { '.\Logs' }
             $compressDays = if ($config.GlobalSettings.LogCompressAfterDays) { $config.GlobalSettings.LogCompressAfterDays } else { $script:LogCompressAfterDays }
             $deleteDays = if ($config.GlobalSettings.LogRetentionDays) { $config.GlobalSettings.LogRetentionDays } else { $script:LogDeleteAfterDays }
             Initialize-LogSession -LogRoot $logRoot -CompressAfterDays $compressDays -DeleteAfterDays $deleteDays

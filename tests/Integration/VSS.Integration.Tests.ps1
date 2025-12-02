@@ -394,6 +394,262 @@ Describe "VSS Integration Tests" -Skip:(-not $script:CanUseVss) {
         }
     }
 
+    Context "VSS Junction Functions" {
+        # These tests verify that junctions allow robocopy to access VSS paths
+        # which it cannot access directly (Error 123)
+
+        BeforeAll {
+            $script:JunctionSourceDir = Join-Path $env:TEMP "RobocurseVssJunctionSrc_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+            $script:JunctionDestDir = Join-Path $env:TEMP "RobocurseVssJunctionDst_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+
+            New-Item -ItemType Directory -Path $script:JunctionSourceDir -Force | Out-Null
+            New-Item -ItemType Directory -Path $script:JunctionDestDir -Force | Out-Null
+
+            # Create test files
+            "File 1 content" | Set-Content -Path (Join-Path $script:JunctionSourceDir "file1.txt")
+            "File 2 content" | Set-Content -Path (Join-Path $script:JunctionSourceDir "file2.txt")
+            New-Item -ItemType Directory -Path (Join-Path $script:JunctionSourceDir "subdir") -Force | Out-Null
+            "Subdir file" | Set-Content -Path (Join-Path $script:JunctionSourceDir "subdir\nested.txt")
+        }
+
+        AfterAll {
+            Remove-Item $script:JunctionSourceDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $script:JunctionDestDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        It "Should create a junction to VSS path" {
+            $result = New-VssSnapshot -SourcePath $script:JunctionSourceDir
+
+            try {
+                $result.Success | Should -Be $true
+
+                $vssPath = Get-VssPath -OriginalPath $script:JunctionSourceDir -VssSnapshot $result.Data
+
+                # Create junction
+                $junctionResult = New-VssJunction -VssPath $vssPath
+                $junctionResult.Success | Should -Be $true
+                $junctionPath = $junctionResult.Data
+
+                try {
+                    # Verify junction exists and is accessible
+                    Test-Path $junctionPath | Should -Be $true
+
+                    # Verify files are accessible through junction
+                    $files = Get-ChildItem $junctionPath -File
+                    $files.Count | Should -Be 2
+                }
+                finally {
+                    Remove-VssJunction -JunctionPath $junctionPath | Out-Null
+                }
+            }
+            finally {
+                if ($result.Success) {
+                    Remove-VssSnapshot -ShadowId $result.Data.ShadowId | Out-Null
+                }
+            }
+        }
+
+        It "Should remove junction without affecting VSS contents" {
+            $result = New-VssSnapshot -SourcePath $script:JunctionSourceDir
+
+            try {
+                $result.Success | Should -Be $true
+
+                $vssPath = Get-VssPath -OriginalPath $script:JunctionSourceDir -VssSnapshot $result.Data
+                $junctionResult = New-VssJunction -VssPath $vssPath
+                $junctionResult.Success | Should -Be $true
+                $junctionPath = $junctionResult.Data
+
+                # Remove junction
+                $removeResult = Remove-VssJunction -JunctionPath $junctionPath
+                $removeResult.Success | Should -Be $true
+
+                # Verify junction is gone
+                Test-Path $junctionPath | Should -Be $false
+
+                # Verify VSS path is still accessible (via PowerShell)
+                Test-Path -LiteralPath $vssPath | Should -Be $true
+            }
+            finally {
+                if ($result.Success) {
+                    Remove-VssSnapshot -ShadowId $result.Data.ShadowId | Out-Null
+                }
+            }
+        }
+
+        It "Should allow robocopy to copy from VSS via junction" {
+            $result = New-VssSnapshot -SourcePath $script:JunctionSourceDir
+
+            try {
+                $result.Success | Should -Be $true
+
+                $vssPath = Get-VssPath -OriginalPath $script:JunctionSourceDir -VssSnapshot $result.Data
+                $junctionResult = New-VssJunction -VssPath $vssPath
+                $junctionResult.Success | Should -Be $true
+                $junctionPath = $junctionResult.Data
+
+                try {
+                    # Clear destination
+                    Get-ChildItem $script:JunctionDestDir | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+                    # Use robocopy via junction - THIS IS THE KEY TEST
+                    # This should work because robocopy can access the junction path
+                    $robocopyOutput = robocopy $junctionPath $script:JunctionDestDir /E /R:0 /W:0 2>&1 | Out-String
+
+                    # Robocopy exit codes 0-7 are success/informational
+                    $LASTEXITCODE | Should -BeLessOrEqual 7 -Because "Robocopy should succeed via junction: $robocopyOutput"
+
+                    # Verify files were copied
+                    $destFiles = Get-ChildItem $script:JunctionDestDir -Recurse -File
+                    $destFiles.Count | Should -Be 3  # file1.txt, file2.txt, subdir/nested.txt
+                }
+                finally {
+                    Remove-VssJunction -JunctionPath $junctionPath | Out-Null
+                }
+            }
+            finally {
+                if ($result.Success) {
+                    Remove-VssSnapshot -ShadowId $result.Data.ShadowId | Out-Null
+                }
+            }
+        }
+
+        It "Should fail gracefully when junction path already exists" {
+            # Create a directory at the junction path
+            $existingPath = Join-Path $env:TEMP "RobocurseVssExisting_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+            New-Item -ItemType Directory -Path $existingPath -Force | Out-Null
+
+            try {
+                $result = New-VssJunction -VssPath "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1" -JunctionPath $existingPath
+                $result.Success | Should -Be $false
+                $result.ErrorMessage | Should -Match "already exists"
+            }
+            finally {
+                Remove-Item $existingPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It "Should handle removing non-existent junction gracefully" {
+            $fakePath = Join-Path $env:TEMP "RobocurseVssNonExistent_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+            $result = Remove-VssJunction -JunctionPath $fakePath
+            $result.Success | Should -Be $true  # Idempotent operation
+        }
+    }
+
+    Context "Invoke-WithVssJunction Wrapper" {
+        BeforeAll {
+            $script:WrapperSourceDir = Join-Path $env:TEMP "RobocurseVssWrapper_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+            $script:WrapperDestDir = Join-Path $env:TEMP "RobocurseVssWrapperDest_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+
+            New-Item -ItemType Directory -Path $script:WrapperSourceDir -Force | Out-Null
+            New-Item -ItemType Directory -Path $script:WrapperDestDir -Force | Out-Null
+
+            # Create test files
+            "Wrapper test 1" | Set-Content -Path (Join-Path $script:WrapperSourceDir "test1.txt")
+            "Wrapper test 2" | Set-Content -Path (Join-Path $script:WrapperSourceDir "test2.txt")
+        }
+
+        AfterAll {
+            Remove-Item $script:WrapperSourceDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $script:WrapperDestDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+
+        It "Should execute scriptblock with junction path and cleanup" {
+            $snapshotsBefore = @(Get-CimInstance -ClassName Win32_ShadowCopy)
+
+            $result = Invoke-WithVssJunction -SourcePath $script:WrapperSourceDir -ScriptBlock {
+                param($SourcePath)
+
+                # SourcePath should be a junction, not a VSS path
+                $SourcePath | Should -Not -Match 'HarddiskVolumeShadowCopy'
+                $SourcePath | Should -Match 'RobocurseVss_'
+
+                # Return file count as proof we accessed the files
+                (Get-ChildItem $SourcePath -File).Count
+            }
+
+            $result.Success | Should -Be $true
+            $result.Data | Should -Be 2
+
+            # Verify cleanup
+            Start-Sleep -Milliseconds 500
+            $snapshotsAfter = @(Get-CimInstance -ClassName Win32_ShadowCopy)
+            $snapshotsAfter.Count | Should -BeLessOrEqual $snapshotsBefore.Count
+        }
+
+        It "Should allow robocopy copy via Invoke-WithVssJunction" {
+            # Clear destination
+            Get-ChildItem $script:WrapperDestDir | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+            $result = Invoke-WithVssJunction -SourcePath $script:WrapperSourceDir -ScriptBlock {
+                param($SourcePath)
+
+                # Run robocopy from the junction
+                $output = robocopy $SourcePath $script:WrapperDestDir /E /R:0 /W:0 2>&1 | Out-String
+                [PSCustomObject]@{
+                    ExitCode = $LASTEXITCODE
+                    Output = $output
+                }
+            }
+
+            $result.Success | Should -Be $true
+            $result.Data.ExitCode | Should -BeLessOrEqual 7 -Because "Robocopy should succeed: $($result.Data.Output)"
+
+            # Verify files were copied
+            $destFiles = Get-ChildItem $script:WrapperDestDir -File
+            $destFiles.Count | Should -Be 2
+        }
+
+        It "Should cleanup junction and snapshot even when scriptblock throws" {
+            $snapshotsBefore = @(Get-CimInstance -ClassName Win32_ShadowCopy)
+
+            $result = Invoke-WithVssJunction -SourcePath $script:WrapperSourceDir -ScriptBlock {
+                param($SourcePath)
+                throw "Intentional test error in junction wrapper"
+            } -ErrorAction SilentlyContinue
+
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "Intentional test error"
+
+            # Verify cleanup happened
+            Start-Sleep -Milliseconds 500
+            $snapshotsAfter = @(Get-CimInstance -ClassName Win32_ShadowCopy)
+            $snapshotsAfter.Count | Should -BeLessOrEqual $snapshotsBefore.Count
+
+            # Verify no orphan junctions in temp
+            $orphanJunctions = Get-ChildItem $env:TEMP -Directory | Where-Object { $_.Name -match '^RobocurseVss_' }
+            $orphanJunctions | Should -BeNullOrEmpty -Because "Junction should be cleaned up after error"
+        }
+
+        It "Should see VSS snapshot content (point-in-time) not current content" {
+            $testFile = Join-Path $script:WrapperSourceDir "volatile.txt"
+            "Original content before snapshot" | Set-Content -Path $testFile
+
+            $result = Invoke-WithVssJunction -SourcePath $script:WrapperSourceDir -ScriptBlock {
+                param($SourcePath)
+
+                # Read content from VSS (via junction)
+                $vssContent = Get-Content (Join-Path $SourcePath "volatile.txt") -Raw
+
+                # Modify the original file AFTER snapshot was taken
+                "Modified during snapshot" | Set-Content -Path $testFile
+
+                # Return the VSS content (should be original)
+                $vssContent.Trim()
+            }
+
+            $result.Success | Should -Be $true
+            $result.Data | Should -Be "Original content before snapshot"
+
+            # Current file should have modified content
+            $currentContent = Get-Content $testFile -Raw
+            $currentContent.Trim() | Should -Be "Modified during snapshot"
+
+            # Cleanup
+            Remove-Item $testFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     Context "VSS Snapshot Tracking" {
         It "Should track created snapshots" {
             $result = New-VssSnapshot -SourcePath "C:\Windows"
@@ -447,5 +703,336 @@ Describe "VSS Not Available Tests" -Skip:($script:CanUseVss) {
         if (-not $result.Success) {
             $result.ErrorMessage | Should -Not -BeNullOrEmpty
         }
+    }
+}
+
+
+# Remote VSS Integration Tests
+# These tests require:
+# - A remote file server accessible via UNC path
+# - Admin rights on the remote server
+# - PowerShell remoting enabled on the remote server
+# - CIM/WMI access to the remote server
+#
+# Set the environment variable ROBOCURSE_TEST_REMOTE_SHARE to a UNC path to enable these tests
+# Example: $env:ROBOCURSE_TEST_REMOTE_SHARE = "\\FileServer01\TestShare"
+
+BeforeDiscovery {
+    # Check for remote VSS test capability
+    $script:CanTestRemoteVss = $false
+    $script:RemoteTestShare = $env:ROBOCURSE_TEST_REMOTE_SHARE
+
+    if ($script:RemoteTestShare -and $script:RemoteTestShare -match '^\\\\[^\\]+\\[^\\]+') {
+        # Extract server name
+        if ($script:RemoteTestShare -match '^\\\\([^\\]+)\\') {
+            $testServer = $Matches[1]
+
+            # Test if we can reach the server and have remoting access
+            try {
+                $canConnect = Test-Connection -ComputerName $testServer -Count 1 -Quiet -ErrorAction SilentlyContinue
+                if ($canConnect) {
+                    # Test PowerShell remoting
+                    $remotingTest = Invoke-Command -ComputerName $testServer -ScriptBlock { $true } -ErrorAction SilentlyContinue
+                    if ($remotingTest) {
+                        # Test CIM access
+                        $cimSession = New-CimSession -ComputerName $testServer -ErrorAction SilentlyContinue
+                        if ($cimSession) {
+                            $script:CanTestRemoteVss = $true
+                            Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+            }
+            catch {
+                $script:CanTestRemoteVss = $false
+            }
+        }
+    }
+}
+
+Describe "Remote VSS Integration Tests" -Skip:(-not $script:CanTestRemoteVss) {
+
+    BeforeAll {
+        # Load test helper and fixtures
+        . "$PSScriptRoot\..\TestHelper.ps1"
+        . "$PSScriptRoot\Fixtures\TestDataGenerator.ps1"
+        Initialize-RobocurseForTesting
+
+        # Parse the remote share
+        $script:RemoteShare = $env:ROBOCURSE_TEST_REMOTE_SHARE
+        $script:RemoteComponents = Get-UncPathComponents -UncPath $script:RemoteShare
+
+        # Create a test subdirectory in the remote share
+        $script:RemoteTestDir = Join-Path $script:RemoteShare "RobocurseRemoteVssTest_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+        $script:LocalDestDir = Join-Path $env:TEMP "RobocurseRemoteVssDest_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+
+        # Create directories
+        New-Item -ItemType Directory -Path $script:RemoteTestDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $script:LocalDestDir -Force | Out-Null
+
+        # Create test files on the remote share
+        "Remote file 1" | Set-Content -Path (Join-Path $script:RemoteTestDir "file1.txt")
+        "Remote file 2" | Set-Content -Path (Join-Path $script:RemoteTestDir "file2.txt")
+        New-Item -ItemType Directory -Path (Join-Path $script:RemoteTestDir "subdir") -Force | Out-Null
+        "Remote subdir file" | Set-Content -Path (Join-Path $script:RemoteTestDir "subdir\nested.txt")
+    }
+
+    AfterAll {
+        # Cleanup
+        if ($script:RemoteTestDir -and (Test-Path $script:RemoteTestDir)) {
+            Remove-Item $script:RemoteTestDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($script:LocalDestDir -and (Test-Path $script:LocalDestDir)) {
+            Remove-Item $script:LocalDestDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Context "Remote VSS Capability Detection" {
+        It "Should detect remote VSS support" {
+            $result = Test-RemoteVssSupported -UncPath $script:RemoteShare
+            $result.Success | Should -Be $true
+            $result.Data.ServerName | Should -Be $script:RemoteComponents.ServerName
+        }
+
+        It "Should parse UNC path components correctly" {
+            $components = Get-UncPathComponents -UncPath $script:RemoteTestDir
+
+            $components.ServerName | Should -Be $script:RemoteComponents.ServerName
+            $components.ShareName | Should -Be $script:RemoteComponents.ShareName
+            $components.RelativePath | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    Context "Remote VSS Snapshot Creation" {
+        It "Should create a VSS snapshot on the remote server" {
+            $result = New-RemoteVssSnapshot -UncPath $script:RemoteTestDir
+
+            try {
+                $result.Success | Should -Be $true -Because "Remote VSS snapshot should succeed: $($result.ErrorMessage)"
+                $result.Data | Should -Not -BeNullOrEmpty
+
+                # Verify snapshot properties
+                $result.Data.ShadowId | Should -Match '^\{[A-F0-9-]+\}$'
+                $result.Data.ServerName | Should -Be $script:RemoteComponents.ServerName
+                $result.Data.ShareName | Should -Be $script:RemoteComponents.ShareName
+                $result.Data.IsRemote | Should -Be $true
+            }
+            finally {
+                if ($result.Success -and $result.Data) {
+                    Remove-RemoteVssSnapshot -ShadowId $result.Data.ShadowId -ServerName $result.Data.ServerName | Out-Null
+                }
+            }
+        }
+
+        It "Should delete a remote VSS snapshot" {
+            $createResult = New-RemoteVssSnapshot -UncPath $script:RemoteTestDir
+            $createResult.Success | Should -Be $true
+
+            $deleteResult = Remove-RemoteVssSnapshot `
+                -ShadowId $createResult.Data.ShadowId `
+                -ServerName $createResult.Data.ServerName
+
+            $deleteResult.Success | Should -Be $true
+        }
+    }
+
+    Context "Remote VSS Junction Creation" {
+        It "Should create a junction on the remote server" {
+            $snapshotResult = New-RemoteVssSnapshot -UncPath $script:RemoteTestDir
+            $snapshotResult.Success | Should -Be $true
+
+            try {
+                $junctionResult = New-RemoteVssJunction -VssSnapshot $snapshotResult.Data
+                $junctionResult.Success | Should -Be $true -Because "Junction creation should succeed: $($junctionResult.ErrorMessage)"
+
+                try {
+                    # Verify we can access the junction via UNC
+                    $junctionUncPath = $junctionResult.Data.JunctionUncPath
+                    Test-Path $junctionUncPath | Should -Be $true
+
+                    # Verify files are accessible through junction
+                    $files = Get-ChildItem $junctionUncPath -File -ErrorAction SilentlyContinue
+                    $files.Count | Should -BeGreaterOrEqual 2
+                }
+                finally {
+                    Remove-RemoteVssJunction `
+                        -JunctionLocalPath $junctionResult.Data.JunctionLocalPath `
+                        -ServerName $junctionResult.Data.ServerName | Out-Null
+                }
+            }
+            finally {
+                Remove-RemoteVssSnapshot -ShadowId $snapshotResult.Data.ShadowId -ServerName $snapshotResult.Data.ServerName | Out-Null
+            }
+        }
+
+        It "Should remove a junction from the remote server" {
+            $snapshotResult = New-RemoteVssSnapshot -UncPath $script:RemoteTestDir
+            $snapshotResult.Success | Should -Be $true
+
+            try {
+                $junctionResult = New-RemoteVssJunction -VssSnapshot $snapshotResult.Data
+                $junctionResult.Success | Should -Be $true
+
+                # Remove the junction
+                $removeResult = Remove-RemoteVssJunction `
+                    -JunctionLocalPath $junctionResult.Data.JunctionLocalPath `
+                    -ServerName $junctionResult.Data.ServerName
+
+                $removeResult.Success | Should -Be $true
+
+                # Verify junction is gone
+                Test-Path $junctionResult.Data.JunctionUncPath | Should -Be $false
+            }
+            finally {
+                Remove-RemoteVssSnapshot -ShadowId $snapshotResult.Data.ShadowId -ServerName $snapshotResult.Data.ServerName | Out-Null
+            }
+        }
+    }
+
+    Context "Remote VSS with Robocopy" {
+        It "Should allow robocopy to copy from remote VSS via junction" {
+            $snapshotResult = New-RemoteVssSnapshot -UncPath $script:RemoteTestDir
+            $snapshotResult.Success | Should -Be $true
+
+            try {
+                $junctionResult = New-RemoteVssJunction -VssSnapshot $snapshotResult.Data
+                $junctionResult.Success | Should -Be $true
+
+                try {
+                    # Clear destination
+                    Get-ChildItem $script:LocalDestDir | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+                    # Get the VSS UNC path
+                    $vssUncPath = Get-RemoteVssPath `
+                        -OriginalUncPath $script:RemoteTestDir `
+                        -VssSnapshot $snapshotResult.Data `
+                        -JunctionInfo $junctionResult.Data
+
+                    # Use robocopy to copy from the VSS junction
+                    $robocopyOutput = robocopy $vssUncPath $script:LocalDestDir /E /R:0 /W:0 2>&1 | Out-String
+
+                    # Robocopy exit codes 0-7 are success/informational
+                    $LASTEXITCODE | Should -BeLessOrEqual 7 -Because "Robocopy should succeed: $robocopyOutput"
+
+                    # Verify files were copied
+                    $destFiles = Get-ChildItem $script:LocalDestDir -Recurse -File
+                    $destFiles.Count | Should -Be 3  # file1.txt, file2.txt, subdir/nested.txt
+                }
+                finally {
+                    Remove-RemoteVssJunction `
+                        -JunctionLocalPath $junctionResult.Data.JunctionLocalPath `
+                        -ServerName $junctionResult.Data.ServerName | Out-Null
+                }
+            }
+            finally {
+                Remove-RemoteVssSnapshot -ShadowId $snapshotResult.Data.ShadowId -ServerName $snapshotResult.Data.ServerName | Out-Null
+            }
+        }
+    }
+
+    Context "Invoke-WithRemoteVssJunction Wrapper" {
+        It "Should execute scriptblock with remote VSS UNC path" {
+            $result = Invoke-WithRemoteVssJunction -UncPath $script:RemoteTestDir -ScriptBlock {
+                param($SourcePath)
+
+                # SourcePath should be a UNC path through the junction
+                $SourcePath | Should -Match '\.robocurse-vss-'
+                $SourcePath | Should -Match '^\\\\[^\\]+\\'
+
+                # Return file count as proof
+                (Get-ChildItem $SourcePath -Recurse -File).Count
+            }
+
+            $result.Success | Should -Be $true -Because "Remote VSS wrapper should succeed: $($result.ErrorMessage)"
+            $result.Data | Should -Be 3
+        }
+
+        It "Should allow robocopy via Invoke-WithRemoteVssJunction" {
+            # Clear destination
+            Get-ChildItem $script:LocalDestDir | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+            $result = Invoke-WithRemoteVssJunction -UncPath $script:RemoteTestDir -ScriptBlock {
+                param($SourcePath)
+
+                $output = robocopy $SourcePath $script:LocalDestDir /E /R:0 /W:0 2>&1 | Out-String
+                [PSCustomObject]@{
+                    ExitCode = $LASTEXITCODE
+                    Output   = $output
+                }
+            }
+
+            $result.Success | Should -Be $true -Because "Wrapper should succeed: $($result.ErrorMessage)"
+            $result.Data.ExitCode | Should -BeLessOrEqual 7
+
+            # Verify files were copied
+            $destFiles = Get-ChildItem $script:LocalDestDir -Recurse -File
+            $destFiles.Count | Should -Be 3
+        }
+
+        It "Should cleanup remote junction and snapshot even on error" {
+            # Count snapshots before
+            $serverName = $script:RemoteComponents.ServerName
+            $cimSession = New-CimSession -ComputerName $serverName
+            $snapshotsBefore = @(Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy)
+            Remove-CimSession -CimSession $cimSession
+
+            $result = Invoke-WithRemoteVssJunction -UncPath $script:RemoteTestDir -ScriptBlock {
+                param($SourcePath)
+                throw "Intentional test error in remote wrapper"
+            } -ErrorAction SilentlyContinue
+
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "Intentional test error"
+
+            # Wait for cleanup
+            Start-Sleep -Milliseconds 500
+
+            # Verify cleanup
+            $cimSession = New-CimSession -ComputerName $serverName
+            $snapshotsAfter = @(Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy)
+            Remove-CimSession -CimSession $cimSession
+
+            $snapshotsAfter.Count | Should -BeLessOrEqual $snapshotsBefore.Count
+
+            # Verify no orphan junctions in the share
+            $orphanJunctions = Get-ChildItem $script:RemoteShare -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^\.robocurse-vss-' }
+            $orphanJunctions | Should -BeNullOrEmpty
+        }
+
+        It "Should see remote VSS snapshot content (point-in-time) not current content" {
+            $testFile = Join-Path $script:RemoteTestDir "volatile_remote.txt"
+            "Original remote content" | Set-Content -Path $testFile
+
+            $result = Invoke-WithRemoteVssJunction -UncPath $script:RemoteTestDir -ScriptBlock {
+                param($SourcePath)
+
+                # Read content from VSS (via junction)
+                $vssContent = Get-Content (Join-Path $SourcePath "volatile_remote.txt") -Raw
+
+                # Modify the original file AFTER snapshot was taken
+                "Modified remote content" | Set-Content -Path $testFile
+
+                # Return the VSS content (should be original)
+                $vssContent.Trim()
+            }
+
+            $result.Success | Should -Be $true
+            $result.Data | Should -Be "Original remote content"
+
+            # Current file should have modified content
+            $currentContent = Get-Content $testFile -Raw
+            $currentContent.Trim() | Should -Be "Modified remote content"
+
+            # Cleanup
+            Remove-Item $testFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe "Remote VSS Not Available Tests" -Skip:($script:CanTestRemoteVss) {
+    It "Should skip remote VSS tests when environment not configured" {
+        # This test documents why remote tests were skipped
+        $script:RemoteTestShare | Should -BeNullOrEmpty -Because "ROBOCURSE_TEST_REMOTE_SHARE not set or server not accessible"
     }
 }

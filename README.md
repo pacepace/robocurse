@@ -235,6 +235,45 @@ To manually trigger orphan cleanup:
 Clear-OrphanVssSnapshots
 ```
 
+#### Local VSS with Robocopy
+
+Use `Invoke-WithVssJunction` to backup local paths with VSS:
+
+```powershell
+$result = Invoke-WithVssJunction -SourcePath "C:\Users\Data" -ScriptBlock {
+    param($SourcePath)
+    robocopy $SourcePath "D:\Backup\Data" /MIR /R:0 /W:0
+    return $LASTEXITCODE
+}
+```
+
+This creates a VSS snapshot, makes it accessible to robocopy via a temporary junction, runs your scriptblock, and cleans up automatically.
+
+#### Remote VSS (Network Shares)
+
+Use `Invoke-WithRemoteVssJunction` to backup network shares with VSS snapshots created on the file server:
+
+```powershell
+$result = Invoke-WithRemoteVssJunction -UncPath "\\FileServer01\Data\Projects" -ScriptBlock {
+    param($SourcePath)
+    robocopy $SourcePath "D:\Backup\Projects" /MIR /R:0 /W:0
+    return $LASTEXITCODE
+}
+```
+
+**Requirements for remote VSS:**
+- Admin rights on the remote file server
+- PowerShell remoting enabled on the server (`Enable-PSRemoting`)
+
+To check if remote VSS is available before use:
+
+```powershell
+$check = Test-RemoteVssSupported -UncPath "\\FileServer01\Data"
+if (-not $check.Success) {
+    Write-Warning "Remote VSS not available: $($check.ErrorMessage)"
+}
+```
+
 ## Usage
 
 Use `dist/Robocurse.ps1` for deployment (or import the module from `src/Robocurse/` for development).
