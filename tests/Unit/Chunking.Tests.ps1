@@ -281,9 +281,9 @@ Describe "Recursive Chunking" {
     }
 
     Context "Get-NormalizedPath" {
-        It "Should convert to lowercase for case-insensitive comparison" {
+        It "Should preserve case (callers should use case-insensitive comparison)" {
             $result = Get-NormalizedPath -Path "\\SERVER\Share$"
-            $result | Should -Be "\\server\share$"
+            $result | Should -Be "\\SERVER\Share$"
         }
 
         It "Should remove trailing backslashes" {
@@ -298,12 +298,18 @@ Describe "Recursive Chunking" {
 
         It "Should handle multiple trailing slashes" {
             $result = Get-NormalizedPath -Path "C:\Data\\\\"
-            $result | Should -Be "c:\data"
+            $result | Should -Be "C:\Data"
         }
 
-        It "Should handle mixed slashes" {
+        It "Should handle mixed slashes while preserving case" {
             $result = Get-NormalizedPath -Path "\\SERVER/Share$\Folder/"
-            $result | Should -Be "\\server\share$\folder"
+            $result | Should -Be "\\SERVER\Share$\Folder"
+        }
+
+        It "Should allow case-insensitive comparison with Equals" {
+            $path1 = Get-NormalizedPath -Path "C:\Data\Folder"
+            $path2 = Get-NormalizedPath -Path "C:\DATA\FOLDER"
+            $path1.Equals($path2, [StringComparison]::OrdinalIgnoreCase) | Should -Be $true
         }
     }
 

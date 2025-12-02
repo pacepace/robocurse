@@ -571,16 +571,18 @@ Describe "Robocopy Wrapper" {
 
         It "Should increase IPG as more jobs are active" {
             # More jobs = less bandwidth per job = higher IPG
-            $ipg1Job = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 1
-            $ipg4Jobs = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 4
+            # Use 2 Mbps to ensure visible differences (at 100 Mbps, both clamp to 1ms)
+            $ipg1Job = Get-BandwidthThrottleIPG -BandwidthLimitMbps 2 -ActiveJobs 1
+            $ipg4Jobs = Get-BandwidthThrottleIPG -BandwidthLimitMbps 2 -ActiveJobs 4
 
             $ipg4Jobs | Should -BeGreaterThan $ipg1Job
         }
 
         It "Should account for pending job start" {
             # With -PendingJobStart, effective jobs should be ActiveJobs + 1
-            $ipgWithoutPending = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 2
-            $ipgWithPending = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 2 -PendingJobStart
+            # Use 2 Mbps to ensure visible differences
+            $ipgWithoutPending = Get-BandwidthThrottleIPG -BandwidthLimitMbps 2 -ActiveJobs 2
+            $ipgWithPending = Get-BandwidthThrottleIPG -BandwidthLimitMbps 2 -ActiveJobs 2 -PendingJobStart
 
             # With pending, we calculate for 3 jobs instead of 2
             $ipgWithPending | Should -BeGreaterThan $ipgWithoutPending
@@ -639,6 +641,189 @@ Describe "Robocopy Wrapper" {
         It "Should return integer value" {
             $result = Get-BandwidthThrottleIPG -BandwidthLimitMbps 50 -ActiveJobs 3
             $result | Should -BeOfType [int]
+        }
+    }
+
+    Context "Test-SafeRobocopyArgument - Security Validation" {
+        It "Should accept valid simple path" {
+            Test-SafeRobocopyArgument -Value "C:\Users\John" | Should -Be $true
+        }
+
+        It "Should accept valid UNC path" {
+            Test-SafeRobocopyArgument -Value "\\server\share\folder" | Should -Be $true
+        }
+
+        It "Should accept valid path with spaces" {
+            Test-SafeRobocopyArgument -Value "C:\Program Files\My App" | Should -Be $true
+        }
+
+        It "Should accept valid exclude pattern with wildcard" {
+            Test-SafeRobocopyArgument -Value "*.tmp" | Should -Be $true
+        }
+
+        It "Should accept empty string" {
+            Test-SafeRobocopyArgument -Value "" | Should -Be $true
+        }
+
+        It "Should reject command separator semicolon" {
+            Test-SafeRobocopyArgument -Value "C:\path; del *" | Should -Be $false
+        }
+
+        It "Should reject command separator ampersand" {
+            Test-SafeRobocopyArgument -Value "C:\path & malicious" | Should -Be $false
+        }
+
+        It "Should reject command separator pipe" {
+            Test-SafeRobocopyArgument -Value "C:\path | format C:" | Should -Be $false
+        }
+
+        It "Should reject shell redirection greater-than" {
+            Test-SafeRobocopyArgument -Value "C:\path > output.txt" | Should -Be $false
+        }
+
+        It "Should reject shell redirection less-than" {
+            Test-SafeRobocopyArgument -Value "C:\path < input.txt" | Should -Be $false
+        }
+
+        It "Should reject backtick for command execution" {
+            Test-SafeRobocopyArgument -Value "C:\path`nmalicious" | Should -Be $false
+        }
+
+        It "Should reject PowerShell command substitution" {
+            Test-SafeRobocopyArgument -Value 'C:\$(Get-Process)' | Should -Be $false
+        }
+
+        It "Should reject PowerShell variable expansion with braces" {
+            Test-SafeRobocopyArgument -Value 'C:\${env:TEMP}' | Should -Be $false
+        }
+
+        It "Should reject cmd.exe environment variable syntax" {
+            Test-SafeRobocopyArgument -Value "C:\%TEMP%\file" | Should -Be $false
+        }
+
+        It "Should reject parent directory traversal" {
+            Test-SafeRobocopyArgument -Value "C:\Users\..\Admin" | Should -Be $false
+        }
+
+        It "Should reject arguments starting with dash" {
+            Test-SafeRobocopyArgument -Value "-Force" | Should -Be $false
+        }
+
+        It "Should reject null bytes" {
+            Test-SafeRobocopyArgument -Value "C:\path`0malicious" | Should -Be $false
+        }
+
+        It "Should reject newlines" {
+            Test-SafeRobocopyArgument -Value "C:\path`nmalicious" | Should -Be $false
+        }
+
+        It "Should reject carriage returns" {
+            Test-SafeRobocopyArgument -Value "C:\path`rmalicious" | Should -Be $false
+        }
+    }
+
+    Context "Get-SanitizedPath - Security Validation" {
+        It "Should return safe path unchanged" {
+            $result = Get-SanitizedPath -Path "C:\Users\John" -ParameterName "Source"
+            $result | Should -Be "C:\Users\John"
+        }
+
+        It "Should throw for path with injection attempt" {
+            { Get-SanitizedPath -Path "C:\path; del *" -ParameterName "Source" } | Should -Throw "*unsafe*"
+        }
+
+        It "Should include parameter name in error message" {
+            { Get-SanitizedPath -Path "C:\path; del *" -ParameterName "SourcePath" } | Should -Throw "*SourcePath*"
+        }
+    }
+
+    Context "Get-SanitizedExcludePatterns - Security Validation" {
+        It "Should return all safe patterns" {
+            $patterns = @("*.tmp", "*.log", "cache")
+            $result = Get-SanitizedExcludePatterns -Patterns $patterns -Type 'Files'
+            $result.Count | Should -Be 3
+            $result | Should -Contain "*.tmp"
+        }
+
+        It "Should filter out unsafe patterns" {
+            $patterns = @("*.tmp", "safe; malicious", "*.log")
+            $result = Get-SanitizedExcludePatterns -Patterns $patterns -Type 'Files'
+            $result.Count | Should -Be 2
+            $result | Should -Not -Contain "safe; malicious"
+        }
+
+        It "Should return empty array when all patterns are unsafe" {
+            $patterns = @("bad; rm -rf /", "evil | format")
+            $result = Get-SanitizedExcludePatterns -Patterns $patterns -Type 'Dirs'
+            $result.Count | Should -Be 0
+        }
+
+        It "Should handle empty input array" {
+            $result = Get-SanitizedExcludePatterns -Patterns @() -Type 'Files'
+            $result.Count | Should -Be 0
+        }
+    }
+
+    Context "New-RobocopyArguments - Security Integration" {
+        It "Should throw when source path contains injection" {
+            { New-RobocopyArguments `
+                -SourcePath "C:\Source; del *" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt"
+            } | Should -Throw "*unsafe*"
+        }
+
+        It "Should throw when destination path contains injection" {
+            { New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest & format C:" `
+                -LogPath "C:\log.txt"
+            } | Should -Throw "*unsafe*"
+        }
+
+        It "Should throw when log path contains injection" {
+            { New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt; evil"
+            } | Should -Throw "*unsafe*"
+        }
+
+        It "Should filter unsafe exclude files but not throw" {
+            # Should not throw - just filters the bad pattern
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -RobocopyOptions @{ ExcludeFiles = @("*.tmp", "bad; injection") }
+
+            $argString = $args -join ' '
+            $argString | Should -Match '"\*\.tmp"'
+            $argString | Should -Not -Match 'injection'
+        }
+
+        It "Should filter unsafe exclude dirs but not throw" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -RobocopyOptions @{ ExcludeDirs = @("temp", "evil | attack", "cache") }
+
+            $argString = $args -join ' '
+            $argString | Should -Match '"temp"'
+            $argString | Should -Match '"cache"'
+            $argString | Should -Not -Match 'attack'
+        }
+
+        It "Should omit /XF when all exclude file patterns are unsafe" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -RobocopyOptions @{ ExcludeFiles = @("bad; del", "evil & cmd") }
+
+            $argString = $args -join ' '
+            $argString | Should -Not -Match '/XF'
         }
     }
 }

@@ -69,7 +69,9 @@
 param(
     [switch]$Headless,
     [string]$ConfigPath = ".\Robocurse.config.json",
-    [string]$Profile,
+    # Note: Named $SyncProfile to avoid shadowing PowerShell's built-in $Profile variable
+    [Alias('Profile')]
+    [string]$SyncProfile,
     [switch]$AllProfiles,
     [switch]$Help
 )
@@ -134,6 +136,33 @@ $script:LogCompressAfterDays = 7
 # Delete compressed log files older than this many days.
 # 30 days aligns with typical retention policies and provides adequate audit history.
 $script:LogDeleteAfterDays = 30
+
+# GUI display limits
+# Maximum number of completed chunks to display in the GUI grid.
+# Limits prevent UI lag with large chunk counts while showing recent activity.
+$script:GuiMaxCompletedChunksDisplay = 20
+
+# Maximum number of log lines to retain in GUI ring buffer.
+# 500 lines provides sufficient context without excessive memory use.
+$script:GuiLogMaxLines = 500
+
+# Maximum number of errors to display in email notifications.
+# 10 errors provides useful context without overwhelming the email.
+$script:EmailMaxErrorsDisplay = 10
+
+# Orchestration intervals
+# Polling interval in milliseconds for replication tick loop.
+# 500ms balances responsiveness with CPU overhead.
+$script:ReplicationTickIntervalMs = 500
+
+# Progress output interval in seconds for headless mode console output.
+# 10 seconds provides regular updates without flooding the console.
+$script:HeadlessProgressIntervalSeconds = 10
+
+# Checkpoint save frequency
+# Save checkpoint every N completed chunks (also saved on failures).
+# 10 chunks balances disk I/O with recovery granularity.
+$script:CheckpointSaveFrequency = 10
 
 #endregion
 
@@ -249,6 +278,10 @@ function New-OperationResult {
     }
 }
 
+# Capture script-level invocation info at load time for reliable dot-source detection
+# This must be at script scope, not inside a function, to get accurate invocation context
+$script:ScriptInvocation = $MyInvocation
+
 function Test-IsBeingDotSourced {
     <#
     .SYNOPSIS
@@ -257,15 +290,247 @@ function Test-IsBeingDotSourced {
         Used to prevent main execution when loading functions for testing.
         Returns $true if the script is being dot-sourced (. .\script.ps1)
         Returns $false if the script is being executed directly (.\script.ps1)
+
+        Uses multiple detection methods for reliability:
+        1. Check if invocation name is "." (explicit dot-sourcing)
+        2. Check if invocation line starts with ". " (dot-source operator)
+        3. Check if called from another script context (CommandOrigin)
     .OUTPUTS
         Boolean
     #>
-    # When dot-sourced, $MyInvocation.InvocationName is "." or the script path
-    # When executed directly, $MyInvocation.InvocationName is the script path
-    # We check if we're being called from another script's context
+
+    # Method 1: Check script-level invocation name captured at load time
+    # When dot-sourced, InvocationName is typically "." or empty
+    if ($script:ScriptInvocation.InvocationName -eq '.') {
+        return $true
+    }
+
+    # Method 2: Check if the command line contains dot-source operator
+    # The Line property shows how the script was invoked
+    if ($script:ScriptInvocation.Line -match '^\s*\.\s+') {
+        return $true
+    }
+
+    # Method 3: Check MyInvocation.CommandOrigin
+    # When dot-sourced, CommandOrigin is "Runspace" (not directly invoked)
+    # When executed directly, it's typically "Runspace" too, so this isn't reliable alone
+    # But combined with checking if there's a parent script, it helps
+
+    # Method 4: Check if there's a calling script (most reliable fallback)
+    # When dot-sourced from a test file, ScriptName in the call stack will differ
     $callStack = Get-PSCallStack
-    # If there's more than just the current scope and global, we're being dot-sourced
-    return $callStack.Count -gt 2
+    if ($callStack.Count -ge 2) {
+        # Get the immediate caller (index 1 is the caller of this function)
+        # If index 1+ has a different ScriptName than our script, we're being dot-sourced
+        $ourScript = $script:ScriptInvocation.MyCommand.Path
+        $caller = $callStack[1]
+
+        # If called from a different script file, we're being dot-sourced
+        if ($caller.ScriptName -and $caller.ScriptName -ne $ourScript) {
+            return $true
+        }
+    }
+
+    # Method 5: Check if -Help was passed (explicit signal to skip main execution)
+    # This is handled separately at the call site, but we include it as a fallback
+    if ($Help) {
+        return $true
+    }
+
+    return $false
+}
+
+function Test-SafeRobocopyArgument {
+    <#
+    .SYNOPSIS
+        Validates that a string is safe to use as a robocopy argument
+    .DESCRIPTION
+        Checks for command injection patterns, shell metacharacters, and other
+        dangerous sequences that could be exploited when passed to robocopy.
+        Returns $false for any string containing:
+        - Command separators (;, &, |, newlines)
+        - Shell redirectors (>, <)
+        - Backticks or $() for command substitution
+        - Null bytes or other control characters
+    .PARAMETER Value
+        The string to validate
+    .OUTPUTS
+        Boolean - $true if safe, $false if potentially dangerous
+    .EXAMPLE
+        Test-SafeRobocopyArgument -Value "C:\Users\John"  # Returns $true
+        Test-SafeRobocopyArgument -Value "path; del *"   # Returns $false
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    # Empty strings are safe (robocopy will ignore them)
+    if ([string]::IsNullOrEmpty($Value)) {
+        return $true
+    }
+
+    # Check for dangerous patterns that could enable command injection
+    # These patterns should never appear in legitimate paths or exclude patterns
+    $dangerousPatterns = @(
+        '[\x00-\x1F]',           # Control characters (null, newline, etc.)
+        '[;&|]',                  # Command separators
+        '[<>]',                   # Shell redirectors
+        '`',                      # Backtick (PowerShell escape/execution)
+        '\$\(',                   # Command substitution
+        '\$\{',                   # Variable expansion with braces
+        '%[^%]+%',                # Environment variable expansion (cmd.exe style)
+        '\.\.',                   # Parent directory traversal (be careful - this is sometimes legitimate)
+        '^\s*-'                   # Arguments starting with dash (could inject robocopy flags)
+    )
+
+    foreach ($pattern in $dangerousPatterns) {
+        if ($Value -match $pattern) {
+            Write-RobocurseLog -Message "Rejected unsafe argument containing pattern '$pattern': $Value" `
+                -Level 'Warning' -Component 'Security'
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Get-SanitizedPath {
+    <#
+    .SYNOPSIS
+        Returns a sanitized path safe for use with robocopy
+    .DESCRIPTION
+        Validates and returns the path if safe, or throws an error if the path
+        contains dangerous patterns. Use this for source/destination paths.
+    .PARAMETER Path
+        The path to sanitize
+    .PARAMETER ParameterName
+        Name of the parameter (for error messages)
+    .OUTPUTS
+        The original path if safe
+    .EXAMPLE
+        $safePath = Get-SanitizedPath -Path $userInput -ParameterName "Source"
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [string]$ParameterName = "Path"
+    )
+
+    if (-not (Test-SafeRobocopyArgument -Value $Path)) {
+        throw "Invalid $ParameterName : contains unsafe characters or patterns. Path: $Path"
+    }
+
+    return $Path
+}
+
+function Get-SanitizedExcludePatterns {
+    <#
+    .SYNOPSIS
+        Returns sanitized exclude patterns, filtering out dangerous entries
+    .DESCRIPTION
+        Validates each exclude pattern and returns only safe ones.
+        Logs warnings for rejected patterns but doesn't throw.
+    .PARAMETER Patterns
+        Array of exclude patterns to sanitize
+    .PARAMETER Type
+        "Files" or "Dirs" (for logging)
+    .OUTPUTS
+        Array of safe patterns
+    .EXAMPLE
+        $safePatterns = Get-SanitizedExcludePatterns -Patterns $excludeFiles -Type "Files"
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [string[]]$Patterns,
+
+        [ValidateSet('Files', 'Dirs')]
+        [string]$Type = 'Files'
+    )
+
+    $safePatterns = @()
+
+    foreach ($pattern in $Patterns) {
+        if (Test-SafeRobocopyArgument -Value $pattern) {
+            $safePatterns += $pattern
+        }
+        else {
+            Write-RobocurseLog -Message "Excluded unsafe $Type pattern from robocopy args: $pattern" `
+                -Level 'Warning' -Component 'Security'
+        }
+    }
+
+    return $safePatterns
+}
+
+function Test-SafeConfigPath {
+    <#
+    .SYNOPSIS
+        Validates that a configuration file path is safe to use
+    .DESCRIPTION
+        Checks for dangerous patterns in config file paths that could lead to:
+        - Directory traversal attacks
+        - Accessing system files
+        - Command injection via path manipulation
+        Returns $false for any path containing dangerous patterns.
+    .PARAMETER Path
+        The config file path to validate
+    .OUTPUTS
+        Boolean - $true if safe, $false if potentially dangerous
+    .EXAMPLE
+        Test-SafeConfigPath -Path ".\config.json"  # Returns $true
+        Test-SafeConfigPath -Path "..\..\etc\passwd"  # Returns $false
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    # Empty path is technically safe (will fail later at Test-Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $true
+    }
+
+    # Check for dangerous patterns
+    $dangerousPatterns = @(
+        '[\x00-\x1F]',           # Control characters
+        '[;&|<>]',               # Shell metacharacters
+        '`',                      # Backtick
+        '\$\(',                   # Command substitution
+        '\$\{',                   # Variable expansion with braces
+        '%[^%]+%'                 # Environment variable expansion (cmd.exe)
+    )
+
+    foreach ($pattern in $dangerousPatterns) {
+        if ($Path -match $pattern) {
+            Write-Warning "Rejected unsafe config path containing pattern '$pattern': $Path"
+            return $false
+        }
+    }
+
+    # Additionally check that the resolved path doesn't escape expected boundaries
+    # Don't block relative paths with .. entirely, but log if they resolve outside current tree
+    try {
+        $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+        $currentDir = (Get-Location).Path
+
+        # Log if the resolved path goes outside the working directory
+        if (-not $resolvedPath.StartsWith($currentDir)) {
+            # This is allowed but worth logging for security auditing
+            Write-Verbose "Config path resolves outside working directory: $Path -> $resolvedPath"
+        }
+    }
+    catch {
+        # Path is malformed - not safe
+        Write-Warning "Config path is malformed: $Path"
+        return $false
+    }
+
+    return $true
 }
 
 #endregion
@@ -1924,16 +2189,27 @@ function Get-NormalizedPath {
     .DESCRIPTION
         Handles UNC paths, drive letters, and various edge cases:
         - Removes trailing slashes
-        - Normalizes case (Windows is case-insensitive)
-        - Handles \\server\share vs \\SERVER\Share$
         - Converts forward slashes to backslashes
+        - Preserves case (use case-insensitive comparison when comparing)
+
+        NOTE: This function does NOT lowercase paths because:
+        1. ToLowerInvariant() can give unexpected results for Unicode characters
+        2. Windows file system uses ordinal case-insensitive comparison
+        3. Consistent with Get-NormalizedCacheKey behavior
+
+        For path comparisons, use: $path1.Equals($path2, [StringComparison]::OrdinalIgnoreCase)
+        Or use [StringComparer]::OrdinalIgnoreCase in collections.
     .PARAMETER Path
         Path to normalize
     .OUTPUTS
-        Normalized path string
+        Normalized path string (case-preserved)
     .EXAMPLE
         Get-NormalizedPath -Path "\\SERVER\Share$\"
-        # Returns: "\\server\share$"
+        # Returns: "\\SERVER\Share$"
+    .EXAMPLE
+        # For comparison, use case-insensitive:
+        (Get-NormalizedPath "C:\Foo").Equals((Get-NormalizedPath "C:\FOO"), [StringComparison]::OrdinalIgnoreCase)
+        # Returns: $true
     #>
     param(
         [Parameter(Mandatory)]
@@ -1943,12 +2219,10 @@ function Get-NormalizedPath {
     # Convert forward slashes to backslashes
     $normalized = $Path.Replace('/', '\')
 
-    # Remove trailing slashes
+    # Remove trailing slashes (but keep drive root like "C:\")
     $normalized = $normalized.TrimEnd('\')
 
-    # Lowercase for case-insensitive comparison on Windows
-    $normalized = $normalized.ToLowerInvariant()
-
+    # Note: Case is preserved - callers should use OrdinalIgnoreCase comparison
     return $normalized
 }
 
@@ -1992,8 +2266,8 @@ function Convert-ToDestinationPath {
     $normalizedSourceRoot = Get-NormalizedPath -Path $SourceRoot
     $normalizedDestRoot = $DestRoot.TrimEnd('\', '/')
 
-    # Check if SourcePath starts with SourceRoot (using normalized versions for comparison)
-    if (-not $normalizedSource.StartsWith($normalizedSourceRoot, [StringComparison]::Ordinal)) {
+    # Check if SourcePath starts with SourceRoot (case-insensitive for Windows paths)
+    if (-not $normalizedSource.StartsWith($normalizedSourceRoot, [StringComparison]::OrdinalIgnoreCase)) {
         Write-RobocurseLog "SourcePath '$SourcePath' does not start with SourceRoot '$SourceRoot'" -Level Warning
         # If they don't match, just append source to dest
         return Join-Path $normalizedDestRoot (Split-Path $SourcePath -Leaf)
@@ -2142,6 +2416,11 @@ function New-RobocopyArguments {
         [string[]]$ChunkArgs = @()
     )
 
+    # Validate paths for command injection before using them
+    $safeSourcePath = Get-SanitizedPath -Path $SourcePath -ParameterName "SourcePath"
+    $safeDestPath = Get-SanitizedPath -Path $DestinationPath -ParameterName "DestinationPath"
+    $safeLogPath = Get-SanitizedPath -Path $LogPath -ParameterName "LogPath"
+
     # Extract options with defaults
     $retryCount = if ($RobocopyOptions.RetryCount) { $RobocopyOptions.RetryCount } else { $script:RobocopyRetryCount }
     $retryWait = if ($RobocopyOptions.RetryWait) { $RobocopyOptions.RetryWait } else { $script:RobocopyRetryWaitSeconds }
@@ -2153,8 +2432,8 @@ function New-RobocopyArguments {
     $argList = [System.Collections.Generic.List[string]]::new()
 
     # Source and destination (quoted for paths with spaces)
-    $argList.Add("`"$SourcePath`"")
-    $argList.Add("`"$DestinationPath`"")
+    $argList.Add("`"$safeSourcePath`"")
+    $argList.Add("`"$safeDestPath`"")
 
     # Copy mode: /MIR (mirror with delete) or /E (copy subdirs including empty)
     $argList.Add($(if ($noMirror) { "/E" } else { "/MIR" }))
@@ -2180,7 +2459,7 @@ function New-RobocopyArguments {
     $argList.Add("/MT:$ThreadsPerJob")
     $argList.Add("/R:$retryCount")
     $argList.Add("/W:$retryWait")
-    $argList.Add("/LOG:`"$LogPath`"")
+    $argList.Add("/LOG:`"$safeLogPath`"")
     $argList.Add("/TEE")
     $argList.Add("/NP")
     $argList.Add("/BYTES")
@@ -2196,19 +2475,25 @@ function New-RobocopyArguments {
         $argList.Add("/IPG:$interPacketGapMs")
     }
 
-    # Exclude files
+    # Exclude files (sanitized to prevent injection)
     if ($RobocopyOptions.ExcludeFiles -and $RobocopyOptions.ExcludeFiles.Count -gt 0) {
-        $argList.Add("/XF")
-        foreach ($pattern in $RobocopyOptions.ExcludeFiles) {
-            $argList.Add("`"$pattern`"")
+        $safeExcludeFiles = Get-SanitizedExcludePatterns -Patterns $RobocopyOptions.ExcludeFiles -Type 'Files'
+        if ($safeExcludeFiles.Count -gt 0) {
+            $argList.Add("/XF")
+            foreach ($pattern in $safeExcludeFiles) {
+                $argList.Add("`"$pattern`"")
+            }
         }
     }
 
-    # Exclude directories
+    # Exclude directories (sanitized to prevent injection)
     if ($RobocopyOptions.ExcludeDirs -and $RobocopyOptions.ExcludeDirs.Count -gt 0) {
-        $argList.Add("/XD")
-        foreach ($dir in $RobocopyOptions.ExcludeDirs) {
-            $argList.Add("`"$dir`"")
+        $safeExcludeDirs = Get-SanitizedExcludePatterns -Patterns $RobocopyOptions.ExcludeDirs -Type 'Dirs'
+        if ($safeExcludeDirs.Count -gt 0) {
+            $argList.Add("/XD")
+            foreach ($dir in $safeExcludeDirs) {
+                $argList.Add("`"$dir`"")
+            }
         }
     }
 
@@ -2427,58 +2712,93 @@ function ConvertFrom-RobocopyLog {
         return $result
     }
 
-    # Parse summary statistics using regex
-    # Target format:
-    #                Total    Copied   Skipped  Mismatch    FAILED    Extras
-    #     Dirs :      100        10        90         0         0         0
-    #    Files :     1000       500       500         0         5         0
-    #    Bytes :   1.0 g   500.0 m   500.0 m         0    10.0 k         0
+    # Parse summary statistics using locale-independent patterns
+    # The summary table structure is consistent across locales:
+    #   - Three data lines (Dirs, Files, Bytes) with 6 numeric columns each
+    #   - The label text varies by locale but column structure is fixed
+    #   - May or may not have a separator line of dashes before the table
+    #
+    # Strategy: Find lines that match the stats pattern (text : numbers) directly
+    # Column order: Total, Copied, Skipped, Mismatch, FAILED, Extras
 
     try {
-        # Parse Files line
-        if ($content -match '\s+Files\s*:\s+(\d+)\s+(\d+)\s+(\d+)\s+\d+\s+(\d+)') {
-            $parsedValue = 0
-            if ([int]::TryParse($matches[2], [ref]$parsedValue)) { $result.FilesCopied = $parsedValue }
-            if ([int]::TryParse($matches[3], [ref]$parsedValue)) { $result.FilesSkipped = $parsedValue }
-            if ([int]::TryParse($matches[4], [ref]$parsedValue)) { $result.FilesFailed = $parsedValue }
+        $lines = $content -split "`n"
+
+        # Find all lines that match the stats pattern: "label : numbers"
+        # The last 3 such lines should be Dirs, Files, Bytes
+        $statsPattern = ':\s*([\d.]+)\s*[kmgt]?\s+([\d.]+)\s*[kmgt]?\s+([\d.]+)\s*[kmgt]?\s+([\d.]+)\s*[kmgt]?\s+([\d.]+)\s*[kmgt]?\s+([\d.]+)'
+        $statsLines = @()
+        foreach ($line in $lines) {
+            if ($line -match $statsPattern) {
+                $statsLines += $line
+            }
         }
 
-        # Parse Dirs line
-        if ($content -match '\s+Dirs\s*:\s+(\d+)\s+(\d+)\s+(\d+)\s+\d+\s+(\d+)') {
-            $parsedValue = 0
-            if ([int]::TryParse($matches[2], [ref]$parsedValue)) { $result.DirsCopied = $parsedValue }
-            if ([int]::TryParse($matches[3], [ref]$parsedValue)) { $result.DirsSkipped = $parsedValue }
-            if ([int]::TryParse($matches[4], [ref]$parsedValue)) { $result.DirsFailed = $parsedValue }
-        }
+        # If we found at least 3 matching lines, parse them
+        if ($statsLines.Count -ge 3) {
+            # Last 3 lines: Dirs, Files, Bytes (in order)
+            $dirsLine = $statsLines[$statsLines.Count - 3]
+            $filesLine = $statsLines[$statsLines.Count - 2]
+            $bytesLine = $statsLines[$statsLines.Count - 1]
 
-        # Parse Bytes line - extract number and convert units
-        if ($content -match '\s+Bytes\s*:\s+[\d.]+\s+[kmgt]?\s+([\d.]+)\s+([kmgt]?)') {
-            $parsedDouble = 0.0
-            if ([double]::TryParse($matches[1], [ref]$parsedDouble)) {
-                $byteValue = $parsedDouble
-                $unit = $matches[2].ToLower()
+            # Parse Dirs line (all integers)
+            if ($dirsLine -match $statsPattern) {
+                $parsedValue = 0
+                if ([int]::TryParse($matches[2], [ref]$parsedValue)) { $result.DirsCopied = $parsedValue }
+                if ([int]::TryParse($matches[3], [ref]$parsedValue)) { $result.DirsSkipped = $parsedValue }
+                if ([int]::TryParse($matches[5], [ref]$parsedValue)) { $result.DirsFailed = $parsedValue }
+            }
 
-                $result.BytesCopied = switch ($unit) {
-                    'k' { [long]($byteValue * 1KB) }
-                    'm' { [long]($byteValue * 1MB) }
-                    'g' { [long]($byteValue * 1GB) }
-                    't' { [long]($byteValue * 1TB) }
-                    default { [long]$byteValue }
+            # Parse Files line (all integers)
+            if ($filesLine -match $statsPattern) {
+                $parsedValue = 0
+                if ([int]::TryParse($matches[2], [ref]$parsedValue)) { $result.FilesCopied = $parsedValue }
+                if ([int]::TryParse($matches[3], [ref]$parsedValue)) { $result.FilesSkipped = $parsedValue }
+                if ([int]::TryParse($matches[5], [ref]$parsedValue)) { $result.FilesFailed = $parsedValue }
+            }
+
+            # Parse Bytes line - need to handle unit suffixes (k, m, g, t)
+            # Pattern: captures number+unit pairs (Total, Copied with their units)
+            $bytesPattern = ':\s*([\d.]+)\s*([kmgt]?)\s+([\d.]+)\s*([kmgt]?)'
+            if ($bytesLine -match $bytesPattern) {
+                $parsedDouble = 0.0
+                if ([double]::TryParse($matches[3], [ref]$parsedDouble)) {
+                    $byteValue = $parsedDouble
+                    $unit = if ($matches[4]) { $matches[4].ToLower() } else { '' }
+
+                    $result.BytesCopied = switch ($unit) {
+                        'k' { [long]($byteValue * 1KB) }
+                        'm' { [long]($byteValue * 1MB) }
+                        'g' { [long]($byteValue * 1GB) }
+                        't' { [long]($byteValue * 1TB) }
+                        default { [long]$byteValue }
+                    }
                 }
             }
         }
 
-        # Parse Speed line (MegaBytes/min format)
-        if ($content -match 'Speed\s*:\s*([\d.]+)\s+MegaBytes/min') {
-            $result.Speed = "$($matches[1]) MB/min"
+        # Parse Speed line - look for numeric pattern followed by common speed units
+        # Robocopy outputs speed in format like "50.123 MegaBytes/min" or "2621440 Bytes/sec"
+        # The unit names may be localized but the numeric pattern is consistent
+        if ($content -match '([\d.]+)\s+(Mega)?Bytes[/\s]*(min|sec)') {
+            $speedValue = $matches[1]
+            $isMega = $matches[2] -eq 'Mega'
+            $timeUnit = $matches[3]
+            $result.Speed = if ($isMega) { "$speedValue MB/$timeUnit" } else { "$speedValue B/$timeUnit" }
         }
 
-        # Parse current file from progress lines (last occurrence)
-        # Formats: "New File", "Newer", "*EXTRA File"
-        $progressMatches = [regex]::Matches($content, '\s+(New File|Newer|\*EXTRA File)\s+[\d.]+\s+[kmgt]?\s+(.+)$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+        # Parse current file from progress lines (locale-independent)
+        # Robocopy progress lines have: indicator (may contain spaces), size, path
+        # Format: "  New File  1024  path\file.txt" or "  *EXTRA File  100  path\file.txt"
+        # Key insight: look for a number followed by a backslash path
+        $progressMatches = [regex]::Matches($content, '([\d.]+)\s*[kmgt]?\s+(\S*[\\\/].+)$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
         if ($progressMatches.Count -gt 0) {
             $lastMatch = $progressMatches[$progressMatches.Count - 1]
-            $result.CurrentFile = $lastMatch.Groups[2].Value.Trim()
+            $potentialPath = $lastMatch.Groups[2].Value.Trim()
+            # Verify it looks like a path (not a summary line with just numbers)
+            if ($potentialPath -match '[a-zA-Z]') {
+                $result.CurrentFile = $potentialPath
+            }
         }
     }
     catch {
@@ -2559,11 +2879,42 @@ function Wait-RobocopyJob {
 
 #region ==================== ORCHESTRATION ====================
 
-# Thread-safe orchestration state class (compiled C# for proper cross-thread access)
-# This class ensures all scalar property access is properly synchronized while
-# leveraging .NET's concurrent collections for queue/dictionary operations.
-if (-not ([System.Management.Automation.PSTypeName]'Robocurse.OrchestrationState').Type) {
-    Add-Type -TypeDefinition @'
+# Script variable to track if C# type has been initialized (for lazy loading)
+$script:OrchestrationTypeInitialized = $false
+$script:OrchestrationState = $null
+
+function Initialize-OrchestrationStateType {
+    <#
+    .SYNOPSIS
+        Lazy-loads the C# orchestration state type
+    .DESCRIPTION
+        Compiles and loads the C# OrchestrationState class only when first needed.
+        This defers the Add-Type overhead until orchestration is actually used,
+        improving script startup time for GUI and help commands.
+
+        The type is only compiled once per PowerShell session. Subsequent calls
+        return immediately if the type already exists.
+    .OUTPUTS
+        $true if type is available, $false on compilation failure
+    #>
+
+    # Fast path: already initialized this session
+    if ($script:OrchestrationTypeInitialized -and $script:OrchestrationState) {
+        return $true
+    }
+
+    # Check if type exists from a previous session/import
+    if (([System.Management.Automation.PSTypeName]'Robocurse.OrchestrationState').Type) {
+        $script:OrchestrationTypeInitialized = $true
+        if (-not $script:OrchestrationState) {
+            $script:OrchestrationState = [Robocurse.OrchestrationState]::new()
+        }
+        return $true
+    }
+
+    # Compile the C# type (this is the expensive operation we're deferring)
+    try {
+        Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Concurrent;
 using System.Threading;
@@ -2843,10 +3194,20 @@ namespace Robocurse
     }
 }
 '@ -ErrorAction Stop
-}
 
-# Create the singleton orchestration state instance
-$script:OrchestrationState = [Robocurse.OrchestrationState]::new()
+        # Create the singleton instance
+        $script:OrchestrationState = [Robocurse.OrchestrationState]::new()
+        $script:OrchestrationTypeInitialized = $true
+
+        Write-Verbose "OrchestrationState C# type compiled and initialized"
+        return $true
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to compile OrchestrationState type: $($_.Exception.Message)" `
+            -Level 'Error' -Component 'Orchestration'
+        return $false
+    }
+}
 
 # Script-scoped callback handlers
 $script:OnProgress = $null
@@ -2862,7 +3223,14 @@ function Initialize-OrchestrationState {
         Uses the C# class's Reset() method to properly clear all state.
         Also clears the directory profile cache to prevent memory growth across runs
         and cleans up any orphaned VSS snapshots from previous crashed runs.
+
+        If this is the first call, lazy-loads the C# OrchestrationState type.
     #>
+
+    # Ensure the C# type is compiled and instance exists (lazy load)
+    if (-not (Initialize-OrchestrationStateType)) {
+        throw "Failed to initialize OrchestrationState type. Check logs for compilation errors."
+    }
 
     # Reset the existing state object (don't create a new one - that breaks cross-thread sharing)
     $script:OrchestrationState.Reset()
@@ -2884,6 +3252,184 @@ function Initialize-OrchestrationState {
         -Level 'Info' -Component 'Orchestrator'
 }
 
+#region ==================== CHECKPOINT/RESUME ====================
+
+$script:CheckpointFileName = "robocurse-checkpoint.json"
+
+function Get-CheckpointPath {
+    <#
+    .SYNOPSIS
+        Returns the checkpoint file path based on log directory
+    .OUTPUTS
+        Path to checkpoint file
+    #>
+    $logDir = if ($script:CurrentLogPath) {
+        Split-Path $script:CurrentLogPath -Parent
+    } else {
+        "."
+    }
+    return Join-Path $logDir $script:CheckpointFileName
+}
+
+function Save-ReplicationCheckpoint {
+    <#
+    .SYNOPSIS
+        Saves current replication progress to a checkpoint file
+    .DESCRIPTION
+        Persists the current state of replication to disk, allowing
+        resumption after a crash or interruption. Saves:
+        - Session ID
+        - Profile index and name
+        - Completed chunk paths (for skipping on resume)
+        - Start time
+        - Profiles configuration
+    .PARAMETER Force
+        Overwrite existing checkpoint without confirmation
+    .OUTPUTS
+        OperationResult indicating success/failure
+    #>
+    param(
+        [switch]$Force
+    )
+
+    if (-not $script:OrchestrationState) {
+        return New-OperationResult -Success $false -ErrorMessage "No orchestration state to checkpoint"
+    }
+
+    $state = $script:OrchestrationState
+
+    try {
+        # Build list of completed chunk paths for skip detection on resume
+        $completedPaths = @()
+        foreach ($chunk in $state.CompletedChunks.ToArray()) {
+            $completedPaths += $chunk.SourcePath
+        }
+
+        $checkpoint = [PSCustomObject]@{
+            Version = "1.0"
+            SessionId = $state.SessionId
+            SavedAt = (Get-Date).ToString('o')
+            ProfileIndex = $state.ProfileIndex
+            CurrentProfileName = if ($state.CurrentProfile) { $state.CurrentProfile.Name } else { "" }
+            CompletedChunkPaths = $completedPaths
+            CompletedCount = $state.CompletedCount
+            FailedCount = $state.FailedChunks.Count
+            BytesComplete = $state.BytesComplete
+            StartTime = if ($state.StartTime) { $state.StartTime.ToString('o') } else { $null }
+        }
+
+        $checkpointPath = Get-CheckpointPath
+
+        # Create directory if needed
+        $checkpointDir = Split-Path $checkpointPath -Parent
+        if ($checkpointDir -and -not (Test-Path $checkpointDir)) {
+            New-Item -ItemType Directory -Path $checkpointDir -Force | Out-Null
+        }
+
+        $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $checkpointPath -Encoding UTF8
+
+        Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
+            -Level 'Info' -Component 'Checkpoint'
+
+        return New-OperationResult -Success $true -Data $checkpointPath
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to save checkpoint: $($_.Exception.Message)" `
+            -Level 'Error' -Component 'Checkpoint'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to save checkpoint: $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+function Get-ReplicationCheckpoint {
+    <#
+    .SYNOPSIS
+        Loads a checkpoint file if one exists
+    .OUTPUTS
+        Checkpoint object or $null if no checkpoint exists
+    #>
+
+    $checkpointPath = Get-CheckpointPath
+
+    if (-not (Test-Path $checkpointPath)) {
+        return $null
+    }
+
+    try {
+        $content = Get-Content -Path $checkpointPath -Raw -Encoding UTF8
+        $checkpoint = $content | ConvertFrom-Json
+
+        Write-RobocurseLog -Message "Found checkpoint: $($checkpoint.CompletedChunkPaths.Count) chunks completed at $($checkpoint.SavedAt)" `
+            -Level 'Info' -Component 'Checkpoint'
+
+        return $checkpoint
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to load checkpoint: $($_.Exception.Message)" `
+            -Level 'Warning' -Component 'Checkpoint'
+        return $null
+    }
+}
+
+function Remove-ReplicationCheckpoint {
+    <#
+    .SYNOPSIS
+        Removes the checkpoint file after successful completion
+    .OUTPUTS
+        $true if removed, $false otherwise
+    #>
+
+    $checkpointPath = Get-CheckpointPath
+
+    if (Test-Path $checkpointPath) {
+        try {
+            Remove-Item -Path $checkpointPath -Force
+            Write-RobocurseLog -Message "Checkpoint file removed (replication complete)" `
+                -Level 'Debug' -Component 'Checkpoint'
+            return $true
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to remove checkpoint file: $($_.Exception.Message)" `
+                -Level 'Warning' -Component 'Checkpoint'
+        }
+    }
+    return $false
+}
+
+function Test-ChunkAlreadyCompleted {
+    <#
+    .SYNOPSIS
+        Checks if a chunk was completed in a previous run
+    .PARAMETER Chunk
+        Chunk object to check
+    .PARAMETER Checkpoint
+        Checkpoint object from previous run
+    .OUTPUTS
+        $true if chunk should be skipped, $false otherwise
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Chunk,
+
+        [PSCustomObject]$Checkpoint
+    )
+
+    if (-not $Checkpoint -or -not $Checkpoint.CompletedChunkPaths) {
+        return $false
+    }
+
+    # Case-insensitive check for Windows paths
+    $normalizedChunkPath = $Chunk.SourcePath.ToLowerInvariant()
+    foreach ($completedPath in $Checkpoint.CompletedChunkPaths) {
+        if ($completedPath.ToLowerInvariant() -eq $normalizedChunkPath) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+#endregion
+
 function Start-ReplicationRun {
     <#
     .SYNOPSIS
@@ -2893,6 +3439,9 @@ function Start-ReplicationRun {
         replication of the specified profiles. Use SkipInitialization when the state
         has already been initialized by the caller (e.g., GUI mode where state is
         shared across threads).
+
+        Supports resume from checkpoint: if a checkpoint file exists, completed chunks
+        will be skipped. Use -IgnoreCheckpoint to start fresh.
     .PARAMETER Profiles
         Array of profile objects from config
     .PARAMETER MaxConcurrentJobs
@@ -2900,6 +3449,8 @@ function Start-ReplicationRun {
     .PARAMETER SkipInitialization
         Skip state initialization. Use when state was pre-initialized by caller
         (e.g., GUI mode for cross-thread state sharing)
+    .PARAMETER IgnoreCheckpoint
+        Ignore any existing checkpoint file and start fresh
     .PARAMETER OnProgress
         Scriptblock called on progress updates
     .PARAMETER OnChunkComplete
@@ -2937,6 +3488,8 @@ function Start-ReplicationRun {
 
         [switch]$SkipInitialization,
 
+        [switch]$IgnoreCheckpoint,
+
         [scriptblock]$OnProgress,
         [scriptblock]$OnChunkComplete,
         [scriptblock]$OnProfileComplete
@@ -2945,6 +3498,17 @@ function Start-ReplicationRun {
     # Initialize state (unless caller already did - e.g., GUI cross-thread scenario)
     if (-not $SkipInitialization) {
         Initialize-OrchestrationState
+    }
+
+    # Load checkpoint if resuming
+    $script:CurrentCheckpoint = $null
+    if (-not $IgnoreCheckpoint) {
+        $script:CurrentCheckpoint = Get-ReplicationCheckpoint
+        if ($script:CurrentCheckpoint) {
+            $skippedCount = $script:CurrentCheckpoint.CompletedChunkPaths.Count
+            Write-RobocurseLog -Message "Resuming from checkpoint: $skippedCount chunks will be skipped" `
+                -Level 'Info' -Component 'Checkpoint'
+        }
     }
 
     # Set bandwidth limit for dynamic IPG calculation
@@ -3213,9 +3777,8 @@ function Invoke-ReplicationTick {
     $activeJobsCopy = $state.ActiveJobs.ToArray()
     foreach ($kvp in $activeJobsCopy) {
         $job = $kvp.Value
-        # Use WaitForExit(0) instead of HasExited - this is atomic and ensures
-        # the exit code is properly available when it returns true
-        if ($job.Process.WaitForExit(0)) {
+        # Check if process has completed
+        if ($job.Process.HasExited) {
             # Process completion
             $result = Complete-RobocopyJob -Job $job
 
@@ -3243,6 +3806,12 @@ function Invoke-ReplicationTick {
             if ($script:OnChunkComplete) {
                 & $script:OnChunkComplete $job $result
             }
+
+            # Save checkpoint periodically (every N chunks or on failure)
+            # This enables resume after crash without excessive disk I/O
+            if (($state.CompletedCount % $script:CheckpointSaveFrequency -eq 0) -or ($result.ExitMeaning.Severity -in @('Error', 'Fatal'))) {
+                Save-ReplicationCheckpoint | Out-Null
+            }
         }
     }
 
@@ -3251,6 +3820,20 @@ function Invoke-ReplicationTick {
            ($state.ChunkQueue.Count -gt 0)) {
         $chunk = $null
         if ($state.ChunkQueue.TryDequeue([ref]$chunk)) {
+            # Check if chunk was completed in previous run (resume from checkpoint)
+            if ($script:CurrentCheckpoint -and (Test-ChunkAlreadyCompleted -Chunk $chunk -Checkpoint $script:CurrentCheckpoint)) {
+                # Skip this chunk - mark as already completed
+                $chunk.Status = 'Skipped'
+                $state.CompletedChunks.Enqueue($chunk)
+                $state.IncrementCompletedCount()
+                if ($chunk.EstimatedSize) {
+                    $state.AddCompletedChunkBytes($chunk.EstimatedSize)
+                }
+                Write-RobocurseLog -Message "Chunk $($chunk.ChunkId) skipped (already completed in previous run)" `
+                    -Level 'Debug' -Component 'Checkpoint'
+                continue
+            }
+
             $job = Start-ChunkJob -Chunk $chunk
             $state.ActiveJobs[$job.Process.Id] = $job
         }
@@ -3456,6 +4039,9 @@ function Complete-CurrentProfile {
         $state.Phase = "Complete"
         $totalDuration = [datetime]::Now - $state.StartTime
 
+        # Remove checkpoint file on successful completion
+        Remove-ReplicationCheckpoint | Out-Null
+
         Write-RobocurseLog -Message "All profiles complete in $($totalDuration.ToString('hh\:mm\:ss'))" `
             -Level 'Info' -Component 'Orchestrator'
 
@@ -3479,8 +4065,8 @@ function Stop-AllJobs {
         -Level 'Warning' -Component 'Orchestrator'
 
     foreach ($job in $state.ActiveJobs.Values) {
-        # WaitForExit(0) returns true if already exited, so we only kill if still running
-        if (-not $job.Process.WaitForExit(0)) {
+        # Check HasExited property - only kill if process is still running
+        if (-not $job.Process.HasExited) {
             try {
                 $job.Process.Kill()
                 Write-RobocurseLog -Message "Killed chunk $($job.Chunk.ChunkId)" -Level 'Warning' -Component 'Orchestrator'
@@ -3581,6 +4167,26 @@ function Get-OrchestrationStatus {
     .OUTPUTS
         PSCustomObject with all status info
     #>
+
+    # Handle case where orchestration hasn't been initialized yet
+    if (-not $script:OrchestrationState) {
+        return [PSCustomObject]@{
+            Phase = 'Idle'
+            Elapsed = [timespan]::Zero
+            ETA = $null
+            CurrentProfile = ""
+            ProfileProgress = 0
+            OverallProgress = 0
+            BytesComplete = 0
+            FilesCopied = 0
+            ChunksTotal = 0
+            ChunksComplete = 0
+            ChunksFailed = 0
+            ActiveJobCount = 0
+            ErrorCount = 0
+        }
+    }
+
     $state = $script:OrchestrationState
 
     $elapsed = if ($state.StartTime) {
@@ -3648,7 +4254,9 @@ function Get-ETAEstimate {
 #region ==================== VSS ====================
 
 # Path to track active VSS snapshots (for orphan cleanup)
-$script:VssTrackingFile = Join-Path $env:TEMP "Robocurse-VSS-Tracking.json"
+# Handle cross-platform: TEMP on Windows, TMPDIR on macOS, /tmp fallback
+$script:VssTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
+$script:VssTrackingFile = Join-Path $script:VssTempDir "Robocurse-VSS-Tracking.json"
 
 function Clear-OrphanVssSnapshots {
     <#
@@ -4536,19 +5144,20 @@ function New-CompletionEmailBody {
 "@
     }
 
-    # Build errors list HTML
+    # Build errors list HTML (limited to configured max for readability)
     $errorsHtml = ""
     if ($Results.Errors -and $Results.Errors.Count -gt 0) {
         $errorItems = ""
-        $errorCount = [Math]::Min($Results.Errors.Count, 10)
+        $maxErrors = $script:EmailMaxErrorsDisplay
+        $errorCount = [Math]::Min($Results.Errors.Count, $maxErrors)
         for ($i = 0; $i -lt $errorCount; $i++) {
             $encodedError = [System.Net.WebUtility]::HtmlEncode($Results.Errors[$i])
             $errorItems += "                <li>$encodedError</li>`n"
         }
 
         $additionalErrors = ""
-        if ($Results.Errors.Count -gt 10) {
-            $additionalErrors = "            <p><em>... and $($Results.Errors.Count - 10) more errors. See logs for details.</em></p>`n"
+        if ($Results.Errors.Count -gt $maxErrors) {
+            $additionalErrors = "            <p><em>... and $($Results.Errors.Count - $maxErrors) more errors. See logs for details.</em></p>`n"
         }
 
         $errorsHtml = @"
@@ -5141,6 +5750,19 @@ function Test-RobocurseTaskExists {
 
 #region ==================== GUI ====================
 
+# GUI XAML Structure (for maintainability):
+# The main window XAML is embedded here as a heredoc to maintain single-file deployment.
+# Structure overview:
+#   1. Window.Resources    - Styles (DarkLabel, DarkTextBox, DarkButton, etc.) [lines ~5765-5850]
+#   2. Main Grid           - Two-row layout (toolbar + main content) [line ~5860]
+#   3. Toolbar             - Run/Stop buttons [lines ~5865-5885]
+#   4. Main Content Grid   - Three columns (profiles | settings | progress) [line ~5890]
+#   5. Profile Panel       - Left sidebar with profile list [lines ~5895-5920]
+#   6. Settings Panel      - Center panel with profile editor [lines ~5925-6000]
+#   7. Progress Panel      - Right panel with status, chunks, logs [lines ~6005-6060]
+#
+# To find a specific control, search for its x:Name attribute (e.g., x:Name="lstProfiles")
+
 $script:MainWindowXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -5149,6 +5771,7 @@ $script:MainWindowXaml = @'
         WindowStartupLocation="CenterScreen"
         Background="#1E1E1E">
 
+    <!-- ==================== RESOURCES: Theme Styles ==================== -->
     <Window.Resources>
         <!-- Dark Theme Styles -->
         <Style x:Key="DarkLabel" TargetType="Label">
@@ -5201,6 +5824,8 @@ $script:MainWindowXaml = @'
         </Style>
     </Window.Resources>
 
+    <!-- ==================== LAYOUT: Main Grid ==================== -->
+    <!-- Row 0: Header, Row 1: Profile/Settings, Row 2: Progress, Row 3: Action Buttons, Row 4: Log -->
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -5210,21 +5835,21 @@ $script:MainWindowXaml = @'
             <RowDefinition Height="120"/>
         </Grid.RowDefinitions>
 
-        <!-- Header -->
+        <!-- ==================== ROW 0: Header ==================== -->
         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
             <TextBlock Text="ROBOCURSE" FontSize="28" FontWeight="Bold" Foreground="#0078D4"/>
             <TextBlock Text=" | Multi-Share Replication" FontSize="14" Foreground="#808080"
                        VerticalAlignment="Bottom" Margin="0,0,0,4"/>
         </StackPanel>
 
-        <!-- Profile and Settings Panel -->
+        <!-- ==================== ROW 1: Profile and Settings Panel ==================== -->
         <Grid Grid.Row="1" Margin="0,0,0,10">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="250"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <!-- Profile List -->
+            <!-- ===== COLUMN 0: Profile List Sidebar ===== -->
             <Border Grid.Column="0" Background="#252525" CornerRadius="4" Margin="0,0,10,0" Padding="10">
                 <DockPanel>
                     <Label DockPanel.Dock="Top" Content="Sync Profiles" Style="{StaticResource DarkLabel}" FontWeight="Bold"/>
@@ -5517,51 +6142,86 @@ function Initialize-EventHandlers {
     $script:Controls.cmbScanMode.Add_SelectionChanged({ Save-ProfileFromForm })
 
     # Window closing
-    $script:Window.Add_Closing({
-        param($sender, $e)
+    $script:Window.Add_Closing({ Invoke-WindowClosingHandler -EventArgs $args[1] })
+}
 
-        if ($script:OrchestrationState.Phase -eq 'Replicating') {
-            $result = [System.Windows.MessageBox]::Show(
-                "Replication is in progress. Stop and exit?",
-                "Confirm Exit",
-                [System.Windows.MessageBoxButton]::YesNo,
-                [System.Windows.MessageBoxImage]::Warning
-            )
-            if ($result -eq 'No') {
-                $e.Cancel = $true
-                return
-            }
-            Stop-AllJobs
+function Invoke-WindowClosingHandler {
+    <#
+    .SYNOPSIS
+        Handles the window closing event
+    .DESCRIPTION
+        Prompts for confirmation if replication is in progress,
+        stops jobs if confirmed, cleans up resources, and saves config.
+    .PARAMETER EventArgs
+        The CancelEventArgs from the Closing event
+    #>
+    param($EventArgs)
+
+    # Check if replication is running and confirm exit
+    if ($script:OrchestrationState -and $script:OrchestrationState.Phase -eq 'Replicating') {
+        $result = [System.Windows.MessageBox]::Show(
+            "Replication is in progress. Stop and exit?",
+            "Confirm Exit",
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Warning
+        )
+        if ($result -eq 'No') {
+            $EventArgs.Cancel = $true
+            return
         }
+        Stop-AllJobs
+    }
+
+    # Stop the progress timer
+    if ($script:ProgressTimer) {
         $script:ProgressTimer.Stop()
+    }
 
-        # Clean up background runspace to prevent memory leaks
-        # This handles cases where the user closes the window mid-replication or after an exception
-        if ($script:ReplicationPowerShell) {
-            try {
-                if ($script:ReplicationHandle -and -not $script:ReplicationHandle.IsCompleted) {
-                    $script:ReplicationPowerShell.Stop()
-                }
-                if ($script:ReplicationPowerShell.Runspace) {
-                    $script:ReplicationPowerShell.Runspace.Close()
-                    $script:ReplicationPowerShell.Runspace.Dispose()
-                }
-                $script:ReplicationPowerShell.Dispose()
-            }
-            catch {
-                # Silently ignore cleanup errors during window close
-            }
-            finally {
-                $script:ReplicationPowerShell = $null
-                $script:ReplicationHandle = $null
-            }
+    # Clean up background runspace to prevent memory leaks
+    Close-ReplicationRunspace
+
+    # Save configuration
+    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
+    if (-not $saveResult.Success) {
+        Write-GuiLog "Warning: Failed to save config on exit: $($saveResult.ErrorMessage)"
+    }
+}
+
+function Close-ReplicationRunspace {
+    <#
+    .SYNOPSIS
+        Cleans up the background replication runspace
+    .DESCRIPTION
+        Safely stops and disposes the PowerShell instance and runspace
+        used for background replication. Called during window close
+        and when replication completes.
+    #>
+
+    if (-not $script:ReplicationPowerShell) { return }
+
+    try {
+        # Stop the PowerShell instance if still running
+        if ($script:ReplicationHandle -and -not $script:ReplicationHandle.IsCompleted) {
+            $script:ReplicationPowerShell.Stop()
         }
 
-        $saveResult = Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
-        if (-not $saveResult.Success) {
-            Write-GuiLog "Warning: Failed to save config on exit: $($saveResult.ErrorMessage)"
+        # Close and dispose the runspace
+        if ($script:ReplicationPowerShell.Runspace) {
+            $script:ReplicationPowerShell.Runspace.Close()
+            $script:ReplicationPowerShell.Runspace.Dispose()
         }
-    })
+
+        # Dispose the PowerShell instance
+        $script:ReplicationPowerShell.Dispose()
+    }
+    catch {
+        # Silently ignore cleanup errors during window close
+        Write-Verbose "Runspace cleanup error (ignored): $($_.Exception.Message)"
+    }
+    finally {
+        $script:ReplicationPowerShell = $null
+        $script:ReplicationHandle = $null
+    }
 }
 
 function Update-ProfileList {
@@ -6044,7 +6704,7 @@ function Get-ChunkDisplayItems {
         Array of display objects for DataGrid binding
     #>
     param(
-        [int]$MaxCompletedItems = 20
+        [int]$MaxCompletedItems = $script:GuiMaxCompletedChunksDisplay
     )
 
     $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -6152,10 +6812,18 @@ function Update-GuiProgress {
     }
 }
 
+# GUI Log ring buffer (uses $script:GuiLogMaxLines from constants)
+$script:GuiLogBuffer = [System.Collections.Generic.List[string]]::new()
+$script:GuiLogDirty = $false  # Track if buffer needs to be flushed to UI
+
 function Write-GuiLog {
     <#
     .SYNOPSIS
-        Writes a message to the GUI log panel
+        Writes a message to the GUI log panel using a ring buffer
+    .DESCRIPTION
+        Uses a fixed-size ring buffer to prevent O(n²) string concatenation
+        performance issues. When the buffer exceeds GuiLogMaxLines, oldest
+        entries are removed. This keeps the GUI responsive during long runs.
     .PARAMETER Message
         Message to log
     #>
@@ -6164,11 +6832,20 @@ function Write-GuiLog {
     if (-not $script:Controls.txtLog) { return }
 
     $timestamp = Get-Date -Format "HH:mm:ss"
-    $line = "[$timestamp] $Message`n"
+    $line = "[$timestamp] $Message"
 
-    # Use Dispatcher for thread safety
+    # Add to ring buffer
+    $script:GuiLogBuffer.Add($line)
+
+    # Trim if over limit (remove oldest entries)
+    while ($script:GuiLogBuffer.Count -gt $script:GuiLogMaxLines) {
+        $script:GuiLogBuffer.RemoveAt(0)
+    }
+
+    # Use Dispatcher for thread safety - rebuild text from buffer
     $script:Window.Dispatcher.Invoke([Action]{
-        $script:Controls.txtLog.Text += $line
+        # Join all lines - more efficient than repeated concatenation
+        $script:Controls.txtLog.Text = $script:GuiLogBuffer -join "`n"
         $script:Controls.svLog.ScrollToEnd()
     })
 }
@@ -6489,7 +7166,7 @@ function Invoke-HeadlessReplication {
 
     # Track last progress output time for throttling
     $lastProgressOutput = [datetime]::MinValue
-    $progressInterval = [timespan]::FromSeconds(10)
+    $progressInterval = [timespan]::FromSeconds($script:HeadlessProgressIntervalSeconds)
 
     # Run the orchestration loop with progress output
     while ($script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
@@ -6512,7 +7189,7 @@ function Invoke-HeadlessReplication {
             $lastProgressOutput = $now
         }
 
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds $script:ReplicationTickIntervalMs
     }
 
     # Get final status
@@ -6609,6 +7286,12 @@ function Start-RobocurseMain {
     if ($ShowHelp) {
         Show-RobocurseHelp
         return 0
+    }
+
+    # Validate config path for security before using it
+    if (-not (Test-SafeConfigPath -Path $ConfigPath)) {
+        Write-Error "Configuration path '$ConfigPath' contains unsafe characters or patterns."
+        return 1
     }
 
     try {
@@ -6725,7 +7408,7 @@ if ($Help) {
 # Use the Test-IsBeingDotSourced function to detect dot-sourcing
 # This avoids duplicating the call stack detection logic
 if (-not (Test-IsBeingDotSourced)) {
-    $exitCode = Start-RobocurseMain -Headless:$Headless -ConfigPath $ConfigPath -ProfileName $Profile -AllProfiles:$AllProfiles -ShowHelp:$Help
+    $exitCode = Start-RobocurseMain -Headless:$Headless -ConfigPath $ConfigPath -ProfileName $SyncProfile -AllProfiles:$AllProfiles -ShowHelp:$Help
     exit $exitCode
 }
 

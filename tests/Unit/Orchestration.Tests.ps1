@@ -3,6 +3,9 @@
 BeforeAll {
     # Load the main script in non-interactive mode
     . "$PSScriptRoot\..\..\Robocurse.ps1" -Help
+
+    # Initialize the C# OrchestrationState type (not auto-loaded in -Help mode)
+    Initialize-OrchestrationStateType | Out-Null
 }
 
 Describe "Orchestration" {
