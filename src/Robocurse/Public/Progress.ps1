@@ -157,5 +157,7 @@ function Get-ETAEstimate {
         $secondsRemaining = $maxSeconds
     }
 
-    return [timespan]::FromSeconds([int]$secondsRemaining)
+    # Ensure value fits in Int32 range before casting (defensive programming)
+    $safeSeconds = [Math]::Min($secondsRemaining, [int]::MaxValue)
+    return [timespan]::FromSeconds([int]$safeSeconds)
 }

@@ -436,9 +436,8 @@ function Convert-ToDestinationPath {
 
     # Check if SourcePath starts with SourceRoot (case-insensitive for Windows paths)
     if (-not $normalizedSource.StartsWith($normalizedSourceRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        Write-RobocurseLog "SourcePath '$SourcePath' does not start with SourceRoot '$SourceRoot'" -Level Warning
-        # If they don't match, just append source to dest
-        return Join-Path $normalizedDestRoot (Split-Path $SourcePath -Leaf)
+        # This is a configuration error - fail fast rather than silently creating unexpected paths
+        throw "Path mismatch: SourcePath '$SourcePath' does not start with SourceRoot '$SourceRoot'. Cannot compute relative destination path."
     }
 
     # Get the relative path (using original SourcePath to preserve original casing in output)

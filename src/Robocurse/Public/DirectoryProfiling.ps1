@@ -515,7 +515,9 @@ function Get-DirectoryProfilesParallel {
                 }
             }
             finally {
-                $job.PowerShell.Dispose()
+                # Wrap disposal in try-catch to prevent one failed disposal from
+                # blocking cleanup of remaining jobs
+                try { $job.PowerShell.Dispose() } catch { }
             }
         }
 

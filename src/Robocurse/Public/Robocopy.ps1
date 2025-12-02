@@ -54,9 +54,14 @@ function Get-BandwidthThrottleIPG {
     $perJobBytesPerSec = $totalBytesPerSec / $effectiveJobs
 
     # Robocopy IPG is delay in ms between 512-byte packets
-    # Time per packet (ms) = (512 bytes * 8 bits * 1000 ms) / bits_per_second
-    # IPG = (4096000) / (perJobBytesPerSec * 8) = 512000 / perJobBytesPerSec
-    $ipg = [Math]::Ceiling(512000 / $perJobBytesPerSec)
+    # Formula derivation:
+    #   - Robocopy sends data in 512-byte packets
+    #   - IPG (Inter-Packet Gap) = time between packets in milliseconds
+    #   - To achieve target bytes/sec: IPG = (packet_size / target_bytes_per_sec) * 1000
+    #   - IPG = (512 / perJobBytesPerSec) * 1000 = 512000 / perJobBytesPerSec
+    $robocopyPacketSize = 512  # bytes per packet (robocopy default)
+    $msPerSecond = 1000
+    $ipg = [Math]::Ceiling(($robocopyPacketSize * $msPerSecond) / $perJobBytesPerSec)
 
     # Clamp to reasonable range (1ms to 10000ms)
     $ipg = [Math]::Max(1, [Math]::Min(10000, $ipg))
@@ -355,6 +360,7 @@ function Get-RobocopyExitMeaning {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
+        [ValidateRange(0, 255)]
         [int]$ExitCode,
 
         [ValidateSet("Warning", "Error", "Success")]

@@ -8,7 +8,7 @@
     ModuleVersion = '1.0.0'
 
     # ID used to uniquely identify this module
-    GUID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
+    GUID = 'f228b3b9-963b-4125-bc4c-ce82856cb6fd'
 
     # Author of this module
     Author = 'Mark Pace'
@@ -17,13 +17,17 @@
     CompanyName = 'pace.org'
 
     # Copyright statement for this module
-    Copyright = '(c) 2024 Mark Pace. All rights reserved.'
+    Copyright = '(c) 2025 Mark Pace. All rights reserved.'
 
     # Description of the functionality provided by this module
     Description = 'Multi-share parallel robocopy orchestrator for Windows environments.'
 
     # Minimum version of the PowerShell engine required by this module
     PowerShellVersion = '5.1'
+
+    # Supported PowerShell editions (Desktop = Windows PowerShell 5.1, Core = PowerShell 7+)
+    # Note: This module requires Windows due to robocopy.exe, VSS, and Task Scheduler dependencies
+    CompatiblePSEditions = @('Desktop', 'Core')
 
     # Functions to export from this module
     FunctionsToExport = @(
@@ -99,7 +103,7 @@
         'New-VssSnapshot'
         'Remove-VssSnapshot'
         'Get-VssPath'
-        'Remove-OrphanVssSnapshots'
+        'Clear-OrphanVssSnapshots'
 
         # Email
         'Initialize-CredentialManager'
