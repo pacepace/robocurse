@@ -124,20 +124,6 @@ $script:DryRunMode = $false
 # Get the module's root directory
 $PSModuleRoot = $PSScriptRoot
 
-# Load private functions first (internal helpers)
-$privateFunctions = @(
-    Get-ChildItem -Path "$PSModuleRoot\Private\*.ps1" -ErrorAction SilentlyContinue
-)
-
-foreach ($function in $privateFunctions) {
-    try {
-        . $function.FullName
-    }
-    catch {
-        Write-Error "Failed to load private function $($function.FullName): $_"
-    }
-}
-
 # Load public functions (in dependency order)
 $publicFunctionOrder = @(
     'Utility.ps1'

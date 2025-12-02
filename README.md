@@ -307,29 +307,34 @@ robocurse/
 ├── src/Robocurse/             # SOURCE OF TRUTH - Module files
 │   ├── Robocurse.psd1         # Module manifest
 │   ├── Robocurse.psm1         # Module loader + constants
-│   └── Public/                # Exported functions
-│       ├── Utility.ps1
-│       ├── Configuration.ps1
-│       ├── Logging.ps1
-│       ├── DirectoryProfiling.ps1
-│       ├── Chunking.ps1
-│       ├── Robocopy.ps1
-│       ├── Orchestration.ps1
-│       ├── Progress.ps1
-│       ├── VSS.ps1
-│       ├── Email.ps1
-│       ├── Scheduling.ps1
-│       ├── GUI.ps1
-│       └── Main.ps1
+│   ├── Public/                # Exported functions
+│   │   ├── Utility.ps1        # Platform detection, validation, pre-flight checks
+│   │   ├── Configuration.ps1  # Config loading/validation
+│   │   ├── Logging.ps1        # Operational & SIEM logging
+│   │   ├── DirectoryProfiling.ps1
+│   │   ├── Chunking.ps1       # Directory chunking algorithms
+│   │   ├── Robocopy.ps1       # Robocopy wrapper
+│   │   ├── Checkpoint.ps1     # Crash recovery
+│   │   ├── Orchestration.ps1  # Job orchestration (C# interop)
+│   │   ├── Progress.ps1       # Progress tracking
+│   │   ├── VSS.ps1            # Volume Shadow Copy
+│   │   ├── Email.ps1          # SMTP notifications
+│   │   ├── Scheduling.ps1     # Task Scheduler integration
+│   │   ├── GUI.ps1            # WPF interface
+│   │   └── Main.ps1           # Entry point
+│   └── Resources/             # XAML resources
+│       ├── MainWindow.xaml
+│       └── ScheduleDialog.xaml
 ├── build/                     # Build tools
 │   ├── Build-Robocurse.ps1    # Assembles modules into monolith
 │   └── README.md              # Build documentation
 ├── dist/                      # Built artifacts
-│   └── Robocurse.ps1          # DEPLOYABLE MONOLITH
+│   ├── Robocurse.ps1          # DEPLOYABLE MONOLITH
+│   └── Robocurse.ps1.sha256   # Integrity hash
 ├── tests/                     # Test directory
 │   ├── TestHelper.ps1         # Test loader (uses modules)
 │   ├── Robocurse.Tests.ps1    # Main test suite
-│   ├── Unit/                  # Unit tests
+│   ├── Unit/                  # Unit tests (11 files)
 │   └── Integration/           # Integration tests
 ├── Robocurse.config.json      # Configuration file
 ├── docs/                      # Documentation
@@ -446,6 +451,7 @@ Robocopy uses bit-flag exit codes. Consult the `Get-RobocopyExitMeaning` functio
 When retrieving SMTP credentials from Windows Credential Manager, the password briefly exists as a plaintext string in memory before being converted to a `SecureString`. This is an unavoidable limitation of the Windows Credential Manager P/Invoke API.
 
 **Mitigations:**
+- Byte arrays containing credential data are explicitly zeroed immediately after use via `[Array]::Clear()` rather than waiting for garbage collection
 - The plaintext string is immediately eligible for garbage collection after `SecureString` creation
 - Credentials are only retrieved when sending email notifications (not at startup)
 - The credential retrieval code runs in the main PowerShell process, not persisted to disk
@@ -478,6 +484,22 @@ This creates an audit trail of when credentials are accessed, useful for complia
 ### Network Share Credentials
 
 For network share access, Robocurse relies on the Windows security context of the executing user. Use a service account with minimal required permissions when running as a scheduled task.
+
+### Pre-flight Validations
+
+Before starting replication, Robocurse performs several safety checks:
+
+1. **Source Path Accessibility**: Verifies the source path exists and is readable. For UNC paths, provides helpful error messages about network connectivity.
+
+2. **Destination Disk Space**: Checks if the destination drive is more than 90% full, and optionally verifies estimated data will fit. UNC paths skip this check due to the complexity of remote disk space queries.
+
+3. **Robocopy Options Validation**: Warns about potentially dangerous switch combinations:
+   - `/PURGE` without `/MIR` (deletes destination files without ensuring full sync)
+   - `/MOVE` or `/MOV` (deletes source files after copy)
+   - `/XX` with `/MIR` or `/PURGE` (conflicting behaviors)
+   - Switches that conflict with Robocurse-managed options (`/MT:`, `/LOG:`, etc.)
+
+These validations log warnings but do not block replication (except source path failures), allowing you to proceed with intentional configurations while being informed of potential issues.
 
 ## License
 

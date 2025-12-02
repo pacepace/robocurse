@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-01 21:16:14
+    Built: 2025-12-01 21:46:45
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -430,6 +430,223 @@ function Get-SanitizedExcludePatterns {
     }
 
     return $safePatterns
+}
+
+function Test-SourcePathAccessible {
+    <#
+    .SYNOPSIS
+        Pre-flight check to validate source path exists and is accessible
+    .DESCRIPTION
+        Checks that the source path exists before starting replication.
+        This catches configuration errors early rather than failing during scan.
+        For UNC paths, also validates network connectivity.
+    .PARAMETER Path
+        The source path to validate
+    .OUTPUTS
+        OperationResult - Success=$true if accessible, Success=$false with details on failure
+    .EXAMPLE
+        $check = Test-SourcePathAccessible -Path "\\SERVER\Share"
+        if (-not $check.Success) { Write-Error $check.ErrorMessage }
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path
+    )
+
+    # Check if path exists
+    if (-not (Test-Path -Path $Path -PathType Container)) {
+        # Provide more specific error for UNC paths
+        if ($Path -match '^\\\\') {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Source path not accessible: '$Path'. Check network connectivity and share permissions."
+        }
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Source path does not exist: '$Path'"
+    }
+
+    # Try to enumerate at least one item to verify read access
+    try {
+        $null = Get-ChildItem -Path $Path -Force -ErrorAction Stop | Select-Object -First 1
+        return New-OperationResult -Success $true -Data $Path
+    }
+    catch {
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Source path exists but is not readable: '$Path'. Error: $($_.Exception.Message)" `
+            -ErrorRecord $_
+    }
+}
+
+function Test-DestinationDiskSpace {
+    <#
+    .SYNOPSIS
+        Pre-flight check for approximate available disk space on destination
+    .DESCRIPTION
+        Performs a general check that the destination drive has reasonable free space.
+        This is NOT a precise byte-for-byte comparison (source sizes change during copy,
+        compression varies, etc.) but catches obvious problems like a nearly-full drive.
+
+        For UNC paths, checks the drive where the share is mounted if accessible.
+    .PARAMETER Path
+        The destination path to check
+    .PARAMETER EstimatedSizeBytes
+        Optional: Estimated size of data to copy. If provided, warns if free space is less.
+        If not provided, just warns if drive is >90% full.
+    .OUTPUTS
+        OperationResult - Success=$true if space looks reasonable, Success=$false with warning
+    .EXAMPLE
+        $check = Test-DestinationDiskSpace -Path "D:\Backups"
+        if (-not $check.Success) { Write-Warning $check.ErrorMessage }
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path,
+
+        [int64]$EstimatedSizeBytes = 0
+    )
+
+    try {
+        # For UNC paths, we can't easily check disk space without mounting
+        # Just verify the path is writable
+        if ($Path -match '^\\\\') {
+            # Ensure parent path exists or can be created
+            if (-not (Test-Path -Path $Path)) {
+                $parentPath = Split-Path -Path $Path -Parent
+                if ($parentPath -and -not (Test-Path -Path $parentPath)) {
+                    return New-OperationResult -Success $false `
+                        -ErrorMessage "Destination path parent does not exist: '$parentPath'"
+                }
+            }
+            # Can't check disk space on UNC without more complex logic
+            return New-OperationResult -Success $true -Data "UNC path - disk space check skipped"
+        }
+
+        # Extract drive letter for local paths
+        $driveLetter = [System.IO.Path]::GetPathRoot($Path)
+        if (-not $driveLetter) {
+            # Relative path - resolve it
+            $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+            $driveLetter = [System.IO.Path]::GetPathRoot($resolvedPath)
+        }
+
+        # Get drive info
+        $drive = Get-PSDrive -Name $driveLetter.TrimEnd(':\') -ErrorAction SilentlyContinue
+        if (-not $drive) {
+            # Try WMI/CIM for more reliable drive info
+            $driveLetterClean = $driveLetter.TrimEnd('\')
+            $diskInfo = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$driveLetterClean'" -ErrorAction SilentlyContinue
+            if ($diskInfo) {
+                $freeSpace = $diskInfo.FreeSpace
+                $totalSize = $diskInfo.Size
+            }
+            else {
+                # Can't get drive info - proceed with warning
+                return New-OperationResult -Success $true -Data "Could not determine disk space for $driveLetter"
+            }
+        }
+        else {
+            $freeSpace = $drive.Free
+            $totalSize = $drive.Used + $drive.Free
+        }
+
+        # Check if drive is >90% full
+        $percentUsed = if ($totalSize -gt 0) { (($totalSize - $freeSpace) / $totalSize) * 100 } else { 0 }
+
+        if ($percentUsed -gt 90) {
+            $freeGB = [math]::Round($freeSpace / 1GB, 2)
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Destination drive $driveLetter is $([math]::Round($percentUsed))% full (only $freeGB GB free). Consider freeing space before replication."
+        }
+
+        # If we have an estimated size, check if it fits (with 10% buffer)
+        if ($EstimatedSizeBytes -gt 0) {
+            $requiredWithBuffer = $EstimatedSizeBytes * 1.1
+            if ($freeSpace -lt $requiredWithBuffer) {
+                $freeGB = [math]::Round($freeSpace / 1GB, 2)
+                $neededGB = [math]::Round($requiredWithBuffer / 1GB, 2)
+                return New-OperationResult -Success $false `
+                    -ErrorMessage "Destination drive $driveLetter may not have enough space. Free: $freeGB GB, Estimated needed: $neededGB GB"
+            }
+        }
+
+        $freeGB = [math]::Round($freeSpace / 1GB, 2)
+        return New-OperationResult -Success $true -Data "Destination drive $driveLetter has $freeGB GB free"
+    }
+    catch {
+        # Don't fail the whole operation on disk check errors - just warn
+        return New-OperationResult -Success $true `
+            -Data "Disk space check failed (proceeding anyway): $($_.Exception.Message)"
+    }
+}
+
+function Test-RobocopyOptionsValid {
+    <#
+    .SYNOPSIS
+        Validates robocopy options for dangerous or conflicting combinations
+    .DESCRIPTION
+        Checks for robocopy switch combinations that could cause data loss or
+        unexpected behavior. Returns warnings for:
+        - /PURGE without /MIR (deletes destination files but doesn't sync)
+        - /MOVE (deletes source files after copy)
+        - /XX combined with /PURGE or /MIR (conflicting behaviors)
+    .PARAMETER Options
+        Hashtable of robocopy options from profile configuration
+    .OUTPUTS
+        OperationResult - Success=$true if options are safe, Success=$false with warnings
+    .EXAMPLE
+        $check = Test-RobocopyOptionsValid -Options $profile.RobocopyOptions
+        if (-not $check.Success) { Write-Warning $check.ErrorMessage }
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [hashtable]$Options
+    )
+
+    if ($null -eq $Options) {
+        return New-OperationResult -Success $true -Data "No custom options specified"
+    }
+
+    $switches = @()
+    if ($Options.Switches) {
+        $switches = @($Options.Switches) | ForEach-Object { $_.ToUpper() }
+    }
+
+    $warnings = @()
+
+    # Check for dangerous switch combinations
+    $hasPurge = $switches -contains '/PURGE'
+    $hasMir = $switches -contains '/MIR'
+    $hasMove = $switches | Where-Object { $_ -match '^/MOV[E]?$' }
+    $hasXX = $switches -contains '/XX'
+
+    # /PURGE without /MIR is suspicious - deletes extras without ensuring full sync
+    if ($hasPurge -and -not $hasMir) {
+        $warnings += "/PURGE specified without /MIR - this will delete destination files without ensuring source is fully copied. Consider using /MIR instead."
+    }
+
+    # /MOVE is dangerous - deletes source files
+    if ($hasMove) {
+        $warnings += "/MOV or /MOVE specified - this will DELETE source files after copying. Ensure this is intentional."
+    }
+
+    # /XX with /MIR or /PURGE is contradictory
+    if ($hasXX -and ($hasMir -or $hasPurge)) {
+        $warnings += "/XX specified with /MIR or /PURGE - these options conflict. /XX excludes extra files but /MIR and /PURGE delete them."
+    }
+
+    # Check for switches that override Robocurse-managed options
+    $managedSwitches = $switches | Where-Object { $_ -match '^/(MT|LOG|TEE|BYTES|NP):?' }
+    if ($managedSwitches) {
+        $warnings += "Switches that may conflict with Robocurse-managed options detected: $($managedSwitches -join ', '). These are normally set automatically."
+    }
+
+    if ($warnings.Count -gt 0) {
+        return New-OperationResult -Success $false -ErrorMessage ($warnings -join "`n")
+    }
+
+    return New-OperationResult -Success $true -Data "Robocopy options validated"
 }
 
 function Test-SafeConfigPath {
@@ -3569,182 +3786,6 @@ function Initialize-OrchestrationState {
         -Level 'Info' -Component 'Orchestrator'
 }
 
-#region ==================== CHECKPOINT/RESUME ====================
-
-$script:CheckpointFileName = "robocurse-checkpoint.json"
-
-function Get-CheckpointPath {
-    <#
-    .SYNOPSIS
-        Returns the checkpoint file path based on log directory
-    .OUTPUTS
-        Path to checkpoint file
-    #>
-    $logDir = if ($script:CurrentLogPath) {
-        Split-Path $script:CurrentLogPath -Parent
-    } else {
-        "."
-    }
-    return Join-Path $logDir $script:CheckpointFileName
-}
-
-function Save-ReplicationCheckpoint {
-    <#
-    .SYNOPSIS
-        Saves current replication progress to a checkpoint file
-    .DESCRIPTION
-        Persists the current state of replication to disk, allowing
-        resumption after a crash or interruption. Saves:
-        - Session ID
-        - Profile index and name
-        - Completed chunk paths (for skipping on resume)
-        - Start time
-        - Profiles configuration
-    .PARAMETER Force
-        Overwrite existing checkpoint without confirmation
-    .OUTPUTS
-        OperationResult indicating success/failure
-    #>
-    param(
-        [switch]$Force
-    )
-
-    if (-not $script:OrchestrationState) {
-        return New-OperationResult -Success $false -ErrorMessage "No orchestration state to checkpoint"
-    }
-
-    $state = $script:OrchestrationState
-
-    try {
-        # Build list of completed chunk paths for skip detection on resume
-        $completedPaths = @()
-        foreach ($chunk in $state.CompletedChunks.ToArray()) {
-            $completedPaths += $chunk.SourcePath
-        }
-
-        $checkpoint = [PSCustomObject]@{
-            Version = "1.0"
-            SessionId = $state.SessionId
-            SavedAt = (Get-Date).ToString('o')
-            ProfileIndex = $state.ProfileIndex
-            CurrentProfileName = if ($state.CurrentProfile) { $state.CurrentProfile.Name } else { "" }
-            CompletedChunkPaths = $completedPaths
-            CompletedCount = $state.CompletedCount
-            FailedCount = $state.FailedChunks.Count
-            BytesComplete = $state.BytesComplete
-            StartTime = if ($state.StartTime) { $state.StartTime.ToString('o') } else { $null }
-        }
-
-        $checkpointPath = Get-CheckpointPath
-
-        # Create directory if needed
-        $checkpointDir = Split-Path $checkpointPath -Parent
-        if ($checkpointDir -and -not (Test-Path $checkpointDir)) {
-            New-Item -ItemType Directory -Path $checkpointDir -Force | Out-Null
-        }
-
-        $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $checkpointPath -Encoding UTF8
-
-        Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
-            -Level 'Info' -Component 'Checkpoint'
-
-        return New-OperationResult -Success $true -Data $checkpointPath
-    }
-    catch {
-        Write-RobocurseLog -Message "Failed to save checkpoint: $($_.Exception.Message)" `
-            -Level 'Error' -Component 'Checkpoint'
-        return New-OperationResult -Success $false -ErrorMessage "Failed to save checkpoint: $($_.Exception.Message)" -ErrorRecord $_
-    }
-}
-
-function Get-ReplicationCheckpoint {
-    <#
-    .SYNOPSIS
-        Loads a checkpoint file if one exists
-    .OUTPUTS
-        Checkpoint object or $null if no checkpoint exists
-    #>
-
-    $checkpointPath = Get-CheckpointPath
-
-    if (-not (Test-Path $checkpointPath)) {
-        return $null
-    }
-
-    try {
-        $content = Get-Content -Path $checkpointPath -Raw -Encoding UTF8
-        $checkpoint = $content | ConvertFrom-Json
-
-        Write-RobocurseLog -Message "Found checkpoint: $($checkpoint.CompletedChunkPaths.Count) chunks completed at $($checkpoint.SavedAt)" `
-            -Level 'Info' -Component 'Checkpoint'
-
-        return $checkpoint
-    }
-    catch {
-        Write-RobocurseLog -Message "Failed to load checkpoint: $($_.Exception.Message)" `
-            -Level 'Warning' -Component 'Checkpoint'
-        return $null
-    }
-}
-
-function Remove-ReplicationCheckpoint {
-    <#
-    .SYNOPSIS
-        Removes the checkpoint file after successful completion
-    .OUTPUTS
-        $true if removed, $false otherwise
-    #>
-
-    $checkpointPath = Get-CheckpointPath
-
-    if (Test-Path $checkpointPath) {
-        try {
-            Remove-Item -Path $checkpointPath -Force
-            Write-RobocurseLog -Message "Checkpoint file removed (replication complete)" `
-                -Level 'Debug' -Component 'Checkpoint'
-            return $true
-        }
-        catch {
-            Write-RobocurseLog -Message "Failed to remove checkpoint file: $($_.Exception.Message)" `
-                -Level 'Warning' -Component 'Checkpoint'
-        }
-    }
-    return $false
-}
-
-function Test-ChunkAlreadyCompleted {
-    <#
-    .SYNOPSIS
-        Checks if a chunk was completed in a previous run
-    .PARAMETER Chunk
-        Chunk object to check
-    .PARAMETER Checkpoint
-        Checkpoint object from previous run
-    .OUTPUTS
-        $true if chunk should be skipped, $false otherwise
-    #>
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject]$Chunk,
-
-        [PSCustomObject]$Checkpoint
-    )
-
-    if (-not $Checkpoint -or -not $Checkpoint.CompletedChunkPaths) {
-        return $false
-    }
-
-    # Case-insensitive check for Windows paths
-    $normalizedChunkPath = $Chunk.SourcePath.ToLowerInvariant()
-    foreach ($completedPath in $Checkpoint.CompletedChunkPaths) {
-        if ($completedPath.ToLowerInvariant() -eq $normalizedChunkPath) {
-            return $true
-        }
-    }
-
-    return $false
-}
-
 function Start-ReplicationRun {
     <#
     .SYNOPSIS
@@ -3895,6 +3936,35 @@ function Start-ProfileReplication {
     $state.CurrentProfile = $Profile
     $state.ProfileStartTime = [datetime]::Now
     $state.ProfileStartFiles = $state.CompletedChunkFiles  # Snapshot for per-profile file counting
+
+    # Pre-flight validation: Source path accessibility
+    $sourceCheck = Test-SourcePathAccessible -Path $Profile.Source
+    if (-not $sourceCheck.Success) {
+        $errorMsg = "Profile '$($Profile.Name)' failed pre-flight check: $($sourceCheck.ErrorMessage)"
+        Write-RobocurseLog -Message $errorMsg -Level 'Error' -Component 'Orchestrator'
+        $state.EnqueueError($errorMsg)
+
+        # Skip to next profile instead of failing the whole run
+        Complete-CurrentProfile
+        return
+    }
+
+    # Pre-flight validation: Destination disk space (warning only)
+    $diskCheck = Test-DestinationDiskSpace -Path $Profile.Destination
+    if (-not $diskCheck.Success) {
+        Write-RobocurseLog -Message "Profile '$($Profile.Name)' disk space warning: $($diskCheck.ErrorMessage)" `
+            -Level 'Warning' -Component 'Orchestrator'
+        # Continue anyway - this is a warning, not a blocker
+    }
+
+    # Pre-flight validation: Robocopy options (warnings for dangerous combinations)
+    $robocopyOptions = if ($Profile.RobocopyOptions) { $Profile.RobocopyOptions } else { @{} }
+    $optionsCheck = Test-RobocopyOptionsValid -Options $robocopyOptions
+    if (-not $optionsCheck.Success) {
+        Write-RobocurseLog -Message "Profile '$($Profile.Name)' robocopy options warning: $($optionsCheck.ErrorMessage)" `
+            -Level 'Warning' -Component 'Orchestrator'
+        # Continue anyway - this is a warning, not a blocker
+    }
 
     # Extract robocopy options from profile
     $state.CurrentRobocopyOptions = @{}
@@ -5648,12 +5718,19 @@ function Get-SmtpCredential {
                     if ($credential.CredentialBlobSize -gt 0) {
                         $passwordBytes = New-Object byte[] $credential.CredentialBlobSize
                         [System.Runtime.InteropServices.Marshal]::Copy($credential.CredentialBlob, $passwordBytes, 0, $credential.CredentialBlobSize)
-                        # SECURITY NOTE: The password exists briefly as a plaintext string before
+
+                        # SECURITY MITIGATION: The password exists briefly as a plaintext string before
                         # conversion to SecureString. This is unavoidable when reading from Windows
-                        # Credential Manager via P/Invoke. The plaintext string is eligible for GC
-                        # immediately after SecureString creation. See README Security Considerations.
-                        $password = [System.Text.Encoding]::Unicode.GetString($passwordBytes)
-                        $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
+                        # Credential Manager via P/Invoke. We explicitly zero the byte array after use
+                        # rather than waiting for GC. See README Security Considerations.
+                        try {
+                            $password = [System.Text.Encoding]::Unicode.GetString($passwordBytes)
+                            $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
+                        }
+                        finally {
+                            # Zero the byte array immediately - don't wait for GC
+                            [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+                        }
 
                         # AUDIT: Log credential retrieval from Windows Credential Manager
                         Write-RobocurseLog -Message "SMTP credential retrieved from Windows Credential Manager (target: $Target, user: $($credential.UserName))" `
@@ -5748,6 +5825,9 @@ function Save-SmtpCredential {
             }
         }
         finally {
+            # Zero the byte array immediately - don't wait for GC
+            [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+
             if ($credPtr -ne [IntPtr]::Zero) {
                 [System.Runtime.InteropServices.Marshal]::FreeHGlobal($credPtr)
             }
@@ -6205,7 +6285,11 @@ function Register-RobocurseTask {
     .EXAMPLE
         $result = Register-RobocurseTask -ConfigPath "C:\config.json" -Schedule Weekly -DaysOfWeek @('Monday', 'Friday') -RunAsSystem
         if (-not $result.Success) { Write-Error $result.ErrorMessage }
+    .EXAMPLE
+        Register-RobocurseTask -ConfigPath "C:\config.json" -WhatIf
+        # Shows what task would be created without actually registering it
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication",
@@ -6303,8 +6387,10 @@ function Register-RobocurseTask {
             Force = $true
         }
 
-        Register-ScheduledTask @taskParams | Out-Null
-        Write-RobocurseLog -Message "Scheduled task '$TaskName' registered successfully" -Level 'Info' -Component 'Scheduler'
+        if ($PSCmdlet.ShouldProcess($TaskName, "Register scheduled task (Schedule: $Schedule, Time: $Time)")) {
+            Register-ScheduledTask @taskParams | Out-Null
+            Write-RobocurseLog -Message "Scheduled task '$TaskName' registered successfully" -Level 'Info' -Component 'Scheduler'
+        }
         return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
@@ -6553,278 +6639,45 @@ function Test-RobocurseTaskExists {
 
 #region ==================== PUBLIC\GUI ====================
 
-# GUI XAML Structure (for maintainability):
-# The main window XAML is embedded here as a heredoc to maintain single-file deployment.
-# Structure overview:
-#   1. Window.Resources    - Styles (DarkLabel, DarkTextBox, DarkButton, etc.) [lines ~5765-5850]
-#   2. Main Grid           - Two-row layout (toolbar + main content) [line ~5860]
-#   3. Toolbar             - Run/Stop buttons [lines ~5865-5885]
-#   4. Main Content Grid   - Three columns (profiles | settings | progress) [line ~5890]
-#   5. Profile Panel       - Left sidebar with profile list [lines ~5895-5920]
-#   6. Settings Panel      - Center panel with profile editor [lines ~5925-6000]
-#   7. Progress Panel      - Right panel with status, chunks, logs [lines ~6005-6060]
-#
-# To find a specific control, search for its x:Name attribute (e.g., x:Name="lstProfiles")
+# XAML resources are stored in the Resources folder for maintainability.
+# The Get-XamlResource function loads them at runtime with fallback to embedded content.
 
-$script:MainWindowXaml = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Robocurse - Multi-Share Replication"
-        Height="800" Width="1100"
-        WindowStartupLocation="CenterScreen"
-        Background="#1E1E1E">
+function Get-XamlResource {
+    <#
+    .SYNOPSIS
+        Loads XAML content from a resource file or falls back to embedded content
+    .PARAMETER ResourceName
+        Name of the XAML resource file (without path)
+    .PARAMETER FallbackContent
+        Optional embedded XAML content to use if file not found
+    .OUTPUTS
+        XAML string content
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$ResourceName,
 
-    <!-- ==================== RESOURCES: Theme Styles ==================== -->
-    <Window.Resources>
-        <!-- Dark Theme Styles -->
-        <Style x:Key="DarkLabel" TargetType="Label">
-            <Setter Property="Foreground" Value="#E0E0E0"/>
-            <Setter Property="FontFamily" Value="Segoe UI"/>
-        </Style>
+        [string]$FallbackContent
+    )
 
-        <Style x:Key="DarkTextBox" TargetType="TextBox">
-            <Setter Property="Background" Value="#2D2D2D"/>
-            <Setter Property="Foreground" Value="#E0E0E0"/>
-            <Setter Property="BorderBrush" Value="#3E3E3E"/>
-            <Setter Property="Padding" Value="5"/>
-            <Setter Property="CaretBrush" Value="#E0E0E0"/>
-        </Style>
+    # Try to load from Resources folder
+    $resourcePath = Join-Path $PSScriptRoot "..\Resources\$ResourceName"
+    if (Test-Path $resourcePath) {
+        try {
+            return Get-Content -Path $resourcePath -Raw -ErrorAction Stop
+        }
+        catch {
+            Write-Verbose "Failed to load XAML resource '$ResourceName': $_"
+        }
+    }
 
-        <Style x:Key="DarkButton" TargetType="Button">
-            <Setter Property="Background" Value="#0078D4"/>
-            <Setter Property="Foreground" Value="White"/>
-            <Setter Property="BorderThickness" Value="0"/>
-            <Setter Property="Padding" Value="12,6"/>
-            <Setter Property="Cursor" Value="Hand"/>
-            <Style.Triggers>
-                <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#1084D8"/>
-                </Trigger>
-                <Trigger Property="IsEnabled" Value="False">
-                    <Setter Property="Background" Value="#4A4A4A"/>
-                    <Setter Property="Foreground" Value="#808080"/>
-                </Trigger>
-            </Style.Triggers>
-        </Style>
+    # Fall back to embedded content if provided
+    if ($FallbackContent) {
+        return $FallbackContent
+    }
 
-        <Style x:Key="StopButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
-            <Setter Property="Background" Value="#D32F2F"/>
-            <Style.Triggers>
-                <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#E53935"/>
-                </Trigger>
-            </Style.Triggers>
-        </Style>
-
-        <Style x:Key="DarkCheckBox" TargetType="CheckBox">
-            <Setter Property="Foreground" Value="#E0E0E0"/>
-        </Style>
-
-        <Style x:Key="DarkListBox" TargetType="ListBox">
-            <Setter Property="Background" Value="#2D2D2D"/>
-            <Setter Property="Foreground" Value="#E0E0E0"/>
-            <Setter Property="BorderBrush" Value="#3E3E3E"/>
-        </Style>
-    </Window.Resources>
-
-    <!-- ==================== LAYOUT: Main Grid ==================== -->
-    <!-- Row 0: Header, Row 1: Profile/Settings, Row 2: Progress, Row 3: Action Buttons, Row 4: Log -->
-    <Grid Margin="10">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="120"/>
-        </Grid.RowDefinitions>
-
-        <!-- ==================== ROW 0: Header ==================== -->
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
-            <TextBlock Text="ROBOCURSE" FontSize="28" FontWeight="Bold" Foreground="#0078D4"/>
-            <TextBlock Text=" | Multi-Share Replication" FontSize="14" Foreground="#808080"
-                       VerticalAlignment="Bottom" Margin="0,0,0,4"/>
-        </StackPanel>
-
-        <!-- ==================== ROW 1: Profile and Settings Panel ==================== -->
-        <Grid Grid.Row="1" Margin="0,0,0,10">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="250"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-
-            <!-- ===== COLUMN 0: Profile List Sidebar ===== -->
-            <Border Grid.Column="0" Background="#252525" CornerRadius="4" Margin="0,0,10,0" Padding="10">
-                <DockPanel>
-                    <Label DockPanel.Dock="Top" Content="Sync Profiles" Style="{StaticResource DarkLabel}" FontWeight="Bold"/>
-                    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,10,0,0">
-                        <Button x:Name="btnAddProfile" Content="+ Add" Style="{StaticResource DarkButton}" Width="70" Margin="0,0,5,0"
-                                ToolTip="Add a new sync profile for a source/destination pair"/>
-                        <Button x:Name="btnRemoveProfile" Content="Remove" Style="{StaticResource DarkButton}" Width="70"
-                                ToolTip="Remove the selected sync profile"/>
-                    </StackPanel>
-                    <ListBox x:Name="lstProfiles" Style="{StaticResource DarkListBox}" Margin="0,5,0,0"
-                             ToolTip="List of configured sync profiles. Check to enable, uncheck to disable.">
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
-                                <CheckBox IsChecked="{Binding Enabled}" Content="{Binding Name}"
-                                          Style="{StaticResource DarkCheckBox}"/>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
-                </DockPanel>
-            </Border>
-
-            <!-- Selected Profile Settings -->
-            <Border Grid.Column="1" Background="#252525" CornerRadius="4" Padding="15">
-                <Grid x:Name="pnlProfileSettings">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="100"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="80"/>
-                    </Grid.ColumnDefinitions>
-
-                    <Label Grid.Row="0" Content="Name:" Style="{StaticResource DarkLabel}"/>
-                    <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtProfileName"
-                             Style="{StaticResource DarkTextBox}" Margin="0,0,0,8"
-                             ToolTip="Display name for this sync profile"/>
-
-                    <Label Grid.Row="1" Content="Source:" Style="{StaticResource DarkLabel}"/>
-                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="txtSource" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
-                             ToolTip="The network share or local path to copy FROM.&#x0a;Example: \\fileserver\users$ or D:\SourceData"/>
-                    <Button Grid.Row="1" Grid.Column="2" x:Name="btnBrowseSource" Content="Browse"
-                            Style="{StaticResource DarkButton}"/>
-
-                    <Label Grid.Row="2" Content="Destination:" Style="{StaticResource DarkLabel}"/>
-                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtDest" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
-                             ToolTip="Where files will be copied TO. Directory will be created if needed."/>
-                    <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
-                            Style="{StaticResource DarkButton}"/>
-
-                    <StackPanel Grid.Row="3" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,5,0,8">
-                        <CheckBox x:Name="chkUseVss" Content="Use VSS" Style="{StaticResource DarkCheckBox}" Margin="0,0,20,0"
-                                  ToolTip="Create a shadow copy snapshot before syncing.&#x0a;Allows copying locked files (like Outlook PST).&#x0a;Requires admin rights."/>
-                        <Label Content="Scan Mode:" Style="{StaticResource DarkLabel}"/>
-                        <ComboBox x:Name="cmbScanMode" Width="100" Margin="5,0,0,0"
-                                  ToolTip="Smart: Scans and splits based on size (recommended).&#x0a;Quick: Fixed depth split, faster startup.">
-                            <ComboBoxItem Content="Smart" IsSelected="True"/>
-                            <ComboBoxItem Content="Quick"/>
-                        </ComboBox>
-                    </StackPanel>
-
-                    <StackPanel Grid.Row="4" Grid.ColumnSpan="3" Orientation="Horizontal">
-                        <Label Content="Max Size:" Style="{StaticResource DarkLabel}"/>
-                        <TextBox x:Name="txtMaxSize" Width="50" Style="{StaticResource DarkTextBox}" Text="10"
-                                 ToolTip="Split directories larger than this (GB).&#x0a;Smaller = more parallel jobs.&#x0a;Recommended: 5-20 GB"/>
-                        <Label Content="GB" Style="{StaticResource DarkLabel}" Margin="0,0,15,0"/>
-
-                        <Label Content="Max Files:" Style="{StaticResource DarkLabel}"/>
-                        <TextBox x:Name="txtMaxFiles" Width="60" Style="{StaticResource DarkTextBox}" Text="50000"
-                                 ToolTip="Split directories with more files than this.&#x0a;Recommended: 20,000-100,000"/>
-
-                        <Label Content="Max Depth:" Style="{StaticResource DarkLabel}" Margin="15,0,0,0"/>
-                        <TextBox x:Name="txtMaxDepth" Width="40" Style="{StaticResource DarkTextBox}" Text="5"
-                                 ToolTip="How deep to split directories.&#x0a;Higher = more granular but slower scan.&#x0a;Recommended: 3-6"/>
-                    </StackPanel>
-                </Grid>
-            </Border>
-        </Grid>
-
-        <!-- Progress Area -->
-        <Grid Grid.Row="2">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
-
-            <!-- Control Bar -->
-            <Border Grid.Row="0" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
-                <StackPanel Orientation="Horizontal">
-                    <Label Content="Workers:" Style="{StaticResource DarkLabel}"
-                           ToolTip="Number of simultaneous robocopy processes.&#x0a;More = faster but uses more resources.&#x0a;Recommended: 2-8"/>
-                    <Slider x:Name="sldWorkers" Width="100" Minimum="1" Maximum="16" Value="4" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="txtWorkerCount" Text="4" Foreground="#E0E0E0" Width="25" Margin="5,0,20,0" VerticalAlignment="Center"/>
-
-                    <Button x:Name="btnRunAll" Content="▶ Run All" Style="{StaticResource DarkButton}" Width="100" Margin="0,0,10,0"
-                            ToolTip="Start syncing all enabled profiles in sequence"/>
-                    <Button x:Name="btnRunSelected" Content="▶ Run Selected" Style="{StaticResource DarkButton}" Width="120" Margin="0,0,10,0"
-                            ToolTip="Run only the currently selected profile"/>
-                    <Button x:Name="btnStop" Content="⏹ Stop" Style="{StaticResource StopButton}" Width="80" Margin="0,0,10,0" IsEnabled="False"
-                            ToolTip="Stop all running robocopy jobs"/>
-                    <Button x:Name="btnSchedule" Content="⚙ Schedule" Style="{StaticResource DarkButton}" Width="100"
-                            ToolTip="Configure automated scheduled runs"/>
-                </StackPanel>
-            </Border>
-
-            <!-- Chunk DataGrid -->
-            <DataGrid Grid.Row="1" x:Name="dgChunks" AutoGenerateColumns="False"
-                      Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
-                      GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#3E3E3E"
-                      RowHeaderWidth="0" IsReadOnly="True" SelectionMode="Single">
-                <DataGrid.Columns>
-                    <DataGridTextColumn Header="ID" Binding="{Binding ChunkId}" Width="50"/>
-                    <DataGridTextColumn Header="Path" Binding="{Binding SourcePath}" Width="400"/>
-                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
-                    <DataGridTemplateColumn Header="Progress" Width="150">
-                        <DataGridTemplateColumn.CellTemplate>
-                            <DataTemplate>
-                                <ProgressBar Value="{Binding Progress}" Maximum="100" Height="18"
-                                             Background="#3E3E3E" Foreground="#4CAF50"/>
-                            </DataTemplate>
-                        </DataGridTemplateColumn.CellTemplate>
-                    </DataGridTemplateColumn>
-                    <DataGridTextColumn Header="Speed" Binding="{Binding Speed}" Width="80"/>
-                </DataGrid.Columns>
-            </DataGrid>
-
-            <!-- Progress Summary -->
-            <Border Grid.Row="2" Background="#252525" CornerRadius="4" Padding="10" Margin="0,10,0,0">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="200"/>
-                    </Grid.ColumnDefinitions>
-
-                    <StackPanel Grid.Column="0">
-                        <TextBlock x:Name="txtProfileProgress" Text="Profile: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                        <ProgressBar x:Name="pbProfile" Height="20" Background="#3E3E3E" Foreground="#0078D4"/>
-                    </StackPanel>
-
-                    <StackPanel Grid.Column="1" Margin="20,0,0,0">
-                        <TextBlock x:Name="txtOverallProgress" Text="Overall: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                        <ProgressBar x:Name="pbOverall" Height="20" Background="#3E3E3E" Foreground="#4CAF50"/>
-                    </StackPanel>
-
-                    <StackPanel Grid.Column="2" Margin="20,0,0,0">
-                        <TextBlock x:Name="txtEta" Text="ETA: --:--:--" Foreground="#808080"/>
-                        <TextBlock x:Name="txtSpeed" Text="Speed: -- MB/s" Foreground="#808080"/>
-                        <TextBlock x:Name="txtChunks" Text="Chunks: 0/0" Foreground="#808080"/>
-                    </StackPanel>
-                </Grid>
-            </Border>
-        </Grid>
-
-        <!-- Status Bar -->
-        <TextBlock Grid.Row="3" x:Name="txtStatus" Text="Ready" Foreground="#808080" Margin="0,10,0,5"/>
-
-        <!-- Log Panel -->
-        <Border Grid.Row="4" Background="#1A1A1A" BorderBrush="#3E3E3E" BorderThickness="1" CornerRadius="4">
-            <ScrollViewer x:Name="svLog" VerticalScrollBarVisibility="Auto">
-                <TextBlock x:Name="txtLog" Foreground="#808080" FontFamily="Consolas" FontSize="11"
-                           Padding="10" TextWrapping="Wrap"/>
-            </ScrollViewer>
-        </Border>
-    </Grid>
-</Window>
-'@
+    throw "XAML resource '$ResourceName' not found and no fallback provided"
+}
 
 function Get-GuiSettingsPath {
     <#
@@ -6964,8 +6817,8 @@ function Initialize-RobocurseGui {
     .SYNOPSIS
         Initializes and displays the WPF GUI
     .DESCRIPTION
-        Loads XAML, wires up event handlers, initializes the UI state
-        Only works on Windows due to WPF dependency
+        Loads XAML from Resources folder, wires up event handlers, initializes the UI state.
+        Only works on Windows due to WPF dependency.
     .OUTPUTS
         Window object if successful, $null if not supported
     #>
@@ -6988,8 +6841,9 @@ function Initialize-RobocurseGui {
     }
 
     try {
-        # Parse XAML
-        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($script:MainWindowXaml))
+        # Load XAML from resource file
+        $xamlContent = Get-XamlResource -ResourceName 'MainWindow.xaml'
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xamlContent))
         $script:Window = [System.Windows.Markup.XamlReader]::Load($reader)
         $reader.Close()
     }
@@ -7849,50 +7703,9 @@ function Show-ScheduleDialog {
         actually created or removed based on the enabled state.
     #>
 
-    $xaml = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Configure Schedule"
-        Height="350" Width="450"
-        WindowStartupLocation="CenterScreen"
-        Background="#1E1E1E">
-    <Grid Margin="15">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
-
-        <CheckBox x:Name="chkEnabled" Content="Enable Scheduled Runs" Foreground="#E0E0E0" FontWeight="Bold"/>
-
-        <StackPanel Grid.Row="1" Margin="0,15,0,0">
-            <Label Content="Run Time (HH:MM):" Foreground="#E0E0E0"/>
-            <TextBox x:Name="txtTime" Background="#2D2D2D" Foreground="#E0E0E0" Padding="5" Text="02:00" Width="100" HorizontalAlignment="Left"/>
-        </StackPanel>
-
-        <StackPanel Grid.Row="2" Margin="0,15,0,0">
-            <Label Content="Frequency:" Foreground="#E0E0E0"/>
-            <ComboBox x:Name="cmbFrequency" Background="#2D2D2D" Foreground="#E0E0E0" Width="150" HorizontalAlignment="Left">
-                <ComboBoxItem Content="Daily" IsSelected="True"/>
-                <ComboBoxItem Content="Weekdays"/>
-                <ComboBoxItem Content="Hourly"/>
-            </ComboBox>
-        </StackPanel>
-
-        <TextBlock Grid.Row="3" x:Name="txtStatus" Foreground="#808080" Margin="0,15,0,0" TextWrapping="Wrap"/>
-
-        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button x:Name="btnOk" Content="Apply" Width="80" Margin="0,0,10,0" Background="#0078D4" Foreground="White" Padding="10,5"/>
-            <Button x:Name="btnCancel" Content="Cancel" Width="80" Background="#4A4A4A" Foreground="White" Padding="10,5"/>
-        </StackPanel>
-    </Grid>
-</Window>
-'@
-
     try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'ScheduleDialog.xaml'
         $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
         $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
         $reader.Close()

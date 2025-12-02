@@ -26,7 +26,11 @@ function Register-RobocurseTask {
     .EXAMPLE
         $result = Register-RobocurseTask -ConfigPath "C:\config.json" -Schedule Weekly -DaysOfWeek @('Monday', 'Friday') -RunAsSystem
         if (-not $result.Success) { Write-Error $result.ErrorMessage }
+    .EXAMPLE
+        Register-RobocurseTask -ConfigPath "C:\config.json" -WhatIf
+        # Shows what task would be created without actually registering it
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
         [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication",
@@ -124,8 +128,10 @@ function Register-RobocurseTask {
             Force = $true
         }
 
-        Register-ScheduledTask @taskParams | Out-Null
-        Write-RobocurseLog -Message "Scheduled task '$TaskName' registered successfully" -Level 'Info' -Component 'Scheduler'
+        if ($PSCmdlet.ShouldProcess($TaskName, "Register scheduled task (Schedule: $Schedule, Time: $Time)")) {
+            Register-ScheduledTask @taskParams | Out-Null
+            Write-RobocurseLog -Message "Scheduled task '$TaskName' registered successfully" -Level 'Info' -Component 'Scheduler'
+        }
         return New-OperationResult -Success $true -Data $TaskName
     }
     catch {

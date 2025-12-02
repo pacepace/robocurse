@@ -156,12 +156,19 @@ function Get-SmtpCredential {
                     if ($credential.CredentialBlobSize -gt 0) {
                         $passwordBytes = New-Object byte[] $credential.CredentialBlobSize
                         [System.Runtime.InteropServices.Marshal]::Copy($credential.CredentialBlob, $passwordBytes, 0, $credential.CredentialBlobSize)
-                        # SECURITY NOTE: The password exists briefly as a plaintext string before
+
+                        # SECURITY MITIGATION: The password exists briefly as a plaintext string before
                         # conversion to SecureString. This is unavoidable when reading from Windows
-                        # Credential Manager via P/Invoke. The plaintext string is eligible for GC
-                        # immediately after SecureString creation. See README Security Considerations.
-                        $password = [System.Text.Encoding]::Unicode.GetString($passwordBytes)
-                        $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
+                        # Credential Manager via P/Invoke. We explicitly zero the byte array after use
+                        # rather than waiting for GC. See README Security Considerations.
+                        try {
+                            $password = [System.Text.Encoding]::Unicode.GetString($passwordBytes)
+                            $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
+                        }
+                        finally {
+                            # Zero the byte array immediately - don't wait for GC
+                            [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+                        }
 
                         # AUDIT: Log credential retrieval from Windows Credential Manager
                         Write-RobocurseLog -Message "SMTP credential retrieved from Windows Credential Manager (target: $Target, user: $($credential.UserName))" `
@@ -256,6 +263,9 @@ function Save-SmtpCredential {
             }
         }
         finally {
+            # Zero the byte array immediately - don't wait for GC
+            [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+
             if ($credPtr -ne [IntPtr]::Zero) {
                 [System.Runtime.InteropServices.Marshal]::FreeHGlobal($credPtr)
             }

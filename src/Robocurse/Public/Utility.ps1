@@ -359,6 +359,223 @@ function Get-SanitizedExcludePatterns {
     return $safePatterns
 }
 
+function Test-SourcePathAccessible {
+    <#
+    .SYNOPSIS
+        Pre-flight check to validate source path exists and is accessible
+    .DESCRIPTION
+        Checks that the source path exists before starting replication.
+        This catches configuration errors early rather than failing during scan.
+        For UNC paths, also validates network connectivity.
+    .PARAMETER Path
+        The source path to validate
+    .OUTPUTS
+        OperationResult - Success=$true if accessible, Success=$false with details on failure
+    .EXAMPLE
+        $check = Test-SourcePathAccessible -Path "\\SERVER\Share"
+        if (-not $check.Success) { Write-Error $check.ErrorMessage }
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path
+    )
+
+    # Check if path exists
+    if (-not (Test-Path -Path $Path -PathType Container)) {
+        # Provide more specific error for UNC paths
+        if ($Path -match '^\\\\') {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Source path not accessible: '$Path'. Check network connectivity and share permissions."
+        }
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Source path does not exist: '$Path'"
+    }
+
+    # Try to enumerate at least one item to verify read access
+    try {
+        $null = Get-ChildItem -Path $Path -Force -ErrorAction Stop | Select-Object -First 1
+        return New-OperationResult -Success $true -Data $Path
+    }
+    catch {
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Source path exists but is not readable: '$Path'. Error: $($_.Exception.Message)" `
+            -ErrorRecord $_
+    }
+}
+
+function Test-DestinationDiskSpace {
+    <#
+    .SYNOPSIS
+        Pre-flight check for approximate available disk space on destination
+    .DESCRIPTION
+        Performs a general check that the destination drive has reasonable free space.
+        This is NOT a precise byte-for-byte comparison (source sizes change during copy,
+        compression varies, etc.) but catches obvious problems like a nearly-full drive.
+
+        For UNC paths, checks the drive where the share is mounted if accessible.
+    .PARAMETER Path
+        The destination path to check
+    .PARAMETER EstimatedSizeBytes
+        Optional: Estimated size of data to copy. If provided, warns if free space is less.
+        If not provided, just warns if drive is >90% full.
+    .OUTPUTS
+        OperationResult - Success=$true if space looks reasonable, Success=$false with warning
+    .EXAMPLE
+        $check = Test-DestinationDiskSpace -Path "D:\Backups"
+        if (-not $check.Success) { Write-Warning $check.ErrorMessage }
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path,
+
+        [int64]$EstimatedSizeBytes = 0
+    )
+
+    try {
+        # For UNC paths, we can't easily check disk space without mounting
+        # Just verify the path is writable
+        if ($Path -match '^\\\\') {
+            # Ensure parent path exists or can be created
+            if (-not (Test-Path -Path $Path)) {
+                $parentPath = Split-Path -Path $Path -Parent
+                if ($parentPath -and -not (Test-Path -Path $parentPath)) {
+                    return New-OperationResult -Success $false `
+                        -ErrorMessage "Destination path parent does not exist: '$parentPath'"
+                }
+            }
+            # Can't check disk space on UNC without more complex logic
+            return New-OperationResult -Success $true -Data "UNC path - disk space check skipped"
+        }
+
+        # Extract drive letter for local paths
+        $driveLetter = [System.IO.Path]::GetPathRoot($Path)
+        if (-not $driveLetter) {
+            # Relative path - resolve it
+            $resolvedPath = [System.IO.Path]::GetFullPath($Path)
+            $driveLetter = [System.IO.Path]::GetPathRoot($resolvedPath)
+        }
+
+        # Get drive info
+        $drive = Get-PSDrive -Name $driveLetter.TrimEnd(':\') -ErrorAction SilentlyContinue
+        if (-not $drive) {
+            # Try WMI/CIM for more reliable drive info
+            $driveLetterClean = $driveLetter.TrimEnd('\')
+            $diskInfo = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$driveLetterClean'" -ErrorAction SilentlyContinue
+            if ($diskInfo) {
+                $freeSpace = $diskInfo.FreeSpace
+                $totalSize = $diskInfo.Size
+            }
+            else {
+                # Can't get drive info - proceed with warning
+                return New-OperationResult -Success $true -Data "Could not determine disk space for $driveLetter"
+            }
+        }
+        else {
+            $freeSpace = $drive.Free
+            $totalSize = $drive.Used + $drive.Free
+        }
+
+        # Check if drive is >90% full
+        $percentUsed = if ($totalSize -gt 0) { (($totalSize - $freeSpace) / $totalSize) * 100 } else { 0 }
+
+        if ($percentUsed -gt 90) {
+            $freeGB = [math]::Round($freeSpace / 1GB, 2)
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Destination drive $driveLetter is $([math]::Round($percentUsed))% full (only $freeGB GB free). Consider freeing space before replication."
+        }
+
+        # If we have an estimated size, check if it fits (with 10% buffer)
+        if ($EstimatedSizeBytes -gt 0) {
+            $requiredWithBuffer = $EstimatedSizeBytes * 1.1
+            if ($freeSpace -lt $requiredWithBuffer) {
+                $freeGB = [math]::Round($freeSpace / 1GB, 2)
+                $neededGB = [math]::Round($requiredWithBuffer / 1GB, 2)
+                return New-OperationResult -Success $false `
+                    -ErrorMessage "Destination drive $driveLetter may not have enough space. Free: $freeGB GB, Estimated needed: $neededGB GB"
+            }
+        }
+
+        $freeGB = [math]::Round($freeSpace / 1GB, 2)
+        return New-OperationResult -Success $true -Data "Destination drive $driveLetter has $freeGB GB free"
+    }
+    catch {
+        # Don't fail the whole operation on disk check errors - just warn
+        return New-OperationResult -Success $true `
+            -Data "Disk space check failed (proceeding anyway): $($_.Exception.Message)"
+    }
+}
+
+function Test-RobocopyOptionsValid {
+    <#
+    .SYNOPSIS
+        Validates robocopy options for dangerous or conflicting combinations
+    .DESCRIPTION
+        Checks for robocopy switch combinations that could cause data loss or
+        unexpected behavior. Returns warnings for:
+        - /PURGE without /MIR (deletes destination files but doesn't sync)
+        - /MOVE (deletes source files after copy)
+        - /XX combined with /PURGE or /MIR (conflicting behaviors)
+    .PARAMETER Options
+        Hashtable of robocopy options from profile configuration
+    .OUTPUTS
+        OperationResult - Success=$true if options are safe, Success=$false with warnings
+    .EXAMPLE
+        $check = Test-RobocopyOptionsValid -Options $profile.RobocopyOptions
+        if (-not $check.Success) { Write-Warning $check.ErrorMessage }
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [hashtable]$Options
+    )
+
+    if ($null -eq $Options) {
+        return New-OperationResult -Success $true -Data "No custom options specified"
+    }
+
+    $switches = @()
+    if ($Options.Switches) {
+        $switches = @($Options.Switches) | ForEach-Object { $_.ToUpper() }
+    }
+
+    $warnings = @()
+
+    # Check for dangerous switch combinations
+    $hasPurge = $switches -contains '/PURGE'
+    $hasMir = $switches -contains '/MIR'
+    $hasMove = $switches | Where-Object { $_ -match '^/MOV[E]?$' }
+    $hasXX = $switches -contains '/XX'
+
+    # /PURGE without /MIR is suspicious - deletes extras without ensuring full sync
+    if ($hasPurge -and -not $hasMir) {
+        $warnings += "/PURGE specified without /MIR - this will delete destination files without ensuring source is fully copied. Consider using /MIR instead."
+    }
+
+    # /MOVE is dangerous - deletes source files
+    if ($hasMove) {
+        $warnings += "/MOV or /MOVE specified - this will DELETE source files after copying. Ensure this is intentional."
+    }
+
+    # /XX with /MIR or /PURGE is contradictory
+    if ($hasXX -and ($hasMir -or $hasPurge)) {
+        $warnings += "/XX specified with /MIR or /PURGE - these options conflict. /XX excludes extra files but /MIR and /PURGE delete them."
+    }
+
+    # Check for switches that override Robocurse-managed options
+    $managedSwitches = $switches | Where-Object { $_ -match '^/(MT|LOG|TEE|BYTES|NP):?' }
+    if ($managedSwitches) {
+        $warnings += "Switches that may conflict with Robocurse-managed options detected: $($managedSwitches -join ', '). These are normally set automatically."
+    }
+
+    if ($warnings.Count -gt 0) {
+        return New-OperationResult -Success $false -ErrorMessage ($warnings -join "`n")
+    }
+
+    return New-OperationResult -Success $true -Data "Robocopy options validated"
+}
+
 function Test-SafeConfigPath {
     <#
     .SYNOPSIS

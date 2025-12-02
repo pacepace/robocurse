@@ -515,6 +515,52 @@ InModuleScope 'Robocurse' {
             }
         }
 
+        Context "WhatIf Support" -Skip:(-not $IsWindows) {
+            BeforeEach {
+                $script:tempConfigPath = "$TestDrive/test-config.json"
+                '{}' | Set-Content $script:tempConfigPath
+            }
+
+            It "Register-RobocurseTask should support -WhatIf" {
+                Mock New-ScheduledTaskAction { [PSCustomObject]@{ Execute = "powershell.exe" } }
+                Mock New-ScheduledTaskTrigger { [PSCustomObject]@{ Type = "Daily" } }
+                Mock New-ScheduledTaskPrincipal { [PSCustomObject]@{ UserId = "TestUser" } }
+                Mock New-ScheduledTaskSettingsSet { [PSCustomObject]@{ } }
+                Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
+                Mock Write-RobocurseLog { }
+
+                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -WhatIf
+
+                # Task should NOT be registered when using -WhatIf
+                Should -Invoke Register-ScheduledTask -Times 0
+                $result.Success | Should -Be $true
+            }
+
+            It "Unregister-RobocurseTask should support -WhatIf" {
+                Mock Get-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
+                Mock Unregister-ScheduledTask { }
+                Mock Write-RobocurseLog { }
+
+                $result = Unregister-RobocurseTask -TaskName "Test-Task" -WhatIf
+
+                # Task should NOT be unregistered when using -WhatIf
+                Should -Invoke Unregister-ScheduledTask -Times 0
+                $result.Success | Should -Be $true
+            }
+
+            It "Disable-RobocurseTask should support -WhatIf" {
+                Mock Get-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
+                Mock Disable-ScheduledTask { }
+                Mock Write-RobocurseLog { }
+
+                $result = Disable-RobocurseTask -TaskName "Test-Task" -WhatIf
+
+                # Task should NOT be disabled when using -WhatIf
+                Should -Invoke Disable-ScheduledTask -Times 0
+                $result.Success | Should -Be $true
+            }
+        }
+
         Context "Platform Detection" {
             It "Should handle non-Windows platform gracefully for Register" {
                 # On non-Windows platforms, functions should return false without trying to execute

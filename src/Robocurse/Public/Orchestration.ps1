@@ -552,6 +552,35 @@ function Start-ProfileReplication {
     $state.ProfileStartTime = [datetime]::Now
     $state.ProfileStartFiles = $state.CompletedChunkFiles  # Snapshot for per-profile file counting
 
+    # Pre-flight validation: Source path accessibility
+    $sourceCheck = Test-SourcePathAccessible -Path $Profile.Source
+    if (-not $sourceCheck.Success) {
+        $errorMsg = "Profile '$($Profile.Name)' failed pre-flight check: $($sourceCheck.ErrorMessage)"
+        Write-RobocurseLog -Message $errorMsg -Level 'Error' -Component 'Orchestrator'
+        $state.EnqueueError($errorMsg)
+
+        # Skip to next profile instead of failing the whole run
+        Complete-CurrentProfile
+        return
+    }
+
+    # Pre-flight validation: Destination disk space (warning only)
+    $diskCheck = Test-DestinationDiskSpace -Path $Profile.Destination
+    if (-not $diskCheck.Success) {
+        Write-RobocurseLog -Message "Profile '$($Profile.Name)' disk space warning: $($diskCheck.ErrorMessage)" `
+            -Level 'Warning' -Component 'Orchestrator'
+        # Continue anyway - this is a warning, not a blocker
+    }
+
+    # Pre-flight validation: Robocopy options (warnings for dangerous combinations)
+    $robocopyOptions = if ($Profile.RobocopyOptions) { $Profile.RobocopyOptions } else { @{} }
+    $optionsCheck = Test-RobocopyOptionsValid -Options $robocopyOptions
+    if (-not $optionsCheck.Success) {
+        Write-RobocurseLog -Message "Profile '$($Profile.Name)' robocopy options warning: $($optionsCheck.ErrorMessage)" `
+            -Level 'Warning' -Component 'Orchestrator'
+        # Continue anyway - this is a warning, not a blocker
+    }
+
     # Extract robocopy options from profile
     $state.CurrentRobocopyOptions = @{}
     if ($Profile.RobocopyOptions) {
