@@ -1202,7 +1202,7 @@ function Write-GuiLog {
     # Using Invoke (synchronous) could cause deadlocks if called from background thread
     # while UI thread is busy
     $logText = $script:GuiLogBuffer -join "`n"
-    $script:Window.Dispatcher.BeginInvoke([Action]{
+    [void]$script:Window.Dispatcher.BeginInvoke([Action]{
         $script:Controls.txtLog.Text = $logText
         $script:Controls.svLog.ScrollToEnd()
     })

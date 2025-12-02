@@ -32,9 +32,20 @@ $ErrorActionPreference = 'Stop'
 
 $scriptRoot = Split-Path -Parent $PSScriptRoot
 $srcRoot = Join-Path $scriptRoot "src\Robocurse"
+$resourcesRoot = Join-Path $srcRoot "Resources"
 
 Write-Host "Building Robocurse monolith..." -ForegroundColor Cyan
 Write-Host "Source: $srcRoot" -ForegroundColor Gray
+
+# Load XAML resources for embedding
+$xamlResources = @{}
+$xamlFiles = Get-ChildItem -Path $resourcesRoot -Filter "*.xaml" -ErrorAction SilentlyContinue
+foreach ($xamlFile in $xamlFiles) {
+    $xamlContent = Get-Content -Path $xamlFile.FullName -Raw
+    # Escape single quotes for PowerShell here-string embedding
+    $xamlResources[$xamlFile.Name] = $xamlContent
+    Write-Host "  Loaded XAML: $($xamlFile.Name)" -ForegroundColor Gray
+}
 
 # Define module load order (dependency order)
 # Checkpoint must be loaded before Orchestration (Orchestration uses checkpoint functions)
@@ -146,12 +157,16 @@ $psmPath = Join-Path $srcRoot "Robocurse.psm1"
 if (Test-Path $psmPath) {
     $psmContent = Get-Content $psmPath -Raw
 
-    # Extract the CONSTANTS region
-    if ($psmContent -match '#region ==================== CONSTANTS ====================(.+?)#endregion') {
+    # Extract the CONSTANTS region (use [\s\S] to match across newlines)
+    if ($psmContent -match '(?s)#region ==================== CONSTANTS ====================(.*?)#endregion') {
         [void]$output.AppendLine("#region ==================== CONSTANTS ====================")
         [void]$output.AppendLine($matches[1].Trim())
         [void]$output.AppendLine("#endregion")
         [void]$output.AppendLine()
+        Write-Host "  Added CONSTANTS region" -ForegroundColor Gray
+    }
+    else {
+        Write-Warning "CONSTANTS region not found in Robocurse.psm1"
     }
 }
 
@@ -175,6 +190,25 @@ foreach ($modulePath in $moduleOrder) {
     if ($MinifyComments) {
         # Remove <# ... #> blocks
         $content = $content -replace '<#[\s\S]*?#>', ''
+    }
+
+    # For GUI.ps1, embed XAML resources as fallback content
+    if ($modulePath -eq 'Public\GUI.ps1') {
+        Write-Host "    Embedding XAML resources..." -ForegroundColor DarkGray
+        foreach ($xamlName in $xamlResources.Keys) {
+            # Create escaped XAML content for embedding in a here-string
+            $escapedXaml = $xamlResources[$xamlName] -replace "'", "''"
+
+            # Pattern to find: Get-XamlResource -ResourceName 'FileName.xaml'
+            # Replace with: Get-XamlResource -ResourceName 'FileName.xaml' -FallbackContent @'...'@
+            $pattern = "Get-XamlResource -ResourceName '$xamlName'"
+            $replacement = "Get-XamlResource -ResourceName '$xamlName' -FallbackContent @'`n$($xamlResources[$xamlName])`n'@"
+
+            if ($content -match [regex]::Escape($pattern)) {
+                $content = $content -replace [regex]::Escape($pattern), $replacement
+                Write-Host "      Embedded: $xamlName" -ForegroundColor DarkGray
+            }
+        }
     }
 
     # Add region wrapper
