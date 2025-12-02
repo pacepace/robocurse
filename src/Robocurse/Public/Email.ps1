@@ -37,6 +37,8 @@ function Initialize-CredentialManager {
         Adds the necessary .NET types for interacting with Windows Credential Manager
         via P/Invoke to advapi32.dll. Only works on Windows platform.
     #>
+    [CmdletBinding()]
+    param()
 
     if ($script:CredentialManagerTypeAdded) {
         return
@@ -117,6 +119,7 @@ function Get-SmtpCredential {
         $cred = Get-SmtpCredential
         $cred = Get-SmtpCredential -Target "CustomSMTP"
     #>
+    [CmdletBinding()]
     param(
         [string]$Target = "Robocurse-SMTP"
     )
@@ -226,6 +229,7 @@ function Save-SmtpCredential {
         $result = Save-SmtpCredential -Credential $cred
         if ($result.Success) { "Credential saved" }
     #>
+    [CmdletBinding()]
     param(
         [string]$Target = "Robocurse-SMTP",
 
@@ -362,6 +366,7 @@ function Test-SmtpCredential {
             # Credential exists
         }
     #>
+    [CmdletBinding()]
     param(
         [string]$Target = "Robocurse-SMTP"
     )
@@ -382,6 +387,7 @@ function Format-FileSize {
         Format-FileSize -Bytes 1073741824
         # Returns "1.00 GB"
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [int64]$Bytes
@@ -420,6 +426,7 @@ function New-CompletionEmailBody {
     .EXAMPLE
         $html = New-CompletionEmailBody -Results $results -Status 'Success'
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Results,
@@ -579,6 +586,7 @@ function Send-CompletionEmail {
         $result = Send-CompletionEmail -Config $config.Email -Results $results -Status 'Success'
         if (-not $result.Success) { Write-Warning $result.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNull()]
@@ -676,6 +684,7 @@ function Test-EmailConfiguration {
         $result = Test-EmailConfiguration -Config $config.Email
         if ($result.Success) { Write-Host "Email test passed" }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Config

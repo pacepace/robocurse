@@ -29,6 +29,7 @@ function Get-BandwidthThrottleIPG {
         $ipg = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 4
         # Returns approximately 164 ms
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [int]$BandwidthLimitMbps,
@@ -106,6 +107,7 @@ function New-RobocopyArguments {
         $args = New-RobocopyArguments -SourcePath "C:\Source" -DestinationPath "D:\Dest" -LogPath "C:\log.txt" -DryRun
         # Returns args with /L flag for preview mode
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -265,6 +267,7 @@ function Start-RobocopyJob {
         Start-RobocopyJob -Chunk $chunk -LogPath $logPath -DryRun
         # Preview mode - shows what would be copied
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNull()]
@@ -349,6 +352,7 @@ function Get-RobocopyExitMeaning {
         Bit 3 (8)  = Some files could NOT be copied (copy errors)
         Bit 4 (16) = Fatal error (no files copied, serious error)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [int]$ExitCode,
@@ -419,6 +423,7 @@ function ConvertFrom-RobocopyLog {
     .NOTES
         Handles file locking by using FileShare.ReadWrite when robocopy has the file open
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$LogPath,
@@ -450,18 +455,23 @@ function ConvertFrom-RobocopyLog {
     }
 
     # Read log file with ReadWrite sharing to handle file locking
+    # Use try-finally to ensure proper disposal even if ReadToEnd() throws
+    $fs = $null
+    $sr = $null
     try {
         $fs = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         $sr = New-Object System.IO.StreamReader($fs)
         $content = $sr.ReadToEnd()
-        $sr.Close()
-        $fs.Close()
     }
     catch {
         # If we can't read the file, log the warning and return zeros
         $result.ParseWarning = "Failed to read log file: $($_.Exception.Message)"
         Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level 'Warning' -Component 'Robocopy'
         return $result
+    }
+    finally {
+        if ($sr) { $sr.Dispose() }
+        if ($fs) { $fs.Dispose() }
     }
 
     # Parse summary statistics using locale-independent patterns
@@ -614,6 +624,7 @@ function Get-RobocopyProgress {
     .OUTPUTS
         PSCustomObject with CurrentFile, BytesCopied, FilesCopied, etc.
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Job
@@ -634,6 +645,7 @@ function Wait-RobocopyJob {
     .OUTPUTS
         PSCustomObject with ExitCode, ExitMeaning, Duration, Stats
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Job,

@@ -114,7 +114,9 @@ Describe "Robocopy Wrapper" {
             $result.MismatchesFound | Should -Be $false
             $result.CopyErrors | Should -Be $false
             $result.FatalError | Should -Be $true
-            $result.ShouldRetry | Should -Be $true
+            # Pure fatal errors (16) without copy errors should NOT retry - they're typically permanent
+            # (e.g., path not found, access denied, invalid parameters)
+            $result.ShouldRetry | Should -Be $false
         }
 
         It "Should handle combined exit codes (9 = files copied + copy errors)" {

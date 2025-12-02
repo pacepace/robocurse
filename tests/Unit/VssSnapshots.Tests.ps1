@@ -251,9 +251,10 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Remove-VssSnapshot { New-OperationResult -Success $true -Data $ShadowId }
 
+                # Use -ErrorAction SilentlyContinue to suppress Write-Error output from Write-RobocurseLog
                 $result = Invoke-WithVssSnapshot -SourcePath "C:\Test" -ScriptBlock {
                     throw "Simulated error during processing"
-                }
+                } -ErrorAction SilentlyContinue
 
                 $result.Success | Should -Be $false
                 $result.ErrorMessage | Should -Match "Simulated error during processing"

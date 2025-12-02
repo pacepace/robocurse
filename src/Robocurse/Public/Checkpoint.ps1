@@ -10,6 +10,9 @@ function Get-CheckpointPath {
     .OUTPUTS
         Path to checkpoint file
     #>
+    [CmdletBinding()]
+    param()
+
     $logDir = if ($script:CurrentOperationalLogPath) {
         Split-Path $script:CurrentOperationalLogPath -Parent
     } else {
@@ -35,6 +38,7 @@ function Save-ReplicationCheckpoint {
     .OUTPUTS
         OperationResult indicating success/failure
     #>
+    [CmdletBinding()]
     param(
         [switch]$Force
     )
@@ -104,6 +108,8 @@ function Get-ReplicationCheckpoint {
     .OUTPUTS
         Checkpoint object or $null if no checkpoint exists
     #>
+    [CmdletBinding()]
+    param()
 
     $checkpointPath = Get-CheckpointPath
 
@@ -170,6 +176,7 @@ function Test-ChunkAlreadyCompleted {
     .OUTPUTS
         $true if chunk should be skipped, $false otherwise
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Chunk,

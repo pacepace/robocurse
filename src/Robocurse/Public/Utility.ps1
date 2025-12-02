@@ -11,6 +11,8 @@ function Test-IsWindowsPlatform {
     .EXAMPLE
         if (Test-IsWindowsPlatform) { "Running on Windows" }
     #>
+    [CmdletBinding()]
+    param()
 
     # In PowerShell 5.1, $IsWindows doesn't exist (it's always Windows)
     # In PowerShell 7+, $IsWindows is defined
@@ -40,6 +42,7 @@ function Set-RobocopyPath {
     .EXAMPLE
         Set-RobocopyPath -Path "D:\Tools\robocopy.exe"
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -67,6 +70,9 @@ function Clear-RobocopyPath {
     .SYNOPSIS
         Clears the robocopy path override, reverting to automatic detection
     #>
+    [CmdletBinding()]
+    param()
+
     $script:RobocopyPathOverride = $null
     $script:RobocopyPath = $null
     Write-RobocurseLog -Message "Robocopy path override cleared, reverting to auto-detection" -Level 'Info' -Component 'Utility'
@@ -89,6 +95,8 @@ function Test-RobocopyAvailable {
         $result = Test-RobocopyAvailable
         if (-not $result.Success) { throw "Robocopy not found: $($result.ErrorMessage)" }
     #>
+    [CmdletBinding()]
+    param()
 
     # Return cached result if already validated
     if ($script:RobocopyPath) {
@@ -152,6 +160,7 @@ function New-OperationResult {
     .EXAMPLE
         return New-OperationResult -Success $false -ErrorMessage "File not found" -ErrorRecord $_
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [bool]$Success,
@@ -191,6 +200,8 @@ function Test-IsBeingDotSourced {
     .OUTPUTS
         Boolean
     #>
+    [CmdletBinding()]
+    param()
 
     # Method 1: Check script-level invocation name captured at load time
     # When dot-sourced, InvocationName is typically "." or empty
@@ -253,6 +264,7 @@ function Test-SafeRobocopyArgument {
         Test-SafeRobocopyArgument -Value "C:\Users\John"  # Returns $true
         Test-SafeRobocopyArgument -Value "path; del *"   # Returns $false
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
@@ -305,6 +317,7 @@ function Get-SanitizedPath {
     .EXAMPLE
         $safePath = Get-SanitizedPath -Path $userInput -ParameterName "Source"
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path,
@@ -335,6 +348,7 @@ function Get-SanitizedExcludePatterns {
     .EXAMPLE
         $safePatterns = Get-SanitizedExcludePatterns -Patterns $excludeFiles -Type "Files"
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
@@ -374,6 +388,7 @@ function Get-SanitizedChunkArgs {
     .EXAMPLE
         $safeArgs = Get-SanitizedChunkArgs -ChunkArgs @("/LEV:1", "/S")
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
@@ -435,6 +450,7 @@ function Test-SourcePathAccessible {
         $check = Test-SourcePathAccessible -Path "\\SERVER\Share"
         if (-not $check.Success) { Write-Error $check.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -485,6 +501,7 @@ function Test-DestinationDiskSpace {
         $check = Test-DestinationDiskSpace -Path "D:\Backups"
         if (-not $check.Success) { Write-Warning $check.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -585,6 +602,7 @@ function Test-RobocopyOptionsValid {
         $check = Test-RobocopyOptionsValid -Options $profile.RobocopyOptions
         if (-not $check.Success) { Write-Warning $check.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowNull()]
@@ -654,6 +672,7 @@ function Test-SafeConfigPath {
         Test-SafeConfigPath -Path ".\config.json"  # Returns $true
         Test-SafeConfigPath -Path "..\..\etc\passwd"  # Returns $false
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]

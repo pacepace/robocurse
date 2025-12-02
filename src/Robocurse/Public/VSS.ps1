@@ -19,6 +19,7 @@ function Invoke-WithVssTrackingMutex {
     .OUTPUTS
         Result of the scriptblock, or $null if mutex acquisition times out
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [scriptblock]$ScriptBlock,
@@ -68,6 +69,8 @@ function Test-VssPrivileges {
             Write-Warning "VSS not available: $($check.ErrorMessage)"
         }
     #>
+    [CmdletBinding()]
+    param()
 
     # Skip if not Windows
     if (-not (Test-IsWindowsPlatform)) {
@@ -185,6 +188,7 @@ function Add-VssToTracking {
     .PARAMETER SnapshotInfo
         Snapshot info object with ShadowId
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$SnapshotInfo
@@ -227,6 +231,7 @@ function Remove-VssFromTracking {
     .PARAMETER ShadowId
         Shadow ID to remove
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$ShadowId
@@ -279,6 +284,7 @@ function Get-VolumeFromPath {
         Get-VolumeFromPath -Path "\\server\share\folder"
         Returns: $null
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -326,6 +332,7 @@ function New-VssSnapshot {
         $result = New-VssSnapshot -SourcePath "C:\Data" -RetryCount 5 -RetryDelaySeconds 10
         # More aggressive retry for busy systems
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -417,6 +424,7 @@ function New-VssSnapshotInternal {
     .DESCRIPTION
         Called by New-VssSnapshot. Separated for retry logic.
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$SourcePath
@@ -567,6 +575,7 @@ function Get-VssPath {
                     -SourceVolume "C:"
         Returns: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$OriginalPath,
@@ -635,6 +644,7 @@ function Test-VssSupported {
         Test-VssSupported -Path "\\server\share"
         Returns: $false (UNC path)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -689,6 +699,7 @@ function Invoke-WithVssSnapshot {
         }
         if (-not $result.Success) { Write-Error $result.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$SourcePath,

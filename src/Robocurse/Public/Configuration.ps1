@@ -11,6 +11,8 @@ function New-DefaultConfig {
         $config = New-DefaultConfig
         Creates a new default configuration object
     #>
+    [CmdletBinding()]
+    param()
 
     $config = [PSCustomObject]@{
         Version = "1.0"
@@ -57,6 +59,7 @@ function ConvertTo-RobocopyOptionsInternal {
     .SYNOPSIS
         Helper to convert raw robocopy config to internal options format
     #>
+    [CmdletBinding()]
     param([PSCustomObject]$RawRobocopy)
 
     $options = @{
@@ -93,6 +96,7 @@ function ConvertTo-ChunkSettingsInternal {
     .SYNOPSIS
         Helper to apply chunking settings from raw config to a profile
     #>
+    [CmdletBinding()]
     param(
         [PSCustomObject]$Profile,
         [PSCustomObject]$RawChunking
@@ -124,6 +128,7 @@ function Get-DestinationPathFromRaw {
     .SYNOPSIS
         Helper to extract destination path from raw config (handles multiple formats)
     #>
+    [CmdletBinding()]
     param([object]$RawDestination)
 
     if ($RawDestination -and $RawDestination.path) {
@@ -144,6 +149,7 @@ function ConvertFrom-GlobalSettings {
     .PARAMETER Config
         Config object to update
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$RawGlobal,
@@ -200,6 +206,7 @@ function ConvertFrom-ProfileSources {
     .OUTPUTS
         Array of expanded sync profile objects
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$ProfileName,
@@ -258,6 +265,7 @@ function ConvertFrom-ConfigFileFormat {
     .OUTPUTS
         PSCustomObject in internal format
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$RawConfig
@@ -379,6 +387,7 @@ function Get-RobocurseConfig {
         $config = Get-RobocurseConfig -Path "C:\Configs\custom.json"
         Loads configuration from custom path
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
         [string]$Path = ".\Robocurse.config.json"
@@ -445,6 +454,7 @@ function Save-RobocurseConfig {
         $result = Save-RobocurseConfig -Config $config -Path "C:\Configs\custom.json"
         if (-not $result.Success) { Write-Error $result.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [PSCustomObject]$Config,
@@ -499,6 +509,7 @@ function Test-RobocurseConfig {
             $result.Errors | ForEach-Object { Write-Warning $_ }
         }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [PSCustomObject]$Config
@@ -641,6 +652,7 @@ function Test-PathFormat {
     .OUTPUTS
         Boolean indicating if path format is valid
     #>
+    [CmdletBinding()]
     param(
         [string]$Path
     )

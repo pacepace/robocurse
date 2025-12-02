@@ -15,6 +15,7 @@ function Invoke-RobocopyList {
     .OUTPUTS
         Array of output lines from robocopy
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Source
@@ -34,6 +35,7 @@ function ConvertFrom-RobocopyListOutput {
     .OUTPUTS
         PSCustomObject with TotalSize, FileCount, DirCount, Files (array of file info)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
@@ -95,6 +97,7 @@ function Get-DirectoryProfile {
     .OUTPUTS
         PSCustomObject with: Path, TotalSize, FileCount, DirCount, AvgFileSize, LastScanned
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path,
@@ -170,6 +173,7 @@ function Get-DirectoryChildren {
     .OUTPUTS
         Array of child directory paths
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -198,6 +202,7 @@ function Get-NormalizedCacheKey {
     .OUTPUTS
         Normalized path string suitable for cache key
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -218,6 +223,7 @@ function Get-CachedProfile {
     .OUTPUTS
         Cached profile or $null
     #>
+    [CmdletBinding()]
     param(
         [string]$Path,
         [int]$MaxAgeHours = 24
@@ -251,6 +257,7 @@ function Set-CachedProfile {
     .PARAMETER Profile
         Profile object to cache
     #>
+    [CmdletBinding()]
     param(
         [PSCustomObject]$Profile
     )
@@ -293,6 +300,8 @@ function Clear-ProfileCache {
     .EXAMPLE
         Clear-ProfileCache
     #>
+    [CmdletBinding()]
+    param()
 
     $count = $script:ProfileCache.Count
     $script:ProfileCache.Clear()

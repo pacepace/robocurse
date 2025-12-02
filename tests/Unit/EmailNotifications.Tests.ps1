@@ -306,7 +306,8 @@ InModuleScope 'Robocurse' {
                 Mock Get-SmtpCredential { $mockCred }
                 Mock Send-MailMessage { throw "SMTP connection failed" }
 
-                $result = Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Success'
+                # Use -ErrorAction SilentlyContinue to suppress Write-Error output from Write-RobocurseLog
+                $result = Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Success' -ErrorAction SilentlyContinue
 
                 $result.Success | Should -Be $false
                 $result.ErrorMessage | Should -Match "SMTP connection failed"
@@ -380,7 +381,8 @@ InModuleScope 'Robocurse' {
                 Mock Get-SmtpCredential { $mockCred }
                 Mock Send-MailMessage { throw "Connection refused" }
 
-                $result = Test-EmailConfiguration -Config $script:testConfig
+                # Use -ErrorAction SilentlyContinue to suppress Write-Error output from Write-RobocurseLog
+                $result = Test-EmailConfiguration -Config $script:testConfig -ErrorAction SilentlyContinue
 
                 $result.Success | Should -Be $false
                 $result.ErrorMessage | Should -Match "Connection refused"

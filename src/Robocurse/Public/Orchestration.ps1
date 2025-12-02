@@ -17,6 +17,8 @@ function Initialize-OrchestrationStateType {
     .OUTPUTS
         $true if type is available, $false on compilation failure
     #>
+    [CmdletBinding()]
+    param()
 
     # Fast path: already initialized this session
     if ($script:OrchestrationTypeInitialized -and $script:OrchestrationState) {
@@ -380,6 +382,8 @@ function Initialize-OrchestrationState {
 
         If this is the first call, lazy-loads the C# OrchestrationState type.
     #>
+    [CmdletBinding()]
+    param()
 
     # Ensure the C# type is compiled and instance exists (lazy load)
     if (-not (Initialize-OrchestrationStateType)) {
@@ -436,6 +440,7 @@ function Start-ReplicationRun {
     .PARAMETER DryRun
         Preview mode - runs robocopy with /L flag to show what would be copied
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNull()]
@@ -546,6 +551,7 @@ function Start-ProfileReplication {
     .PARAMETER MaxConcurrentJobs
         Maximum parallel processes
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Profile,
@@ -727,6 +733,7 @@ function Start-ChunkJob {
     .OUTPUTS
         Job object from Start-RobocopyJob
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Chunk
@@ -787,6 +794,7 @@ function Invoke-ReplicationTick {
     .PARAMETER MaxConcurrentJobs
         Maximum concurrent jobs
     #>
+    [CmdletBinding()]
     param(
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs
     )
@@ -935,6 +943,7 @@ function Complete-RobocopyJob {
     .OUTPUTS
         Result object with exit code, stats, etc.
     #>
+    [CmdletBinding()]
     param(
         [PSCustomObject]$Job
     )
@@ -1002,6 +1011,7 @@ function Get-RetryBackoffDelay {
         Get-RetryBackoffDelay -RetryCount 2  # Returns 10 (5 * 2^1)
         Get-RetryBackoffDelay -RetryCount 3  # Returns 20 (5 * 2^2)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateRange(1, 100)]
@@ -1034,6 +1044,7 @@ function Invoke-FailedChunkHandler {
     .PARAMETER Result
         Result from Complete-RobocopyJob
     #>
+    [CmdletBinding()]
     param(
         [PSCustomObject]$Job,
         [PSCustomObject]$Result
@@ -1087,6 +1098,9 @@ function Complete-CurrentProfile {
         stores profile results for email reporting, and advances to next profile.
         Also clears completed chunks to prevent memory growth during long runs.
     #>
+    [CmdletBinding()]
+    param()
+
     $state = $script:OrchestrationState
 
     if ($null -eq $state.CurrentProfile) {
@@ -1197,6 +1211,9 @@ function Stop-AllJobs {
     .SYNOPSIS
         Stops all running robocopy processes
     #>
+    [CmdletBinding()]
+    param()
+
     $state = $script:OrchestrationState
 
     Write-RobocurseLog -Message "Stopping all jobs ($($state.ActiveJobs.Count) active)" `
@@ -1240,6 +1257,9 @@ function Request-Stop {
     .SYNOPSIS
         Requests graceful stop (finish current jobs, don't start new)
     #>
+    [CmdletBinding()]
+    param()
+
     $script:OrchestrationState.StopRequested = $true
 
     Write-RobocurseLog -Message "Stop requested" `
@@ -1251,6 +1271,9 @@ function Request-Pause {
     .SYNOPSIS
         Pauses job queue (running jobs continue, no new starts)
     #>
+    [CmdletBinding()]
+    param()
+
     $script:OrchestrationState.PauseRequested = $true
 
     Write-RobocurseLog -Message "Pause requested" `
@@ -1262,6 +1285,9 @@ function Request-Resume {
     .SYNOPSIS
         Resumes paused job queue
     #>
+    [CmdletBinding()]
+    param()
+
     $script:OrchestrationState.PauseRequested = $false
 
     Write-RobocurseLog -Message "Resume requested" `
@@ -1425,7 +1451,7 @@ function Remove-HealthCheckStatus {
     .EXAMPLE
         Remove-HealthCheckStatus
     #>
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess)]
     param()
 
     if (Test-Path $script:HealthCheckStatusFile) {

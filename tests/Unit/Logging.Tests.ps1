@@ -73,8 +73,10 @@ InModuleScope 'Robocurse' {
             }
 
             It "Should output errors to console when no session" {
-                $output = Write-RobocurseLog -Message "Test error" -Level "Error" 2>&1
-                $output | Should -Match "Test error"
+                # Use -ErrorVariable to capture the error without triggering test failure
+                $output = Write-RobocurseLog -Message "Test error" -Level "Error" -ErrorAction SilentlyContinue -ErrorVariable capturedError
+                # The error should be captured in the error variable
+                $capturedError | Should -Match "Test error"
             }
 
             It "Should silently skip Info messages when no session" {

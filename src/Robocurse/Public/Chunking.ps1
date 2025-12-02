@@ -25,6 +25,7 @@ function Get-DirectoryChunks {
     .OUTPUTS
         Array of chunk objects
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -145,6 +146,7 @@ function Get-FilesAtLevel {
     .OUTPUTS
         Array of file info objects
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -175,6 +177,7 @@ function New-Chunk {
     .OUTPUTS
         Chunk object
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$SourcePath,
@@ -224,6 +227,7 @@ function New-FilesOnlyChunk {
     .OUTPUTS
         Chunk object
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$SourcePath,
@@ -274,6 +278,7 @@ function New-FlatChunks {
     .OUTPUTS
         Array of chunk objects
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path,
@@ -315,6 +320,7 @@ function New-SmartChunks {
     .OUTPUTS
         Array of chunk objects
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path,
@@ -342,7 +348,7 @@ function Get-NormalizedPath {
         Normalizes a Windows path for consistent comparison
     .DESCRIPTION
         Handles UNC paths, drive letters, and various edge cases:
-        - Removes trailing slashes
+        - Removes trailing slashes (except for drive roots like "C:\")
         - Converts forward slashes to backslashes
         - Preserves case (use case-insensitive comparison when comparing)
 
@@ -361,10 +367,14 @@ function Get-NormalizedPath {
         Get-NormalizedPath -Path "\\SERVER\Share$\"
         # Returns: "\\SERVER\Share$"
     .EXAMPLE
+        Get-NormalizedPath -Path "C:\"
+        # Returns: "C:\" (drive root preserved)
+    .EXAMPLE
         # For comparison, use case-insensitive:
         (Get-NormalizedPath "C:\Foo").Equals((Get-NormalizedPath "C:\FOO"), [StringComparison]::OrdinalIgnoreCase)
         # Returns: $true
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -373,8 +383,11 @@ function Get-NormalizedPath {
     # Convert forward slashes to backslashes
     $normalized = $Path.Replace('/', '\')
 
-    # Remove trailing slashes (but keep drive root like "C:\")
-    $normalized = $normalized.TrimEnd('\')
+    # Remove trailing slashes, but preserve drive roots like "C:\"
+    # A drive root is exactly 3 characters: letter + colon + backslash (e.g., "C:\")
+    if ($normalized.Length -gt 3 -or -not ($normalized -match '^[A-Za-z]:\\$')) {
+        $normalized = $normalized.TrimEnd('\')
+    }
 
     # Note: Case is preserved - callers should use OrdinalIgnoreCase comparison
     return $normalized
@@ -404,6 +417,7 @@ function Convert-ToDestinationPath {
     .OUTPUTS
         String - destination path
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$SourcePath,

@@ -13,6 +13,7 @@ function Get-XamlResource {
     .OUTPUTS
         XAML string content
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$ResourceName,
@@ -44,6 +45,9 @@ function Get-GuiSettingsPath {
     .SYNOPSIS
         Gets the path to the GUI settings file
     #>
+    [CmdletBinding()]
+    param()
+
     $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $PSCommandPath }
     return Join-Path $scriptDir "Robocurse.settings.json"
 }
@@ -55,6 +59,9 @@ function Get-GuiState {
     .OUTPUTS
         PSCustomObject with saved state or $null if not found
     #>
+    [CmdletBinding()]
+    param()
+
     $settingsPath = Get-GuiSettingsPath
     if (-not (Test-Path $settingsPath)) {
         return $null
@@ -81,6 +88,7 @@ function Save-GuiState {
     .PARAMETER SelectedProfileName
         Name of currently selected profile
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [System.Windows.Window]$Window,
@@ -118,6 +126,7 @@ function Restore-GuiState {
     .PARAMETER Window
         WPF Window object to restore state to
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [System.Windows.Window]$Window
@@ -184,6 +193,7 @@ function Initialize-RobocurseGui {
     .OUTPUTS
         Window object if successful, $null if not supported
     #>
+    [CmdletBinding()]
     param(
         [string]$ConfigPath = ".\config.json"
     )
@@ -274,6 +284,7 @@ function Invoke-SafeEventHandler {
     .PARAMETER HandlerName
         Name of the handler for logging (optional)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [scriptblock]$ScriptBlock,
@@ -309,6 +320,8 @@ function Initialize-EventHandlers {
     .DESCRIPTION
         All handlers are wrapped in error boundaries to prevent GUI crashes.
     #>
+    [CmdletBinding()]
+    param()
 
     # Profile list selection
     $script:Controls.lstProfiles.Add_SelectionChanged({
@@ -399,6 +412,7 @@ function Invoke-WindowClosingHandler {
     .PARAMETER EventArgs
         The CancelEventArgs from the Closing event
     #>
+    [CmdletBinding()]
     param($EventArgs)
 
     # Check if replication is running and confirm exit
@@ -443,6 +457,8 @@ function Close-ReplicationRunspace {
         Uses a script-level flag to prevent race conditions when multiple
         threads attempt cleanup simultaneously (e.g., window close + completion handler).
     #>
+    [CmdletBinding()]
+    param()
 
     # Thread-safe check and set using Interlocked
     # This prevents multiple threads from cleaning up simultaneously
@@ -503,6 +519,8 @@ function Update-ProfileList {
     .SYNOPSIS
         Populates the profile listbox from config
     #>
+    [CmdletBinding()]
+    param()
 
     $script:Controls.lstProfiles.Items.Clear()
 
@@ -525,6 +543,7 @@ function Load-ProfileToForm {
     .PARAMETER Profile
         Profile object to load
     #>
+    [CmdletBinding()]
     param([PSCustomObject]$Profile)
 
     # Guard against null profile
@@ -555,6 +574,8 @@ function Save-ProfileFromForm {
     .SYNOPSIS
         Saves form fields back to selected profile
     #>
+    [CmdletBinding()]
+    param()
 
     $selected = $script:Controls.lstProfiles.SelectedItem
     if (-not $selected) { return }
@@ -612,6 +633,8 @@ function Add-NewProfile {
     .SYNOPSIS
         Creates a new profile with defaults
     #>
+    [CmdletBinding()]
+    param()
 
     $newProfile = [PSCustomObject]@{
         Name = "New Profile"
@@ -643,6 +666,8 @@ function Remove-SelectedProfile {
     .SYNOPSIS
         Removes selected profile with confirmation
     #>
+    [CmdletBinding()]
+    param()
 
     $selected = $script:Controls.lstProfiles.SelectedItem
     if (-not $selected) {
@@ -678,6 +703,7 @@ function Show-FolderBrowser {
     .OUTPUTS
         Selected path or $null
     #>
+    [CmdletBinding()]
     param([string]$Description = "Select folder")
 
     Add-Type -AssemblyName System.Windows.Forms
@@ -702,6 +728,7 @@ function Get-ProfilesToRun {
     .OUTPUTS
         Array of profile objects, or $null if validation fails
     #>
+    [CmdletBinding()]
     param(
         [switch]$AllProfiles,
         [switch]$SelectedOnly
@@ -747,6 +774,7 @@ function New-ReplicationRunspace {
     .OUTPUTS
         PSCustomObject with PowerShell, Handle, and Runspace properties
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject[]]$Profiles,
@@ -822,6 +850,7 @@ function Start-GuiReplication {
     .PARAMETER SelectedOnly
         Run only selected profile
     #>
+    [CmdletBinding()]
     param(
         [switch]$AllProfiles,
         [switch]$SelectedOnly
@@ -864,6 +893,8 @@ function Complete-GuiReplication {
         Handles GUI cleanup after replication: stops timer, re-enables buttons,
         disposes of background runspace resources, and shows completion message.
     #>
+    [CmdletBinding()]
+    param()
 
     # Stop timer
     $script:ProgressTimer.Stop()
@@ -941,6 +972,7 @@ function Update-GuiProgressText {
     .PARAMETER Status
         Orchestration status object from Get-OrchestrationStatus
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Status
@@ -985,6 +1017,7 @@ function Get-ChunkDisplayItems {
     .OUTPUTS
         Array of display objects for DataGrid binding
     #>
+    [CmdletBinding()]
     param(
         [int]$MaxCompletedItems = $script:GuiMaxCompletedChunksDisplay
     )
@@ -1038,6 +1071,8 @@ function Test-ChunkGridNeedsRebuild {
     .OUTPUTS
         $true if grid needs rebuild, $false otherwise
     #>
+    [CmdletBinding()]
+    param()
 
     $currentState = @{
         ActiveCount = $script:OrchestrationState.ActiveJobs.Count
@@ -1073,6 +1108,8 @@ function Update-GuiProgress {
         - Limits displayed items to prevent UI sluggishness
         - Dequeues and displays real-time error messages from background thread
     #>
+    [CmdletBinding()]
+    param()
 
     try {
         $status = Get-OrchestrationStatus
@@ -1118,6 +1155,7 @@ function Write-GuiLog {
     .PARAMETER Message
         Message to log
     #>
+    [CmdletBinding()]
     param([string]$Message)
 
     if (-not $script:Controls.txtLog) { return }
@@ -1150,6 +1188,7 @@ function Show-GuiError {
     .PARAMETER Details
         Detailed error information
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Message,
@@ -1182,6 +1221,8 @@ function Show-ScheduleDialog {
         the configuration is saved AND the Windows Task Scheduler task is
         actually created or removed based on the enabled state.
     #>
+    [CmdletBinding()]
+    param()
 
     try {
         # Load XAML from resource file

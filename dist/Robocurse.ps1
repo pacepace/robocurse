@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 08:41:08
+    Built: 2025-12-02 09:08:17
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -84,6 +84,8 @@ function Test-IsWindowsPlatform {
     .EXAMPLE
         if (Test-IsWindowsPlatform) { "Running on Windows" }
     #>
+    [CmdletBinding()]
+    param()
 
     # In PowerShell 5.1, $IsWindows doesn't exist (it's always Windows)
     # In PowerShell 7+, $IsWindows is defined
@@ -113,6 +115,7 @@ function Set-RobocopyPath {
     .EXAMPLE
         Set-RobocopyPath -Path "D:\Tools\robocopy.exe"
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -140,6 +143,9 @@ function Clear-RobocopyPath {
     .SYNOPSIS
         Clears the robocopy path override, reverting to automatic detection
     #>
+    [CmdletBinding()]
+    param()
+
     $script:RobocopyPathOverride = $null
     $script:RobocopyPath = $null
     Write-RobocurseLog -Message "Robocopy path override cleared, reverting to auto-detection" -Level 'Info' -Component 'Utility'
@@ -162,6 +168,8 @@ function Test-RobocopyAvailable {
         $result = Test-RobocopyAvailable
         if (-not $result.Success) { throw "Robocopy not found: $($result.ErrorMessage)" }
     #>
+    [CmdletBinding()]
+    param()
 
     # Return cached result if already validated
     if ($script:RobocopyPath) {
@@ -225,6 +233,7 @@ function New-OperationResult {
     .EXAMPLE
         return New-OperationResult -Success $false -ErrorMessage "File not found" -ErrorRecord $_
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [bool]$Success,
@@ -264,6 +273,8 @@ function Test-IsBeingDotSourced {
     .OUTPUTS
         Boolean
     #>
+    [CmdletBinding()]
+    param()
 
     # Method 1: Check script-level invocation name captured at load time
     # When dot-sourced, InvocationName is typically "." or empty
@@ -326,6 +337,7 @@ function Test-SafeRobocopyArgument {
         Test-SafeRobocopyArgument -Value "C:\Users\John"  # Returns $true
         Test-SafeRobocopyArgument -Value "path; del *"   # Returns $false
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
@@ -378,6 +390,7 @@ function Get-SanitizedPath {
     .EXAMPLE
         $safePath = Get-SanitizedPath -Path $userInput -ParameterName "Source"
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path,
@@ -408,6 +421,7 @@ function Get-SanitizedExcludePatterns {
     .EXAMPLE
         $safePatterns = Get-SanitizedExcludePatterns -Patterns $excludeFiles -Type "Files"
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
@@ -447,6 +461,7 @@ function Get-SanitizedChunkArgs {
     .EXAMPLE
         $safeArgs = Get-SanitizedChunkArgs -ChunkArgs @("/LEV:1", "/S")
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
@@ -508,6 +523,7 @@ function Test-SourcePathAccessible {
         $check = Test-SourcePathAccessible -Path "\\SERVER\Share"
         if (-not $check.Success) { Write-Error $check.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -558,6 +574,7 @@ function Test-DestinationDiskSpace {
         $check = Test-DestinationDiskSpace -Path "D:\Backups"
         if (-not $check.Success) { Write-Warning $check.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -658,6 +675,7 @@ function Test-RobocopyOptionsValid {
         $check = Test-RobocopyOptionsValid -Options $profile.RobocopyOptions
         if (-not $check.Success) { Write-Warning $check.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowNull()]
@@ -727,6 +745,7 @@ function Test-SafeConfigPath {
         Test-SafeConfigPath -Path ".\config.json"  # Returns $true
         Test-SafeConfigPath -Path "..\..\etc\passwd"  # Returns $false
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
@@ -792,6 +811,8 @@ function New-DefaultConfig {
         $config = New-DefaultConfig
         Creates a new default configuration object
     #>
+    [CmdletBinding()]
+    param()
 
     $config = [PSCustomObject]@{
         Version = "1.0"
@@ -838,6 +859,7 @@ function ConvertTo-RobocopyOptionsInternal {
     .SYNOPSIS
         Helper to convert raw robocopy config to internal options format
     #>
+    [CmdletBinding()]
     param([PSCustomObject]$RawRobocopy)
 
     $options = @{
@@ -874,6 +896,7 @@ function ConvertTo-ChunkSettingsInternal {
     .SYNOPSIS
         Helper to apply chunking settings from raw config to a profile
     #>
+    [CmdletBinding()]
     param(
         [PSCustomObject]$Profile,
         [PSCustomObject]$RawChunking
@@ -905,6 +928,7 @@ function Get-DestinationPathFromRaw {
     .SYNOPSIS
         Helper to extract destination path from raw config (handles multiple formats)
     #>
+    [CmdletBinding()]
     param([object]$RawDestination)
 
     if ($RawDestination -and $RawDestination.path) {
@@ -925,6 +949,7 @@ function ConvertFrom-GlobalSettings {
     .PARAMETER Config
         Config object to update
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$RawGlobal,
@@ -981,6 +1006,7 @@ function ConvertFrom-ProfileSources {
     .OUTPUTS
         Array of expanded sync profile objects
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$ProfileName,
@@ -1039,6 +1065,7 @@ function ConvertFrom-ConfigFileFormat {
     .OUTPUTS
         PSCustomObject in internal format
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$RawConfig
@@ -1160,6 +1187,7 @@ function Get-RobocurseConfig {
         $config = Get-RobocurseConfig -Path "C:\Configs\custom.json"
         Loads configuration from custom path
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $false)]
         [string]$Path = ".\Robocurse.config.json"
@@ -1226,6 +1254,7 @@ function Save-RobocurseConfig {
         $result = Save-RobocurseConfig -Config $config -Path "C:\Configs\custom.json"
         if (-not $result.Success) { Write-Error $result.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [PSCustomObject]$Config,
@@ -1280,6 +1309,7 @@ function Test-RobocurseConfig {
             $result.Errors | ForEach-Object { Write-Warning $_ }
         }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [PSCustomObject]$Config
@@ -1422,6 +1452,7 @@ function Test-PathFormat {
     .OUTPUTS
         Boolean indicating if path format is valid
     #>
+    [CmdletBinding()]
     param(
         [string]$Path
     )
@@ -1475,6 +1506,7 @@ function Initialize-LogSession {
     .OUTPUTS
         Hashtable with SessionId, OperationalLogPath, SiemLogPath
     #>
+    [CmdletBinding()]
     param(
         [string]$LogRoot = ".\Logs",
         [ValidateRange(1, 365)]
@@ -1559,6 +1591,7 @@ function Write-RobocurseLog {
     .PARAMETER WriteSiem
         Also write a SIEM event (default: true for Warning/Error)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Message,
@@ -1650,6 +1683,7 @@ function Write-SiemEvent {
     .PARAMETER SessionId
         Correlation ID
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateSet('SessionStart', 'SessionEnd', 'ProfileStart', 'ProfileComplete',
@@ -1733,6 +1767,7 @@ function Invoke-LogRotation {
     .PARAMETER DeleteAfterDays
         Delete logs older than this (default: 30)
     #>
+    [CmdletBinding()]
     param(
         [string]$LogRoot = ".\Logs",
         [ValidateRange(1, 365)]
@@ -1847,6 +1882,7 @@ function Get-LogPath {
     .PARAMETER ChunkId
         Required for ChunkJob type
     #>
+    [CmdletBinding()]
     param(
         [ValidateSet('Operational', 'Siem', 'ChunkJob')]
         [string]$Type,
@@ -1894,6 +1930,7 @@ function Invoke-RobocopyList {
     .OUTPUTS
         Array of output lines from robocopy
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Source
@@ -1913,6 +1950,7 @@ function ConvertFrom-RobocopyListOutput {
     .OUTPUTS
         PSCustomObject with TotalSize, FileCount, DirCount, Files (array of file info)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
@@ -1974,6 +2012,7 @@ function Get-DirectoryProfile {
     .OUTPUTS
         PSCustomObject with: Path, TotalSize, FileCount, DirCount, AvgFileSize, LastScanned
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path,
@@ -2049,6 +2088,7 @@ function Get-DirectoryChildren {
     .OUTPUTS
         Array of child directory paths
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -2077,6 +2117,7 @@ function Get-NormalizedCacheKey {
     .OUTPUTS
         Normalized path string suitable for cache key
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -2097,6 +2138,7 @@ function Get-CachedProfile {
     .OUTPUTS
         Cached profile or $null
     #>
+    [CmdletBinding()]
     param(
         [string]$Path,
         [int]$MaxAgeHours = 24
@@ -2130,6 +2172,7 @@ function Set-CachedProfile {
     .PARAMETER Profile
         Profile object to cache
     #>
+    [CmdletBinding()]
     param(
         [PSCustomObject]$Profile
     )
@@ -2172,6 +2215,8 @@ function Clear-ProfileCache {
     .EXAMPLE
         Clear-ProfileCache
     #>
+    [CmdletBinding()]
+    param()
 
     $count = $script:ProfileCache.Count
     $script:ProfileCache.Clear()
@@ -2431,6 +2476,7 @@ function Get-DirectoryChunks {
     .OUTPUTS
         Array of chunk objects
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -2551,6 +2597,7 @@ function Get-FilesAtLevel {
     .OUTPUTS
         Array of file info objects
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -2581,6 +2628,7 @@ function New-Chunk {
     .OUTPUTS
         Chunk object
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$SourcePath,
@@ -2630,6 +2678,7 @@ function New-FilesOnlyChunk {
     .OUTPUTS
         Chunk object
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$SourcePath,
@@ -2680,6 +2729,7 @@ function New-FlatChunks {
     .OUTPUTS
         Array of chunk objects
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path,
@@ -2721,6 +2771,7 @@ function New-SmartChunks {
     .OUTPUTS
         Array of chunk objects
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path,
@@ -2748,7 +2799,7 @@ function Get-NormalizedPath {
         Normalizes a Windows path for consistent comparison
     .DESCRIPTION
         Handles UNC paths, drive letters, and various edge cases:
-        - Removes trailing slashes
+        - Removes trailing slashes (except for drive roots like "C:\")
         - Converts forward slashes to backslashes
         - Preserves case (use case-insensitive comparison when comparing)
 
@@ -2767,10 +2818,14 @@ function Get-NormalizedPath {
         Get-NormalizedPath -Path "\\SERVER\Share$\"
         # Returns: "\\SERVER\Share$"
     .EXAMPLE
+        Get-NormalizedPath -Path "C:\"
+        # Returns: "C:\" (drive root preserved)
+    .EXAMPLE
         # For comparison, use case-insensitive:
         (Get-NormalizedPath "C:\Foo").Equals((Get-NormalizedPath "C:\FOO"), [StringComparison]::OrdinalIgnoreCase)
         # Returns: $true
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -2779,8 +2834,11 @@ function Get-NormalizedPath {
     # Convert forward slashes to backslashes
     $normalized = $Path.Replace('/', '\')
 
-    # Remove trailing slashes (but keep drive root like "C:\")
-    $normalized = $normalized.TrimEnd('\')
+    # Remove trailing slashes, but preserve drive roots like "C:\"
+    # A drive root is exactly 3 characters: letter + colon + backslash (e.g., "C:\")
+    if ($normalized.Length -gt 3 -or -not ($normalized -match '^[A-Za-z]:\\$')) {
+        $normalized = $normalized.TrimEnd('\')
+    }
 
     # Note: Case is preserved - callers should use OrdinalIgnoreCase comparison
     return $normalized
@@ -2810,6 +2868,7 @@ function Convert-ToDestinationPath {
     .OUTPUTS
         String - destination path
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$SourcePath,
@@ -2883,6 +2942,7 @@ function Get-BandwidthThrottleIPG {
         $ipg = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 4
         # Returns approximately 164 ms
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [int]$BandwidthLimitMbps,
@@ -2960,6 +3020,7 @@ function New-RobocopyArguments {
         $args = New-RobocopyArguments -SourcePath "C:\Source" -DestinationPath "D:\Dest" -LogPath "C:\log.txt" -DryRun
         # Returns args with /L flag for preview mode
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -3119,6 +3180,7 @@ function Start-RobocopyJob {
         Start-RobocopyJob -Chunk $chunk -LogPath $logPath -DryRun
         # Preview mode - shows what would be copied
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNull()]
@@ -3203,6 +3265,7 @@ function Get-RobocopyExitMeaning {
         Bit 3 (8)  = Some files could NOT be copied (copy errors)
         Bit 4 (16) = Fatal error (no files copied, serious error)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [int]$ExitCode,
@@ -3273,6 +3336,7 @@ function ConvertFrom-RobocopyLog {
     .NOTES
         Handles file locking by using FileShare.ReadWrite when robocopy has the file open
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$LogPath,
@@ -3304,18 +3368,23 @@ function ConvertFrom-RobocopyLog {
     }
 
     # Read log file with ReadWrite sharing to handle file locking
+    # Use try-finally to ensure proper disposal even if ReadToEnd() throws
+    $fs = $null
+    $sr = $null
     try {
         $fs = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         $sr = New-Object System.IO.StreamReader($fs)
         $content = $sr.ReadToEnd()
-        $sr.Close()
-        $fs.Close()
     }
     catch {
         # If we can't read the file, log the warning and return zeros
         $result.ParseWarning = "Failed to read log file: $($_.Exception.Message)"
         Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level 'Warning' -Component 'Robocopy'
         return $result
+    }
+    finally {
+        if ($sr) { $sr.Dispose() }
+        if ($fs) { $fs.Dispose() }
     }
 
     # Parse summary statistics using locale-independent patterns
@@ -3468,6 +3537,7 @@ function Get-RobocopyProgress {
     .OUTPUTS
         PSCustomObject with CurrentFile, BytesCopied, FilesCopied, etc.
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Job
@@ -3488,6 +3558,7 @@ function Wait-RobocopyJob {
     .OUTPUTS
         PSCustomObject with ExitCode, ExitMeaning, Duration, Stats
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Job,
@@ -3540,6 +3611,9 @@ function Get-CheckpointPath {
     .OUTPUTS
         Path to checkpoint file
     #>
+    [CmdletBinding()]
+    param()
+
     $logDir = if ($script:CurrentOperationalLogPath) {
         Split-Path $script:CurrentOperationalLogPath -Parent
     } else {
@@ -3565,6 +3639,7 @@ function Save-ReplicationCheckpoint {
     .OUTPUTS
         OperationResult indicating success/failure
     #>
+    [CmdletBinding()]
     param(
         [switch]$Force
     )
@@ -3634,6 +3709,8 @@ function Get-ReplicationCheckpoint {
     .OUTPUTS
         Checkpoint object or $null if no checkpoint exists
     #>
+    [CmdletBinding()]
+    param()
 
     $checkpointPath = Get-CheckpointPath
 
@@ -3700,6 +3777,7 @@ function Test-ChunkAlreadyCompleted {
     .OUTPUTS
         $true if chunk should be skipped, $false otherwise
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Chunk,
@@ -3757,6 +3835,8 @@ function Initialize-OrchestrationStateType {
     .OUTPUTS
         $true if type is available, $false on compilation failure
     #>
+    [CmdletBinding()]
+    param()
 
     # Fast path: already initialized this session
     if ($script:OrchestrationTypeInitialized -and $script:OrchestrationState) {
@@ -4120,6 +4200,8 @@ function Initialize-OrchestrationState {
 
         If this is the first call, lazy-loads the C# OrchestrationState type.
     #>
+    [CmdletBinding()]
+    param()
 
     # Ensure the C# type is compiled and instance exists (lazy load)
     if (-not (Initialize-OrchestrationStateType)) {
@@ -4176,6 +4258,7 @@ function Start-ReplicationRun {
     .PARAMETER DryRun
         Preview mode - runs robocopy with /L flag to show what would be copied
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNull()]
@@ -4286,6 +4369,7 @@ function Start-ProfileReplication {
     .PARAMETER MaxConcurrentJobs
         Maximum parallel processes
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Profile,
@@ -4467,6 +4551,7 @@ function Start-ChunkJob {
     .OUTPUTS
         Job object from Start-RobocopyJob
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Chunk
@@ -4527,6 +4612,7 @@ function Invoke-ReplicationTick {
     .PARAMETER MaxConcurrentJobs
         Maximum concurrent jobs
     #>
+    [CmdletBinding()]
     param(
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs
     )
@@ -4675,6 +4761,7 @@ function Complete-RobocopyJob {
     .OUTPUTS
         Result object with exit code, stats, etc.
     #>
+    [CmdletBinding()]
     param(
         [PSCustomObject]$Job
     )
@@ -4742,6 +4829,7 @@ function Get-RetryBackoffDelay {
         Get-RetryBackoffDelay -RetryCount 2  # Returns 10 (5 * 2^1)
         Get-RetryBackoffDelay -RetryCount 3  # Returns 20 (5 * 2^2)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateRange(1, 100)]
@@ -4774,6 +4862,7 @@ function Invoke-FailedChunkHandler {
     .PARAMETER Result
         Result from Complete-RobocopyJob
     #>
+    [CmdletBinding()]
     param(
         [PSCustomObject]$Job,
         [PSCustomObject]$Result
@@ -4827,6 +4916,9 @@ function Complete-CurrentProfile {
         stores profile results for email reporting, and advances to next profile.
         Also clears completed chunks to prevent memory growth during long runs.
     #>
+    [CmdletBinding()]
+    param()
+
     $state = $script:OrchestrationState
 
     if ($null -eq $state.CurrentProfile) {
@@ -4937,6 +5029,9 @@ function Stop-AllJobs {
     .SYNOPSIS
         Stops all running robocopy processes
     #>
+    [CmdletBinding()]
+    param()
+
     $state = $script:OrchestrationState
 
     Write-RobocurseLog -Message "Stopping all jobs ($($state.ActiveJobs.Count) active)" `
@@ -4980,6 +5075,9 @@ function Request-Stop {
     .SYNOPSIS
         Requests graceful stop (finish current jobs, don't start new)
     #>
+    [CmdletBinding()]
+    param()
+
     $script:OrchestrationState.StopRequested = $true
 
     Write-RobocurseLog -Message "Stop requested" `
@@ -4991,6 +5089,9 @@ function Request-Pause {
     .SYNOPSIS
         Pauses job queue (running jobs continue, no new starts)
     #>
+    [CmdletBinding()]
+    param()
+
     $script:OrchestrationState.PauseRequested = $true
 
     Write-RobocurseLog -Message "Pause requested" `
@@ -5002,6 +5103,9 @@ function Request-Resume {
     .SYNOPSIS
         Resumes paused job queue
     #>
+    [CmdletBinding()]
+    param()
+
     $script:OrchestrationState.PauseRequested = $false
 
     Write-RobocurseLog -Message "Resume requested" `
@@ -5165,7 +5269,7 @@ function Remove-HealthCheckStatus {
     .EXAMPLE
         Remove-HealthCheckStatus
     #>
-    [CmdletBinding()]
+    [CmdletBinding(SupportsShouldProcess)]
     param()
 
     if (Test-Path $script:HealthCheckStatusFile) {
@@ -5196,6 +5300,9 @@ function Update-ProgressStats {
         instead of iterating the CompletedChunks queue (which could be O(n) with 10,000+ chunks).
         Only active jobs need to be iterated for in-progress bytes.
     #>
+    [CmdletBinding()]
+    param()
+
     $state = $script:OrchestrationState
 
     # Get cumulative bytes from completed chunks (O(1) - pre-calculated counter)
@@ -5220,6 +5327,8 @@ function Get-OrchestrationStatus {
     .OUTPUTS
         PSCustomObject with all status info
     #>
+    [CmdletBinding()]
+    param()
 
     # Handle case where orchestration hasn't been initialized yet
     if (-not $script:OrchestrationState) {
@@ -5289,6 +5398,9 @@ function Get-ETAEstimate {
     .OUTPUTS
         TimeSpan estimate or $null if cannot estimate
     #>
+    [CmdletBinding()]
+    param()
+
     $state = $script:OrchestrationState
 
     if (-not $state.StartTime -or $state.BytesComplete -eq 0 -or $state.TotalBytes -eq 0) {
@@ -5364,6 +5476,7 @@ function Invoke-WithVssTrackingMutex {
     .OUTPUTS
         Result of the scriptblock, or $null if mutex acquisition times out
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [scriptblock]$ScriptBlock,
@@ -5413,6 +5526,8 @@ function Test-VssPrivileges {
             Write-Warning "VSS not available: $($check.ErrorMessage)"
         }
     #>
+    [CmdletBinding()]
+    param()
 
     # Skip if not Windows
     if (-not (Test-IsWindowsPlatform)) {
@@ -5530,6 +5645,7 @@ function Add-VssToTracking {
     .PARAMETER SnapshotInfo
         Snapshot info object with ShadowId
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$SnapshotInfo
@@ -5572,6 +5688,7 @@ function Remove-VssFromTracking {
     .PARAMETER ShadowId
         Shadow ID to remove
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$ShadowId
@@ -5624,6 +5741,7 @@ function Get-VolumeFromPath {
         Get-VolumeFromPath -Path "\\server\share\folder"
         Returns: $null
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -5671,6 +5789,7 @@ function New-VssSnapshot {
         $result = New-VssSnapshot -SourcePath "C:\Data" -RetryCount 5 -RetryDelaySeconds 10
         # More aggressive retry for busy systems
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -5762,6 +5881,7 @@ function New-VssSnapshotInternal {
     .DESCRIPTION
         Called by New-VssSnapshot. Separated for retry logic.
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$SourcePath
@@ -5912,6 +6032,7 @@ function Get-VssPath {
                     -SourceVolume "C:"
         Returns: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$OriginalPath,
@@ -5980,6 +6101,7 @@ function Test-VssSupported {
         Test-VssSupported -Path "\\server\share"
         Returns: $false (UNC path)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Path
@@ -6034,6 +6156,7 @@ function Invoke-WithVssSnapshot {
         }
         if (-not $result.Success) { Write-Error $result.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$SourcePath,
@@ -6118,6 +6241,8 @@ function Initialize-CredentialManager {
         Adds the necessary .NET types for interacting with Windows Credential Manager
         via P/Invoke to advapi32.dll. Only works on Windows platform.
     #>
+    [CmdletBinding()]
+    param()
 
     if ($script:CredentialManagerTypeAdded) {
         return
@@ -6198,6 +6323,7 @@ function Get-SmtpCredential {
         $cred = Get-SmtpCredential
         $cred = Get-SmtpCredential -Target "CustomSMTP"
     #>
+    [CmdletBinding()]
     param(
         [string]$Target = "Robocurse-SMTP"
     )
@@ -6307,6 +6433,7 @@ function Save-SmtpCredential {
         $result = Save-SmtpCredential -Credential $cred
         if ($result.Success) { "Credential saved" }
     #>
+    [CmdletBinding()]
     param(
         [string]$Target = "Robocurse-SMTP",
 
@@ -6443,6 +6570,7 @@ function Test-SmtpCredential {
             # Credential exists
         }
     #>
+    [CmdletBinding()]
     param(
         [string]$Target = "Robocurse-SMTP"
     )
@@ -6463,6 +6591,7 @@ function Format-FileSize {
         Format-FileSize -Bytes 1073741824
         # Returns "1.00 GB"
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [int64]$Bytes
@@ -6501,6 +6630,7 @@ function New-CompletionEmailBody {
     .EXAMPLE
         $html = New-CompletionEmailBody -Results $results -Status 'Success'
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Results,
@@ -6660,6 +6790,7 @@ function Send-CompletionEmail {
         $result = Send-CompletionEmail -Config $config.Email -Results $results -Status 'Success'
         if (-not $result.Success) { Write-Warning $result.ErrorMessage }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateNotNull()]
@@ -6757,6 +6888,7 @@ function Test-EmailConfiguration {
         $result = Test-EmailConfiguration -Config $config.Email
         if ($result.Success) { Write-Host "Email test passed" }
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Config
@@ -7344,6 +7476,7 @@ function Get-XamlResource {
     .OUTPUTS
         XAML string content
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$ResourceName,
@@ -7375,6 +7508,9 @@ function Get-GuiSettingsPath {
     .SYNOPSIS
         Gets the path to the GUI settings file
     #>
+    [CmdletBinding()]
+    param()
+
     $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $PSCommandPath }
     return Join-Path $scriptDir "Robocurse.settings.json"
 }
@@ -7386,6 +7522,9 @@ function Get-GuiState {
     .OUTPUTS
         PSCustomObject with saved state or $null if not found
     #>
+    [CmdletBinding()]
+    param()
+
     $settingsPath = Get-GuiSettingsPath
     if (-not (Test-Path $settingsPath)) {
         return $null
@@ -7412,6 +7551,7 @@ function Save-GuiState {
     .PARAMETER SelectedProfileName
         Name of currently selected profile
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [System.Windows.Window]$Window,
@@ -7449,6 +7589,7 @@ function Restore-GuiState {
     .PARAMETER Window
         WPF Window object to restore state to
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [System.Windows.Window]$Window
@@ -7515,6 +7656,7 @@ function Initialize-RobocurseGui {
     .OUTPUTS
         Window object if successful, $null if not supported
     #>
+    [CmdletBinding()]
     param(
         [string]$ConfigPath = ".\config.json"
     )
@@ -7605,6 +7747,7 @@ function Invoke-SafeEventHandler {
     .PARAMETER HandlerName
         Name of the handler for logging (optional)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [scriptblock]$ScriptBlock,
@@ -7640,6 +7783,8 @@ function Initialize-EventHandlers {
     .DESCRIPTION
         All handlers are wrapped in error boundaries to prevent GUI crashes.
     #>
+    [CmdletBinding()]
+    param()
 
     # Profile list selection
     $script:Controls.lstProfiles.Add_SelectionChanged({
@@ -7730,6 +7875,7 @@ function Invoke-WindowClosingHandler {
     .PARAMETER EventArgs
         The CancelEventArgs from the Closing event
     #>
+    [CmdletBinding()]
     param($EventArgs)
 
     # Check if replication is running and confirm exit
@@ -7774,6 +7920,8 @@ function Close-ReplicationRunspace {
         Uses a script-level flag to prevent race conditions when multiple
         threads attempt cleanup simultaneously (e.g., window close + completion handler).
     #>
+    [CmdletBinding()]
+    param()
 
     # Thread-safe check and set using Interlocked
     # This prevents multiple threads from cleaning up simultaneously
@@ -7834,6 +7982,8 @@ function Update-ProfileList {
     .SYNOPSIS
         Populates the profile listbox from config
     #>
+    [CmdletBinding()]
+    param()
 
     $script:Controls.lstProfiles.Items.Clear()
 
@@ -7856,6 +8006,7 @@ function Load-ProfileToForm {
     .PARAMETER Profile
         Profile object to load
     #>
+    [CmdletBinding()]
     param([PSCustomObject]$Profile)
 
     # Guard against null profile
@@ -7886,6 +8037,8 @@ function Save-ProfileFromForm {
     .SYNOPSIS
         Saves form fields back to selected profile
     #>
+    [CmdletBinding()]
+    param()
 
     $selected = $script:Controls.lstProfiles.SelectedItem
     if (-not $selected) { return }
@@ -7943,6 +8096,8 @@ function Add-NewProfile {
     .SYNOPSIS
         Creates a new profile with defaults
     #>
+    [CmdletBinding()]
+    param()
 
     $newProfile = [PSCustomObject]@{
         Name = "New Profile"
@@ -7974,6 +8129,8 @@ function Remove-SelectedProfile {
     .SYNOPSIS
         Removes selected profile with confirmation
     #>
+    [CmdletBinding()]
+    param()
 
     $selected = $script:Controls.lstProfiles.SelectedItem
     if (-not $selected) {
@@ -8009,6 +8166,7 @@ function Show-FolderBrowser {
     .OUTPUTS
         Selected path or $null
     #>
+    [CmdletBinding()]
     param([string]$Description = "Select folder")
 
     Add-Type -AssemblyName System.Windows.Forms
@@ -8033,6 +8191,7 @@ function Get-ProfilesToRun {
     .OUTPUTS
         Array of profile objects, or $null if validation fails
     #>
+    [CmdletBinding()]
     param(
         [switch]$AllProfiles,
         [switch]$SelectedOnly
@@ -8078,6 +8237,7 @@ function New-ReplicationRunspace {
     .OUTPUTS
         PSCustomObject with PowerShell, Handle, and Runspace properties
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject[]]$Profiles,
@@ -8153,6 +8313,7 @@ function Start-GuiReplication {
     .PARAMETER SelectedOnly
         Run only selected profile
     #>
+    [CmdletBinding()]
     param(
         [switch]$AllProfiles,
         [switch]$SelectedOnly
@@ -8195,6 +8356,8 @@ function Complete-GuiReplication {
         Handles GUI cleanup after replication: stops timer, re-enables buttons,
         disposes of background runspace resources, and shows completion message.
     #>
+    [CmdletBinding()]
+    param()
 
     # Stop timer
     $script:ProgressTimer.Stop()
@@ -8272,6 +8435,7 @@ function Update-GuiProgressText {
     .PARAMETER Status
         Orchestration status object from Get-OrchestrationStatus
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Status
@@ -8316,6 +8480,7 @@ function Get-ChunkDisplayItems {
     .OUTPUTS
         Array of display objects for DataGrid binding
     #>
+    [CmdletBinding()]
     param(
         [int]$MaxCompletedItems = $script:GuiMaxCompletedChunksDisplay
     )
@@ -8369,6 +8534,8 @@ function Test-ChunkGridNeedsRebuild {
     .OUTPUTS
         $true if grid needs rebuild, $false otherwise
     #>
+    [CmdletBinding()]
+    param()
 
     $currentState = @{
         ActiveCount = $script:OrchestrationState.ActiveJobs.Count
@@ -8404,6 +8571,8 @@ function Update-GuiProgress {
         - Limits displayed items to prevent UI sluggishness
         - Dequeues and displays real-time error messages from background thread
     #>
+    [CmdletBinding()]
+    param()
 
     try {
         $status = Get-OrchestrationStatus
@@ -8449,6 +8618,7 @@ function Write-GuiLog {
     .PARAMETER Message
         Message to log
     #>
+    [CmdletBinding()]
     param([string]$Message)
 
     if (-not $script:Controls.txtLog) { return }
@@ -8481,6 +8651,7 @@ function Show-GuiError {
     .PARAMETER Details
         Detailed error information
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory = $true)]
         [string]$Message,
@@ -8513,6 +8684,8 @@ function Show-ScheduleDialog {
         the configuration is saved AND the Windows Task Scheduler task is
         actually created or removed based on the enabled state.
     #>
+    [CmdletBinding()]
+    param()
 
     try {
         # Load XAML from resource file
@@ -8675,6 +8848,8 @@ function Show-RobocurseHelp {
     .SYNOPSIS
         Displays help information
     #>
+    [CmdletBinding()]
+    param()
 
     Write-Host @"
 Robocurse - Multi-Share Parallel Robocopy Orchestrator
@@ -8728,6 +8903,7 @@ function Invoke-HeadlessReplication {
     .OUTPUTS
         Exit code: 0 for success, 1 for failures
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Config,
@@ -8891,6 +9067,7 @@ function Start-RobocurseMain {
         either GUI or headless mode. Separated from script body for testability.
         Uses granular error handling for distinct failure phases.
     #>
+    [CmdletBinding()]
     param(
         [switch]$Headless,
         [string]$ConfigPath,

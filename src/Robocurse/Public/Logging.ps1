@@ -21,6 +21,7 @@ function Initialize-LogSession {
     .OUTPUTS
         Hashtable with SessionId, OperationalLogPath, SiemLogPath
     #>
+    [CmdletBinding()]
     param(
         [string]$LogRoot = ".\Logs",
         [ValidateRange(1, 365)]
@@ -105,6 +106,7 @@ function Write-RobocurseLog {
     .PARAMETER WriteSiem
         Also write a SIEM event (default: true for Warning/Error)
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$Message,
@@ -196,6 +198,7 @@ function Write-SiemEvent {
     .PARAMETER SessionId
         Correlation ID
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateSet('SessionStart', 'SessionEnd', 'ProfileStart', 'ProfileComplete',
@@ -279,6 +282,7 @@ function Invoke-LogRotation {
     .PARAMETER DeleteAfterDays
         Delete logs older than this (default: 30)
     #>
+    [CmdletBinding()]
     param(
         [string]$LogRoot = ".\Logs",
         [ValidateRange(1, 365)]
@@ -393,6 +397,7 @@ function Get-LogPath {
     .PARAMETER ChunkId
         Required for ChunkJob type
     #>
+    [CmdletBinding()]
     param(
         [ValidateSet('Operational', 'Siem', 'ChunkJob')]
         [string]$Type,

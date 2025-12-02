@@ -8,6 +8,9 @@ function Update-ProgressStats {
         instead of iterating the CompletedChunks queue (which could be O(n) with 10,000+ chunks).
         Only active jobs need to be iterated for in-progress bytes.
     #>
+    [CmdletBinding()]
+    param()
+
     $state = $script:OrchestrationState
 
     # Get cumulative bytes from completed chunks (O(1) - pre-calculated counter)
@@ -32,6 +35,8 @@ function Get-OrchestrationStatus {
     .OUTPUTS
         PSCustomObject with all status info
     #>
+    [CmdletBinding()]
+    param()
 
     # Handle case where orchestration hasn't been initialized yet
     if (-not $script:OrchestrationState) {
@@ -101,6 +106,9 @@ function Get-ETAEstimate {
     .OUTPUTS
         TimeSpan estimate or $null if cannot estimate
     #>
+    [CmdletBinding()]
+    param()
+
     $state = $script:OrchestrationState
 
     if (-not $state.StartTime -or $state.BytesComplete -eq 0 -or $state.TotalBytes -eq 0) {

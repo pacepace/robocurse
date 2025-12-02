@@ -5,6 +5,8 @@ function Show-RobocurseHelp {
     .SYNOPSIS
         Displays help information
     #>
+    [CmdletBinding()]
+    param()
 
     Write-Host @"
 Robocurse - Multi-Share Parallel Robocopy Orchestrator
@@ -58,6 +60,7 @@ function Invoke-HeadlessReplication {
     .OUTPUTS
         Exit code: 0 for success, 1 for failures
     #>
+    [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Config,
@@ -221,6 +224,7 @@ function Start-RobocurseMain {
         either GUI or headless mode. Separated from script body for testability.
         Uses granular error handling for distinct failure phases.
     #>
+    [CmdletBinding()]
     param(
         [switch]$Headless,
         [string]$ConfigPath,
