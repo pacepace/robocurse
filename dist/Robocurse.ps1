@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 08:00:17
+    Built: 2025-12-02 08:24:47
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -2139,16 +2139,22 @@ function Set-CachedProfile {
 
     # Enforce cache size limit - if at max, remove oldest entries
     if ($script:ProfileCache.Count -ge $script:ProfileCacheMaxEntries) {
-        # Remove oldest 10% of entries based on LastScanned
-        $entriesToRemove = [math]::Ceiling($script:ProfileCacheMaxEntries * 0.1)
-        $oldestEntries = $script:ProfileCache.ToArray() |
-            Sort-Object { $_.Value.LastScanned } |
-            Select-Object -First $entriesToRemove
+        # Remove oldest 10% of CURRENT entries (not max capacity) based on LastScanned
+        # This ensures we actually free up space when cache is at capacity
+        $currentCount = $script:ProfileCache.Count
+        $entriesToRemove = [math]::Ceiling($currentCount * 0.1)
 
-        foreach ($entry in $oldestEntries) {
-            $script:ProfileCache.TryRemove($entry.Key, [ref]$null) | Out-Null
+        # Only sort and remove if we have entries to remove
+        if ($entriesToRemove -gt 0) {
+            $oldestEntries = $script:ProfileCache.ToArray() |
+                Sort-Object { $_.Value.LastScanned } |
+                Select-Object -First $entriesToRemove
+
+            foreach ($entry in $oldestEntries) {
+                $script:ProfileCache.TryRemove($entry.Key, [ref]$null) | Out-Null
+            }
+            Write-RobocurseLog "Cache at capacity ($currentCount entries), removed $entriesToRemove oldest entries" -Level Debug
         }
-        Write-RobocurseLog "Cache at capacity, removed $entriesToRemove oldest entries" -Level Debug
     }
 
     # Thread-safe add or update using ConcurrentDictionary indexer
@@ -3222,12 +3228,15 @@ function Get-RobocopyExitMeaning {
     if ($result.FatalError) {
         $result.Severity = "Fatal"
         $result.Message = "Fatal error occurred"
-        $result.ShouldRetry = $true  # Worth retrying once
+        # Fatal errors (exit code 16) are often permanent: path not found, access denied, invalid parameters
+        # Only retry if combined with copy errors (exit code 24 = 16+8) which suggests partial success
+        # Pure fatal (16) without copy errors is likely permanent and shouldn't be retried indefinitely
+        $result.ShouldRetry = $result.CopyErrors  # Retry only if there were also copy errors
     }
     elseif ($result.CopyErrors) {
         $result.Severity = "Error"
         $result.Message = "Some files could not be copied"
-        $result.ShouldRetry = $true
+        $result.ShouldRetry = $true  # Copy errors (8) are often transient - file locked, etc.
     }
     elseif ($result.MismatchesFound) {
         # Configurable severity for mismatches
@@ -3594,7 +3603,17 @@ function Save-ReplicationCheckpoint {
             New-Item -ItemType Directory -Path $checkpointDir -Force | Out-Null
         }
 
-        $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $checkpointPath -Encoding UTF8
+        # Atomic write: write to temp file first, then rename
+        # This prevents corruption if the process crashes during write
+        $tempPath = "$checkpointPath.tmp"
+        $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
+
+        # Atomic rename (on NTFS this is atomic)
+        # Remove existing checkpoint first if it exists (Move-Item with -Force doesn't overwrite on all platforms)
+        if (Test-Path $checkpointPath) {
+            Remove-Item -Path $checkpointPath -Force
+        }
+        Move-Item -Path $tempPath -Destination $checkpointPath -Force
 
         Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
             -Level 'Info' -Component 'Checkpoint'
@@ -3697,14 +3716,18 @@ function Test-ChunkAlreadyCompleted {
         return $false
     }
 
-    # Case-insensitive check for Windows paths
-    $normalizedChunkPath = $Chunk.SourcePath.ToLowerInvariant()
+    # Normalize the chunk path for comparison
+    # Use OrdinalIgnoreCase for Windows-style case-insensitivity
+    # This is more reliable than ToLowerInvariant() for international characters
+    # and handles edge cases like Turkish 'I' correctly
+    $chunkPath = $Chunk.SourcePath
+
     foreach ($completedPath in $Checkpoint.CompletedChunkPaths) {
         # Skip null entries in the completed paths array
         if (-not $completedPath) {
             continue
         }
-        if ($completedPath.ToLowerInvariant() -eq $normalizedChunkPath) {
+        if ([string]::Equals($completedPath, $chunkPath, [StringComparison]::OrdinalIgnoreCase)) {
             return $true
         }
     }
@@ -4526,21 +4549,27 @@ function Invoke-ReplicationTick {
         $job = $kvp.Value
         # Check if process has completed
         if ($job.Process.HasExited) {
-            # Process completion
-            $result = Complete-RobocopyJob -Job $job
-
-            # Thread-safe removal from ConcurrentDictionary
+            # Thread-safe removal from ConcurrentDictionary FIRST
+            # This prevents race condition where multiple threads could process the same job
             $removedJob = $null
-            $state.ActiveJobs.TryRemove($kvp.Key, [ref]$removedJob) | Out-Null
+            $wasRemoved = $state.ActiveJobs.TryRemove($kvp.Key, [ref]$removedJob)
+
+            # If we didn't remove it, another thread already claimed this job - skip
+            if (-not $wasRemoved) {
+                continue
+            }
+
+            # Process completion (only if we successfully claimed the job)
+            $result = Complete-RobocopyJob -Job $removedJob
 
             if ($result.ExitMeaning.Severity -in @('Error', 'Fatal')) {
-                Invoke-FailedChunkHandler -Job $job -Result $result
+                Invoke-FailedChunkHandler -Job $removedJob -Result $result
             }
             else {
-                $state.CompletedChunks.Enqueue($job.Chunk)
+                $state.CompletedChunks.Enqueue($removedJob.Chunk)
                 # Track cumulative bytes from completed chunks (avoids O(n) iteration in Update-ProgressStats)
-                if ($job.Chunk.EstimatedSize) {
-                    $state.AddCompletedChunkBytes($job.Chunk.EstimatedSize)
+                if ($removedJob.Chunk.EstimatedSize) {
+                    $state.AddCompletedChunkBytes($removedJob.Chunk.EstimatedSize)
                 }
                 # Track files copied from the parsed robocopy log
                 if ($result.Stats -and $result.Stats.FilesCopied -gt 0) {
@@ -4551,7 +4580,7 @@ function Invoke-ReplicationTick {
 
             # Invoke callback
             if ($script:OnChunkComplete) {
-                & $script:OnChunkComplete $job $result
+                & $script:OnChunkComplete $removedJob $result
             }
 
             # Save checkpoint periodically (every N chunks or on failure)
@@ -4572,9 +4601,9 @@ function Invoke-ReplicationTick {
         if ($state.ChunkQueue.TryDequeue([ref]$chunk)) {
             # Check if chunk was completed in previous run (resume from checkpoint)
             if ($script:CurrentCheckpoint -and (Test-ChunkAlreadyCompleted -Chunk $chunk -Checkpoint $script:CurrentCheckpoint)) {
-                # Skip this chunk - mark as already completed
+                # Skip this chunk - DON'T enqueue to CompletedChunks to prevent memory leak
+                # The chunk is already tracked in the checkpoint file, no need to hold in memory
                 $chunk.Status = 'Skipped'
-                $state.CompletedChunks.Enqueue($chunk)
                 $state.IncrementCompletedCount()
                 if ($chunk.EstimatedSize) {
                     $state.AddCompletedChunkBytes($chunk.EstimatedSize)
@@ -5221,13 +5250,16 @@ function Get-OrchestrationStatus {
 
     $currentProfileName = if ($state.CurrentProfile) { $state.CurrentProfile.Name } else { "" }
 
+    # Clamp progress to 0-100 range to handle edge cases where CompletedCount > TotalChunks
+    # (can happen if files are added during scan or other race conditions)
     $profileProgress = if ($state.TotalChunks -gt 0) {
-        [math]::Round(($state.CompletedCount / $state.TotalChunks) * 100, 1)
+        [math]::Min(100, [math]::Max(0, [math]::Round(($state.CompletedCount / $state.TotalChunks) * 100, 1)))
     } else { 0 }
 
-    # Calculate overall progress across all profiles
+    # Calculate overall progress across all profiles (also clamped)
     $totalProfileCount = if ($state.Profiles.Count -gt 0) { $state.Profiles.Count } else { 1 }
-    $overallProgress = [math]::Round((($state.ProfileIndex + ($profileProgress / 100)) / $totalProfileCount) * 100, 1)
+    $overallProgress = [math]::Min(100, [math]::Max(0,
+        [math]::Round((($state.ProfileIndex + ($profileProgress / 100)) / $totalProfileCount) * 100, 1)))
 
     return [PSCustomObject]@{
         Phase = $state.Phase
@@ -5251,6 +5283,9 @@ function Get-ETAEstimate {
     <#
     .SYNOPSIS
         Estimates completion time based on current progress
+    .DESCRIPTION
+        Calculates ETA based on bytes copied per second. Includes safeguards
+        against integer overflow and division by zero edge cases.
     .OUTPUTS
         TimeSpan estimate or $null if cannot estimate
     #>
@@ -5267,13 +5302,27 @@ function Get-ETAEstimate {
         return $null
     }
 
-    $bytesPerSecond = $state.BytesComplete / $elapsed.TotalSeconds
+    # Cast to double to prevent integer overflow with large byte counts
+    [double]$bytesComplete = $state.BytesComplete
+    [double]$totalBytes = $state.TotalBytes
+    [double]$elapsedSeconds = $elapsed.TotalSeconds
 
-    if ($bytesPerSecond -le 0) {
+    # Guard against unreasonably large values that could cause overflow
+    # Max reasonable bytes: 100 PB (should cover any realistic scenario)
+    $maxBytes = [double](100 * 1PB)
+    if ($bytesComplete -gt $maxBytes -or $totalBytes -gt $maxBytes) {
         return $null
     }
 
-    $bytesRemaining = $state.TotalBytes - $state.BytesComplete
+    $bytesPerSecond = $bytesComplete / $elapsedSeconds
+
+    # Guard against very slow speeds that would result in unreasonable ETA
+    # Minimum 1 byte per second to prevent near-infinite ETA
+    if ($bytesPerSecond -lt 1.0) {
+        return $null
+    }
+
+    $bytesRemaining = $totalBytes - $bytesComplete
 
     # Handle case where more bytes copied than expected (file sizes changed during copy)
     if ($bytesRemaining -le 0) {
@@ -5283,12 +5332,12 @@ function Get-ETAEstimate {
     $secondsRemaining = $bytesRemaining / $bytesPerSecond
 
     # Cap at reasonable maximum (30 days) to prevent overflow
-    $maxSeconds = 30 * 24 * 60 * 60
-    if ($secondsRemaining -gt $maxSeconds) {
+    $maxSeconds = 30.0 * 24.0 * 60.0 * 60.0
+    if ($secondsRemaining -gt $maxSeconds -or [double]::IsInfinity($secondsRemaining) -or [double]::IsNaN($secondsRemaining)) {
         $secondsRemaining = $maxSeconds
     }
 
-    return [timespan]::FromSeconds($secondsRemaining)
+    return [timespan]::FromSeconds([int]$secondsRemaining)
 }
 
 #endregion
@@ -5796,17 +5845,21 @@ function Remove-VssSnapshot {
             if ($PSCmdlet.ShouldProcess($ShadowId, "Remove VSS Snapshot")) {
                 Remove-CimInstance -InputObject $shadow
                 Write-RobocurseLog -Message "Deleted VSS snapshot: $ShadowId" -Level 'Info' -Component 'VSS'
-                # Remove from tracking file
+                # Remove from tracking file ONLY after successful deletion
+                # This prevents orphaned snapshots when ShouldProcess returns false
                 Remove-VssFromTracking -ShadowId $ShadowId
+                return New-OperationResult -Success $true -Data $ShadowId
             }
-            return New-OperationResult -Success $true -Data $ShadowId
+            else {
+                # ShouldProcess returned false (e.g., -WhatIf) - don't remove from tracking
+                # Return success but data indicates it was a WhatIf operation
+                return New-OperationResult -Success $true -Data "WhatIf: Would remove $ShadowId"
+            }
         }
         else {
             Write-RobocurseLog -Message "VSS snapshot not found: $ShadowId (may have been already deleted)" -Level 'Warning' -Component 'VSS'
-            # Remove from tracking even if not found (cleanup)
-            if ($PSCmdlet.ShouldProcess($ShadowId, "Remove from VSS tracking")) {
-                Remove-VssFromTracking -ShadowId $ShadowId
-            }
+            # Remove from tracking even if not found (cleanup of stale tracking entry)
+            Remove-VssFromTracking -ShadowId $ShadowId
             # Still return success since the snapshot is gone (idempotent operation)
             return New-OperationResult -Success $true -Data $ShadowId
         }
@@ -6735,6 +6788,10 @@ function Register-RobocurseTask {
     .DESCRIPTION
         Registers a Windows scheduled task to run Robocurse automatically.
         Supports daily, weekly, and hourly schedules with flexible configuration.
+
+        SECURITY NOTE: When using -RunAsSystem, the script path is validated to ensure
+        it exists and has a .ps1 extension. For additional security, consider placing
+        scripts in protected directories (e.g., Program Files) that require admin to modify.
     .PARAMETER TaskName
         Name for the scheduled task. Default: "Robocurse-Replication"
     .PARAMETER ConfigPath
@@ -6747,6 +6804,14 @@ function Register-RobocurseTask {
         Days for weekly schedule (Sunday, Monday, etc.). Default: @('Sunday')
     .PARAMETER RunAsSystem
         Run as SYSTEM account (requires admin). Default: $false
+        WARNING: This runs the script with SYSTEM privileges. Ensure the script path
+        points to a trusted, protected location.
+        NOTE: SYSTEM account cannot access network resources (UNC paths) by default.
+    .PARAMETER Credential
+        PSCredential object for a domain or local user account. Required for accessing
+        UNC paths (network shares) during scheduled replication.
+        Use: $cred = Get-Credential; Register-RobocurseTask -Credential $cred ...
+        The password is securely stored in Windows Task Scheduler.
     .PARAMETER ScriptPath
         Explicit path to Robocurse.ps1 script. Use when running interactively
         or when automatic path detection fails.
@@ -6764,8 +6829,12 @@ function Register-RobocurseTask {
     .EXAMPLE
         Register-RobocurseTask -ConfigPath "C:\config.json" -ScriptPath "C:\Scripts\Robocurse.ps1"
         # Explicitly specify the script path for interactive sessions
+    .EXAMPLE
+        $cred = Get-Credential -Message "Enter domain credentials for UNC access"
+        Register-RobocurseTask -ConfigPath "C:\config.json" -Credential $cred
+        # Use domain credentials to enable UNC path access during scheduled runs
     #>
-    [CmdletBinding(SupportsShouldProcess)]
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     param(
         [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication",
@@ -6785,6 +6854,11 @@ function Register-RobocurseTask {
         [string[]]$DaysOfWeek = @('Sunday'),
 
         [switch]$RunAsSystem,
+
+        [Parameter(ParameterSetName = 'DomainUser')]
+        [System.Management.Automation.PSCredential]
+        [System.Management.Automation.Credential()]
+        $Credential,
 
         [ValidateScript({
             if ($_ -and -not (Test-Path -Path $_ -PathType Leaf)) {
@@ -6849,8 +6923,51 @@ function Register-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "Cannot determine Robocurse script path. Use -ScriptPath parameter to specify the path to Robocurse.ps1"
         }
 
+        # Security validation for script path
+        # Validate the script has a .ps1 extension (prevent executing arbitrary files)
+        if ([System.IO.Path]::GetExtension($effectiveScriptPath) -ne '.ps1') {
+            return New-OperationResult -Success $false -ErrorMessage "Script path must have a .ps1 extension: $effectiveScriptPath"
+        }
+
+        # Validate paths don't contain dangerous characters that could enable command injection
+        # These characters could break out of the quoted argument
+        $dangerousChars = @('`', '$', '"', ';', '&', '|', '>', '<', [char]0x0000, [char]0x000A, [char]0x000D)
+        foreach ($char in $dangerousChars) {
+            if ($effectiveScriptPath.Contains($char) -or $ConfigPath.Contains($char)) {
+                return New-OperationResult -Success $false -ErrorMessage "Script path or config path contains invalid characters that could pose a security risk"
+            }
+        }
+
+        # Additional warning for SYSTEM-level tasks
+        if ($RunAsSystem) {
+            $resolvedScriptPath = [System.IO.Path]::GetFullPath($effectiveScriptPath)
+            Write-RobocurseLog -Message "SECURITY: Registering task to run as SYSTEM with script: $resolvedScriptPath" -Level 'Warning' -Component 'Scheduler'
+
+            # Check if the script is in a protected location (Program Files or Windows)
+            $protectedPaths = @(
+                $env:ProgramFiles,
+                ${env:ProgramFiles(x86)},
+                $env:SystemRoot
+            ) | Where-Object { $_ }
+
+            $isProtected = $false
+            foreach ($protectedPath in $protectedPaths) {
+                if ($resolvedScriptPath.StartsWith($protectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+                    $isProtected = $true
+                    break
+                }
+            }
+
+            if (-not $isProtected) {
+                Write-RobocurseLog -Message "WARNING: Script '$resolvedScriptPath' is not in a protected directory. Consider moving to Program Files for enhanced security." -Level 'Warning' -Component 'Scheduler'
+            }
+        }
+
         # Build action - PowerShell command to run Robocurse in headless mode
-        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$effectiveScriptPath`" -Headless -ConfigPath `"$ConfigPath`""
+        # Use single quotes for inner paths to prevent variable expansion, then escape for the argument string
+        $escapedScriptPath = $effectiveScriptPath -replace "'", "''"
+        $escapedConfigPath = $ConfigPath -replace "'", "''"
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$escapedScriptPath`" -Headless -ConfigPath `"$escapedConfigPath`""
 
         $action = New-ScheduledTaskAction `
             -Execute "powershell.exe" `
@@ -6874,13 +6991,31 @@ function Register-RobocurseTask {
         }
 
         # Build principal - determines user context for task execution
+        # IMPORTANT: S4U logon does NOT have network credentials and cannot access UNC paths
+        # For UNC path access, use -Credential parameter with a domain account
         $principal = if ($RunAsSystem) {
+            # SYSTEM account - no network credentials, but useful for local-only operations
+            Write-RobocurseLog -Message "Using SYSTEM account - note: SYSTEM cannot access network resources by default" `
+                -Level 'Info' -Component 'Scheduler'
             New-ScheduledTaskPrincipal `
                 -UserId "SYSTEM" `
                 -LogonType ServiceAccount `
                 -RunLevel Highest
         }
+        elseif ($Credential) {
+            # Domain/local user with credentials - enables network access (UNC paths)
+            Write-RobocurseLog -Message "Using credential-based logon for network access capability" `
+                -Level 'Info' -Component 'Scheduler'
+            New-ScheduledTaskPrincipal `
+                -UserId $Credential.UserName `
+                -LogonType Password `
+                -RunLevel Highest
+        }
         else {
+            # S4U logon - current user, but NO network credentials
+            # This will NOT work for UNC paths!
+            Write-RobocurseLog -Message "Using S4U logon (current user) - WARNING: Cannot access network/UNC paths. Use -Credential for network access." `
+                -Level 'Warning' -Component 'Scheduler'
             New-ScheduledTaskPrincipal `
                 -UserId $env:USERNAME `
                 -LogonType S4U `
@@ -6906,6 +7041,13 @@ function Register-RobocurseTask {
             Settings = $settings
             Description = "Robocurse automatic directory replication"
             Force = $true
+        }
+
+        # If credentials provided, add them to task registration
+        # This is required for Password logon type to enable network access
+        if ($Credential) {
+            $taskParams['User'] = $Credential.UserName
+            $taskParams['Password'] = $Credential.GetNetworkCredential().Password
         }
 
         if ($PSCmdlet.ShouldProcess($TaskName, "Register scheduled task (Schedule: $Schedule, Time: $Time)")) {
@@ -7620,32 +7762,62 @@ function Close-ReplicationRunspace {
         Safely stops and disposes the PowerShell instance and runspace
         used for background replication. Called during window close
         and when replication completes.
+
+        Uses a script-level flag to prevent race conditions when multiple
+        threads attempt cleanup simultaneously (e.g., window close + completion handler).
     #>
 
+    # Thread-safe check and set using Interlocked
+    # This prevents multiple threads from cleaning up simultaneously
     if (-not $script:ReplicationPowerShell) { return }
+
+    # Capture reference and clear script variable atomically
+    # This ensures only one thread proceeds with cleanup
+    $psInstance = $script:ReplicationPowerShell
+    $handle = $script:ReplicationHandle
+    $script:ReplicationPowerShell = $null
+    $script:ReplicationHandle = $null
+
+    # If another thread already cleared the variables, exit
+    if (-not $psInstance) { return }
 
     try {
         # Stop the PowerShell instance if still running
-        if ($script:ReplicationHandle -and -not $script:ReplicationHandle.IsCompleted) {
-            $script:ReplicationPowerShell.Stop()
+        if ($handle -and -not $handle.IsCompleted) {
+            try {
+                $psInstance.Stop()
+            }
+            catch [System.Management.Automation.PipelineStoppedException] {
+                # Expected when pipeline is already stopped
+            }
+            catch [System.ObjectDisposedException] {
+                # Already disposed by another thread
+                return
+            }
         }
 
         # Close and dispose the runspace
-        if ($script:ReplicationPowerShell.Runspace) {
-            $script:ReplicationPowerShell.Runspace.Close()
-            $script:ReplicationPowerShell.Runspace.Dispose()
+        if ($psInstance.Runspace) {
+            try {
+                $psInstance.Runspace.Close()
+                $psInstance.Runspace.Dispose()
+            }
+            catch [System.ObjectDisposedException] {
+                # Already disposed
+            }
         }
 
         # Dispose the PowerShell instance
-        $script:ReplicationPowerShell.Dispose()
+        try {
+            $psInstance.Dispose()
+        }
+        catch [System.ObjectDisposedException] {
+            # Already disposed
+        }
     }
     catch {
         # Silently ignore cleanup errors during window close
         Write-Verbose "Runspace cleanup error (ignored): $($_.Exception.Message)"
-    }
-    finally {
-        $script:ReplicationPowerShell = $null
-        $script:ReplicationHandle = $null
     }
 }
 
@@ -8660,20 +8832,42 @@ function Invoke-HeadlessReplication {
         Write-Host ""
     }
 
+    # Track email status for exit code consideration
+    $emailFailed = $false
+
     # Send email notification if configured
     if ($Config.Email -and $Config.Email.Enabled) {
         Write-Host "Sending completion email..."
         $emailResult = Send-CompletionEmail -Config $Config.Email -Results $results -Status $emailStatus
         if ($emailResult.Success) {
-            Write-Host "Email sent successfully."
+            Write-Host "Email sent successfully." -ForegroundColor Green
         }
         else {
-            Write-RobocurseLog -Message "Failed to send completion email: $($emailResult.ErrorMessage)" -Level 'Warning' -Component 'Email'
-            Write-Warning "Failed to send email: $($emailResult.ErrorMessage)"
+            $emailFailed = $true
+            Write-RobocurseLog -Message "Failed to send completion email: $($emailResult.ErrorMessage)" -Level 'Error' -Component 'Email'
+            Write-SiemEvent -EventType 'ChunkError' -Data @{
+                errorType = 'EmailDeliveryFailure'
+                errorMessage = $emailResult.ErrorMessage
+                recipients = ($Config.Email.To -join ', ')
+            }
+            # Make email failure VERY visible in console
+            Write-Host ""
+            Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor Red
+            Write-Host "║  EMAIL NOTIFICATION FAILED                                 ║" -ForegroundColor Red
+            Write-Host "╠════════════════════════════════════════════════════════════╣" -ForegroundColor Red
+            Write-Host "║  Error: $($emailResult.ErrorMessage.PadRight(50).Substring(0,50)) ║" -ForegroundColor Red
+            Write-Host "║                                                            ║" -ForegroundColor Red
+            Write-Host "║  Replication completed but notification was NOT sent.      ║" -ForegroundColor Red
+            Write-Host "║  Check SMTP settings and credentials.                      ║" -ForegroundColor Red
+            Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor Red
+            Write-Host ""
         }
     }
 
     # Return exit code
+    # Email failure alone doesn't cause exit code 1, but is logged prominently
+    # Uncomment the following to treat email failure as a failure condition:
+    # if ($emailFailed) { return 2 }  # Exit code 2 = email delivery failure
     if ($totalFailed -gt 0 -or $script:OrchestrationState.Phase -eq 'Stopped') {
         return 1
     }
@@ -8687,6 +8881,7 @@ function Start-RobocurseMain {
     .DESCRIPTION
         Handles parameter validation, configuration loading, and launches
         either GUI or headless mode. Separated from script body for testability.
+        Uses granular error handling for distinct failure phases.
     #>
     param(
         [switch]$Headless,
@@ -8702,17 +8897,19 @@ function Start-RobocurseMain {
         return 0
     }
 
+    # Track state for cleanup
+    $logSessionInitialized = $false
+    $config = $null
+
     # Validate config path for security before using it
     if (-not (Test-SafeConfigPath -Path $ConfigPath)) {
         Write-Error "Configuration path '$ConfigPath' contains unsafe characters or patterns."
         return 1
     }
 
+    # Phase 1: Resolve and validate configuration path
     try {
-        # Resolve ConfigPath - prefer script directory over working directory
-        # This ensures the config is found when running from Task Scheduler or other locations
         if ($ConfigPath -match '^\.[\\/]' -or -not [System.IO.Path]::IsPathRooted($ConfigPath)) {
-            # Relative path - try script directory first
             $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $PSCommandPath }
             $scriptRelativePath = Join-Path $scriptDir ($ConfigPath -replace '^\.[\\\/]', '')
 
@@ -8721,95 +8918,140 @@ function Start-RobocurseMain {
                 $ConfigPath = $scriptRelativePath
             }
         }
+    }
+    catch {
+        Write-Error "Failed to resolve configuration path '$ConfigPath': $($_.Exception.Message)"
+        return 1
+    }
 
-        # Load configuration
+    # Phase 2: Load configuration
+    try {
         if (Test-Path $ConfigPath) {
             $config = Get-RobocurseConfig -Path $ConfigPath
         }
         else {
             Write-Warning "Configuration file not found: $ConfigPath"
             if (-not $Headless) {
-                # GUI can create a new config
                 $config = New-DefaultConfig
             }
             else {
-                throw "Configuration file required for headless mode: $ConfigPath"
+                Write-Error "Configuration file required for headless mode: $ConfigPath"
+                return 1
             }
         }
+    }
+    catch {
+        Write-Error "Failed to load configuration from '$ConfigPath': $($_.Exception.Message)"
+        return 1
+    }
 
-        # Launch appropriate interface
-        if ($Headless) {
-            # Validate headless parameters
-            if (-not $ProfileName -and -not $AllProfiles) {
-                throw "Headless mode requires either -Profile <name> or -AllProfiles parameter."
-            }
+    # Phase 3: Launch appropriate interface
+    if ($Headless) {
+        # Phase 3a: Validate headless parameters
+        if (-not $ProfileName -and -not $AllProfiles) {
+            Write-Error "Headless mode requires either -Profile <name> or -AllProfiles parameter."
+            return 1
+        }
 
-            if ($ProfileName -and $AllProfiles) {
-                Write-Warning "-Profile and -AllProfiles both specified. Using -Profile '$ProfileName'."
-            }
+        if ($ProfileName -and $AllProfiles) {
+            Write-Warning "-Profile and -AllProfiles both specified. Using -Profile '$ProfileName'."
+        }
 
-            # Initialize logging for headless mode
+        # Phase 3b: Initialize logging
+        try {
             $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { ".\Logs" }
             $compressDays = if ($config.GlobalSettings.LogCompressAfterDays) { $config.GlobalSettings.LogCompressAfterDays } else { $script:LogCompressAfterDays }
             $deleteDays = if ($config.GlobalSettings.LogRetentionDays) { $config.GlobalSettings.LogRetentionDays } else { $script:LogDeleteAfterDays }
             Initialize-LogSession -LogRoot $logRoot -CompressAfterDays $compressDays -DeleteAfterDays $deleteDays
+            $logSessionInitialized = $true
+        }
+        catch {
+            Write-Error "Failed to initialize logging: $($_.Exception.Message)"
+            return 1
+        }
 
-            # Determine which profiles to run
-            $profilesToRun = @()
+        # Phase 3c: Determine which profiles to run
+        $profilesToRun = @()
+        try {
             if ($ProfileName) {
-                # Run specific profile
                 $targetProfile = $config.SyncProfiles | Where-Object { $_.Name -eq $ProfileName }
                 if (-not $targetProfile) {
                     $availableProfiles = ($config.SyncProfiles | ForEach-Object { $_.Name }) -join ", "
-                    throw "Profile '$ProfileName' not found. Available profiles: $availableProfiles"
+                    Write-Error "Profile '$ProfileName' not found. Available profiles: $availableProfiles"
+                    return 1
                 }
                 $profilesToRun = @($targetProfile)
             }
             else {
-                # Run all enabled profiles
                 $profilesToRun = @($config.SyncProfiles | Where-Object {
-                    # Check for explicit Enabled property, default to true if not present
-                    # Use -not to check if property doesn't exist, or if it exists and is true
                     ($null -eq $_.PSObject.Properties['Enabled']) -or ($_.Enabled -eq $true)
                 })
                 if ($profilesToRun.Count -eq 0) {
-                    throw "No enabled profiles found in configuration."
+                    Write-Error "No enabled profiles found in configuration."
+                    return 1
                 }
             }
+        }
+        catch {
+            Write-Error "Failed to resolve profiles: $($_.Exception.Message)"
+            return 1
+        }
 
-            # Get concurrency settings
+        # Phase 3d: Run headless replication
+        try {
             $maxJobs = if ($config.GlobalSettings.MaxConcurrentJobs) {
                 $config.GlobalSettings.MaxConcurrentJobs
             } else {
                 $script:DefaultMaxConcurrentJobs
             }
 
-            # Get bandwidth limit (0 = unlimited)
             $bandwidthLimit = if ($config.GlobalSettings.BandwidthLimitMbps) {
                 $config.GlobalSettings.BandwidthLimitMbps
             } else {
                 0
             }
 
-            # Run headless replication
             return Invoke-HeadlessReplication -Config $config -ProfilesToRun $profilesToRun `
                 -MaxConcurrentJobs $maxJobs -BandwidthLimitMbps $bandwidthLimit -DryRun:$DryRun
         }
-        else {
-            # Launch GUI
+        catch {
+            Write-Error "Replication failed: $($_.Exception.Message)"
+            if ($logSessionInitialized) {
+                Write-RobocurseLog -Message "Replication failed with exception: $($_.Exception.Message)" -Level 'Error' -Component 'Main'
+            }
+            return 1
+        }
+        finally {
+            # Cleanup: Ensure any partial state is handled
+            if ($logSessionInitialized -and $script:OrchestrationState) {
+                # Log final state if orchestration was started
+                if ($script:OrchestrationState.Phase -notin @('Idle', 'Complete')) {
+                    Write-RobocurseLog -Message "Main exit with orchestration in phase: $($script:OrchestrationState.Phase)" -Level 'Warning' -Component 'Main'
+                }
+            }
+            # Clean up health check file on exit
+            if (Test-Path $script:HealthCheckStatusFile) {
+                Remove-Item -Path $script:HealthCheckStatusFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    else {
+        # Phase 3: Launch GUI
+        try {
             $window = Initialize-RobocurseGui -ConfigPath $ConfigPath
             if ($window) {
                 $window.ShowDialog() | Out-Null
                 return 0
             }
             else {
-                throw "Failed to initialize GUI. Try running with -Headless mode."
+                Write-Error "Failed to initialize GUI window. Try running with -Headless mode."
+                return 1
             }
         }
-    }
-    catch {
-        Write-Error "Robocurse failed: $_"
-        return 1
+        catch {
+            Write-Error "GUI initialization failed: $($_.Exception.Message)"
+            return 1
+        }
     }
 }
 

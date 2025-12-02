@@ -1,6 +1,16 @@
 # Robocurse PowerShell Module
 # Multi-share parallel robocopy orchestrator for Windows environments.
 
+#region ==================== MODULE CONFIGURATION ====================
+# Set strict error handling at module level.
+# This ensures non-terminating errors become terminating, preventing silent failures.
+# Individual functions can override with -ErrorAction where appropriate (e.g., SilentlyContinue for optional lookups).
+$ErrorActionPreference = 'Stop'
+
+# Preserve the previous preference for restoration if needed
+$script:PreviousErrorActionPreference = $ErrorActionPreference
+#endregion
+
 #region ==================== CONSTANTS ====================
 # Chunking defaults
 # Maximum size for a single chunk. Larger directories will be split into smaller chunks.

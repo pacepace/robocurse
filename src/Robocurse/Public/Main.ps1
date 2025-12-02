@@ -170,20 +170,42 @@ function Invoke-HeadlessReplication {
         Write-Host ""
     }
 
+    # Track email status for exit code consideration
+    $emailFailed = $false
+
     # Send email notification if configured
     if ($Config.Email -and $Config.Email.Enabled) {
         Write-Host "Sending completion email..."
         $emailResult = Send-CompletionEmail -Config $Config.Email -Results $results -Status $emailStatus
         if ($emailResult.Success) {
-            Write-Host "Email sent successfully."
+            Write-Host "Email sent successfully." -ForegroundColor Green
         }
         else {
-            Write-RobocurseLog -Message "Failed to send completion email: $($emailResult.ErrorMessage)" -Level 'Warning' -Component 'Email'
-            Write-Warning "Failed to send email: $($emailResult.ErrorMessage)"
+            $emailFailed = $true
+            Write-RobocurseLog -Message "Failed to send completion email: $($emailResult.ErrorMessage)" -Level 'Error' -Component 'Email'
+            Write-SiemEvent -EventType 'ChunkError' -Data @{
+                errorType = 'EmailDeliveryFailure'
+                errorMessage = $emailResult.ErrorMessage
+                recipients = ($Config.Email.To -join ', ')
+            }
+            # Make email failure VERY visible in console
+            Write-Host ""
+            Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor Red
+            Write-Host "║  EMAIL NOTIFICATION FAILED                                 ║" -ForegroundColor Red
+            Write-Host "╠════════════════════════════════════════════════════════════╣" -ForegroundColor Red
+            Write-Host "║  Error: $($emailResult.ErrorMessage.PadRight(50).Substring(0,50)) ║" -ForegroundColor Red
+            Write-Host "║                                                            ║" -ForegroundColor Red
+            Write-Host "║  Replication completed but notification was NOT sent.      ║" -ForegroundColor Red
+            Write-Host "║  Check SMTP settings and credentials.                      ║" -ForegroundColor Red
+            Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor Red
+            Write-Host ""
         }
     }
 
     # Return exit code
+    # Email failure alone doesn't cause exit code 1, but is logged prominently
+    # Uncomment the following to treat email failure as a failure condition:
+    # if ($emailFailed) { return 2 }  # Exit code 2 = email delivery failure
     if ($totalFailed -gt 0 -or $script:OrchestrationState.Phase -eq 'Stopped') {
         return 1
     }
@@ -197,6 +219,7 @@ function Start-RobocurseMain {
     .DESCRIPTION
         Handles parameter validation, configuration loading, and launches
         either GUI or headless mode. Separated from script body for testability.
+        Uses granular error handling for distinct failure phases.
     #>
     param(
         [switch]$Headless,
@@ -212,17 +235,19 @@ function Start-RobocurseMain {
         return 0
     }
 
+    # Track state for cleanup
+    $logSessionInitialized = $false
+    $config = $null
+
     # Validate config path for security before using it
     if (-not (Test-SafeConfigPath -Path $ConfigPath)) {
         Write-Error "Configuration path '$ConfigPath' contains unsafe characters or patterns."
         return 1
     }
 
+    # Phase 1: Resolve and validate configuration path
     try {
-        # Resolve ConfigPath - prefer script directory over working directory
-        # This ensures the config is found when running from Task Scheduler or other locations
         if ($ConfigPath -match '^\.[\\/]' -or -not [System.IO.Path]::IsPathRooted($ConfigPath)) {
-            # Relative path - try script directory first
             $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $PSCommandPath }
             $scriptRelativePath = Join-Path $scriptDir ($ConfigPath -replace '^\.[\\\/]', '')
 
@@ -231,94 +256,139 @@ function Start-RobocurseMain {
                 $ConfigPath = $scriptRelativePath
             }
         }
+    }
+    catch {
+        Write-Error "Failed to resolve configuration path '$ConfigPath': $($_.Exception.Message)"
+        return 1
+    }
 
-        # Load configuration
+    # Phase 2: Load configuration
+    try {
         if (Test-Path $ConfigPath) {
             $config = Get-RobocurseConfig -Path $ConfigPath
         }
         else {
             Write-Warning "Configuration file not found: $ConfigPath"
             if (-not $Headless) {
-                # GUI can create a new config
                 $config = New-DefaultConfig
             }
             else {
-                throw "Configuration file required for headless mode: $ConfigPath"
+                Write-Error "Configuration file required for headless mode: $ConfigPath"
+                return 1
             }
         }
+    }
+    catch {
+        Write-Error "Failed to load configuration from '$ConfigPath': $($_.Exception.Message)"
+        return 1
+    }
 
-        # Launch appropriate interface
-        if ($Headless) {
-            # Validate headless parameters
-            if (-not $ProfileName -and -not $AllProfiles) {
-                throw "Headless mode requires either -Profile <name> or -AllProfiles parameter."
-            }
+    # Phase 3: Launch appropriate interface
+    if ($Headless) {
+        # Phase 3a: Validate headless parameters
+        if (-not $ProfileName -and -not $AllProfiles) {
+            Write-Error "Headless mode requires either -Profile <name> or -AllProfiles parameter."
+            return 1
+        }
 
-            if ($ProfileName -and $AllProfiles) {
-                Write-Warning "-Profile and -AllProfiles both specified. Using -Profile '$ProfileName'."
-            }
+        if ($ProfileName -and $AllProfiles) {
+            Write-Warning "-Profile and -AllProfiles both specified. Using -Profile '$ProfileName'."
+        }
 
-            # Initialize logging for headless mode
+        # Phase 3b: Initialize logging
+        try {
             $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { ".\Logs" }
             $compressDays = if ($config.GlobalSettings.LogCompressAfterDays) { $config.GlobalSettings.LogCompressAfterDays } else { $script:LogCompressAfterDays }
             $deleteDays = if ($config.GlobalSettings.LogRetentionDays) { $config.GlobalSettings.LogRetentionDays } else { $script:LogDeleteAfterDays }
             Initialize-LogSession -LogRoot $logRoot -CompressAfterDays $compressDays -DeleteAfterDays $deleteDays
+            $logSessionInitialized = $true
+        }
+        catch {
+            Write-Error "Failed to initialize logging: $($_.Exception.Message)"
+            return 1
+        }
 
-            # Determine which profiles to run
-            $profilesToRun = @()
+        # Phase 3c: Determine which profiles to run
+        $profilesToRun = @()
+        try {
             if ($ProfileName) {
-                # Run specific profile
                 $targetProfile = $config.SyncProfiles | Where-Object { $_.Name -eq $ProfileName }
                 if (-not $targetProfile) {
                     $availableProfiles = ($config.SyncProfiles | ForEach-Object { $_.Name }) -join ", "
-                    throw "Profile '$ProfileName' not found. Available profiles: $availableProfiles"
+                    Write-Error "Profile '$ProfileName' not found. Available profiles: $availableProfiles"
+                    return 1
                 }
                 $profilesToRun = @($targetProfile)
             }
             else {
-                # Run all enabled profiles
                 $profilesToRun = @($config.SyncProfiles | Where-Object {
-                    # Check for explicit Enabled property, default to true if not present
-                    # Use -not to check if property doesn't exist, or if it exists and is true
                     ($null -eq $_.PSObject.Properties['Enabled']) -or ($_.Enabled -eq $true)
                 })
                 if ($profilesToRun.Count -eq 0) {
-                    throw "No enabled profiles found in configuration."
+                    Write-Error "No enabled profiles found in configuration."
+                    return 1
                 }
             }
+        }
+        catch {
+            Write-Error "Failed to resolve profiles: $($_.Exception.Message)"
+            return 1
+        }
 
-            # Get concurrency settings
+        # Phase 3d: Run headless replication
+        try {
             $maxJobs = if ($config.GlobalSettings.MaxConcurrentJobs) {
                 $config.GlobalSettings.MaxConcurrentJobs
             } else {
                 $script:DefaultMaxConcurrentJobs
             }
 
-            # Get bandwidth limit (0 = unlimited)
             $bandwidthLimit = if ($config.GlobalSettings.BandwidthLimitMbps) {
                 $config.GlobalSettings.BandwidthLimitMbps
             } else {
                 0
             }
 
-            # Run headless replication
             return Invoke-HeadlessReplication -Config $config -ProfilesToRun $profilesToRun `
                 -MaxConcurrentJobs $maxJobs -BandwidthLimitMbps $bandwidthLimit -DryRun:$DryRun
         }
-        else {
-            # Launch GUI
+        catch {
+            Write-Error "Replication failed: $($_.Exception.Message)"
+            if ($logSessionInitialized) {
+                Write-RobocurseLog -Message "Replication failed with exception: $($_.Exception.Message)" -Level 'Error' -Component 'Main'
+            }
+            return 1
+        }
+        finally {
+            # Cleanup: Ensure any partial state is handled
+            if ($logSessionInitialized -and $script:OrchestrationState) {
+                # Log final state if orchestration was started
+                if ($script:OrchestrationState.Phase -notin @('Idle', 'Complete')) {
+                    Write-RobocurseLog -Message "Main exit with orchestration in phase: $($script:OrchestrationState.Phase)" -Level 'Warning' -Component 'Main'
+                }
+            }
+            # Clean up health check file on exit
+            if (Test-Path $script:HealthCheckStatusFile) {
+                Remove-Item -Path $script:HealthCheckStatusFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    else {
+        # Phase 3: Launch GUI
+        try {
             $window = Initialize-RobocurseGui -ConfigPath $ConfigPath
             if ($window) {
                 $window.ShowDialog() | Out-Null
                 return 0
             }
             else {
-                throw "Failed to initialize GUI. Try running with -Headless mode."
+                Write-Error "Failed to initialize GUI window. Try running with -Headless mode."
+                return 1
             }
         }
-    }
-    catch {
-        Write-Error "Robocurse failed: $_"
-        return 1
+        catch {
+            Write-Error "GUI initialization failed: $($_.Exception.Message)"
+            return 1
+        }
     }
 }
