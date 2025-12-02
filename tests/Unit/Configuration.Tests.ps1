@@ -1,12 +1,10 @@
 BeforeAll {
-    # Load the main script - it auto-detects dot-sourcing and skips main execution
-    $mainScriptPath = Join-Path $PSScriptRoot ".." ".." "Robocurse.ps1"
-    . $mainScriptPath -Help
+    # Load Robocurse functions using TestHelper
+    . "$PSScriptRoot\..\TestHelper.ps1"
+    Initialize-RobocurseForTesting
 
-    # Create temporary test directory - handle both Windows and Unix-like systems
-    $tempBase = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
-    $script:TestDir = Join-Path $tempBase "RobocurseTests_$(Get-Random)"
-    New-Item -ItemType Directory -Path $script:TestDir -Force | Out-Null
+    # Create temporary test directory
+    $script:TestDir = New-TempTestDirectory
 }
 
 AfterAll {

@@ -40,9 +40,16 @@ Install-Module -Name Pester -Force -SkipPublisherCheck
 
 ## Installation
 
-1. Clone or download this repository
-2. Review and customize `Robocurse.config.json` for your environment
-3. Ensure you have administrator privileges
+**For Deployment:**
+1. Copy `dist/Robocurse.ps1` to your target server
+2. Copy and customize `Robocurse.config.json` to the same directory
+3. Ensure you have administrator privileges (required for VSS)
+
+**For Development:**
+1. Clone this repository
+2. Edit modules in `src/Robocurse/Public/`
+3. Run tests: `Invoke-Pester ./tests`
+4. Build monolith: `.\build\Build-Robocurse.ps1`
 
 ## Configuration
 
@@ -165,12 +172,14 @@ Clear-OrphanVssSnapshots
 
 ## Usage
 
+Use `dist/Robocurse.ps1` for deployment (or import the module from `src/Robocurse/` for development).
+
 ### GUI Mode
 
 Launch the graphical interface:
 
 ```powershell
-.\Robocurse.ps1
+.\dist\Robocurse.ps1
 ```
 
 ### Headless Mode
@@ -178,7 +187,7 @@ Launch the graphical interface:
 Run a specific profile in headless mode (ideal for scheduled tasks):
 
 ```powershell
-.\Robocurse.ps1 -Headless -Profile "DailyBackup"
+.\dist\Robocurse.ps1 -Headless -Profile "DailyBackup"
 ```
 
 ### Custom Configuration File
@@ -186,7 +195,7 @@ Run a specific profile in headless mode (ideal for scheduled tasks):
 Specify a different configuration file:
 
 ```powershell
-.\Robocurse.ps1 -ConfigPath "C:\Configs\custom-config.json" -Headless -Profile "WeeklyFull"
+.\dist\Robocurse.ps1 -ConfigPath "C:\Configs\custom-config.json" -Headless -Profile "WeeklyFull"
 ```
 
 ### Dry-Run Mode
@@ -194,7 +203,7 @@ Specify a different configuration file:
 Preview what would be copied without actually performing the copy:
 
 ```powershell
-.\Robocurse.ps1 -Headless -Profile "DailyBackup" -DryRun
+.\dist\Robocurse.ps1 -Headless -Profile "DailyBackup" -DryRun
 ```
 
 This runs robocopy with the `/L` flag, which lists files that would be copied without actually copying them. Useful for:
@@ -205,12 +214,12 @@ This runs robocopy with the `/L` flag, which lists files that would be copied wi
 ### Display Help
 
 ```powershell
-.\Robocurse.ps1 -Help
+.\dist\Robocurse.ps1 -Help
 ```
 
 ## Testing
 
-This project uses Pester 5 for testing. All tests are located in the `tests/` directory.
+This project uses Pester 5 for testing. Tests load from the modular source (`src/Robocurse/`).
 
 ### Run All Tests
 
@@ -231,30 +240,58 @@ Invoke-Pester ./tests/Integration -Output Detailed
 Invoke-Pester ./tests/Unit/Configuration.Tests.ps1 -Output Detailed
 ```
 
-### Run Tests with Coverage
+### Test the Built Monolith
+
+To test the built artifact instead of the modules:
 
 ```powershell
-Invoke-Pester ./tests -CodeCoverage .\Robocurse.ps1 -Output Detailed
+# In test file BeforeAll block, use:
+Initialize-RobocurseForTesting -UseBuiltMonolith
 ```
 
 ## Project Structure
 
 ```
 robocurse/
-├── Robocurse.ps1              # Main script
-├── Robocurse.config.json      # Configuration file
+├── src/Robocurse/             # SOURCE OF TRUTH - Module files
+│   ├── Robocurse.psd1         # Module manifest
+│   ├── Robocurse.psm1         # Module loader + constants
+│   └── Public/                # Exported functions
+│       ├── Utility.ps1
+│       ├── Configuration.ps1
+│       ├── Logging.ps1
+│       ├── DirectoryProfiling.ps1
+│       ├── Chunking.ps1
+│       ├── Robocopy.ps1
+│       ├── Orchestration.ps1
+│       ├── Progress.ps1
+│       ├── VSS.ps1
+│       ├── Email.ps1
+│       ├── Scheduling.ps1
+│       ├── GUI.ps1
+│       └── Main.ps1
+├── build/                     # Build tools
+│   ├── Build-Robocurse.ps1    # Assembles modules into monolith
+│   └── README.md              # Build documentation
+├── dist/                      # Built artifacts
+│   └── Robocurse.ps1          # DEPLOYABLE MONOLITH
 ├── tests/                     # Test directory
+│   ├── TestHelper.ps1         # Test loader (uses modules)
 │   ├── Robocurse.Tests.ps1    # Main test suite
 │   ├── Unit/                  # Unit tests
-│   │   ├── Configuration.Tests.ps1
-│   │   ├── Logging.Tests.ps1
-│   │   ├── Chunking.Tests.ps1
-│   │   └── ...
 │   └── Integration/           # Integration tests
-│       └── EndToEnd.Tests.ps1
-├── docs/                      # Documentation and task files
+├── Robocurse.config.json      # Configuration file
+├── docs/                      # Documentation
 └── README.md                  # This file
 ```
+
+**Development Workflow:**
+- Edit files in `src/Robocurse/Public/`
+- Run tests: `Invoke-Pester ./tests -Output Detailed`
+- Build monolith: `.\build\Build-Robocurse.ps1`
+- Deploy: Copy `dist/Robocurse.ps1` to target server
+
+See [build/README.md](build/README.md) for detailed build documentation.
 
 ## Development Status
 

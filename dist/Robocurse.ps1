@@ -1,71 +1,64 @@
-<#
-.TITLE
-    Robocurse
-
-.DESCRIPTION
-    Multi-share parallel robocopy orchestrator for Windows environments.
-
-    Robocurse intelligently splits large directory trees into manageable chunks
-    and orchestrates multiple parallel robocopy processes for high-throughput
-    file replication. Designed for enterprise scenarios where single robocopy
-    instances become bottlenecked by massive directory structures.
-
-    Features:
-    - Smart chunking based on directory size and file count
-    - Parallel robocopy execution with configurable concurrency
-    - VSS snapshot support for copying locked files
-    - SIEM-compatible JSON logging for audit trails
-    - Email notifications on completion
-    - Windows Task Scheduler integration
-    - WPF GUI or headless CLI operation
-
-.AUTHOR
-    Mark Pace <pace@pace.org>
-
-.COPYRIGHT
-    (c) 2024 Mark Pace. All rights reserved.
-
-.VERSION
-    1.0.0
-
-.LICENSEURI
-    https://opensource.org/licenses/MIT
-
-.PROJECTURI
-    https://github.com/pacepace/robocurse
-
-.TAGS
-    robocopy, backup, replication, parallel, orchestration, file-sync
-
-.RELEASENOTES
-    1.0.0 - Initial release
-#>
-
 #Requires -Version 5.1
-#Requires -RunAsAdministrator
-
 <#
 .SYNOPSIS
     Robocurse - Multi-share parallel robocopy orchestrator
+
 .DESCRIPTION
-    Manages multiple robocopy instances to replicate large directory
-    structures that would otherwise overwhelm a single robocopy process.
-.PARAMETER Headless
-    Run in headless mode without GUI
+    A parallel replication orchestrator for robocopy that handles multiple source/destination
+    pairs with intelligent directory chunking, progress tracking, and email notifications.
+
+    Features:
+    - Parallel robocopy jobs with configurable concurrency
+    - Smart directory chunking based on size and file count
+    - VSS snapshot support for locked files
+    - JSON configuration with profile management
+    - SIEM-compatible JSON logging
+    - Email notifications with HTML reports
+    - Windows Task Scheduler integration
+    - Dark-themed WPF GUI
+
 .PARAMETER ConfigPath
-    Path to the configuration file (default: .\Robocurse.config.json)
-.PARAMETER Profile
-    Specify a profile name from the configuration file
+    Path to JSON configuration file. Default: .\Robocurse.config.json
+
+.PARAMETER Headless
+    Run without GUI (for scheduled tasks and scripts)
+
+.PARAMETER SyncProfile
+    Name of specific profile to run (alias: -Profile)
+
+.PARAMETER AllProfiles
+    Run all enabled profiles (headless mode only)
+
+.PARAMETER DryRun
+    Preview mode - shows what would be copied without copying
+
 .PARAMETER Help
-    Display help information
+    Show this help message
+
 .EXAMPLE
     .\Robocurse.ps1
-    Launches the GUI interface
-.EXAMPLE
-    .\Robocurse.ps1 -Headless -ConfigPath ".\custom.config.json" -Profile "DailyBackup"
-    Runs in headless mode with a custom config and profile
-#>
+    Launches the GUI
 
+.EXAMPLE
+    .\Robocurse.ps1 -Headless -Profile "DailyBackup"
+    Run specific profile in headless mode
+
+.EXAMPLE
+    .\Robocurse.ps1 -Headless -AllProfiles
+    Run all enabled profiles in headless mode
+
+.EXAMPLE
+    .\Robocurse.ps1 -Headless -DryRun -Profile "DailyBackup"
+    Preview what would be replicated
+
+.NOTES
+    Author: Mark Pace
+    License: MIT
+    Built: 2025-12-01 19:49:26
+
+.LINK
+    https://github.com/pacepace/robocurse
+#>
 param(
     [switch]$Headless,
     [string]$ConfigPath = ".\Robocurse.config.json",
@@ -77,105 +70,7 @@ param(
     [switch]$Help
 )
 
-#region ==================== CONSTANTS ====================
-
-# Chunking defaults
-# Maximum size for a single chunk. Larger directories will be split into smaller chunks.
-# 10GB is chosen to balance parallelism vs. overhead - large enough to avoid excessive splitting,
-# small enough to allow meaningful parallel processing.
-$script:DefaultMaxChunkSizeBytes = 10GB
-
-# Maximum number of files in a single chunk before splitting.
-# 50,000 files is chosen to prevent robocopy from being overwhelmed by file enumeration
-# while still processing meaningful batches.
-$script:DefaultMaxFilesPerChunk = 50000
-
-# Maximum directory depth to traverse when creating chunks.
-# Depth of 5 prevents excessive recursion while allowing reasonable directory structure analysis.
-$script:DefaultMaxChunkDepth = 5
-
-# Minimum size threshold for creating a separate chunk.
-# 100MB ensures we don't create chunks for trivial directories, reducing overhead.
-$script:DefaultMinChunkSizeBytes = 100MB
-
-# Retry policy
-# Maximum retry attempts for failed chunks before marking as permanently failed.
-# 3 retries handles transient network issues without indefinite loops.
-$script:MaxChunkRetries = 3
-
-# Number of times robocopy will retry a failed file copy (maps to /R: parameter).
-# 3 retries is sufficient for transient file locks or network glitches.
-$script:RobocopyRetryCount = 3
-
-# Wait time in seconds between robocopy retry attempts (maps to /W: parameter).
-# 10 seconds allows time for locks to clear without excessive delay.
-$script:RobocopyRetryWaitSeconds = 10
-
-# Threading
-# Default number of threads per robocopy job (maps to /MT: parameter).
-# 8 threads provides good parallelism without overwhelming the network or disk I/O.
-$script:DefaultThreadsPerJob = 8
-
-# Maximum number of concurrent robocopy jobs to run in parallel.
-# 4 concurrent jobs balances system resources while maintaining good throughput.
-$script:DefaultMaxConcurrentJobs = 4
-
-# Caching
-# Maximum age in hours for cached directory profiles before re-scanning.
-# 24 hours prevents unnecessary re-scans while ensuring reasonably fresh data.
-$script:ProfileCacheMaxAgeHours = 24
-
-# Maximum number of entries in the profile cache before triggering cleanup.
-# 10,000 entries is sufficient for large directory trees while preventing unbounded growth.
-$script:ProfileCacheMaxEntries = 10000
-
-# Logging
-# Compress log files older than this many days to save disk space.
-# 7 days keeps recent logs readily accessible while compressing older logs.
-$script:LogCompressAfterDays = 7
-
-# Delete compressed log files older than this many days.
-# 30 days aligns with typical retention policies and provides adequate audit history.
-$script:LogDeleteAfterDays = 30
-
-# GUI display limits
-# Maximum number of completed chunks to display in the GUI grid.
-# Limits prevent UI lag with large chunk counts while showing recent activity.
-$script:GuiMaxCompletedChunksDisplay = 20
-
-# Maximum number of log lines to retain in GUI ring buffer.
-# 500 lines provides sufficient context without excessive memory use.
-$script:GuiLogMaxLines = 500
-
-# Maximum number of errors to display in email notifications.
-# 10 errors provides useful context without overwhelming the email.
-$script:EmailMaxErrorsDisplay = 10
-
-# Default mismatch severity
-# Controls how robocopy exit code 4 (mismatches) is treated.
-# Valid values: "Warning" (default), "Error", "Success" (ignore mismatches)
-$script:DefaultMismatchSeverity = "Warning"
-
-# Orchestration intervals
-# Polling interval in milliseconds for replication tick loop.
-# 500ms balances responsiveness with CPU overhead.
-$script:ReplicationTickIntervalMs = 500
-
-# Progress output interval in seconds for headless mode console output.
-# 10 seconds provides regular updates without flooding the console.
-$script:HeadlessProgressIntervalSeconds = 10
-
-# Checkpoint save frequency
-# Save checkpoint every N completed chunks (also saved on failures).
-# 10 chunks balances disk I/O with recovery granularity.
-$script:CheckpointSaveFrequency = 10
-
-# Dry-run mode state (set during replication, used by Start-ChunkJob)
-$script:DryRunMode = $false
-
-#endregion
-
-#region ==================== UTILITY ====================
+#region ==================== PUBLIC\UTILITY ====================
 
 function Test-IsWindowsPlatform {
     <#
@@ -544,7 +439,7 @@ function Test-SafeConfigPath {
 
 #endregion
 
-#region ==================== CONFIGURATION ====================
+#region ==================== PUBLIC\CONFIGURATION ====================
 
 function New-DefaultConfig {
     <#
@@ -1177,7 +1072,7 @@ function Test-PathFormat {
 
 #endregion
 
-#region ==================== LOGGING ====================
+#region ==================== PUBLIC\LOGGING ====================
 
 # Script-scoped variables for current session state
 $script:CurrentSessionId = $null
@@ -1569,7 +1464,7 @@ function Get-LogPath {
 
 #endregion
 
-#region ==================== DIRECTORY PROFILING ====================
+#region ==================== PUBLIC\DIRECTORYPROFILING ====================
 
 # Script-level cache for directory profiles (thread-safe)
 # Uses OrdinalIgnoreCase comparer for Windows-style case-insensitive path matching
@@ -1867,7 +1762,7 @@ function Clear-ProfileCache {
 
 #endregion
 
-#region ==================== CHUNKING ====================
+#region ==================== PUBLIC\CHUNKING ====================
 
 # Script-level counter for unique chunk IDs (using [ref] for thread-safe Interlocked operations)
 $script:ChunkIdCounter = [ref]0
@@ -2299,7 +2194,7 @@ function Convert-ToDestinationPath {
 
 #endregion
 
-#region ==================== ROBOCOPY WRAPPER ====================
+#region ==================== PUBLIC\ROBOCOPY ====================
 
 # Script-level bandwidth limit (set from config during replication start)
 $script:BandwidthLimitMbps = 0
@@ -2941,7 +2836,7 @@ function Wait-RobocopyJob {
 
 #endregion
 
-#region ==================== ORCHESTRATION ====================
+#region ==================== PUBLIC\ORCHESTRATION ====================
 
 # Script variable to track if C# type has been initialized (for lazy loading)
 $script:OrchestrationTypeInitialized = $false
@@ -3520,8 +3415,6 @@ function Test-ChunkAlreadyCompleted {
 
     return $false
 }
-
-#endregion
 
 function Start-ReplicationRun {
     <#
@@ -4245,7 +4138,7 @@ function Request-Resume {
 
 #endregion
 
-#region ==================== PROGRESS ====================
+#region ==================== PUBLIC\PROGRESS ====================
 
 function Update-ProgressStats {
     <#
@@ -4364,7 +4257,7 @@ function Get-ETAEstimate {
 
 #endregion
 
-#region ==================== VSS ====================
+#region ==================== PUBLIC\VSS ====================
 
 # Path to track active VSS snapshots (for orphan cleanup)
 # Handle cross-platform: TEMP on Windows, TMPDIR on macOS, /tmp fallback
@@ -4849,7 +4742,7 @@ function Invoke-WithVssSnapshot {
 
 #endregion
 
-#region ==================== EMAIL ====================
+#region ==================== PUBLIC\EMAIL ====================
 
 # Initialize Windows Credential Manager P/Invoke types (Windows only)
 $script:CredentialManagerTypeAdded = $false
@@ -5498,7 +5391,7 @@ function Test-EmailConfiguration {
 
 #endregion
 
-#region ==================== SCHEDULING ====================
+#region ==================== PUBLIC\SCHEDULING ====================
 
 function Register-RobocurseTask {
     <#
@@ -5861,7 +5754,7 @@ function Test-RobocurseTaskExists {
 
 #endregion
 
-#region ==================== GUI ====================
+#region ==================== PUBLIC\GUI ====================
 
 # GUI XAML Structure (for maintainability):
 # The main window XAML is embedded here as a heredoc to maintain single-file deployment.
@@ -7354,7 +7247,7 @@ function Show-ScheduleDialog {
 
 #endregion
 
-#region ==================== MAIN ====================
+#region ==================== PUBLIC\MAIN ====================
 
 function Show-RobocurseHelp {
     <#
@@ -7678,6 +7571,9 @@ function Start-RobocurseMain {
     }
 }
 
+#endregion
+
+
 # Main entry point - only execute if not being dot-sourced for testing
 # Check if -Help was passed (always process help)
 if ($Help) {
@@ -7692,4 +7588,4 @@ if (-not (Test-IsBeingDotSourced)) {
     exit $exitCode
 }
 
-#endregion
+

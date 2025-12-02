@@ -1,0 +1,150 @@
+# Robocurse PowerShell Module
+# Multi-share parallel robocopy orchestrator for Windows environments.
+
+#region ==================== CONSTANTS ====================
+# Chunking defaults
+# Maximum size for a single chunk. Larger directories will be split into smaller chunks.
+# 10GB is chosen to balance parallelism vs. overhead - large enough to avoid excessive splitting,
+# small enough to allow meaningful parallel processing.
+$script:DefaultMaxChunkSizeBytes = 10GB
+
+# Maximum number of files in a single chunk before splitting.
+# 50,000 files is chosen to prevent robocopy from being overwhelmed by file enumeration
+# while still processing meaningful batches.
+$script:DefaultMaxFilesPerChunk = 50000
+
+# Maximum directory depth to traverse when creating chunks.
+# Depth of 5 prevents excessive recursion while allowing reasonable directory structure analysis.
+$script:DefaultMaxChunkDepth = 5
+
+# Minimum size threshold for creating a separate chunk.
+# 100MB ensures we don't create chunks for trivial directories, reducing overhead.
+$script:DefaultMinChunkSizeBytes = 100MB
+
+# Retry policy
+# Maximum retry attempts for failed chunks before marking as permanently failed.
+# 3 retries handles transient network issues without indefinite loops.
+$script:MaxChunkRetries = 3
+
+# Number of times robocopy will retry a failed file copy (maps to /R: parameter).
+# 3 retries is sufficient for transient file locks or network glitches.
+$script:RobocopyRetryCount = 3
+
+# Wait time in seconds between robocopy retry attempts (maps to /W: parameter).
+# 10 seconds allows time for locks to clear without excessive delay.
+$script:RobocopyRetryWaitSeconds = 10
+
+# Threading
+# Default number of threads per robocopy job (maps to /MT: parameter).
+# 8 threads provides good parallelism without overwhelming the network or disk I/O.
+$script:DefaultThreadsPerJob = 8
+
+# Maximum number of concurrent robocopy jobs to run in parallel.
+# 4 concurrent jobs balances system resources while maintaining good throughput.
+$script:DefaultMaxConcurrentJobs = 4
+
+# Caching
+# Maximum age in hours for cached directory profiles before re-scanning.
+# 24 hours prevents unnecessary re-scans while ensuring reasonably fresh data.
+$script:ProfileCacheMaxAgeHours = 24
+
+# Maximum number of entries in the profile cache before triggering cleanup.
+# 10,000 entries is sufficient for large directory trees while preventing unbounded growth.
+$script:ProfileCacheMaxEntries = 10000
+
+# Logging
+# Compress log files older than this many days to save disk space.
+# 7 days keeps recent logs readily accessible while compressing older logs.
+$script:LogCompressAfterDays = 7
+
+# Delete compressed log files older than this many days.
+# 30 days aligns with typical retention policies and provides adequate audit history.
+$script:LogDeleteAfterDays = 30
+
+# GUI display limits
+# Maximum number of completed chunks to display in the GUI grid.
+# Limits prevent UI lag with large chunk counts while showing recent activity.
+$script:GuiMaxCompletedChunksDisplay = 20
+
+# Maximum number of log lines to retain in GUI ring buffer.
+# 500 lines provides sufficient context without excessive memory use.
+$script:GuiLogMaxLines = 500
+
+# Maximum number of errors to display in email notifications.
+# 10 errors provides useful context without overwhelming the email.
+$script:EmailMaxErrorsDisplay = 10
+
+# Default mismatch severity
+# Controls how robocopy exit code 4 (mismatches) is treated.
+# Valid values: "Warning" (default), "Error", "Success" (ignore mismatches)
+$script:DefaultMismatchSeverity = "Warning"
+
+# Orchestration intervals
+# Polling interval in milliseconds for replication tick loop.
+# 500ms balances responsiveness with CPU overhead.
+$script:ReplicationTickIntervalMs = 500
+
+# Progress output interval in seconds for headless mode console output.
+# 10 seconds provides regular updates without flooding the console.
+$script:HeadlessProgressIntervalSeconds = 10
+
+# Checkpoint save frequency
+# Save checkpoint every N completed chunks (also saved on failures).
+# 10 chunks balances disk I/O with recovery granularity.
+$script:CheckpointSaveFrequency = 10
+
+# Dry-run mode state (set during replication, used by Start-ChunkJob)
+$script:DryRunMode = $false
+#endregion
+
+#region ==================== MODULE LOADING ====================
+
+# Get the module's root directory
+$PSModuleRoot = $PSScriptRoot
+
+# Load private functions first (internal helpers)
+$privateFunctions = @(
+    Get-ChildItem -Path "$PSModuleRoot\Private\*.ps1" -ErrorAction SilentlyContinue
+)
+
+foreach ($function in $privateFunctions) {
+    try {
+        . $function.FullName
+    }
+    catch {
+        Write-Error "Failed to load private function $($function.FullName): $_"
+    }
+}
+
+# Load public functions (in dependency order)
+# Note: Checkpoint functions are now part of Orchestration.ps1
+$publicFunctionOrder = @(
+    'Utility.ps1'
+    'Configuration.ps1'
+    'Logging.ps1'
+    'DirectoryProfiling.ps1'
+    'Chunking.ps1'
+    'Robocopy.ps1'
+    'Orchestration.ps1'
+    'Progress.ps1'
+    'VSS.ps1'
+    'Email.ps1'
+    'Scheduling.ps1'
+    'GUI.ps1'
+    'Main.ps1'
+)
+
+foreach ($functionFile in $publicFunctionOrder) {
+    $path = Join-Path "$PSModuleRoot\Public" $functionFile
+    if (Test-Path $path) {
+        try {
+            . $path
+        }
+        catch {
+            Write-Error "Failed to load public function $path`: $_"
+        }
+    }
+}
+
+#endregion
+

@@ -1,0 +1,638 @@
+# Robocurse Robocopy wrapper Functions
+# Script-level bandwidth limit (set from config during replication start)
+$script:BandwidthLimitMbps = 0
+
+function Get-BandwidthThrottleIPG {
+    <#
+    .SYNOPSIS
+        Calculates Inter-Packet Gap (IPG) for bandwidth throttling
+    .DESCRIPTION
+        Computes the robocopy /IPG:n value based on:
+        - Total bandwidth limit (Mbps)
+        - Number of active concurrent jobs
+
+        The IPG is the delay in milliseconds between 512-byte packets.
+        Formula: IPG = (512 * 8 * 1000) / (BandwidthBytesPerSec / ActiveJobs)
+               = 4096000 / (PerJobBytesPerSec)
+
+        Returns 0 (unlimited) if no bandwidth limit is set.
+    .PARAMETER BandwidthLimitMbps
+        Total bandwidth limit in Megabits per second (0 = unlimited)
+    .PARAMETER ActiveJobs
+        Number of currently active jobs (minimum 1)
+    .PARAMETER PendingJobStart
+        Set to $true when calculating for a new job about to start
+    .OUTPUTS
+        Integer IPG value in milliseconds, or 0 for unlimited
+    .EXAMPLE
+        # 100 Mbps total, 4 active jobs = 25 Mbps per job
+        $ipg = Get-BandwidthThrottleIPG -BandwidthLimitMbps 100 -ActiveJobs 4
+        # Returns approximately 164 ms
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [int]$BandwidthLimitMbps,
+
+        [Parameter(Mandatory)]
+        [int]$ActiveJobs,
+
+        [switch]$PendingJobStart
+    )
+
+    # No limit set
+    if ($BandwidthLimitMbps -le 0) {
+        return 0
+    }
+
+    # Account for the job we're about to start
+    $effectiveJobs = if ($PendingJobStart) { $ActiveJobs + 1 } else { [Math]::Max(1, $ActiveJobs) }
+
+    # Convert Mbps to bytes per second per job
+    # 1 Mbps = 125,000 bytes/sec (1,000,000 bits / 8)
+    $totalBytesPerSec = $BandwidthLimitMbps * 125000
+    $perJobBytesPerSec = $totalBytesPerSec / $effectiveJobs
+
+    # Robocopy IPG is delay in ms between 512-byte packets
+    # Time per packet (ms) = (512 bytes * 8 bits * 1000 ms) / bits_per_second
+    # IPG = (4096000) / (perJobBytesPerSec * 8) = 512000 / perJobBytesPerSec
+    $ipg = [Math]::Ceiling(512000 / $perJobBytesPerSec)
+
+    # Clamp to reasonable range (1ms to 10000ms)
+    $ipg = [Math]::Max(1, [Math]::Min(10000, $ipg))
+
+    Write-RobocurseLog -Message "Bandwidth throttle: $BandwidthLimitMbps Mbps / $effectiveJobs jobs = IPG ${ipg}ms" `
+        -Level 'Debug' -Component 'Bandwidth'
+
+    return $ipg
+}
+
+function New-RobocopyArguments {
+    <#
+    .SYNOPSIS
+        Builds robocopy command-line arguments from options
+    .DESCRIPTION
+        Constructs the argument array for robocopy based on:
+        - Source and destination paths
+        - Copy mode (mirror vs regular)
+        - Custom switches from RobocopyOptions
+        - Threading, retry, and logging settings
+        - Exclusion patterns
+        - Chunk-specific arguments
+
+        This function is separated from Start-RobocopyJob for:
+        - Easier unit testing of argument generation
+        - Reusability for displaying planned operations
+        - Cleaner separation of concerns
+    .PARAMETER SourcePath
+        Source directory path
+    .PARAMETER DestinationPath
+        Destination directory path
+    .PARAMETER LogPath
+        Path for robocopy log file
+    .PARAMETER ThreadsPerJob
+        Number of threads for robocopy (/MT:n)
+    .PARAMETER RobocopyOptions
+        Hashtable of robocopy options (see Start-RobocopyJob for details)
+    .PARAMETER ChunkArgs
+        Additional arguments specific to the chunk (e.g., /LEV:1)
+    .PARAMETER DryRun
+        If true, adds /L flag to list what would be copied without copying
+    .OUTPUTS
+        String[] - Array of robocopy arguments ready to join
+    .EXAMPLE
+        $args = New-RobocopyArguments -SourcePath "C:\Source" -DestinationPath "D:\Dest" -LogPath "C:\log.txt"
+        $argString = $args -join ' '
+    .EXAMPLE
+        $args = New-RobocopyArguments -SourcePath "C:\Source" -DestinationPath "D:\Dest" -LogPath "C:\log.txt" -DryRun
+        # Returns args with /L flag for preview mode
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DestinationPath,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LogPath,
+
+        [ValidateRange(1, 128)]
+        [int]$ThreadsPerJob = $script:DefaultThreadsPerJob,
+
+        [hashtable]$RobocopyOptions = @{},
+
+        [string[]]$ChunkArgs = @(),
+
+        [switch]$DryRun
+    )
+
+    # Validate paths for command injection before using them
+    $safeSourcePath = Get-SanitizedPath -Path $SourcePath -ParameterName "SourcePath"
+    $safeDestPath = Get-SanitizedPath -Path $DestinationPath -ParameterName "DestinationPath"
+    $safeLogPath = Get-SanitizedPath -Path $LogPath -ParameterName "LogPath"
+
+    # Extract options with defaults
+    $retryCount = if ($RobocopyOptions.RetryCount) { $RobocopyOptions.RetryCount } else { $script:RobocopyRetryCount }
+    $retryWait = if ($RobocopyOptions.RetryWait) { $RobocopyOptions.RetryWait } else { $script:RobocopyRetryWaitSeconds }
+    $skipJunctions = if ($RobocopyOptions.ContainsKey('SkipJunctions')) { $RobocopyOptions.SkipJunctions } else { $true }
+    $noMirror = if ($RobocopyOptions.NoMirror) { $true } else { $false }
+    $interPacketGapMs = if ($RobocopyOptions.InterPacketGapMs) { [int]$RobocopyOptions.InterPacketGapMs } else { $null }
+
+    # Build argument list
+    $argList = [System.Collections.Generic.List[string]]::new()
+
+    # Source and destination (quoted for paths with spaces)
+    $argList.Add("`"$safeSourcePath`"")
+    $argList.Add("`"$safeDestPath`"")
+
+    # Copy mode: /MIR (mirror with delete) or /E (copy subdirs including empty)
+    $argList.Add($(if ($noMirror) { "/E" } else { "/MIR" }))
+
+    # Profile-specified switches or defaults
+    if ($RobocopyOptions.Switches -and $RobocopyOptions.Switches.Count -gt 0) {
+        # Filter out switches we handle separately
+        $customSwitches = $RobocopyOptions.Switches | Where-Object {
+            $_ -notmatch '^/(MT|R|W|LOG|MIR|E|TEE|NP|BYTES)' -and
+            $_ -notmatch '^/LOG:'
+        }
+        foreach ($sw in $customSwitches) {
+            $argList.Add($sw)
+        }
+    }
+    else {
+        # Default copy options
+        $argList.Add("/COPY:DAT")
+        $argList.Add("/DCOPY:T")
+    }
+
+    # Threading, retry, and logging (always applied)
+    $argList.Add("/MT:$ThreadsPerJob")
+    $argList.Add("/R:$retryCount")
+    $argList.Add("/W:$retryWait")
+    $argList.Add("/LOG:`"$safeLogPath`"")
+    $argList.Add("/TEE")
+    $argList.Add("/NP")
+    $argList.Add("/BYTES")
+
+    # Junction handling
+    if ($skipJunctions) {
+        $argList.Add("/XJD")
+        $argList.Add("/XJF")
+    }
+
+    # Bandwidth throttling
+    if ($interPacketGapMs -and $interPacketGapMs -gt 0) {
+        $argList.Add("/IPG:$interPacketGapMs")
+    }
+
+    # Exclude files (sanitized to prevent injection)
+    if ($RobocopyOptions.ExcludeFiles -and $RobocopyOptions.ExcludeFiles.Count -gt 0) {
+        $safeExcludeFiles = Get-SanitizedExcludePatterns -Patterns $RobocopyOptions.ExcludeFiles -Type 'Files'
+        if ($safeExcludeFiles.Count -gt 0) {
+            $argList.Add("/XF")
+            foreach ($pattern in $safeExcludeFiles) {
+                $argList.Add("`"$pattern`"")
+            }
+        }
+    }
+
+    # Exclude directories (sanitized to prevent injection)
+    if ($RobocopyOptions.ExcludeDirs -and $RobocopyOptions.ExcludeDirs.Count -gt 0) {
+        $safeExcludeDirs = Get-SanitizedExcludePatterns -Patterns $RobocopyOptions.ExcludeDirs -Type 'Dirs'
+        if ($safeExcludeDirs.Count -gt 0) {
+            $argList.Add("/XD")
+            foreach ($dir in $safeExcludeDirs) {
+                $argList.Add("`"$dir`"")
+            }
+        }
+    }
+
+    # Chunk-specific arguments (e.g., /LEV:1 for files-only chunks)
+    foreach ($arg in $ChunkArgs) {
+        $argList.Add($arg)
+    }
+
+    # Dry-run mode: /L lists what would be copied without actually copying
+    if ($DryRun) {
+        $argList.Add("/L")
+    }
+
+    return $argList.ToArray()
+}
+
+function Start-RobocopyJob {
+    <#
+    .SYNOPSIS
+        Starts a robocopy process for a chunk
+    .PARAMETER Chunk
+        Chunk object with SourcePath, DestinationPath, RobocopyArgs
+    .PARAMETER LogPath
+        Path for robocopy log file
+    .PARAMETER ThreadsPerJob
+        Number of threads for robocopy (/MT:n)
+    .PARAMETER RobocopyOptions
+        Hashtable of robocopy options from profile. Supports:
+        - Switches: Array of robocopy switches (e.g., @("/MIR", "/COPYALL"))
+        - ExcludeFiles: Array of file patterns to exclude (e.g., @("*.tmp", "~*"))
+        - ExcludeDirs: Array of directory names to exclude
+        - RetryCount: Override default retry count
+        - RetryWait: Override default retry wait seconds
+        - NoMirror: Set to $true to use /E instead of /MIR (copy without deleting)
+        - SkipJunctions: Set to $false to include junction points (default: skip)
+        - InterPacketGapMs: Bandwidth throttling - milliseconds between packets (robocopy /IPG:n)
+          Use this to limit network bandwidth consumption. Higher values = slower transfer.
+          Example: 50 gives roughly 40 Mbps per job, 100 gives roughly 20 Mbps.
+    .PARAMETER DryRun
+        If true, runs robocopy with /L flag (list only, no actual copying)
+    .OUTPUTS
+        PSCustomObject with Process, Chunk, StartTime, LogPath, DryRun
+    .EXAMPLE
+        $options = @{
+            Switches = @("/COPYALL", "/DCOPY:DAT")
+            ExcludeFiles = @("*.tmp", "*.log")
+            ExcludeDirs = @("temp", "cache")
+            NoMirror = $true
+            InterPacketGapMs = 50  # Throttle bandwidth
+        }
+        Start-RobocopyJob -Chunk $chunk -LogPath $logPath -RobocopyOptions $options
+    .EXAMPLE
+        Start-RobocopyJob -Chunk $chunk -LogPath $logPath -DryRun
+        # Preview mode - shows what would be copied
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [PSCustomObject]$Chunk,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$LogPath,
+
+        [ValidateRange(1, 128)]
+        [int]$ThreadsPerJob = $script:DefaultThreadsPerJob,
+
+        [hashtable]$RobocopyOptions = @{},
+
+        [switch]$DryRun
+    )
+
+    # Validate Chunk properties
+    if ([string]::IsNullOrWhiteSpace($Chunk.SourcePath)) {
+        throw "Chunk.SourcePath is required and cannot be null or empty"
+    }
+    if ([string]::IsNullOrWhiteSpace($Chunk.DestinationPath)) {
+        throw "Chunk.DestinationPath is required and cannot be null or empty"
+    }
+
+    # Build arguments using the dedicated function
+    $chunkArgs = if ($Chunk.RobocopyArgs) { @($Chunk.RobocopyArgs) } else { @() }
+    $argList = New-RobocopyArguments `
+        -SourcePath $Chunk.SourcePath `
+        -DestinationPath $Chunk.DestinationPath `
+        -LogPath $LogPath `
+        -ThreadsPerJob $ThreadsPerJob `
+        -RobocopyOptions $RobocopyOptions `
+        -ChunkArgs $chunkArgs `
+        -DryRun:$DryRun
+
+    # Create process start info
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    # Use validated robocopy path (fallback to just "robocopy.exe" if not yet validated)
+    $psi.FileName = if ($script:RobocopyPath) { $script:RobocopyPath } else { "robocopy.exe" }
+    $psi.Arguments = $argList -join ' '
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $false  # Using /LOG and /TEE instead
+    $psi.RedirectStandardError = $true
+
+    Write-RobocurseLog -Message "Robocopy args: $($argList -join ' ')" -Level 'Debug' -Component 'Robocopy'
+
+    # Start the process
+    $process = [System.Diagnostics.Process]::Start($psi)
+
+    return [PSCustomObject]@{
+        Process = $process
+        Chunk = $Chunk
+        StartTime = [datetime]::Now
+        LogPath = $LogPath
+        DryRun = $DryRun.IsPresent
+    }
+}
+
+function Get-RobocopyExitMeaning {
+    <#
+    .SYNOPSIS
+        Interprets robocopy exit code using bitmask logic
+    .PARAMETER ExitCode
+        Robocopy exit code (bitmask)
+    .PARAMETER MismatchSeverity
+        How to treat mismatch exit codes (bit 2/value 4). Valid values:
+        - "Warning" (default): Treat as warning but not failure
+        - "Error": Treat as error, trigger retry
+        - "Success": Ignore mismatches entirely
+    .OUTPUTS
+        PSCustomObject with Severity, Message, ShouldRetry, and bit flags
+    .NOTES
+        Exit code bits:
+        Bit 0 (1)  = Files copied successfully
+        Bit 1 (2)  = Extra files/dirs in destination
+        Bit 2 (4)  = Mismatched files/dirs detected
+        Bit 3 (8)  = Some files could NOT be copied (copy errors)
+        Bit 4 (16) = Fatal error (no files copied, serious error)
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [int]$ExitCode,
+
+        [ValidateSet("Warning", "Error", "Success")]
+        [string]$MismatchSeverity = $script:DefaultMismatchSeverity
+    )
+
+    # Parse bitmask flags
+    $result = [PSCustomObject]@{
+        ExitCode = $ExitCode
+        Severity = "Success"
+        Message = ""
+        ShouldRetry = $false
+        FilesCopied = ($ExitCode -band 1) -ne 0
+        ExtrasDetected = ($ExitCode -band 2) -ne 0
+        MismatchesFound = ($ExitCode -band 4) -ne 0
+        CopyErrors = ($ExitCode -band 8) -ne 0
+        FatalError = ($ExitCode -band 16) -ne 0
+    }
+
+    # Determine severity based on priority (worst case first)
+    if ($result.FatalError) {
+        $result.Severity = "Fatal"
+        $result.Message = "Fatal error occurred"
+        $result.ShouldRetry = $true  # Worth retrying once
+    }
+    elseif ($result.CopyErrors) {
+        $result.Severity = "Error"
+        $result.Message = "Some files could not be copied"
+        $result.ShouldRetry = $true
+    }
+    elseif ($result.MismatchesFound) {
+        # Configurable severity for mismatches
+        $result.Severity = $MismatchSeverity
+        $result.Message = "Mismatched files detected"
+        $result.ShouldRetry = ($MismatchSeverity -eq "Error")
+    }
+    elseif ($result.ExtrasDetected) {
+        $result.Severity = "Success"
+        $result.Message = "Extra files cleaned from destination"
+    }
+    elseif ($result.FilesCopied) {
+        $result.Severity = "Success"
+        $result.Message = "Files copied successfully"
+    }
+    else {
+        $result.Severity = "Success"
+        $result.Message = "No changes needed"
+    }
+
+    return $result
+}
+
+function ConvertFrom-RobocopyLog {
+    <#
+    .SYNOPSIS
+        Parses a robocopy log file for progress and statistics
+    .PARAMETER LogPath
+        Path to log file
+    .PARAMETER TailLines
+        Number of lines to read from end (for in-progress parsing)
+    .OUTPUTS
+        PSCustomObject with file counts, byte counts, speed, and current file
+    .NOTES
+        Handles file locking by using FileShare.ReadWrite when robocopy has the file open
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$LogPath,
+
+        [int]$TailLines = 100
+    )
+
+    # Initialize result with zero values
+    $result = [PSCustomObject]@{
+        FilesCopied = 0
+        FilesSkipped = 0
+        FilesFailed = 0
+        DirsCopied = 0
+        DirsSkipped = 0
+        DirsFailed = 0
+        BytesCopied = 0
+        Speed = ""
+        CurrentFile = ""
+    }
+
+    # Check if log file exists
+    if (-not (Test-Path $LogPath)) {
+        return $result
+    }
+
+    # Read log file with ReadWrite sharing to handle file locking
+    try {
+        $fs = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $sr = New-Object System.IO.StreamReader($fs)
+        $content = $sr.ReadToEnd()
+        $sr.Close()
+        $fs.Close()
+    }
+    catch {
+        # If we can't read the file, log the error and return zeros
+        Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level Warning
+        return $result
+    }
+
+    # Parse summary statistics using locale-independent patterns
+    # The summary table structure is consistent across locales:
+    #   - Three data lines (Dirs, Files, Bytes) with 6 numeric columns each
+    #   - The label text varies by locale but column structure is fixed
+    #   - May or may not have a separator line of dashes before the table
+    #
+    # Strategy: Find lines that match the stats pattern (text : numbers) directly
+    # Column order: Total, Copied, Skipped, Mismatch, FAILED, Extras
+    #
+    # Locale considerations:
+    #   - Some locales use comma as decimal separator (1,5 instead of 1.5)
+    #   - Some use period as thousands separator (1.000 instead of 1000)
+    #   - We normalize by replacing commas with periods and removing spaces in numbers
+
+    try {
+        $lines = $content -split "`n"
+
+        # Find all lines that match the stats pattern: "label : numbers"
+        # The last 3 such lines should be Dirs, Files, Bytes
+        # Pattern accepts both . and , as potential decimal separators
+        # Note: Don't allow spaces within number groups as that breaks column separation
+        $statsPattern = ':\s*([\d.,]+)\s*[kmgt]?\s+([\d.,]+)\s*[kmgt]?\s+([\d.,]+)\s*[kmgt]?\s+([\d.,]+)\s*[kmgt]?\s+([\d.,]+)\s*[kmgt]?\s+([\d.,]+)'
+        $statsLines = @()
+        foreach ($line in $lines) {
+            if ($line -match $statsPattern) {
+                $statsLines += $line
+            }
+        }
+
+        # Helper function to parse locale-flexible numbers
+        $parseLocaleNumber = {
+            param([string]$numStr)
+            if ([string]::IsNullOrWhiteSpace($numStr)) { return 0 }
+            # Remove spaces (thousands separator in some locales)
+            $cleaned = $numStr -replace '\s', ''
+            # If there's exactly one comma and it appears to be a decimal separator
+            # (no other periods, or comma comes after period), treat it as decimal
+            if ($cleaned -match '^[\d.]+,\d{1,2}$') {
+                # Looks like European format: 1.234,56 -> 1234.56
+                $cleaned = $cleaned -replace '\.', '' -replace ',', '.'
+            }
+            elseif ($cleaned -match ',') {
+                # Multiple commas or comma not in decimal position - likely thousands separator
+                $cleaned = $cleaned -replace ',', ''
+            }
+            $parsedValue = 0.0
+            if ([double]::TryParse($cleaned, [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsedValue)) {
+                return $parsedValue
+            }
+            return 0
+        }
+
+        # If we found at least 3 matching lines, parse them
+        if ($statsLines.Count -ge 3) {
+            # Last 3 lines: Dirs, Files, Bytes (in order)
+            $dirsLine = $statsLines[$statsLines.Count - 3]
+            $filesLine = $statsLines[$statsLines.Count - 2]
+            $bytesLine = $statsLines[$statsLines.Count - 1]
+
+            # Parse Dirs line (all integers)
+            if ($dirsLine -match $statsPattern) {
+                $result.DirsCopied = [int](& $parseLocaleNumber $matches[2])
+                $result.DirsSkipped = [int](& $parseLocaleNumber $matches[3])
+                $result.DirsFailed = [int](& $parseLocaleNumber $matches[5])
+            }
+
+            # Parse Files line (all integers)
+            if ($filesLine -match $statsPattern) {
+                $result.FilesCopied = [int](& $parseLocaleNumber $matches[2])
+                $result.FilesSkipped = [int](& $parseLocaleNumber $matches[3])
+                $result.FilesFailed = [int](& $parseLocaleNumber $matches[5])
+            }
+
+            # Parse Bytes line - need to handle unit suffixes (k, m, g, t)
+            # Pattern: captures number+unit pairs (Total, Copied with their units)
+            $bytesPattern = ':\s*([\d.,]+)\s*([kmgt]?)\s+([\d.,]+)\s*([kmgt]?)'
+            if ($bytesLine -match $bytesPattern) {
+                $byteValue = & $parseLocaleNumber $matches[3]
+                $unit = if ($matches[4]) { $matches[4].ToLower() } else { '' }
+
+                $result.BytesCopied = switch ($unit) {
+                    'k' { [long]($byteValue * 1KB) }
+                    'm' { [long]($byteValue * 1MB) }
+                    'g' { [long]($byteValue * 1GB) }
+                    't' { [long]($byteValue * 1TB) }
+                    default { [long]$byteValue }
+                }
+            }
+        }
+
+        # Parse Speed line - look for numeric pattern followed by common speed units
+        # Robocopy outputs speed in format like "50.123 MegaBytes/min" or "2621440 Bytes/sec"
+        # The unit names may be localized but the numeric pattern is consistent
+        if ($content -match '([\d.]+)\s+(Mega)?Bytes[/\s]*(min|sec)') {
+            $speedValue = $matches[1]
+            $isMega = $matches[2] -eq 'Mega'
+            $timeUnit = $matches[3]
+            $result.Speed = if ($isMega) { "$speedValue MB/$timeUnit" } else { "$speedValue B/$timeUnit" }
+        }
+
+        # Parse current file from progress lines (locale-independent)
+        # Robocopy progress lines have: indicator (may contain spaces), size, path
+        # Format: "  New File  1024  path\file.txt" or "  *EXTRA File  100  path\file.txt"
+        # Key insight: look for a number followed by a backslash path
+        $progressMatches = [regex]::Matches($content, '([\d.]+)\s*[kmgt]?\s+(\S*[\\\/].+)$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+        if ($progressMatches.Count -gt 0) {
+            $lastMatch = $progressMatches[$progressMatches.Count - 1]
+            $potentialPath = $lastMatch.Groups[2].Value.Trim()
+            # Verify it looks like a path (not a summary line with just numbers)
+            if ($potentialPath -match '[a-zA-Z]') {
+                $result.CurrentFile = $potentialPath
+            }
+        }
+    }
+    catch {
+        # Log parsing errors but don't fail - return partial results
+        Write-RobocurseLog "Error parsing robocopy log '$LogPath': $_" -Level Warning
+    }
+
+    return $result
+}
+
+function Get-RobocopyProgress {
+    <#
+    .SYNOPSIS
+        Gets current progress from a running robocopy job
+    .PARAMETER Job
+        Job object from Start-RobocopyJob
+    .OUTPUTS
+        PSCustomObject with CurrentFile, BytesCopied, FilesCopied, etc.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Job
+    )
+
+    # Use ConvertFrom-RobocopyLog with tail parsing to get current status
+    return ConvertFrom-RobocopyLog -LogPath $Job.LogPath -TailLines 100
+}
+
+function Wait-RobocopyJob {
+    <#
+    .SYNOPSIS
+        Waits for a robocopy job to complete
+    .PARAMETER Job
+        Job object from Start-RobocopyJob
+    .PARAMETER TimeoutSeconds
+        Max wait time (0 = infinite)
+    .OUTPUTS
+        PSCustomObject with ExitCode, ExitMeaning, Duration, Stats
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Job,
+
+        [int]$TimeoutSeconds = 0
+    )
+
+    # Wait for process to complete
+    if ($TimeoutSeconds -gt 0) {
+        $completed = $Job.Process.WaitForExit($TimeoutSeconds * 1000)
+        if (-not $completed) {
+            $Job.Process.Kill()
+            throw "Robocopy job timed out after $TimeoutSeconds seconds"
+        }
+    }
+    else {
+        $Job.Process.WaitForExit()
+    }
+
+    # Calculate duration
+    $duration = [datetime]::Now - $Job.StartTime
+
+    # Get exit code and interpret it
+    $exitCode = $Job.Process.ExitCode
+    $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
+
+    # Parse final statistics from log
+    $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
+
+    return [PSCustomObject]@{
+        ExitCode = $exitCode
+        ExitMeaning = $exitMeaning
+        Duration = $duration
+        Stats = $finalStats
+    }
+}

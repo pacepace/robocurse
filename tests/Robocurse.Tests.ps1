@@ -1,35 +1,36 @@
 BeforeAll {
-    # Get the path to the main script
-    $mainScriptPath = Join-Path $PSScriptRoot ".." "Robocurse.ps1"
+    # Load Robocurse functions using TestHelper
+    # This supports both modular (src/) and monolith (Robocurse.ps1) structures
+    . "$PSScriptRoot\TestHelper.ps1"
+    Initialize-RobocurseForTesting
 
-    # Dot-source the script to load functions
-    # The script now auto-detects dot-sourcing and skips main execution
-    . $mainScriptPath -Help
+    # For backward compatibility, also set $mainScriptPath for tests that need it
+    $script:mainScriptPath = Join-Path $PSScriptRoot ".." "Robocurse.ps1"
 }
 
 Describe "Robocurse Main Script" {
-    Context "Script Loading" {
-        It "Should load without errors" {
-            $mainScriptPath = Join-Path $PSScriptRoot ".." "Robocurse.ps1"
-            Test-Path $mainScriptPath | Should -Be $true
+    Context "Module Loading" {
+        It "Should have module manifest" {
+            $manifestPath = Join-Path $PSScriptRoot ".." "src" "Robocurse" "Robocurse.psd1"
+            Test-Path $manifestPath | Should -Be $true
         }
 
-        It "Should have all required regions defined" {
-            $mainScriptPath = Join-Path $PSScriptRoot ".." "Robocurse.ps1"
-            $scriptContent = Get-Content $mainScriptPath -Raw
+        It "Should have module loader" {
+            $modulePath = Join-Path $PSScriptRoot ".." "src" "Robocurse" "Robocurse.psm1"
+            Test-Path $modulePath | Should -Be $true
+        }
 
-            $scriptContent | Should -Match "#region.*CONFIGURATION"
-            $scriptContent | Should -Match "#region.*LOGGING"
-            $scriptContent | Should -Match "#region.*DIRECTORY PROFILING"
-            $scriptContent | Should -Match "#region.*CHUNKING"
-            $scriptContent | Should -Match "#region.*ROBOCOPY WRAPPER"
-            $scriptContent | Should -Match "#region.*ORCHESTRATION"
-            $scriptContent | Should -Match "#region.*PROGRESS"
-            $scriptContent | Should -Match "#region.*VSS"
-            $scriptContent | Should -Match "#region.*EMAIL"
-            $scriptContent | Should -Match "#region.*SCHEDULING"
-            $scriptContent | Should -Match "#region.*GUI"
-            $scriptContent | Should -Match "#region.*MAIN"
+        It "Should have all required public module files" {
+            $publicPath = Join-Path $PSScriptRoot ".." "src" "Robocurse" "Public"
+            $requiredFiles = @(
+                'Utility.ps1', 'Configuration.ps1', 'Logging.ps1', 'DirectoryProfiling.ps1',
+                'Chunking.ps1', 'Robocopy.ps1', 'Orchestration.ps1', 'Progress.ps1',
+                'VSS.ps1', 'Email.ps1', 'Scheduling.ps1', 'GUI.ps1', 'Main.ps1'
+            )
+            foreach ($file in $requiredFiles) {
+                $filePath = Join-Path $publicPath $file
+                Test-Path $filePath | Should -Be $true -Because "Public/$file should exist"
+            }
         }
     }
 

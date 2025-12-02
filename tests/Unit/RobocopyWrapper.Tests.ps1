@@ -1,6 +1,7 @@
 BeforeAll {
-    # Source the main script to get access to functions
-    . "$PSScriptRoot\..\..\Robocurse.ps1" -Help
+    # Load Robocurse functions using TestHelper
+    . "$PSScriptRoot\..\TestHelper.ps1"
+    Initialize-RobocurseForTesting
 }
 
 Describe "Robocopy Wrapper" {
