@@ -276,6 +276,7 @@ namespace Robocurse
             Interlocked.Exchange(ref _bytesComplete, 0);
             Interlocked.Exchange(ref _completedChunkBytes, 0);
             Interlocked.Exchange(ref _completedChunkFiles, 0);
+            Interlocked.Exchange(ref _profileStartFiles, 0);
 
             // Reset volatile flags
             _stopRequested = false;
@@ -306,12 +307,13 @@ namespace Robocurse
             Interlocked.Exchange(ref _completedCount, 0);
             Interlocked.Exchange(ref _bytesComplete, 0);
             Interlocked.Exchange(ref _completedChunkBytes, 0);
+            Interlocked.Exchange(ref _completedChunkFiles, 0);
 
             ChunkQueue = new ConcurrentQueue<object>();
             ActiveJobs.Clear();
             CompletedChunks = new ConcurrentQueue<object>();
             FailedChunks = new ConcurrentQueue<object>();
-            // Note: ProfileResults is NOT cleared - accumulates across profiles
+            // Note: ProfileResults and ErrorMessages are NOT cleared - accumulate across profiles
         }
 
         /// <summary>Clear just the chunk collections (used between profiles)</summary>
@@ -362,6 +364,9 @@ namespace Robocurse
 $script:OnProgress = $null
 $script:OnChunkComplete = $null
 $script:OnProfileComplete = $null
+
+# Script-scoped replication run settings (preserved across profile transitions)
+$script:CurrentMaxConcurrentJobs = $null
 
 function Initialize-OrchestrationState {
     <#
@@ -507,10 +512,11 @@ function Start-ReplicationRun {
     }
     Write-RobocurseLog -Message "Using robocopy from: $($robocopyCheck.Data)" -Level 'Debug' -Component 'Orchestrator'
 
-    # Store callbacks
+    # Store callbacks and run settings
     $script:OnProgress = $OnProgress
     $script:OnChunkComplete = $OnChunkComplete
     $script:OnProfileComplete = $OnProfileComplete
+    $script:CurrentMaxConcurrentJobs = $MaxConcurrentJobs
 
     # Store profiles and start timing
     $script:OrchestrationState.Profiles = $Profiles
@@ -869,6 +875,24 @@ function Invoke-ReplicationTick {
             }
 
             $job = Start-ChunkJob -Chunk $chunk
+
+            # Handle job start failure (null job returned)
+            if ($null -eq $job -or $null -eq $job.Process) {
+                Write-RobocurseLog -Message "Failed to start job for chunk $($chunk.ChunkId)" `
+                    -Level 'Error' -Component 'Orchestrator'
+                $chunk.RetryCount++
+                if ($chunk.RetryCount -lt $script:MaxChunkRetries) {
+                    $chunk.RetryAfter = [datetime]::Now.AddSeconds(5)
+                    $chunksToRequeue.Add($chunk)
+                }
+                else {
+                    $chunk.Status = 'Failed'
+                    $state.FailedChunks.Enqueue($chunk)
+                    $state.EnqueueError("Chunk $($chunk.ChunkId) failed to start after $($chunk.RetryCount) attempts")
+                }
+                continue
+            }
+
             $state.ActiveJobs[$job.Process.Id] = $job
         }
     }
@@ -1134,8 +1158,8 @@ function Complete-CurrentProfile {
     # Move to next profile
     $state.ProfileIndex++
     if ($state.ProfileIndex -lt $state.Profiles.Count) {
-        # Preserve MaxConcurrentJobs from current run (stored in state during Start-ReplicationRun)
-        $maxJobs = if ($state.MaxConcurrentJobs) { $state.MaxConcurrentJobs } else { $script:DefaultMaxConcurrentJobs }
+        # Use MaxConcurrentJobs from current run (stored in script-scope during Start-ReplicationRun)
+        $maxJobs = if ($script:CurrentMaxConcurrentJobs) { $script:CurrentMaxConcurrentJobs } else { $script:DefaultMaxConcurrentJobs }
         Start-ProfileReplication -Profile $state.Profiles[$state.ProfileIndex] -MaxConcurrentJobs $maxJobs
     }
     else {

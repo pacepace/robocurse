@@ -384,6 +384,12 @@ function Get-RobocurseConfig {
         [string]$Path = ".\Robocurse.config.json"
     )
 
+    # Validate path safety to prevent path traversal attacks
+    if (-not (Test-SafeConfigPath -Path $Path)) {
+        Write-Warning "Configuration path '$Path' contains unsafe characters or patterns. Using default configuration."
+        return New-DefaultConfig
+    }
+
     # Return default config if file doesn't exist
     if (-not (Test-Path -Path $Path)) {
         Write-Verbose "Configuration file not found at '$Path'. Returning default configuration."
@@ -446,6 +452,11 @@ function Save-RobocurseConfig {
         [Parameter(Mandatory = $false)]
         [string]$Path = ".\Robocurse.config.json"
     )
+
+    # Validate path safety to prevent writing to unauthorized locations
+    if (-not (Test-SafeConfigPath -Path $Path)) {
+        return New-OperationResult -Success $false -ErrorMessage "Configuration path '$Path' contains unsafe characters or patterns"
+    }
 
     try {
         # Get the parent directory

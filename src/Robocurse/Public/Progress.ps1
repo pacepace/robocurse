@@ -102,6 +102,12 @@ function Get-ETAEstimate {
     }
 
     $elapsed = [datetime]::Now - $state.StartTime
+
+    # Guard against division by zero (can happen if called immediately after start)
+    if ($elapsed.TotalSeconds -lt 0.001) {
+        return $null
+    }
+
     $bytesPerSecond = $state.BytesComplete / $elapsed.TotalSeconds
 
     if ($bytesPerSecond -le 0) {
@@ -109,7 +115,19 @@ function Get-ETAEstimate {
     }
 
     $bytesRemaining = $state.TotalBytes - $state.BytesComplete
+
+    # Handle case where more bytes copied than expected (file sizes changed during copy)
+    if ($bytesRemaining -le 0) {
+        return [timespan]::Zero
+    }
+
     $secondsRemaining = $bytesRemaining / $bytesPerSecond
+
+    # Cap at reasonable maximum (30 days) to prevent overflow
+    $maxSeconds = 30 * 24 * 60 * 60
+    if ($secondsRemaining -gt $maxSeconds) {
+        $secondsRemaining = $maxSeconds
+    }
 
     return [timespan]::FromSeconds($secondsRemaining)
 }

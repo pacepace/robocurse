@@ -135,11 +135,12 @@ function New-RobocopyArguments {
     $safeLogPath = Get-SanitizedPath -Path $LogPath -ParameterName "LogPath"
 
     # Extract options with defaults
-    $retryCount = if ($RobocopyOptions.RetryCount) { $RobocopyOptions.RetryCount } else { $script:RobocopyRetryCount }
-    $retryWait = if ($RobocopyOptions.RetryWait) { $RobocopyOptions.RetryWait } else { $script:RobocopyRetryWaitSeconds }
+    # Use ContainsKey() to distinguish between "not set" and "set to 0/false"
+    $retryCount = if ($RobocopyOptions.ContainsKey('RetryCount')) { $RobocopyOptions.RetryCount } else { $script:RobocopyRetryCount }
+    $retryWait = if ($RobocopyOptions.ContainsKey('RetryWait')) { $RobocopyOptions.RetryWait } else { $script:RobocopyRetryWaitSeconds }
     $skipJunctions = if ($RobocopyOptions.ContainsKey('SkipJunctions')) { $RobocopyOptions.SkipJunctions } else { $true }
-    $noMirror = if ($RobocopyOptions.NoMirror) { $true } else { $false }
-    $interPacketGapMs = if ($RobocopyOptions.InterPacketGapMs) { [int]$RobocopyOptions.InterPacketGapMs } else { $null }
+    $noMirror = if ($RobocopyOptions.ContainsKey('NoMirror')) { $RobocopyOptions.NoMirror } else { $false }
+    $interPacketGapMs = if ($RobocopyOptions.ContainsKey('InterPacketGapMs') -and $RobocopyOptions.InterPacketGapMs) { [int]$RobocopyOptions.InterPacketGapMs } else { $null }
 
     # Build argument list
     $argList = [System.Collections.Generic.List[string]]::new()
@@ -495,14 +496,17 @@ function ConvertFrom-RobocopyLog {
             if ([string]::IsNullOrWhiteSpace($numStr)) { return 0 }
             # Remove spaces (thousands separator in some locales)
             $cleaned = $numStr -replace '\s', ''
-            # If there's exactly one comma and it appears to be a decimal separator
-            # (no other periods, or comma comes after period), treat it as decimal
-            if ($cleaned -match '^[\d.]+,\d{1,2}$') {
-                # Looks like European format: 1.234,56 -> 1234.56
+            # Detect European format: periods as thousands separator, comma as decimal
+            # Pattern: digits with optional period groups, then comma, then any decimal digits
+            # Examples: "1.234,56" "1.234.567,89" "1,5" "1.234,567"
+            if ($cleaned -match '^[\d.]+,\d+$' -and $cleaned -notmatch '\.\d{1,2}\.') {
+                # Looks like European format - comma is the decimal separator
+                # Remove periods (thousands separators) and convert comma to period
                 $cleaned = $cleaned -replace '\.', '' -replace ',', '.'
             }
             elseif ($cleaned -match ',') {
-                # Multiple commas or comma not in decimal position - likely thousands separator
+                # Has commas but doesn't look like European decimal format
+                # Likely commas are thousands separators (US format: 1,234,567.89)
                 $cleaned = $cleaned -replace ',', ''
             }
             $parsedValue = 0.0

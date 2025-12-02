@@ -83,14 +83,40 @@ function Register-RobocurseTask {
             $ScriptPath
         }
         else {
-            $autoPath = $PSCommandPath
-            if (-not $autoPath) {
-                $autoPath = $MyInvocation.MyCommand.Path
+            # Auto-detection: Look for Robocurse.ps1 in common locations
+            # Priority: 1) dist folder relative to module, 2) same folder as config, 3) current directory
+            $autoPath = $null
+
+            # Try dist folder relative to module location
+            $moduleRoot = if ($PSScriptRoot) { Split-Path -Parent $PSScriptRoot } else { $null }
+            if ($moduleRoot) {
+                $distPath = Join-Path (Split-Path -Parent $moduleRoot) "dist\Robocurse.ps1"
+                if (Test-Path $distPath) {
+                    $autoPath = $distPath
+                }
             }
+
+            # Try same folder as config file
+            if (-not $autoPath) {
+                $configDir = Split-Path -Parent $ConfigPath
+                $configDirScript = Join-Path $configDir "Robocurse.ps1"
+                if (Test-Path $configDirScript) {
+                    $autoPath = $configDirScript
+                }
+            }
+
+            # Try current directory
+            if (-not $autoPath) {
+                $cwdScript = Join-Path (Get-Location) "Robocurse.ps1"
+                if (Test-Path $cwdScript) {
+                    $autoPath = $cwdScript
+                }
+            }
+
             $autoPath
         }
 
-        if (-not $effectiveScriptPath) {
+        if (-not $effectiveScriptPath -or -not (Test-Path $effectiveScriptPath)) {
             return New-OperationResult -Success $false -ErrorMessage "Cannot determine Robocurse script path. Use -ScriptPath parameter to specify the path to Robocurse.ps1"
         }
 
@@ -111,9 +137,10 @@ function Register-RobocurseTask {
                 New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DaysOfWeek -At $Time
             }
             'Hourly' {
+                # Use indefinite duration for hourly tasks (runs forever until disabled)
                 New-ScheduledTaskTrigger -Once -At $Time `
                     -RepetitionInterval (New-TimeSpan -Hours 1) `
-                    -RepetitionDuration (New-TimeSpan -Days 1)
+                    -RepetitionDuration ([TimeSpan]::MaxValue)
             }
         }
 

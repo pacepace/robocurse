@@ -274,7 +274,7 @@ function Test-SafeRobocopyArgument {
         '\$\(',                   # Command substitution
         '\$\{',                   # Variable expansion with braces
         '%[^%]+%',                # Environment variable expansion (cmd.exe style)
-        '\.\.',                   # Parent directory traversal (be careful - this is sometimes legitimate)
+        '(^|[/\\])\.\.([/\\]|$)', # Parent directory traversal at path boundaries only (../foo or foo/../bar or foo/..)
         '^\s*-'                   # Arguments starting with dash (could inject robocopy flags)
     )
 

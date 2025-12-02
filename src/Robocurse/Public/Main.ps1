@@ -279,7 +279,8 @@ function Start-RobocurseMain {
                 # Run all enabled profiles
                 $profilesToRun = @($config.SyncProfiles | Where-Object {
                     # Check for explicit Enabled property, default to true if not present
-                    $_.PSObject.Properties['Enabled'] -eq $null -or $_.Enabled -eq $true
+                    # Use -not to check if property doesn't exist, or if it exists and is true
+                    ($null -eq $_.PSObject.Properties['Enabled']) -or ($_.Enabled -eq $true)
                 })
                 if ($profilesToRun.Count -eq 0) {
                     throw "No enabled profiles found in configuration."

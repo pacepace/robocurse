@@ -37,7 +37,7 @@ Write-Host "Building Robocurse monolith..." -ForegroundColor Cyan
 Write-Host "Source: $srcRoot" -ForegroundColor Gray
 
 # Define module load order (dependency order)
-# Note: Checkpoint functions are part of Orchestration.ps1
+# Checkpoint must be loaded before Orchestration (Orchestration uses checkpoint functions)
 $moduleOrder = @(
     'Public\Utility.ps1'
     'Public\Configuration.ps1'
@@ -45,6 +45,7 @@ $moduleOrder = @(
     'Public\DirectoryProfiling.ps1'
     'Public\Chunking.ps1'
     'Public\Robocopy.ps1'
+    'Public\Checkpoint.ps1'
     'Public\Orchestration.ps1'
     'Public\Progress.ps1'
     'Public\VSS.ps1'

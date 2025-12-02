@@ -191,6 +191,30 @@ InModuleScope 'Robocurse' {
                 $script:OrchestrationState.ChunkQueue.Count | Should -Be 6
             }
 
+            It "Should handle null job return gracefully and requeue chunk" {
+                # Add a chunk to queue with all required properties
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test"
+                    DestinationPath = "D:\Test"
+                    RetryCount = 0
+                    RetryAfter = $null
+                }
+                $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
+                $script:OrchestrationState.TotalChunks = 1
+
+                # Mock Start-ChunkJob to return null (simulating process start failure)
+                Mock Start-ChunkJob { return $null }
+                Mock Update-ProgressStats { }
+
+                Invoke-ReplicationTick -MaxConcurrentJobs 4
+
+                # Job should not be added to active jobs
+                $script:OrchestrationState.ActiveJobs.Count | Should -Be 0
+                # Chunk should be requeued for retry
+                $script:OrchestrationState.ChunkQueue.Count | Should -Be 1
+            }
+
             It "Should not start new jobs when paused" {
                 $chunk = [PSCustomObject]@{
                     ChunkId = 1
@@ -758,6 +782,30 @@ InModuleScope 'Robocurse' {
                 $eta = Get-ETAEstimate
 
                 $eta | Should -BeNullOrEmpty
+            }
+
+            It "Should return null if elapsed time is nearly zero (avoid division by zero)" {
+                # Start time is now - should have near-zero elapsed
+                $script:OrchestrationState.StartTime = [datetime]::Now
+                $script:OrchestrationState.TotalBytes = 10000000
+                $script:OrchestrationState.BytesComplete = 5000000
+
+                $eta = Get-ETAEstimate
+
+                # With nearly zero elapsed time, should return null to avoid division by zero
+                $eta | Should -BeNullOrEmpty
+            }
+
+            It "Should return zero timespan when all bytes are complete" {
+                $script:OrchestrationState.StartTime = [datetime]::Now.AddSeconds(-100)
+                $script:OrchestrationState.TotalBytes = 10000000
+                $script:OrchestrationState.BytesComplete = 10000000  # All complete
+
+                $eta = Get-ETAEstimate
+
+                # When complete, should return zero (no time remaining)
+                $eta | Should -Not -BeNullOrEmpty
+                $eta.TotalSeconds | Should -Be 0
             }
         }
 

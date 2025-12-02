@@ -448,7 +448,7 @@ function Get-DirectoryProfilesParallel {
                 if ($result -and $result.Count -gt 0) {
                     $profile = $result[0]
                     if ($profile.Success) {
-                        # Remove Success property before storing
+                        # Create profile object with success indicator
                         $profileObj = [PSCustomObject]@{
                             Path = $profile.Path
                             TotalSize = $profile.TotalSize
@@ -456,14 +456,23 @@ function Get-DirectoryProfilesParallel {
                             DirCount = $profile.DirCount
                             AvgFileSize = $profile.AvgFileSize
                             LastScanned = $profile.LastScanned
+                            ProfileSuccess = $true
                         }
                         $results[$job.Path] = $profileObj
-                        # Store in cache
-                        Set-CachedProfile -Profile $profileObj
+                        # Store in cache (without the ProfileSuccess property to save space)
+                        $cacheObj = [PSCustomObject]@{
+                            Path = $profile.Path
+                            TotalSize = $profile.TotalSize
+                            FileCount = $profile.FileCount
+                            DirCount = $profile.DirCount
+                            AvgFileSize = $profile.AvgFileSize
+                            LastScanned = $profile.LastScanned
+                        }
+                        Set-CachedProfile -Profile $cacheObj
                     }
                     else {
                         Write-RobocurseLog "Error profiling '$($job.Path)': $($profile.Error)" -Level Warning
-                        # Return empty profile on error
+                        # Return profile with error indicator so callers can detect failure
                         $results[$job.Path] = [PSCustomObject]@{
                             Path = $job.Path.TrimEnd('\')
                             TotalSize = 0
@@ -471,6 +480,8 @@ function Get-DirectoryProfilesParallel {
                             DirCount = 0
                             AvgFileSize = 0
                             LastScanned = Get-Date
+                            ProfileSuccess = $false
+                            ProfileError = $profile.Error
                         }
                     }
                 }
@@ -484,6 +495,8 @@ function Get-DirectoryProfilesParallel {
                     DirCount = 0
                     AvgFileSize = 0
                     LastScanned = Get-Date
+                    ProfileSuccess = $false
+                    ProfileError = $_.Exception.Message
                 }
             }
             finally {

@@ -1,6 +1,6 @@
 # Robocurse Chunking Functions
-# Script-level counter for unique chunk IDs (using [ref] for thread-safe Interlocked operations)
-$script:ChunkIdCounter = [ref]0
+# Script-level counter for unique chunk IDs (plain integer, use [ref] when calling Interlocked)
+$script:ChunkIdCounter = 0
 
 function Get-DirectoryChunks {
     <#
@@ -188,8 +188,8 @@ function New-Chunk {
         [bool]$IsFilesOnly = $false
     )
 
-    # Thread-safe increment using Interlocked
-    $chunkId = [System.Threading.Interlocked]::Increment($script:ChunkIdCounter)
+    # Thread-safe increment using Interlocked (pass [ref] to the plain integer)
+    $chunkId = [System.Threading.Interlocked]::Increment([ref]$script:ChunkIdCounter)
 
     $chunk = [PSCustomObject]@{
         ChunkId = $chunkId

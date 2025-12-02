@@ -334,7 +334,19 @@ function Invoke-LogRotation {
                     # Compress the directory
                     Compress-Archive -Path $dir.FullName -DestinationPath $zipPath -Force -ErrorAction Stop
 
-                    # Remove the original directory after successful compression
+                    # Verify the archive was created successfully and has content
+                    if (-not (Test-Path $zipPath)) {
+                        Write-Warning "Failed to verify compressed archive: $zipPath"
+                        continue
+                    }
+                    $archiveInfo = Get-Item -Path $zipPath -ErrorAction SilentlyContinue
+                    if ($null -eq $archiveInfo -or $archiveInfo.Length -eq 0) {
+                        Write-Warning "Compressed archive is empty or invalid, keeping original: $zipPath"
+                        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+                        continue
+                    }
+
+                    # Remove the original directory only after verifying compression succeeded
                     Remove-Item -Path $dir.FullName -Recurse -Force -ErrorAction Stop
 
                     Write-Verbose "Compressed log directory: $($dir.Name)"

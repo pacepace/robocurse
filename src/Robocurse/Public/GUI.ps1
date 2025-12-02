@@ -497,19 +497,27 @@ function Load-ProfileToForm {
     #>
     param([PSCustomObject]$Profile)
 
-    $script:Controls.txtProfileName.Text = $Profile.Name
-    $script:Controls.txtSource.Text = $Profile.Source
-    $script:Controls.txtDest.Text = $Profile.Destination
-    $script:Controls.chkUseVss.IsChecked = $Profile.UseVSS
+    # Guard against null profile
+    if ($null -eq $Profile) { return }
+
+    # Load basic properties with null safety
+    $script:Controls.txtProfileName.Text = if ($Profile.Name) { $Profile.Name } else { "" }
+    $script:Controls.txtSource.Text = if ($Profile.Source) { $Profile.Source } else { "" }
+    $script:Controls.txtDest.Text = if ($Profile.Destination) { $Profile.Destination } else { "" }
+    $script:Controls.chkUseVss.IsChecked = if ($null -ne $Profile.UseVSS) { $Profile.UseVSS } else { $false }
 
     # Set scan mode
     $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
     $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Quick") { 1 } else { 0 }
 
-    # Load chunk settings
-    $script:Controls.txtMaxSize.Text = $Profile.ChunkMaxSizeGB
-    $script:Controls.txtMaxFiles.Text = $Profile.ChunkMaxFiles
-    $script:Controls.txtMaxDepth.Text = $Profile.ChunkMaxDepth
+    # Load chunk settings with defaults for missing properties
+    $maxSize = if ($null -ne $Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB } else { 10 }
+    $maxFiles = if ($null -ne $Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { 50000 }
+    $maxDepth = if ($null -ne $Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { 5 }
+
+    $script:Controls.txtMaxSize.Text = $maxSize.ToString()
+    $script:Controls.txtMaxFiles.Text = $maxFiles.ToString()
+    $script:Controls.txtMaxDepth.Text = $maxDepth.ToString()
 }
 
 function Save-ProfileFromForm {

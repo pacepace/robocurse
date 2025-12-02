@@ -145,20 +145,28 @@ function Add-VssToTracking {
     )
 
     $mutex = $null
+    $mutexAcquired = $false
     try {
         # Use a named mutex to synchronize access across processes
         $mutexName = "Global\RobocurseVssTracking"
         $mutex = [System.Threading.Mutex]::new($false, $mutexName)
 
         # Wait up to 10 seconds to acquire the lock
-        if (-not $mutex.WaitOne(10000)) {
+        $mutexAcquired = $mutex.WaitOne(10000)
+        if (-not $mutexAcquired) {
             Write-RobocurseLog -Message "Timeout waiting for VSS tracking file lock" -Level 'Warning' -Component 'VSS'
             return
         }
 
         $tracked = @()
         if (Test-Path $script:VssTrackingFile) {
-            $tracked = @(Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json)
+            try {
+                $tracked = @(Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json)
+            }
+            catch {
+                # File might be corrupted or empty - start fresh
+                $tracked = @()
+            }
         }
 
         $tracked += [PSCustomObject]@{
@@ -174,7 +182,9 @@ function Add-VssToTracking {
     }
     finally {
         if ($mutex) {
-            try { $mutex.ReleaseMutex() } catch { }
+            if ($mutexAcquired) {
+                try { $mutex.ReleaseMutex() } catch { }
+            }
             $mutex.Dispose()
         }
     }
@@ -196,13 +206,15 @@ function Remove-VssFromTracking {
     )
 
     $mutex = $null
+    $mutexAcquired = $false
     try {
         # Use a named mutex to synchronize access across processes
         $mutexName = "Global\RobocurseVssTracking"
         $mutex = [System.Threading.Mutex]::new($false, $mutexName)
 
         # Wait up to 10 seconds to acquire the lock
-        if (-not $mutex.WaitOne(10000)) {
+        $mutexAcquired = $mutex.WaitOne(10000)
+        if (-not $mutexAcquired) {
             Write-RobocurseLog -Message "Timeout waiting for VSS tracking file lock" -Level 'Warning' -Component 'VSS'
             return
         }
@@ -211,7 +223,15 @@ function Remove-VssFromTracking {
             return
         }
 
-        $tracked = @(Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json)
+        try {
+            $tracked = @(Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json)
+        }
+        catch {
+            # File might be corrupted - just remove it
+            Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+            return
+        }
+
         $tracked = @($tracked | Where-Object { $_.ShadowId -ne $ShadowId })
 
         if ($tracked.Count -eq 0) {
@@ -225,7 +245,9 @@ function Remove-VssFromTracking {
     }
     finally {
         if ($mutex) {
-            try { $mutex.ReleaseMutex() } catch { }
+            if ($mutexAcquired) {
+                try { $mutex.ReleaseMutex() } catch { }
+            }
             $mutex.Dispose()
         }
     }

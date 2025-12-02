@@ -551,6 +551,19 @@ Describe "Robocopy Wrapper" {
             $argString | Should -Match '/W:30'
         }
 
+        It "Should respect RetryCount=0 (no retries)" {
+            # Fix: Previously RetryCount=0 would use default instead of 0
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -RobocopyOptions @{ RetryCount = 0; RetryWait = 0 }
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/R:0'
+            $argString | Should -Match '/W:0'
+        }
+
         It "Should include /L flag when DryRun is specified" {
             $args = New-RobocopyArguments `
                 -SourcePath "C:\Source" `

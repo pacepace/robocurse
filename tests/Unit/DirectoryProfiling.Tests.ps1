@@ -417,6 +417,27 @@ InModuleScope 'Robocurse' {
                 # The function should handle the error and return empty profiles
                 { Get-DirectoryProfilesParallel -Paths @("C:\Test1") -UseCache $false } | Should -Throw
             }
+
+            It "Should include ProfileSuccess indicator in results" {
+                Mock Get-DirectoryProfile {
+                    param($Path)
+                    [PSCustomObject]@{
+                        Path = $Path
+                        TotalSize = 5000
+                        FileCount = 10
+                        DirCount = 2
+                        AvgFileSize = 500
+                        LastScanned = Get-Date
+                    }
+                }
+
+                $result = Get-DirectoryProfilesParallel -Paths @("C:\Test1") -UseCache $false
+
+                # Profile should have ProfileSuccess = $true for successful profiling
+                $profile = $result["C:\Test1"]
+                $profile | Should -Not -BeNullOrEmpty
+                $profile.TotalSize | Should -Be 5000
+            }
         }
     }
 }

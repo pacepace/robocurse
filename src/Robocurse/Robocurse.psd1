@@ -33,7 +33,6 @@
         'Test-RobocopyAvailable'
         'Set-RobocopyPath'
         'Clear-RobocopyPath'
-        'ConvertTo-SafeFilename'
         'Get-NormalizedCacheKey'
         'New-OperationResult'
 
@@ -72,7 +71,8 @@
         'Start-RobocopyJob'
         'Get-RobocopyExitMeaning'
         'ConvertFrom-RobocopyLog'
-        'Build-RobocopyArguments'
+        'New-RobocopyArguments'
+        'Get-BandwidthThrottleIPG'
         'Start-ChunkJob'
 
         # Orchestration
@@ -84,10 +84,10 @@
         'Get-OrchestrationStatus'
 
         # Checkpoint
-        'Save-Checkpoint'
-        'Get-Checkpoint'
-        'Resume-FromCheckpoint'
-        'Remove-Checkpoint'
+        'Save-ReplicationCheckpoint'
+        'Get-ReplicationCheckpoint'
+        'Remove-ReplicationCheckpoint'
+        'Test-ChunkAlreadyCompleted'
 
         # Progress
         'Get-RobocopyProgress'
@@ -99,7 +99,7 @@
         'New-VssSnapshot'
         'Remove-VssSnapshot'
         'Get-VssPath'
-        'Get-VssShadowCopyId'
+        'Remove-OrphanVssSnapshots'
 
         # Email
         'Initialize-CredentialManager'

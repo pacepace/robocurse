@@ -86,6 +86,21 @@ InModuleScope 'Robocurse' {
             It "Should accept empty strings" {
                 Test-SafeRobocopyArgument -Value "" | Should -Be $true
             }
+
+            It "Should allow double-dots in filenames (not traversal)" {
+                # Files with ".." in the name (not at path boundaries) should be allowed
+                Test-SafeRobocopyArgument -Value "C:\Data\file..name.txt" | Should -Be $true
+                Test-SafeRobocopyArgument -Value "C:\Data\archive..backup.zip" | Should -Be $true
+                Test-SafeRobocopyArgument -Value "report..final..v2.docx" | Should -Be $true
+            }
+
+            It "Should reject parent directory traversal patterns" {
+                # Actual traversal at path boundaries should be blocked
+                Test-SafeRobocopyArgument -Value "..\secret" | Should -Be $false
+                Test-SafeRobocopyArgument -Value "C:\Data\..\secret" | Should -Be $false
+                Test-SafeRobocopyArgument -Value "folder/../escape" | Should -Be $false
+                Test-SafeRobocopyArgument -Value "path\.." | Should -Be $false
+            }
         }
 
         Context "Test-SourcePathAccessible" {

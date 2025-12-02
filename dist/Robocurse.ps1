@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-01 22:56:22
+    Built: 2025-12-01 23:19:39
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -347,7 +347,7 @@ function Test-SafeRobocopyArgument {
         '\$\(',                   # Command substitution
         '\$\{',                   # Variable expansion with braces
         '%[^%]+%',                # Environment variable expansion (cmd.exe style)
-        '\.\.',                   # Parent directory traversal (be careful - this is sometimes legitimate)
+        '(^|[/\\])\.\.([/\\]|$)', # Parent directory traversal at path boundaries only (../foo or foo/../bar or foo/..)
         '^\s*-'                   # Arguments starting with dash (could inject robocopy flags)
     )
 
@@ -1165,6 +1165,12 @@ function Get-RobocurseConfig {
         [string]$Path = ".\Robocurse.config.json"
     )
 
+    # Validate path safety to prevent path traversal attacks
+    if (-not (Test-SafeConfigPath -Path $Path)) {
+        Write-Warning "Configuration path '$Path' contains unsafe characters or patterns. Using default configuration."
+        return New-DefaultConfig
+    }
+
     # Return default config if file doesn't exist
     if (-not (Test-Path -Path $Path)) {
         Write-Verbose "Configuration file not found at '$Path'. Returning default configuration."
@@ -1227,6 +1233,11 @@ function Save-RobocurseConfig {
         [Parameter(Mandatory = $false)]
         [string]$Path = ".\Robocurse.config.json"
     )
+
+    # Validate path safety to prevent writing to unauthorized locations
+    if (-not (Test-SafeConfigPath -Path $Path)) {
+        return New-OperationResult -Success $false -ErrorMessage "Configuration path '$Path' contains unsafe characters or patterns"
+    }
 
     try {
         # Get the parent directory
@@ -1777,7 +1788,19 @@ function Invoke-LogRotation {
                     # Compress the directory
                     Compress-Archive -Path $dir.FullName -DestinationPath $zipPath -Force -ErrorAction Stop
 
-                    # Remove the original directory after successful compression
+                    # Verify the archive was created successfully and has content
+                    if (-not (Test-Path $zipPath)) {
+                        Write-Warning "Failed to verify compressed archive: $zipPath"
+                        continue
+                    }
+                    $archiveInfo = Get-Item -Path $zipPath -ErrorAction SilentlyContinue
+                    if ($null -eq $archiveInfo -or $archiveInfo.Length -eq 0) {
+                        Write-Warning "Compressed archive is empty or invalid, keeping original: $zipPath"
+                        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+                        continue
+                    }
+
+                    # Remove the original directory only after verifying compression succeeded
                     Remove-Item -Path $dir.FullName -Recurse -Force -ErrorAction Stop
 
                     Write-Verbose "Compressed log directory: $($dir.Name)"
@@ -2304,7 +2327,7 @@ function Get-DirectoryProfilesParallel {
                 if ($result -and $result.Count -gt 0) {
                     $profile = $result[0]
                     if ($profile.Success) {
-                        # Remove Success property before storing
+                        # Create profile object with success indicator
                         $profileObj = [PSCustomObject]@{
                             Path = $profile.Path
                             TotalSize = $profile.TotalSize
@@ -2312,14 +2335,23 @@ function Get-DirectoryProfilesParallel {
                             DirCount = $profile.DirCount
                             AvgFileSize = $profile.AvgFileSize
                             LastScanned = $profile.LastScanned
+                            ProfileSuccess = $true
                         }
                         $results[$job.Path] = $profileObj
-                        # Store in cache
-                        Set-CachedProfile -Profile $profileObj
+                        # Store in cache (without the ProfileSuccess property to save space)
+                        $cacheObj = [PSCustomObject]@{
+                            Path = $profile.Path
+                            TotalSize = $profile.TotalSize
+                            FileCount = $profile.FileCount
+                            DirCount = $profile.DirCount
+                            AvgFileSize = $profile.AvgFileSize
+                            LastScanned = $profile.LastScanned
+                        }
+                        Set-CachedProfile -Profile $cacheObj
                     }
                     else {
                         Write-RobocurseLog "Error profiling '$($job.Path)': $($profile.Error)" -Level Warning
-                        # Return empty profile on error
+                        # Return profile with error indicator so callers can detect failure
                         $results[$job.Path] = [PSCustomObject]@{
                             Path = $job.Path.TrimEnd('\')
                             TotalSize = 0
@@ -2327,6 +2359,8 @@ function Get-DirectoryProfilesParallel {
                             DirCount = 0
                             AvgFileSize = 0
                             LastScanned = Get-Date
+                            ProfileSuccess = $false
+                            ProfileError = $profile.Error
                         }
                     }
                 }
@@ -2340,6 +2374,8 @@ function Get-DirectoryProfilesParallel {
                     DirCount = 0
                     AvgFileSize = 0
                     LastScanned = Get-Date
+                    ProfileSuccess = $false
+                    ProfileError = $_.Exception.Message
                 }
             }
             finally {
@@ -2363,8 +2399,8 @@ function Get-DirectoryProfilesParallel {
 
 #region ==================== PUBLIC\CHUNKING ====================
 
-# Script-level counter for unique chunk IDs (using [ref] for thread-safe Interlocked operations)
-$script:ChunkIdCounter = [ref]0
+# Script-level counter for unique chunk IDs (plain integer, use [ref] when calling Interlocked)
+$script:ChunkIdCounter = 0
 
 function Get-DirectoryChunks {
     <#
@@ -2552,8 +2588,8 @@ function New-Chunk {
         [bool]$IsFilesOnly = $false
     )
 
-    # Thread-safe increment using Interlocked
-    $chunkId = [System.Threading.Interlocked]::Increment($script:ChunkIdCounter)
+    # Thread-safe increment using Interlocked (pass [ref] to the plain integer)
+    $chunkId = [System.Threading.Interlocked]::Increment([ref]$script:ChunkIdCounter)
 
     $chunk = [PSCustomObject]@{
         ChunkId = $chunkId
@@ -2947,11 +2983,12 @@ function New-RobocopyArguments {
     $safeLogPath = Get-SanitizedPath -Path $LogPath -ParameterName "LogPath"
 
     # Extract options with defaults
-    $retryCount = if ($RobocopyOptions.RetryCount) { $RobocopyOptions.RetryCount } else { $script:RobocopyRetryCount }
-    $retryWait = if ($RobocopyOptions.RetryWait) { $RobocopyOptions.RetryWait } else { $script:RobocopyRetryWaitSeconds }
+    # Use ContainsKey() to distinguish between "not set" and "set to 0/false"
+    $retryCount = if ($RobocopyOptions.ContainsKey('RetryCount')) { $RobocopyOptions.RetryCount } else { $script:RobocopyRetryCount }
+    $retryWait = if ($RobocopyOptions.ContainsKey('RetryWait')) { $RobocopyOptions.RetryWait } else { $script:RobocopyRetryWaitSeconds }
     $skipJunctions = if ($RobocopyOptions.ContainsKey('SkipJunctions')) { $RobocopyOptions.SkipJunctions } else { $true }
-    $noMirror = if ($RobocopyOptions.NoMirror) { $true } else { $false }
-    $interPacketGapMs = if ($RobocopyOptions.InterPacketGapMs) { [int]$RobocopyOptions.InterPacketGapMs } else { $null }
+    $noMirror = if ($RobocopyOptions.ContainsKey('NoMirror')) { $RobocopyOptions.NoMirror } else { $false }
+    $interPacketGapMs = if ($RobocopyOptions.ContainsKey('InterPacketGapMs') -and $RobocopyOptions.InterPacketGapMs) { [int]$RobocopyOptions.InterPacketGapMs } else { $null }
 
     # Build argument list
     $argList = [System.Collections.Generic.List[string]]::new()
@@ -3307,14 +3344,17 @@ function ConvertFrom-RobocopyLog {
             if ([string]::IsNullOrWhiteSpace($numStr)) { return 0 }
             # Remove spaces (thousands separator in some locales)
             $cleaned = $numStr -replace '\s', ''
-            # If there's exactly one comma and it appears to be a decimal separator
-            # (no other periods, or comma comes after period), treat it as decimal
-            if ($cleaned -match '^[\d.]+,\d{1,2}$') {
-                # Looks like European format: 1.234,56 -> 1234.56
+            # Detect European format: periods as thousands separator, comma as decimal
+            # Pattern: digits with optional period groups, then comma, then any decimal digits
+            # Examples: "1.234,56" "1.234.567,89" "1,5" "1.234,567"
+            if ($cleaned -match '^[\d.]+,\d+$' -and $cleaned -notmatch '\.\d{1,2}\.') {
+                # Looks like European format - comma is the decimal separator
+                # Remove periods (thousands separators) and convert comma to period
                 $cleaned = $cleaned -replace '\.', '' -replace ',', '.'
             }
             elseif ($cleaned -match ',') {
-                # Multiple commas or comma not in decimal position - likely thousands separator
+                # Has commas but doesn't look like European decimal format
+                # Likely commas are thousands separators (US format: 1,234,567.89)
                 $cleaned = $cleaned -replace ',', ''
             }
             $parsedValue = 0.0
@@ -3474,6 +3514,195 @@ function Wait-RobocopyJob {
         Duration = $duration
         Stats = $finalStats
     }
+}
+
+#endregion
+
+#region ==================== PUBLIC\CHECKPOINT ====================
+
+# Handles checkpoint/resume functionality for crash recovery
+
+$script:CheckpointFileName = "robocurse-checkpoint.json"
+
+function Get-CheckpointPath {
+    <#
+    .SYNOPSIS
+        Returns the checkpoint file path based on log directory
+    .OUTPUTS
+        Path to checkpoint file
+    #>
+    $logDir = if ($script:CurrentLogPath) {
+        Split-Path $script:CurrentLogPath -Parent
+    } else {
+        "."
+    }
+    return Join-Path $logDir $script:CheckpointFileName
+}
+
+function Save-ReplicationCheckpoint {
+    <#
+    .SYNOPSIS
+        Saves current replication progress to a checkpoint file
+    .DESCRIPTION
+        Persists the current state of replication to disk, allowing
+        resumption after a crash or interruption. Saves:
+        - Session ID
+        - Profile index and name
+        - Completed chunk paths (for skipping on resume)
+        - Start time
+        - Profiles configuration
+    .PARAMETER Force
+        Overwrite existing checkpoint without confirmation
+    .OUTPUTS
+        OperationResult indicating success/failure
+    #>
+    param(
+        [switch]$Force
+    )
+
+    if (-not $script:OrchestrationState) {
+        return New-OperationResult -Success $false -ErrorMessage "No orchestration state to checkpoint"
+    }
+
+    $state = $script:OrchestrationState
+
+    try {
+        # Build list of completed chunk paths for skip detection on resume
+        $completedPaths = @()
+        foreach ($chunk in $state.CompletedChunks.ToArray()) {
+            $completedPaths += $chunk.SourcePath
+        }
+
+        $checkpoint = [PSCustomObject]@{
+            Version = "1.0"
+            SessionId = $state.SessionId
+            SavedAt = (Get-Date).ToString('o')
+            ProfileIndex = $state.ProfileIndex
+            CurrentProfileName = if ($state.CurrentProfile) { $state.CurrentProfile.Name } else { "" }
+            CompletedChunkPaths = $completedPaths
+            CompletedCount = $state.CompletedCount
+            FailedCount = $state.FailedChunks.Count
+            BytesComplete = $state.BytesComplete
+            StartTime = if ($state.StartTime) { $state.StartTime.ToString('o') } else { $null }
+        }
+
+        $checkpointPath = Get-CheckpointPath
+
+        # Create directory if needed
+        $checkpointDir = Split-Path $checkpointPath -Parent
+        if ($checkpointDir -and -not (Test-Path $checkpointDir)) {
+            New-Item -ItemType Directory -Path $checkpointDir -Force | Out-Null
+        }
+
+        $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $checkpointPath -Encoding UTF8
+
+        Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
+            -Level 'Info' -Component 'Checkpoint'
+
+        return New-OperationResult -Success $true -Data $checkpointPath
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to save checkpoint: $($_.Exception.Message)" `
+            -Level 'Error' -Component 'Checkpoint'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to save checkpoint: $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+function Get-ReplicationCheckpoint {
+    <#
+    .SYNOPSIS
+        Loads a checkpoint file if one exists
+    .OUTPUTS
+        Checkpoint object or $null if no checkpoint exists
+    #>
+
+    $checkpointPath = Get-CheckpointPath
+
+    if (-not (Test-Path $checkpointPath)) {
+        return $null
+    }
+
+    try {
+        $content = Get-Content -Path $checkpointPath -Raw -Encoding UTF8
+        $checkpoint = $content | ConvertFrom-Json
+
+        Write-RobocurseLog -Message "Found checkpoint: $($checkpoint.CompletedChunkPaths.Count) chunks completed at $($checkpoint.SavedAt)" `
+            -Level 'Info' -Component 'Checkpoint'
+
+        return $checkpoint
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to load checkpoint: $($_.Exception.Message)" `
+            -Level 'Warning' -Component 'Checkpoint'
+        return $null
+    }
+}
+
+function Remove-ReplicationCheckpoint {
+    <#
+    .SYNOPSIS
+        Removes the checkpoint file after successful completion
+    .OUTPUTS
+        $true if removed, $false otherwise
+    #>
+
+    $checkpointPath = Get-CheckpointPath
+
+    if (Test-Path $checkpointPath) {
+        try {
+            Remove-Item -Path $checkpointPath -Force
+            Write-RobocurseLog -Message "Checkpoint file removed (replication complete)" `
+                -Level 'Debug' -Component 'Checkpoint'
+            return $true
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to remove checkpoint file: $($_.Exception.Message)" `
+                -Level 'Warning' -Component 'Checkpoint'
+        }
+    }
+    return $false
+}
+
+function Test-ChunkAlreadyCompleted {
+    <#
+    .SYNOPSIS
+        Checks if a chunk was completed in a previous run
+    .PARAMETER Chunk
+        Chunk object to check
+    .PARAMETER Checkpoint
+        Checkpoint object from previous run
+    .OUTPUTS
+        $true if chunk should be skipped, $false otherwise
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Chunk,
+
+        [PSCustomObject]$Checkpoint
+    )
+
+    if (-not $Checkpoint -or -not $Checkpoint.CompletedChunkPaths) {
+        return $false
+    }
+
+    # Guard against null SourcePath
+    if (-not $Chunk.SourcePath) {
+        return $false
+    }
+
+    # Case-insensitive check for Windows paths
+    $normalizedChunkPath = $Chunk.SourcePath.ToLowerInvariant()
+    foreach ($completedPath in $Checkpoint.CompletedChunkPaths) {
+        # Skip null entries in the completed paths array
+        if (-not $completedPath) {
+            continue
+        }
+        if ($completedPath.ToLowerInvariant() -eq $normalizedChunkPath) {
+            return $true
+        }
+    }
+
+    return $false
 }
 
 #endregion
@@ -3757,6 +3986,7 @@ namespace Robocurse
             Interlocked.Exchange(ref _bytesComplete, 0);
             Interlocked.Exchange(ref _completedChunkBytes, 0);
             Interlocked.Exchange(ref _completedChunkFiles, 0);
+            Interlocked.Exchange(ref _profileStartFiles, 0);
 
             // Reset volatile flags
             _stopRequested = false;
@@ -3787,12 +4017,13 @@ namespace Robocurse
             Interlocked.Exchange(ref _completedCount, 0);
             Interlocked.Exchange(ref _bytesComplete, 0);
             Interlocked.Exchange(ref _completedChunkBytes, 0);
+            Interlocked.Exchange(ref _completedChunkFiles, 0);
 
             ChunkQueue = new ConcurrentQueue<object>();
             ActiveJobs.Clear();
             CompletedChunks = new ConcurrentQueue<object>();
             FailedChunks = new ConcurrentQueue<object>();
-            // Note: ProfileResults is NOT cleared - accumulates across profiles
+            // Note: ProfileResults and ErrorMessages are NOT cleared - accumulate across profiles
         }
 
         /// <summary>Clear just the chunk collections (used between profiles)</summary>
@@ -3843,6 +4074,9 @@ namespace Robocurse
 $script:OnProgress = $null
 $script:OnChunkComplete = $null
 $script:OnProfileComplete = $null
+
+# Script-scoped replication run settings (preserved across profile transitions)
+$script:CurrentMaxConcurrentJobs = $null
 
 function Initialize-OrchestrationState {
     <#
@@ -3988,10 +4222,11 @@ function Start-ReplicationRun {
     }
     Write-RobocurseLog -Message "Using robocopy from: $($robocopyCheck.Data)" -Level 'Debug' -Component 'Orchestrator'
 
-    # Store callbacks
+    # Store callbacks and run settings
     $script:OnProgress = $OnProgress
     $script:OnChunkComplete = $OnChunkComplete
     $script:OnProfileComplete = $OnProfileComplete
+    $script:CurrentMaxConcurrentJobs = $MaxConcurrentJobs
 
     # Store profiles and start timing
     $script:OrchestrationState.Profiles = $Profiles
@@ -4350,6 +4585,24 @@ function Invoke-ReplicationTick {
             }
 
             $job = Start-ChunkJob -Chunk $chunk
+
+            # Handle job start failure (null job returned)
+            if ($null -eq $job -or $null -eq $job.Process) {
+                Write-RobocurseLog -Message "Failed to start job for chunk $($chunk.ChunkId)" `
+                    -Level 'Error' -Component 'Orchestrator'
+                $chunk.RetryCount++
+                if ($chunk.RetryCount -lt $script:MaxChunkRetries) {
+                    $chunk.RetryAfter = [datetime]::Now.AddSeconds(5)
+                    $chunksToRequeue.Add($chunk)
+                }
+                else {
+                    $chunk.Status = 'Failed'
+                    $state.FailedChunks.Enqueue($chunk)
+                    $state.EnqueueError("Chunk $($chunk.ChunkId) failed to start after $($chunk.RetryCount) attempts")
+                }
+                continue
+            }
+
             $state.ActiveJobs[$job.Process.Id] = $job
         }
     }
@@ -4615,8 +4868,8 @@ function Complete-CurrentProfile {
     # Move to next profile
     $state.ProfileIndex++
     if ($state.ProfileIndex -lt $state.Profiles.Count) {
-        # Preserve MaxConcurrentJobs from current run (stored in state during Start-ReplicationRun)
-        $maxJobs = if ($state.MaxConcurrentJobs) { $state.MaxConcurrentJobs } else { $script:DefaultMaxConcurrentJobs }
+        # Use MaxConcurrentJobs from current run (stored in script-scope during Start-ReplicationRun)
+        $maxJobs = if ($script:CurrentMaxConcurrentJobs) { $script:CurrentMaxConcurrentJobs } else { $script:DefaultMaxConcurrentJobs }
         Start-ProfileReplication -Profile $state.Profiles[$state.ProfileIndex] -MaxConcurrentJobs $maxJobs
     }
     else {
@@ -5001,6 +5254,12 @@ function Get-ETAEstimate {
     }
 
     $elapsed = [datetime]::Now - $state.StartTime
+
+    # Guard against division by zero (can happen if called immediately after start)
+    if ($elapsed.TotalSeconds -lt 0.001) {
+        return $null
+    }
+
     $bytesPerSecond = $state.BytesComplete / $elapsed.TotalSeconds
 
     if ($bytesPerSecond -le 0) {
@@ -5008,7 +5267,19 @@ function Get-ETAEstimate {
     }
 
     $bytesRemaining = $state.TotalBytes - $state.BytesComplete
+
+    # Handle case where more bytes copied than expected (file sizes changed during copy)
+    if ($bytesRemaining -le 0) {
+        return [timespan]::Zero
+    }
+
     $secondsRemaining = $bytesRemaining / $bytesPerSecond
+
+    # Cap at reasonable maximum (30 days) to prevent overflow
+    $maxSeconds = 30 * 24 * 60 * 60
+    if ($secondsRemaining -gt $maxSeconds) {
+        $secondsRemaining = $maxSeconds
+    }
 
     return [timespan]::FromSeconds($secondsRemaining)
 }
@@ -5163,20 +5434,28 @@ function Add-VssToTracking {
     )
 
     $mutex = $null
+    $mutexAcquired = $false
     try {
         # Use a named mutex to synchronize access across processes
         $mutexName = "Global\RobocurseVssTracking"
         $mutex = [System.Threading.Mutex]::new($false, $mutexName)
 
         # Wait up to 10 seconds to acquire the lock
-        if (-not $mutex.WaitOne(10000)) {
+        $mutexAcquired = $mutex.WaitOne(10000)
+        if (-not $mutexAcquired) {
             Write-RobocurseLog -Message "Timeout waiting for VSS tracking file lock" -Level 'Warning' -Component 'VSS'
             return
         }
 
         $tracked = @()
         if (Test-Path $script:VssTrackingFile) {
-            $tracked = @(Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json)
+            try {
+                $tracked = @(Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json)
+            }
+            catch {
+                # File might be corrupted or empty - start fresh
+                $tracked = @()
+            }
         }
 
         $tracked += [PSCustomObject]@{
@@ -5192,7 +5471,9 @@ function Add-VssToTracking {
     }
     finally {
         if ($mutex) {
-            try { $mutex.ReleaseMutex() } catch { }
+            if ($mutexAcquired) {
+                try { $mutex.ReleaseMutex() } catch { }
+            }
             $mutex.Dispose()
         }
     }
@@ -5214,13 +5495,15 @@ function Remove-VssFromTracking {
     )
 
     $mutex = $null
+    $mutexAcquired = $false
     try {
         # Use a named mutex to synchronize access across processes
         $mutexName = "Global\RobocurseVssTracking"
         $mutex = [System.Threading.Mutex]::new($false, $mutexName)
 
         # Wait up to 10 seconds to acquire the lock
-        if (-not $mutex.WaitOne(10000)) {
+        $mutexAcquired = $mutex.WaitOne(10000)
+        if (-not $mutexAcquired) {
             Write-RobocurseLog -Message "Timeout waiting for VSS tracking file lock" -Level 'Warning' -Component 'VSS'
             return
         }
@@ -5229,7 +5512,15 @@ function Remove-VssFromTracking {
             return
         }
 
-        $tracked = @(Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json)
+        try {
+            $tracked = @(Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json)
+        }
+        catch {
+            # File might be corrupted - just remove it
+            Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+            return
+        }
+
         $tracked = @($tracked | Where-Object { $_.ShadowId -ne $ShadowId })
 
         if ($tracked.Count -eq 0) {
@@ -5243,7 +5534,9 @@ function Remove-VssFromTracking {
     }
     finally {
         if ($mutex) {
-            try { $mutex.ReleaseMutex() } catch { }
+            if ($mutexAcquired) {
+                try { $mutex.ReleaseMutex() } catch { }
+            }
             $mutex.Dispose()
         }
     }
@@ -6512,14 +6805,40 @@ function Register-RobocurseTask {
             $ScriptPath
         }
         else {
-            $autoPath = $PSCommandPath
-            if (-not $autoPath) {
-                $autoPath = $MyInvocation.MyCommand.Path
+            # Auto-detection: Look for Robocurse.ps1 in common locations
+            # Priority: 1) dist folder relative to module, 2) same folder as config, 3) current directory
+            $autoPath = $null
+
+            # Try dist folder relative to module location
+            $moduleRoot = if ($PSScriptRoot) { Split-Path -Parent $PSScriptRoot } else { $null }
+            if ($moduleRoot) {
+                $distPath = Join-Path (Split-Path -Parent $moduleRoot) "dist\Robocurse.ps1"
+                if (Test-Path $distPath) {
+                    $autoPath = $distPath
+                }
             }
+
+            # Try same folder as config file
+            if (-not $autoPath) {
+                $configDir = Split-Path -Parent $ConfigPath
+                $configDirScript = Join-Path $configDir "Robocurse.ps1"
+                if (Test-Path $configDirScript) {
+                    $autoPath = $configDirScript
+                }
+            }
+
+            # Try current directory
+            if (-not $autoPath) {
+                $cwdScript = Join-Path (Get-Location) "Robocurse.ps1"
+                if (Test-Path $cwdScript) {
+                    $autoPath = $cwdScript
+                }
+            }
+
             $autoPath
         }
 
-        if (-not $effectiveScriptPath) {
+        if (-not $effectiveScriptPath -or -not (Test-Path $effectiveScriptPath)) {
             return New-OperationResult -Success $false -ErrorMessage "Cannot determine Robocurse script path. Use -ScriptPath parameter to specify the path to Robocurse.ps1"
         }
 
@@ -6540,9 +6859,10 @@ function Register-RobocurseTask {
                 New-ScheduledTaskTrigger -Weekly -DaysOfWeek $DaysOfWeek -At $Time
             }
             'Hourly' {
+                # Use indefinite duration for hourly tasks (runs forever until disabled)
                 New-ScheduledTaskTrigger -Once -At $Time `
                     -RepetitionInterval (New-TimeSpan -Hours 1) `
-                    -RepetitionDuration (New-TimeSpan -Days 1)
+                    -RepetitionDuration ([TimeSpan]::MaxValue)
             }
         }
 
@@ -7351,19 +7671,27 @@ function Load-ProfileToForm {
     #>
     param([PSCustomObject]$Profile)
 
-    $script:Controls.txtProfileName.Text = $Profile.Name
-    $script:Controls.txtSource.Text = $Profile.Source
-    $script:Controls.txtDest.Text = $Profile.Destination
-    $script:Controls.chkUseVss.IsChecked = $Profile.UseVSS
+    # Guard against null profile
+    if ($null -eq $Profile) { return }
+
+    # Load basic properties with null safety
+    $script:Controls.txtProfileName.Text = if ($Profile.Name) { $Profile.Name } else { "" }
+    $script:Controls.txtSource.Text = if ($Profile.Source) { $Profile.Source } else { "" }
+    $script:Controls.txtDest.Text = if ($Profile.Destination) { $Profile.Destination } else { "" }
+    $script:Controls.chkUseVss.IsChecked = if ($null -ne $Profile.UseVSS) { $Profile.UseVSS } else { $false }
 
     # Set scan mode
     $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
     $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Quick") { 1 } else { 0 }
 
-    # Load chunk settings
-    $script:Controls.txtMaxSize.Text = $Profile.ChunkMaxSizeGB
-    $script:Controls.txtMaxFiles.Text = $Profile.ChunkMaxFiles
-    $script:Controls.txtMaxDepth.Text = $Profile.ChunkMaxDepth
+    # Load chunk settings with defaults for missing properties
+    $maxSize = if ($null -ne $Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB } else { 10 }
+    $maxFiles = if ($null -ne $Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { 50000 }
+    $maxDepth = if ($null -ne $Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { 5 }
+
+    $script:Controls.txtMaxSize.Text = $maxSize.ToString()
+    $script:Controls.txtMaxFiles.Text = $maxFiles.ToString()
+    $script:Controls.txtMaxDepth.Text = $maxDepth.ToString()
 }
 
 function Save-ProfileFromForm {
@@ -8434,7 +8762,8 @@ function Start-RobocurseMain {
                 # Run all enabled profiles
                 $profilesToRun = @($config.SyncProfiles | Where-Object {
                     # Check for explicit Enabled property, default to true if not present
-                    $_.PSObject.Properties['Enabled'] -eq $null -or $_.Enabled -eq $true
+                    # Use -not to check if property doesn't exist, or if it exists and is true
+                    ($null -eq $_.PSObject.Properties['Enabled']) -or ($_.Enabled -eq $true)
                 })
                 if ($profilesToRun.Count -eq 0) {
                     throw "No enabled profiles found in configuration."
