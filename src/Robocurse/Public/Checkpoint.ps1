@@ -73,7 +73,17 @@ function Save-ReplicationCheckpoint {
             New-Item -ItemType Directory -Path $checkpointDir -Force | Out-Null
         }
 
-        $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $checkpointPath -Encoding UTF8
+        # Atomic write: write to temp file first, then rename
+        # This prevents corruption if the process crashes during write
+        $tempPath = "$checkpointPath.tmp"
+        $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
+
+        # Atomic rename (on NTFS this is atomic)
+        # Remove existing checkpoint first if it exists (Move-Item with -Force doesn't overwrite on all platforms)
+        if (Test-Path $checkpointPath) {
+            Remove-Item -Path $checkpointPath -Force
+        }
+        Move-Item -Path $tempPath -Destination $checkpointPath -Force
 
         Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
             -Level 'Info' -Component 'Checkpoint'
@@ -176,14 +186,18 @@ function Test-ChunkAlreadyCompleted {
         return $false
     }
 
-    # Case-insensitive check for Windows paths
-    $normalizedChunkPath = $Chunk.SourcePath.ToLowerInvariant()
+    # Normalize the chunk path for comparison
+    # Use OrdinalIgnoreCase for Windows-style case-insensitivity
+    # This is more reliable than ToLowerInvariant() for international characters
+    # and handles edge cases like Turkish 'I' correctly
+    $chunkPath = $Chunk.SourcePath
+
     foreach ($completedPath in $Checkpoint.CompletedChunkPaths) {
         # Skip null entries in the completed paths array
         if (-not $completedPath) {
             continue
         }
-        if ($completedPath.ToLowerInvariant() -eq $normalizedChunkPath) {
+        if ([string]::Equals($completedPath, $chunkPath, [StringComparison]::OrdinalIgnoreCase)) {
             return $true
         }
     }

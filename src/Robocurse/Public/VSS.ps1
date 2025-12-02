@@ -500,17 +500,21 @@ function Remove-VssSnapshot {
             if ($PSCmdlet.ShouldProcess($ShadowId, "Remove VSS Snapshot")) {
                 Remove-CimInstance -InputObject $shadow
                 Write-RobocurseLog -Message "Deleted VSS snapshot: $ShadowId" -Level 'Info' -Component 'VSS'
-                # Remove from tracking file
+                # Remove from tracking file ONLY after successful deletion
+                # This prevents orphaned snapshots when ShouldProcess returns false
                 Remove-VssFromTracking -ShadowId $ShadowId
+                return New-OperationResult -Success $true -Data $ShadowId
             }
-            return New-OperationResult -Success $true -Data $ShadowId
+            else {
+                # ShouldProcess returned false (e.g., -WhatIf) - don't remove from tracking
+                # Return success but data indicates it was a WhatIf operation
+                return New-OperationResult -Success $true -Data "WhatIf: Would remove $ShadowId"
+            }
         }
         else {
             Write-RobocurseLog -Message "VSS snapshot not found: $ShadowId (may have been already deleted)" -Level 'Warning' -Component 'VSS'
-            # Remove from tracking even if not found (cleanup)
-            if ($PSCmdlet.ShouldProcess($ShadowId, "Remove from VSS tracking")) {
-                Remove-VssFromTracking -ShadowId $ShadowId
-            }
+            # Remove from tracking even if not found (cleanup of stale tracking entry)
+            Remove-VssFromTracking -ShadowId $ShadowId
             # Still return success since the snapshot is gone (idempotent operation)
             return New-OperationResult -Success $true -Data $ShadowId
         }

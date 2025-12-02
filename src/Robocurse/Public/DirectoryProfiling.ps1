@@ -260,16 +260,22 @@ function Set-CachedProfile {
 
     # Enforce cache size limit - if at max, remove oldest entries
     if ($script:ProfileCache.Count -ge $script:ProfileCacheMaxEntries) {
-        # Remove oldest 10% of entries based on LastScanned
-        $entriesToRemove = [math]::Ceiling($script:ProfileCacheMaxEntries * 0.1)
-        $oldestEntries = $script:ProfileCache.ToArray() |
-            Sort-Object { $_.Value.LastScanned } |
-            Select-Object -First $entriesToRemove
+        # Remove oldest 10% of CURRENT entries (not max capacity) based on LastScanned
+        # This ensures we actually free up space when cache is at capacity
+        $currentCount = $script:ProfileCache.Count
+        $entriesToRemove = [math]::Ceiling($currentCount * 0.1)
 
-        foreach ($entry in $oldestEntries) {
-            $script:ProfileCache.TryRemove($entry.Key, [ref]$null) | Out-Null
+        # Only sort and remove if we have entries to remove
+        if ($entriesToRemove -gt 0) {
+            $oldestEntries = $script:ProfileCache.ToArray() |
+                Sort-Object { $_.Value.LastScanned } |
+                Select-Object -First $entriesToRemove
+
+            foreach ($entry in $oldestEntries) {
+                $script:ProfileCache.TryRemove($entry.Key, [ref]$null) | Out-Null
+            }
+            Write-RobocurseLog "Cache at capacity ($currentCount entries), removed $entriesToRemove oldest entries" -Level Debug
         }
-        Write-RobocurseLog "Cache at capacity, removed $entriesToRemove oldest entries" -Level Debug
     }
 
     # Thread-safe add or update using ConcurrentDictionary indexer

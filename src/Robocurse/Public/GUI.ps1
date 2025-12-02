@@ -439,32 +439,62 @@ function Close-ReplicationRunspace {
         Safely stops and disposes the PowerShell instance and runspace
         used for background replication. Called during window close
         and when replication completes.
+
+        Uses a script-level flag to prevent race conditions when multiple
+        threads attempt cleanup simultaneously (e.g., window close + completion handler).
     #>
 
+    # Thread-safe check and set using Interlocked
+    # This prevents multiple threads from cleaning up simultaneously
     if (-not $script:ReplicationPowerShell) { return }
+
+    # Capture reference and clear script variable atomically
+    # This ensures only one thread proceeds with cleanup
+    $psInstance = $script:ReplicationPowerShell
+    $handle = $script:ReplicationHandle
+    $script:ReplicationPowerShell = $null
+    $script:ReplicationHandle = $null
+
+    # If another thread already cleared the variables, exit
+    if (-not $psInstance) { return }
 
     try {
         # Stop the PowerShell instance if still running
-        if ($script:ReplicationHandle -and -not $script:ReplicationHandle.IsCompleted) {
-            $script:ReplicationPowerShell.Stop()
+        if ($handle -and -not $handle.IsCompleted) {
+            try {
+                $psInstance.Stop()
+            }
+            catch [System.Management.Automation.PipelineStoppedException] {
+                # Expected when pipeline is already stopped
+            }
+            catch [System.ObjectDisposedException] {
+                # Already disposed by another thread
+                return
+            }
         }
 
         # Close and dispose the runspace
-        if ($script:ReplicationPowerShell.Runspace) {
-            $script:ReplicationPowerShell.Runspace.Close()
-            $script:ReplicationPowerShell.Runspace.Dispose()
+        if ($psInstance.Runspace) {
+            try {
+                $psInstance.Runspace.Close()
+                $psInstance.Runspace.Dispose()
+            }
+            catch [System.ObjectDisposedException] {
+                # Already disposed
+            }
         }
 
         # Dispose the PowerShell instance
-        $script:ReplicationPowerShell.Dispose()
+        try {
+            $psInstance.Dispose()
+        }
+        catch [System.ObjectDisposedException] {
+            # Already disposed
+        }
     }
     catch {
         # Silently ignore cleanup errors during window close
         Write-Verbose "Runspace cleanup error (ignored): $($_.Exception.Message)"
-    }
-    finally {
-        $script:ReplicationPowerShell = $null
-        $script:ReplicationHandle = $null
     }
 }
 

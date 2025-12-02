@@ -6,6 +6,10 @@ function Register-RobocurseTask {
     .DESCRIPTION
         Registers a Windows scheduled task to run Robocurse automatically.
         Supports daily, weekly, and hourly schedules with flexible configuration.
+
+        SECURITY NOTE: When using -RunAsSystem, the script path is validated to ensure
+        it exists and has a .ps1 extension. For additional security, consider placing
+        scripts in protected directories (e.g., Program Files) that require admin to modify.
     .PARAMETER TaskName
         Name for the scheduled task. Default: "Robocurse-Replication"
     .PARAMETER ConfigPath
@@ -18,6 +22,14 @@ function Register-RobocurseTask {
         Days for weekly schedule (Sunday, Monday, etc.). Default: @('Sunday')
     .PARAMETER RunAsSystem
         Run as SYSTEM account (requires admin). Default: $false
+        WARNING: This runs the script with SYSTEM privileges. Ensure the script path
+        points to a trusted, protected location.
+        NOTE: SYSTEM account cannot access network resources (UNC paths) by default.
+    .PARAMETER Credential
+        PSCredential object for a domain or local user account. Required for accessing
+        UNC paths (network shares) during scheduled replication.
+        Use: $cred = Get-Credential; Register-RobocurseTask -Credential $cred ...
+        The password is securely stored in Windows Task Scheduler.
     .PARAMETER ScriptPath
         Explicit path to Robocurse.ps1 script. Use when running interactively
         or when automatic path detection fails.
@@ -35,8 +47,12 @@ function Register-RobocurseTask {
     .EXAMPLE
         Register-RobocurseTask -ConfigPath "C:\config.json" -ScriptPath "C:\Scripts\Robocurse.ps1"
         # Explicitly specify the script path for interactive sessions
+    .EXAMPLE
+        $cred = Get-Credential -Message "Enter domain credentials for UNC access"
+        Register-RobocurseTask -ConfigPath "C:\config.json" -Credential $cred
+        # Use domain credentials to enable UNC path access during scheduled runs
     #>
-    [CmdletBinding(SupportsShouldProcess)]
+    [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     param(
         [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication",
@@ -56,6 +72,11 @@ function Register-RobocurseTask {
         [string[]]$DaysOfWeek = @('Sunday'),
 
         [switch]$RunAsSystem,
+
+        [Parameter(ParameterSetName = 'DomainUser')]
+        [System.Management.Automation.PSCredential]
+        [System.Management.Automation.Credential()]
+        $Credential,
 
         [ValidateScript({
             if ($_ -and -not (Test-Path -Path $_ -PathType Leaf)) {
@@ -120,8 +141,51 @@ function Register-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "Cannot determine Robocurse script path. Use -ScriptPath parameter to specify the path to Robocurse.ps1"
         }
 
+        # Security validation for script path
+        # Validate the script has a .ps1 extension (prevent executing arbitrary files)
+        if ([System.IO.Path]::GetExtension($effectiveScriptPath) -ne '.ps1') {
+            return New-OperationResult -Success $false -ErrorMessage "Script path must have a .ps1 extension: $effectiveScriptPath"
+        }
+
+        # Validate paths don't contain dangerous characters that could enable command injection
+        # These characters could break out of the quoted argument
+        $dangerousChars = @('`', '$', '"', ';', '&', '|', '>', '<', [char]0x0000, [char]0x000A, [char]0x000D)
+        foreach ($char in $dangerousChars) {
+            if ($effectiveScriptPath.Contains($char) -or $ConfigPath.Contains($char)) {
+                return New-OperationResult -Success $false -ErrorMessage "Script path or config path contains invalid characters that could pose a security risk"
+            }
+        }
+
+        # Additional warning for SYSTEM-level tasks
+        if ($RunAsSystem) {
+            $resolvedScriptPath = [System.IO.Path]::GetFullPath($effectiveScriptPath)
+            Write-RobocurseLog -Message "SECURITY: Registering task to run as SYSTEM with script: $resolvedScriptPath" -Level 'Warning' -Component 'Scheduler'
+
+            # Check if the script is in a protected location (Program Files or Windows)
+            $protectedPaths = @(
+                $env:ProgramFiles,
+                ${env:ProgramFiles(x86)},
+                $env:SystemRoot
+            ) | Where-Object { $_ }
+
+            $isProtected = $false
+            foreach ($protectedPath in $protectedPaths) {
+                if ($resolvedScriptPath.StartsWith($protectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+                    $isProtected = $true
+                    break
+                }
+            }
+
+            if (-not $isProtected) {
+                Write-RobocurseLog -Message "WARNING: Script '$resolvedScriptPath' is not in a protected directory. Consider moving to Program Files for enhanced security." -Level 'Warning' -Component 'Scheduler'
+            }
+        }
+
         # Build action - PowerShell command to run Robocurse in headless mode
-        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$effectiveScriptPath`" -Headless -ConfigPath `"$ConfigPath`""
+        # Use single quotes for inner paths to prevent variable expansion, then escape for the argument string
+        $escapedScriptPath = $effectiveScriptPath -replace "'", "''"
+        $escapedConfigPath = $ConfigPath -replace "'", "''"
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$escapedScriptPath`" -Headless -ConfigPath `"$escapedConfigPath`""
 
         $action = New-ScheduledTaskAction `
             -Execute "powershell.exe" `
@@ -145,13 +209,31 @@ function Register-RobocurseTask {
         }
 
         # Build principal - determines user context for task execution
+        # IMPORTANT: S4U logon does NOT have network credentials and cannot access UNC paths
+        # For UNC path access, use -Credential parameter with a domain account
         $principal = if ($RunAsSystem) {
+            # SYSTEM account - no network credentials, but useful for local-only operations
+            Write-RobocurseLog -Message "Using SYSTEM account - note: SYSTEM cannot access network resources by default" `
+                -Level 'Info' -Component 'Scheduler'
             New-ScheduledTaskPrincipal `
                 -UserId "SYSTEM" `
                 -LogonType ServiceAccount `
                 -RunLevel Highest
         }
+        elseif ($Credential) {
+            # Domain/local user with credentials - enables network access (UNC paths)
+            Write-RobocurseLog -Message "Using credential-based logon for network access capability" `
+                -Level 'Info' -Component 'Scheduler'
+            New-ScheduledTaskPrincipal `
+                -UserId $Credential.UserName `
+                -LogonType Password `
+                -RunLevel Highest
+        }
         else {
+            # S4U logon - current user, but NO network credentials
+            # This will NOT work for UNC paths!
+            Write-RobocurseLog -Message "Using S4U logon (current user) - WARNING: Cannot access network/UNC paths. Use -Credential for network access." `
+                -Level 'Warning' -Component 'Scheduler'
             New-ScheduledTaskPrincipal `
                 -UserId $env:USERNAME `
                 -LogonType S4U `
@@ -177,6 +259,13 @@ function Register-RobocurseTask {
             Settings = $settings
             Description = "Robocurse automatic directory replication"
             Force = $true
+        }
+
+        # If credentials provided, add them to task registration
+        # This is required for Password logon type to enable network access
+        if ($Credential) {
+            $taskParams['User'] = $Credential.UserName
+            $taskParams['Password'] = $Credential.GetNetworkCredential().Password
         }
 
         if ($PSCmdlet.ShouldProcess($TaskName, "Register scheduled task (Schedule: $Schedule, Time: $Time)")) {

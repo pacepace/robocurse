@@ -809,21 +809,27 @@ function Invoke-ReplicationTick {
         $job = $kvp.Value
         # Check if process has completed
         if ($job.Process.HasExited) {
-            # Process completion
-            $result = Complete-RobocopyJob -Job $job
-
-            # Thread-safe removal from ConcurrentDictionary
+            # Thread-safe removal from ConcurrentDictionary FIRST
+            # This prevents race condition where multiple threads could process the same job
             $removedJob = $null
-            $state.ActiveJobs.TryRemove($kvp.Key, [ref]$removedJob) | Out-Null
+            $wasRemoved = $state.ActiveJobs.TryRemove($kvp.Key, [ref]$removedJob)
+
+            # If we didn't remove it, another thread already claimed this job - skip
+            if (-not $wasRemoved) {
+                continue
+            }
+
+            # Process completion (only if we successfully claimed the job)
+            $result = Complete-RobocopyJob -Job $removedJob
 
             if ($result.ExitMeaning.Severity -in @('Error', 'Fatal')) {
-                Invoke-FailedChunkHandler -Job $job -Result $result
+                Invoke-FailedChunkHandler -Job $removedJob -Result $result
             }
             else {
-                $state.CompletedChunks.Enqueue($job.Chunk)
+                $state.CompletedChunks.Enqueue($removedJob.Chunk)
                 # Track cumulative bytes from completed chunks (avoids O(n) iteration in Update-ProgressStats)
-                if ($job.Chunk.EstimatedSize) {
-                    $state.AddCompletedChunkBytes($job.Chunk.EstimatedSize)
+                if ($removedJob.Chunk.EstimatedSize) {
+                    $state.AddCompletedChunkBytes($removedJob.Chunk.EstimatedSize)
                 }
                 # Track files copied from the parsed robocopy log
                 if ($result.Stats -and $result.Stats.FilesCopied -gt 0) {
@@ -834,7 +840,7 @@ function Invoke-ReplicationTick {
 
             # Invoke callback
             if ($script:OnChunkComplete) {
-                & $script:OnChunkComplete $job $result
+                & $script:OnChunkComplete $removedJob $result
             }
 
             # Save checkpoint periodically (every N chunks or on failure)
@@ -855,9 +861,9 @@ function Invoke-ReplicationTick {
         if ($state.ChunkQueue.TryDequeue([ref]$chunk)) {
             # Check if chunk was completed in previous run (resume from checkpoint)
             if ($script:CurrentCheckpoint -and (Test-ChunkAlreadyCompleted -Chunk $chunk -Checkpoint $script:CurrentCheckpoint)) {
-                # Skip this chunk - mark as already completed
+                # Skip this chunk - DON'T enqueue to CompletedChunks to prevent memory leak
+                # The chunk is already tracked in the checkpoint file, no need to hold in memory
                 $chunk.Status = 'Skipped'
-                $state.CompletedChunks.Enqueue($chunk)
                 $state.IncrementCompletedCount()
                 if ($chunk.EstimatedSize) {
                     $state.AddCompletedChunkBytes($chunk.EstimatedSize)

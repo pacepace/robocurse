@@ -374,12 +374,15 @@ function Get-RobocopyExitMeaning {
     if ($result.FatalError) {
         $result.Severity = "Fatal"
         $result.Message = "Fatal error occurred"
-        $result.ShouldRetry = $true  # Worth retrying once
+        # Fatal errors (exit code 16) are often permanent: path not found, access denied, invalid parameters
+        # Only retry if combined with copy errors (exit code 24 = 16+8) which suggests partial success
+        # Pure fatal (16) without copy errors is likely permanent and shouldn't be retried indefinitely
+        $result.ShouldRetry = $result.CopyErrors  # Retry only if there were also copy errors
     }
     elseif ($result.CopyErrors) {
         $result.Severity = "Error"
         $result.Message = "Some files could not be copied"
-        $result.ShouldRetry = $true
+        $result.ShouldRetry = $true  # Copy errors (8) are often transient - file locked, etc.
     }
     elseif ($result.MismatchesFound) {
         # Configurable severity for mismatches

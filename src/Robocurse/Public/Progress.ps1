@@ -62,13 +62,16 @@ function Get-OrchestrationStatus {
 
     $currentProfileName = if ($state.CurrentProfile) { $state.CurrentProfile.Name } else { "" }
 
+    # Clamp progress to 0-100 range to handle edge cases where CompletedCount > TotalChunks
+    # (can happen if files are added during scan or other race conditions)
     $profileProgress = if ($state.TotalChunks -gt 0) {
-        [math]::Round(($state.CompletedCount / $state.TotalChunks) * 100, 1)
+        [math]::Min(100, [math]::Max(0, [math]::Round(($state.CompletedCount / $state.TotalChunks) * 100, 1)))
     } else { 0 }
 
-    # Calculate overall progress across all profiles
+    # Calculate overall progress across all profiles (also clamped)
     $totalProfileCount = if ($state.Profiles.Count -gt 0) { $state.Profiles.Count } else { 1 }
-    $overallProgress = [math]::Round((($state.ProfileIndex + ($profileProgress / 100)) / $totalProfileCount) * 100, 1)
+    $overallProgress = [math]::Min(100, [math]::Max(0,
+        [math]::Round((($state.ProfileIndex + ($profileProgress / 100)) / $totalProfileCount) * 100, 1)))
 
     return [PSCustomObject]@{
         Phase = $state.Phase
@@ -92,6 +95,9 @@ function Get-ETAEstimate {
     <#
     .SYNOPSIS
         Estimates completion time based on current progress
+    .DESCRIPTION
+        Calculates ETA based on bytes copied per second. Includes safeguards
+        against integer overflow and division by zero edge cases.
     .OUTPUTS
         TimeSpan estimate or $null if cannot estimate
     #>
@@ -108,13 +114,27 @@ function Get-ETAEstimate {
         return $null
     }
 
-    $bytesPerSecond = $state.BytesComplete / $elapsed.TotalSeconds
+    # Cast to double to prevent integer overflow with large byte counts
+    [double]$bytesComplete = $state.BytesComplete
+    [double]$totalBytes = $state.TotalBytes
+    [double]$elapsedSeconds = $elapsed.TotalSeconds
 
-    if ($bytesPerSecond -le 0) {
+    # Guard against unreasonably large values that could cause overflow
+    # Max reasonable bytes: 100 PB (should cover any realistic scenario)
+    $maxBytes = [double](100 * 1PB)
+    if ($bytesComplete -gt $maxBytes -or $totalBytes -gt $maxBytes) {
         return $null
     }
 
-    $bytesRemaining = $state.TotalBytes - $state.BytesComplete
+    $bytesPerSecond = $bytesComplete / $elapsedSeconds
+
+    # Guard against very slow speeds that would result in unreasonable ETA
+    # Minimum 1 byte per second to prevent near-infinite ETA
+    if ($bytesPerSecond -lt 1.0) {
+        return $null
+    }
+
+    $bytesRemaining = $totalBytes - $bytesComplete
 
     # Handle case where more bytes copied than expected (file sizes changed during copy)
     if ($bytesRemaining -le 0) {
@@ -124,10 +144,10 @@ function Get-ETAEstimate {
     $secondsRemaining = $bytesRemaining / $bytesPerSecond
 
     # Cap at reasonable maximum (30 days) to prevent overflow
-    $maxSeconds = 30 * 24 * 60 * 60
-    if ($secondsRemaining -gt $maxSeconds) {
+    $maxSeconds = 30.0 * 24.0 * 60.0 * 60.0
+    if ($secondsRemaining -gt $maxSeconds -or [double]::IsInfinity($secondsRemaining) -or [double]::IsNaN($secondsRemaining)) {
         $secondsRemaining = $maxSeconds
     }
 
-    return [timespan]::FromSeconds($secondsRemaining)
+    return [timespan]::FromSeconds([int]$secondsRemaining)
 }
