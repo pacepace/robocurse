@@ -102,9 +102,8 @@ function ConvertTo-ChunkSettingsInternal {
         if ($RawChunking.maxChunkSizeGB) {
             $Profile.ChunkMaxSizeGB = $RawChunking.maxChunkSizeGB
         }
-        if ($RawChunking.parallelChunks) {
-            $Profile | Add-Member -MemberType NoteProperty -Name 'ParallelChunks' -Value $RawChunking.parallelChunks -Force
-        }
+        # Note: parallelChunks from config is intentionally not mapped.
+        # Parallelism is controlled by MaxConcurrentJobs at the orchestration level.
         if ($RawChunking.maxDepthToScan) {
             $Profile.ChunkMaxDepth = $RawChunking.maxDepthToScan
         }

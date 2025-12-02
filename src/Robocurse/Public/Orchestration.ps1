@@ -1134,7 +1134,9 @@ function Complete-CurrentProfile {
     # Move to next profile
     $state.ProfileIndex++
     if ($state.ProfileIndex -lt $state.Profiles.Count) {
-        Start-ProfileReplication -Profile $state.Profiles[$state.ProfileIndex]
+        # Preserve MaxConcurrentJobs from current run (stored in state during Start-ReplicationRun)
+        $maxJobs = if ($state.MaxConcurrentJobs) { $state.MaxConcurrentJobs } else { $script:DefaultMaxConcurrentJobs }
+        Start-ProfileReplication -Profile $state.Profiles[$state.ProfileIndex] -MaxConcurrentJobs $maxJobs
     }
     else {
         # All profiles complete

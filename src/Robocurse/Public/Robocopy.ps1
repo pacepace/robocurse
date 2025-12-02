@@ -211,7 +211,9 @@ function New-RobocopyArguments {
     }
 
     # Chunk-specific arguments (e.g., /LEV:1 for files-only chunks)
-    foreach ($arg in $ChunkArgs) {
+    # Sanitized to prevent command injection
+    $safeChunkArgs = Get-SanitizedChunkArgs -ChunkArgs $ChunkArgs
+    foreach ($arg in $safeChunkArgs) {
         $argList.Add($arg)
     }
 
@@ -306,7 +308,10 @@ function Start-RobocopyJob {
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $false  # Using /LOG and /TEE instead
-    $psi.RedirectStandardError = $true
+    # Note: Not redirecting stderr - robocopy rarely writes to stderr,
+    # and redirecting without reading can cause deadlock on large error output.
+    # Robocopy errors are captured in the log file via /LOG and exit codes.
+    $psi.RedirectStandardError = $false
 
     Write-RobocurseLog -Message "Robocopy args: $($argList -join ' ')" -Level 'Debug' -Component 'Robocopy'
 

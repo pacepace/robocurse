@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-01 22:02:51
+    Built: 2025-12-01 22:56:22
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -430,6 +430,66 @@ function Get-SanitizedExcludePatterns {
     }
 
     return $safePatterns
+}
+
+function Get-SanitizedChunkArgs {
+    <#
+    .SYNOPSIS
+        Validates and returns only safe robocopy chunk arguments
+    .DESCRIPTION
+        ChunkArgs are intended for robocopy switches like /LEV:1.
+        This function validates each argument against a whitelist of safe
+        robocopy switch patterns to prevent command injection.
+    .PARAMETER ChunkArgs
+        Array of chunk arguments to validate
+    .OUTPUTS
+        Array of validated, safe arguments
+    .EXAMPLE
+        $safeArgs = Get-SanitizedChunkArgs -ChunkArgs @("/LEV:1", "/S")
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [string[]]$ChunkArgs
+    )
+
+    $safeArgs = @()
+
+    # Whitelist of safe robocopy switch patterns
+    # These are switches that might legitimately be added per-chunk
+    $safePatterns = @(
+        '^/LEV:\d+$',      # Level depth (e.g., /LEV:1)
+        '^/S$',            # Copy subdirectories (non-empty only)
+        '^/E$',            # Copy subdirectories (including empty)
+        '^/MAXAGE:\d+$',   # Max file age
+        '^/MINAGE:\d+$',   # Min file age
+        '^/MAXLAD:\d+$',   # Max last access date
+        '^/MINLAD:\d+$'    # Min last access date
+    )
+
+    foreach ($arg in $ChunkArgs) {
+        if ([string]::IsNullOrWhiteSpace($arg)) {
+            continue
+        }
+
+        $isSafe = $false
+        foreach ($pattern in $safePatterns) {
+            if ($arg -match $pattern) {
+                $isSafe = $true
+                break
+            }
+        }
+
+        if ($isSafe) {
+            $safeArgs += $arg
+        }
+        else {
+            Write-RobocurseLog -Message "Rejected unsafe chunk argument: $arg" `
+                -Level 'Warning' -Component 'Security'
+        }
+    }
+
+    return $safeArgs
 }
 
 function Test-SourcePathAccessible {
@@ -823,9 +883,8 @@ function ConvertTo-ChunkSettingsInternal {
         if ($RawChunking.maxChunkSizeGB) {
             $Profile.ChunkMaxSizeGB = $RawChunking.maxChunkSizeGB
         }
-        if ($RawChunking.parallelChunks) {
-            $Profile | Add-Member -MemberType NoteProperty -Name 'ParallelChunks' -Value $RawChunking.parallelChunks -Force
-        }
+        # Note: parallelChunks from config is intentionally not mapped.
+        # Parallelism is controlled by MaxConcurrentJobs at the orchestration level.
         if ($RawChunking.maxDepthToScan) {
             $Profile.ChunkMaxDepth = $RawChunking.maxDepthToScan
         }
@@ -1407,9 +1466,17 @@ function Initialize-LogSession {
     #>
     param(
         [string]$LogRoot = ".\Logs",
+        [ValidateRange(1, 365)]
         [int]$CompressAfterDays = $script:LogCompressAfterDays,
+        [ValidateRange(1, 3650)]
         [int]$DeleteAfterDays = $script:LogDeleteAfterDays
     )
+
+    # Validate that CompressAfterDays is less than DeleteAfterDays
+    if ($CompressAfterDays -ge $DeleteAfterDays) {
+        Write-Warning "CompressAfterDays ($CompressAfterDays) should be less than DeleteAfterDays ($DeleteAfterDays). Adjusting CompressAfterDays to $([Math]::Max(1, $DeleteAfterDays - 7))."
+        $CompressAfterDays = [Math]::Max(1, $DeleteAfterDays - 7)
+    }
 
     # Generate unique session ID based on timestamp
     $timestamp = Get-Date -Format "HHmmss"
@@ -1546,7 +1613,12 @@ function Write-RobocurseLog {
 
     # Write to SIEM if requested
     if ($WriteSiem) {
-        $eventType = if ($Level -eq 'Error') { 'ChunkError' } else { 'SessionStart' }
+        # Map log level to appropriate SIEM event type
+        $eventType = switch ($Level) {
+            'Error'   { 'ChunkError' }
+            'Warning' { 'ChunkError' }  # Warnings should also use ChunkError, not SessionStart
+            default   { 'ChunkError' }  # Fallback for any SIEM-worthy level
+        }
         Write-SiemEvent -EventType $eventType -Data @{
             Level = $Level
             Component = $Component
@@ -1652,13 +1724,21 @@ function Invoke-LogRotation {
     #>
     param(
         [string]$LogRoot = ".\Logs",
+        [ValidateRange(1, 365)]
         [int]$CompressAfterDays = $script:LogCompressAfterDays,
+        [ValidateRange(1, 3650)]
         [int]$DeleteAfterDays = $script:LogDeleteAfterDays
     )
 
     if (-not (Test-Path $LogRoot)) {
         Write-Verbose "Log root directory does not exist: $LogRoot"
         return
+    }
+
+    # Validate that CompressAfterDays is less than DeleteAfterDays
+    if ($CompressAfterDays -ge $DeleteAfterDays) {
+        Write-Warning "CompressAfterDays ($CompressAfterDays) should be less than DeleteAfterDays ($DeleteAfterDays). Adjusting CompressAfterDays to $([Math]::Max(1, $DeleteAfterDays - 7))."
+        $CompressAfterDays = [Math]::Max(1, $DeleteAfterDays - 7)
     }
 
     $now = Get-Date
@@ -2371,6 +2451,14 @@ function Get-DirectoryChunks {
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
     }
 
+    # Check if directory is above MinSizeBytes - if not, accept as single chunk to reduce overhead
+    # This prevents creating many tiny chunks which add more overhead than benefit
+    if ($profile.TotalSize -lt $MinSizeBytes) {
+        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $($profile.TotalSize))" -Level Debug
+        $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
+        return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
+    }
+
     # Directory is too big - recurse into children
     $children = Get-DirectoryChildren -Path $Path
 
@@ -2382,8 +2470,9 @@ function Get-DirectoryChunks {
     }
 
     # Recurse into each child
+    # Use List<> instead of array concatenation for O(N) instead of O(N²) performance
     Write-RobocurseLog "Directory too large, recursing into $($children.Count) children: $Path" -Level Debug
-    $chunks = @()
+    $chunkList = [System.Collections.Generic.List[PSCustomObject]]::new()
     foreach ($child in $children) {
         $childChunks = Get-DirectoryChunks `
             -Path $child `
@@ -2395,7 +2484,9 @@ function Get-DirectoryChunks {
             -MinSizeBytes $MinSizeBytes `
             -CurrentDepth ($CurrentDepth + 1)
 
-        $chunks += $childChunks
+        foreach ($chunk in $childChunks) {
+            $chunkList.Add($chunk)
+        }
     }
 
     # Handle files at this level (not in any subdir)
@@ -2403,10 +2494,10 @@ function Get-DirectoryChunks {
     if ($filesAtLevel.Count -gt 0) {
         Write-RobocurseLog "Found $($filesAtLevel.Count) files at level: $Path" -Level Debug
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
-        $chunks += New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath
+        $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath))
     }
 
-    return $chunks
+    return $chunkList.ToArray()
 }
 
 function Get-FilesAtLevel {
@@ -2932,7 +3023,9 @@ function New-RobocopyArguments {
     }
 
     # Chunk-specific arguments (e.g., /LEV:1 for files-only chunks)
-    foreach ($arg in $ChunkArgs) {
+    # Sanitized to prevent command injection
+    $safeChunkArgs = Get-SanitizedChunkArgs -ChunkArgs $ChunkArgs
+    foreach ($arg in $safeChunkArgs) {
         $argList.Add($arg)
     }
 
@@ -3027,7 +3120,10 @@ function Start-RobocopyJob {
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $false  # Using /LOG and /TEE instead
-    $psi.RedirectStandardError = $true
+    # Note: Not redirecting stderr - robocopy rarely writes to stderr,
+    # and redirecting without reading can cause deadlock on large error output.
+    # Robocopy errors are captured in the log file via /LOG and exit codes.
+    $psi.RedirectStandardError = $false
 
     Write-RobocurseLog -Message "Robocopy args: $($argList -join ' ')" -Level 'Debug' -Component 'Robocopy'
 
@@ -4519,7 +4615,9 @@ function Complete-CurrentProfile {
     # Move to next profile
     $state.ProfileIndex++
     if ($state.ProfileIndex -lt $state.Profiles.Count) {
-        Start-ProfileReplication -Profile $state.Profiles[$state.ProfileIndex]
+        # Preserve MaxConcurrentJobs from current run (stored in state during Start-ReplicationRun)
+        $maxJobs = if ($state.MaxConcurrentJobs) { $state.MaxConcurrentJobs } else { $script:DefaultMaxConcurrentJobs }
+        Start-ProfileReplication -Profile $state.Profiles[$state.ProfileIndex] -MaxConcurrentJobs $maxJobs
     }
     else {
         # All profiles complete
@@ -5053,6 +5151,9 @@ function Add-VssToTracking {
     <#
     .SYNOPSIS
         Adds a VSS snapshot to the tracking file
+    .DESCRIPTION
+        Uses a mutex to prevent race conditions when multiple processes
+        access the tracking file concurrently.
     .PARAMETER SnapshotInfo
         Snapshot info object with ShadowId
     #>
@@ -5061,7 +5162,18 @@ function Add-VssToTracking {
         [PSCustomObject]$SnapshotInfo
     )
 
+    $mutex = $null
     try {
+        # Use a named mutex to synchronize access across processes
+        $mutexName = "Global\RobocurseVssTracking"
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+
+        # Wait up to 10 seconds to acquire the lock
+        if (-not $mutex.WaitOne(10000)) {
+            Write-RobocurseLog -Message "Timeout waiting for VSS tracking file lock" -Level 'Warning' -Component 'VSS'
+            return
+        }
+
         $tracked = @()
         if (Test-Path $script:VssTrackingFile) {
             $tracked = @(Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json)
@@ -5078,12 +5190,21 @@ function Add-VssToTracking {
     catch {
         Write-RobocurseLog -Message "Failed to add VSS to tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
     }
+    finally {
+        if ($mutex) {
+            try { $mutex.ReleaseMutex() } catch { }
+            $mutex.Dispose()
+        }
+    }
 }
 
 function Remove-VssFromTracking {
     <#
     .SYNOPSIS
         Removes a VSS snapshot from the tracking file
+    .DESCRIPTION
+        Uses a mutex to prevent race conditions when multiple processes
+        access the tracking file concurrently.
     .PARAMETER ShadowId
         Shadow ID to remove
     #>
@@ -5092,7 +5213,18 @@ function Remove-VssFromTracking {
         [string]$ShadowId
     )
 
+    $mutex = $null
     try {
+        # Use a named mutex to synchronize access across processes
+        $mutexName = "Global\RobocurseVssTracking"
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+
+        # Wait up to 10 seconds to acquire the lock
+        if (-not $mutex.WaitOne(10000)) {
+            Write-RobocurseLog -Message "Timeout waiting for VSS tracking file lock" -Level 'Warning' -Component 'VSS'
+            return
+        }
+
         if (-not (Test-Path $script:VssTrackingFile)) {
             return
         }
@@ -5108,6 +5240,12 @@ function Remove-VssFromTracking {
     }
     catch {
         Write-RobocurseLog -Message "Failed to remove VSS from tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+    }
+    finally {
+        if ($mutex) {
+            try { $mutex.ReleaseMutex() } catch { }
+            $mutex.Dispose()
+        }
     }
 }
 
@@ -5196,6 +5334,13 @@ function New-VssSnapshot {
         [ValidateRange(1, 60)]
         [int]$RetryDelaySeconds = 5
     )
+
+    # Pre-flight privilege check - fail fast if we don't have required privileges
+    $privCheck = Test-VssPrivileges
+    if (-not $privCheck.Success) {
+        Write-RobocurseLog -Message "VSS privilege check failed: $($privCheck.ErrorMessage)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage "VSS privileges not available: $($privCheck.ErrorMessage)"
+    }
 
     # Retry loop for transient VSS failures (lock contention, VSS busy, etc.)
     $attempt = 0
@@ -5619,6 +5764,12 @@ function Initialize-CredentialManager {
 
     # Only attempt on Windows
     if (-not (Test-IsWindowsPlatform)) {
+        return
+    }
+
+    # Check if type already exists from a previous session
+    if (([System.Management.Automation.PSTypeName]'CredentialManager').Type) {
+        $script:CredentialManagerTypeAdded = $true
         return
     }
 
@@ -6296,6 +6447,9 @@ function Register-RobocurseTask {
         Days for weekly schedule (Sunday, Monday, etc.). Default: @('Sunday')
     .PARAMETER RunAsSystem
         Run as SYSTEM account (requires admin). Default: $false
+    .PARAMETER ScriptPath
+        Explicit path to Robocurse.ps1 script. Use when running interactively
+        or when automatic path detection fails.
     .OUTPUTS
         OperationResult - Success=$true with Data=$TaskName on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
@@ -6307,6 +6461,9 @@ function Register-RobocurseTask {
     .EXAMPLE
         Register-RobocurseTask -ConfigPath "C:\config.json" -WhatIf
         # Shows what task would be created without actually registering it
+    .EXAMPLE
+        Register-RobocurseTask -ConfigPath "C:\config.json" -ScriptPath "C:\Scripts\Robocurse.ps1"
+        # Explicitly specify the script path for interactive sessions
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -6327,7 +6484,15 @@ function Register-RobocurseTask {
         [ValidateNotNullOrEmpty()]
         [string[]]$DaysOfWeek = @('Sunday'),
 
-        [switch]$RunAsSystem
+        [switch]$RunAsSystem,
+
+        [ValidateScript({
+            if ($_ -and -not (Test-Path -Path $_ -PathType Leaf)) {
+                throw "ScriptPath '$_' does not exist or is not a file"
+            }
+            $true
+        })]
+        [string]$ScriptPath
     )
 
     try {
@@ -6342,22 +6507,29 @@ function Register-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "ConfigPath '$ConfigPath' does not exist or is not a file"
         }
 
-        # Get script path - required to build the scheduled task action
-        $scriptPath = $PSCommandPath
-        if (-not $scriptPath) {
-            $scriptPath = $MyInvocation.MyCommand.Path
+        # Get script path - use explicit parameter if provided, otherwise auto-detect
+        $effectiveScriptPath = if ($ScriptPath) {
+            $ScriptPath
         }
-        if (-not $scriptPath) {
-            return New-OperationResult -Success $false -ErrorMessage "Cannot determine Robocurse script path. When running interactively, use -ScriptPath parameter to specify the path to Robocurse.ps1"
+        else {
+            $autoPath = $PSCommandPath
+            if (-not $autoPath) {
+                $autoPath = $MyInvocation.MyCommand.Path
+            }
+            $autoPath
+        }
+
+        if (-not $effectiveScriptPath) {
+            return New-OperationResult -Success $false -ErrorMessage "Cannot determine Robocurse script path. Use -ScriptPath parameter to specify the path to Robocurse.ps1"
         }
 
         # Build action - PowerShell command to run Robocurse in headless mode
-        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Headless -ConfigPath `"$ConfigPath`""
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$effectiveScriptPath`" -Headless -ConfigPath `"$ConfigPath`""
 
         $action = New-ScheduledTaskAction `
             -Execute "powershell.exe" `
             -Argument $arguments `
-            -WorkingDirectory (Split-Path $scriptPath -Parent)
+            -WorkingDirectory (Split-Path $effectiveScriptPath -Parent)
 
         # Build trigger based on schedule type
         $trigger = switch ($Schedule) {
@@ -6443,6 +6615,7 @@ function Unregister-RobocurseTask {
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
@@ -6481,7 +6654,9 @@ function Get-RobocurseTask {
     .EXAMPLE
         $taskInfo = Get-RobocurseTask -TaskName "Custom-Task"
     #>
+    [CmdletBinding()]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
@@ -6527,8 +6702,13 @@ function Start-RobocurseTask {
     .EXAMPLE
         $result = Start-RobocurseTask
         if ($result.Success) { "Task started" }
+    .EXAMPLE
+        Start-RobocurseTask -WhatIf
+        # Shows what would be started without actually triggering
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
@@ -6539,8 +6719,10 @@ function Start-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
-        Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-        Write-RobocurseLog -Message "Manually triggered task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        if ($PSCmdlet.ShouldProcess($TaskName, "Start scheduled task")) {
+            Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+            Write-RobocurseLog -Message "Manually triggered task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        }
         return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
@@ -6562,8 +6744,13 @@ function Enable-RobocurseTask {
     .EXAMPLE
         $result = Enable-RobocurseTask
         if ($result.Success) { "Task enabled" }
+    .EXAMPLE
+        Enable-RobocurseTask -WhatIf
+        # Shows what would be enabled without actually enabling
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
@@ -6574,8 +6761,10 @@ function Enable-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
-        Enable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
-        Write-RobocurseLog -Message "Enabled task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        if ($PSCmdlet.ShouldProcess($TaskName, "Enable scheduled task")) {
+            Enable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
+            Write-RobocurseLog -Message "Enabled task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        }
         return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
@@ -6604,6 +6793,7 @@ function Disable-RobocurseTask {
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
@@ -6639,7 +6829,9 @@ function Test-RobocurseTaskExists {
     .EXAMPLE
         if (Test-RobocurseTaskExists) { "Task exists" }
     #>
+    [CmdletBinding()]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
@@ -6841,9 +7033,17 @@ function Initialize-RobocurseGui {
     .DESCRIPTION
         Loads XAML from Resources folder, wires up event handlers, initializes the UI state.
         Only works on Windows due to WPF dependency.
+    .PARAMETER ConfigPath
+        Path to the configuration file. Defaults to .\config.json
     .OUTPUTS
         Window object if successful, $null if not supported
     #>
+    param(
+        [string]$ConfigPath = ".\config.json"
+    )
+
+    # Store ConfigPath in script scope for use by event handlers and background jobs
+    $script:ConfigPath = $ConfigPath
 
     # Check platform
     if (-not (Test-IsWindowsPlatform)) {
@@ -6891,7 +7091,7 @@ function Initialize-RobocurseGui {
     Initialize-EventHandlers
 
     # Load config and populate UI
-    $script:Config = Get-RobocurseConfig -Path $ConfigPath
+    $script:Config = Get-RobocurseConfig -Path $script:ConfigPath
     Update-ProfileList
 
     # Restore saved GUI state (window position, size, worker count, selected profile)
@@ -6916,57 +7116,131 @@ function Initialize-RobocurseGui {
     return $script:Window
 }
 
+function Invoke-SafeEventHandler {
+    <#
+    .SYNOPSIS
+        Wraps event handler code in try-catch for safe execution
+    .DESCRIPTION
+        Prevents GUI crashes from unhandled exceptions in event handlers.
+        Logs errors and shows user-friendly message.
+    .PARAMETER ScriptBlock
+        The event handler code to execute safely
+    .PARAMETER HandlerName
+        Name of the handler for logging (optional)
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock,
+
+        [string]$HandlerName = "EventHandler"
+    )
+
+    try {
+        & $ScriptBlock
+    }
+    catch {
+        $errorMsg = "Error in $HandlerName : $($_.Exception.Message)"
+        Write-GuiLog $errorMsg
+        try {
+            [System.Windows.MessageBox]::Show(
+                "An error occurred: $($_.Exception.Message)",
+                "Error",
+                "OK",
+                "Error"
+            )
+        }
+        catch {
+            # If even the message box fails, just log it
+            Write-Warning $errorMsg
+        }
+    }
+}
+
 function Initialize-EventHandlers {
     <#
     .SYNOPSIS
         Wires up all GUI event handlers
+    .DESCRIPTION
+        All handlers are wrapped in error boundaries to prevent GUI crashes.
     #>
 
     # Profile list selection
     $script:Controls.lstProfiles.Add_SelectionChanged({
-        $selected = $script:Controls.lstProfiles.SelectedItem
-        if ($selected) {
-            Load-ProfileToForm -Profile $selected
+        Invoke-SafeEventHandler -HandlerName "ProfileSelection" -ScriptBlock {
+            $selected = $script:Controls.lstProfiles.SelectedItem
+            if ($selected) {
+                Load-ProfileToForm -Profile $selected
+            }
         }
     })
 
     # Add/Remove profile buttons
-    $script:Controls.btnAddProfile.Add_Click({ Add-NewProfile })
-    $script:Controls.btnRemoveProfile.Add_Click({ Remove-SelectedProfile })
+    $script:Controls.btnAddProfile.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "AddProfile" -ScriptBlock { Add-NewProfile }
+    })
+    $script:Controls.btnRemoveProfile.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "RemoveProfile" -ScriptBlock { Remove-SelectedProfile }
+    })
 
     # Browse buttons
     $script:Controls.btnBrowseSource.Add_Click({
-        $path = Show-FolderBrowser -Description "Select source folder"
-        if ($path) { $script:Controls.txtSource.Text = $path }
+        Invoke-SafeEventHandler -HandlerName "BrowseSource" -ScriptBlock {
+            $path = Show-FolderBrowser -Description "Select source folder"
+            if ($path) { $script:Controls.txtSource.Text = $path }
+        }
     })
     $script:Controls.btnBrowseDest.Add_Click({
-        $path = Show-FolderBrowser -Description "Select destination folder"
-        if ($path) { $script:Controls.txtDest.Text = $path }
+        Invoke-SafeEventHandler -HandlerName "BrowseDest" -ScriptBlock {
+            $path = Show-FolderBrowser -Description "Select destination folder"
+            if ($path) { $script:Controls.txtDest.Text = $path }
+        }
     })
 
     # Workers slider
     $script:Controls.sldWorkers.Add_ValueChanged({
-        $script:Controls.txtWorkerCount.Text = [int]$script:Controls.sldWorkers.Value
+        Invoke-SafeEventHandler -HandlerName "WorkerSlider" -ScriptBlock {
+            $script:Controls.txtWorkerCount.Text = [int]$script:Controls.sldWorkers.Value
+        }
     })
 
-    # Run buttons
-    $script:Controls.btnRunAll.Add_Click({ Start-GuiReplication -AllProfiles })
-    $script:Controls.btnRunSelected.Add_Click({ Start-GuiReplication -SelectedOnly })
-    $script:Controls.btnStop.Add_Click({ Request-Stop })
+    # Run buttons - most critical, need error handling
+    $script:Controls.btnRunAll.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "RunAll" -ScriptBlock { Start-GuiReplication -AllProfiles }
+    })
+    $script:Controls.btnRunSelected.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "RunSelected" -ScriptBlock { Start-GuiReplication -SelectedOnly }
+    })
+    $script:Controls.btnStop.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "Stop" -ScriptBlock { Request-Stop }
+    })
 
     # Schedule button
-    $script:Controls.btnSchedule.Add_Click({ Show-ScheduleDialog })
+    $script:Controls.btnSchedule.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "Schedule" -ScriptBlock { Show-ScheduleDialog }
+    })
 
     # Form field changes - save to profile
     @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
-        $script:Controls[$_].Add_LostFocus({ Save-ProfileFromForm })
+        $script:Controls[$_].Add_LostFocus({
+            Invoke-SafeEventHandler -HandlerName "SaveProfile" -ScriptBlock { Save-ProfileFromForm }
+        })
     }
-    $script:Controls.chkUseVss.Add_Checked({ Save-ProfileFromForm })
-    $script:Controls.chkUseVss.Add_Unchecked({ Save-ProfileFromForm })
-    $script:Controls.cmbScanMode.Add_SelectionChanged({ Save-ProfileFromForm })
+    $script:Controls.chkUseVss.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "VssCheckbox" -ScriptBlock { Save-ProfileFromForm }
+    })
+    $script:Controls.chkUseVss.Add_Unchecked({
+        Invoke-SafeEventHandler -HandlerName "VssCheckbox" -ScriptBlock { Save-ProfileFromForm }
+    })
+    $script:Controls.cmbScanMode.Add_SelectionChanged({
+        Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock { Save-ProfileFromForm }
+    })
 
     # Window closing
-    $script:Window.Add_Closing({ Invoke-WindowClosingHandler -EventArgs $args[1] })
+    $script:Window.Add_Closing({
+        Invoke-SafeEventHandler -HandlerName "WindowClosing" -ScriptBlock {
+            Invoke-WindowClosingHandler -EventArgs $args[1]
+        }
+    })
 }
 
 function Invoke-WindowClosingHandler {
@@ -7005,7 +7279,7 @@ function Invoke-WindowClosingHandler {
     Close-ReplicationRunspace
 
     # Save configuration
-    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
+    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
     if (-not $saveResult.Success) {
         Write-GuiLog "Warning: Failed to save config on exit: $($saveResult.ErrorMessage)"
     }
@@ -7344,7 +7618,7 @@ function New-ReplicationRunspace {
     $powershell.AddArgument($script:OrchestrationState)
     $powershell.AddArgument($Profiles)
     $powershell.AddArgument($MaxWorkers)
-    $powershell.AddArgument($ConfigPath)
+    $powershell.AddArgument($script:ConfigPath)
 
     $handle = $powershell.BeginInvoke()
 
@@ -7764,7 +8038,7 @@ function Show-ScheduleDialog {
         # Check current task status
         $taskExists = Test-RobocurseTaskExists
         if ($taskExists) {
-            $taskInfo = Get-RobocurseTaskStatus
+            $taskInfo = Get-RobocurseTask
             if ($taskInfo) {
                 $txtStatus.Text = "Current task status: $($taskInfo.State)`nNext run: $($taskInfo.NextRunTime)"
             }
@@ -7808,7 +8082,7 @@ function Show-ScheduleDialog {
                     Write-GuiLog "Registering scheduled task..."
 
                     $result = Register-RobocurseTask `
-                        -ConfigPath $ConfigPath `
+                        -ConfigPath $script:ConfigPath `
                         -Schedule $scheduleType `
                         -Time "$($hour.ToString('00')):$($minute.ToString('00'))"
 
@@ -7851,7 +8125,7 @@ function Show-ScheduleDialog {
                     }
                 }
 
-                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
+                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
                 if (-not $saveResult.Success) {
                     Write-GuiLog "Warning: Failed to save config: $($saveResult.ErrorMessage)"
                 }
@@ -8187,7 +8461,7 @@ function Start-RobocurseMain {
         }
         else {
             # Launch GUI
-            $window = Initialize-RobocurseGui
+            $window = Initialize-RobocurseGui -ConfigPath $ConfigPath
             if ($window) {
                 $window.ShowDialog() | Out-Null
                 return 0

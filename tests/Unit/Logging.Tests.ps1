@@ -206,5 +206,41 @@ InModuleScope 'Robocurse' {
                 Test-Path "$script:TestLogRoot\$ancientDate.zip" | Should -Be $false
             }
         }
+
+        Context "CompressAfterDays Validation" {
+            It "Should emit warning when CompressAfterDays >= DeleteAfterDays" {
+                # CompressAfterDays should be less than DeleteAfterDays
+                # Use Pester's Should -Invoke to verify Write-Warning is called
+                Mock Write-Warning { }
+
+                $null = Initialize-LogSession -LogRoot $script:TestLogRoot `
+                    -CompressAfterDays 30 -DeleteAfterDays 30
+
+                Should -Invoke Write-Warning -Times 1 -ParameterFilter {
+                    $Message -match "CompressAfterDays.*should be less than"
+                }
+            }
+
+            It "Should adjust CompressAfterDays when it equals DeleteAfterDays" {
+                # This should not throw, but should adjust internally
+                { Initialize-LogSession -LogRoot $script:TestLogRoot `
+                    -CompressAfterDays 30 -DeleteAfterDays 30 } | Should -Not -Throw
+            }
+
+            It "Should work correctly when CompressAfterDays < DeleteAfterDays" {
+                { Initialize-LogSession -LogRoot $script:TestLogRoot `
+                    -CompressAfterDays 7 -DeleteAfterDays 30 } | Should -Not -Throw
+            }
+
+            It "Should reject CompressAfterDays out of range (too high)" {
+                { Initialize-LogSession -LogRoot $script:TestLogRoot `
+                    -CompressAfterDays 500 -DeleteAfterDays 30 } | Should -Throw
+            }
+
+            It "Should reject DeleteAfterDays out of range (too high)" {
+                { Initialize-LogSession -LogRoot $script:TestLogRoot `
+                    -CompressAfterDays 7 -DeleteAfterDays 5000 } | Should -Throw
+            }
+        }
     }
 }

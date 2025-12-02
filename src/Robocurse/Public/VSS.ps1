@@ -133,6 +133,9 @@ function Add-VssToTracking {
     <#
     .SYNOPSIS
         Adds a VSS snapshot to the tracking file
+    .DESCRIPTION
+        Uses a mutex to prevent race conditions when multiple processes
+        access the tracking file concurrently.
     .PARAMETER SnapshotInfo
         Snapshot info object with ShadowId
     #>
@@ -141,7 +144,18 @@ function Add-VssToTracking {
         [PSCustomObject]$SnapshotInfo
     )
 
+    $mutex = $null
     try {
+        # Use a named mutex to synchronize access across processes
+        $mutexName = "Global\RobocurseVssTracking"
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+
+        # Wait up to 10 seconds to acquire the lock
+        if (-not $mutex.WaitOne(10000)) {
+            Write-RobocurseLog -Message "Timeout waiting for VSS tracking file lock" -Level 'Warning' -Component 'VSS'
+            return
+        }
+
         $tracked = @()
         if (Test-Path $script:VssTrackingFile) {
             $tracked = @(Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json)
@@ -158,12 +172,21 @@ function Add-VssToTracking {
     catch {
         Write-RobocurseLog -Message "Failed to add VSS to tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
     }
+    finally {
+        if ($mutex) {
+            try { $mutex.ReleaseMutex() } catch { }
+            $mutex.Dispose()
+        }
+    }
 }
 
 function Remove-VssFromTracking {
     <#
     .SYNOPSIS
         Removes a VSS snapshot from the tracking file
+    .DESCRIPTION
+        Uses a mutex to prevent race conditions when multiple processes
+        access the tracking file concurrently.
     .PARAMETER ShadowId
         Shadow ID to remove
     #>
@@ -172,7 +195,18 @@ function Remove-VssFromTracking {
         [string]$ShadowId
     )
 
+    $mutex = $null
     try {
+        # Use a named mutex to synchronize access across processes
+        $mutexName = "Global\RobocurseVssTracking"
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName)
+
+        # Wait up to 10 seconds to acquire the lock
+        if (-not $mutex.WaitOne(10000)) {
+            Write-RobocurseLog -Message "Timeout waiting for VSS tracking file lock" -Level 'Warning' -Component 'VSS'
+            return
+        }
+
         if (-not (Test-Path $script:VssTrackingFile)) {
             return
         }
@@ -188,6 +222,12 @@ function Remove-VssFromTracking {
     }
     catch {
         Write-RobocurseLog -Message "Failed to remove VSS from tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+    }
+    finally {
+        if ($mutex) {
+            try { $mutex.ReleaseMutex() } catch { }
+            $mutex.Dispose()
+        }
     }
 }
 
@@ -276,6 +316,13 @@ function New-VssSnapshot {
         [ValidateRange(1, 60)]
         [int]$RetryDelaySeconds = 5
     )
+
+    # Pre-flight privilege check - fail fast if we don't have required privileges
+    $privCheck = Test-VssPrivileges
+    if (-not $privCheck.Success) {
+        Write-RobocurseLog -Message "VSS privilege check failed: $($privCheck.ErrorMessage)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage "VSS privileges not available: $($privCheck.ErrorMessage)"
+    }
 
     # Retry loop for transient VSS failures (lock contention, VSS busy, etc.)
     $attempt = 0

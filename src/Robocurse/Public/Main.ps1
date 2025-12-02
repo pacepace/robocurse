@@ -306,7 +306,7 @@ function Start-RobocurseMain {
         }
         else {
             # Launch GUI
-            $window = Initialize-RobocurseGui
+            $window = Initialize-RobocurseGui -ConfigPath $ConfigPath
             if ($window) {
                 $window.ShowDialog() | Out-Null
                 return 0

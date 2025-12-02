@@ -301,5 +301,58 @@ InModuleScope 'Robocurse' {
                 Test-SafeConfigPath -Path "" | Should -Be $true
             }
         }
+
+        Context "Get-SanitizedChunkArgs" {
+            BeforeEach {
+                Mock Write-RobocurseLog { }
+            }
+
+            It "Should accept valid /LEV:n arguments" {
+                $result = Get-SanitizedChunkArgs -ChunkArgs @('/LEV:1', '/LEV:5')
+                $result.Count | Should -Be 2
+                $result | Should -Contain '/LEV:1'
+                $result | Should -Contain '/LEV:5'
+            }
+
+            It "Should accept valid /S and /E switches" {
+                $result = Get-SanitizedChunkArgs -ChunkArgs @('/S', '/E')
+                $result.Count | Should -Be 2
+                $result | Should -Contain '/S'
+                $result | Should -Contain '/E'
+            }
+
+            It "Should accept valid age switches" {
+                $result = Get-SanitizedChunkArgs -ChunkArgs @('/MAXAGE:7', '/MINAGE:1')
+                $result.Count | Should -Be 2
+                $result | Should -Contain '/MAXAGE:7'
+                $result | Should -Contain '/MINAGE:1'
+            }
+
+            It "Should reject arbitrary robocopy switches" {
+                $result = Get-SanitizedChunkArgs -ChunkArgs @('/LEV:1', '/MIR', '/PURGE')
+                $result.Count | Should -Be 1
+                $result | Should -Contain '/LEV:1'
+                $result | Should -Not -Contain '/MIR'
+                $result | Should -Not -Contain '/PURGE'
+            }
+
+            It "Should reject command injection attempts" {
+                $result = Get-SanitizedChunkArgs -ChunkArgs @('/LEV:1; calc', '&& del *')
+                $result.Count | Should -Be 0
+            }
+
+            It "Should handle empty array" {
+                $result = Get-SanitizedChunkArgs -ChunkArgs @()
+                $result.Count | Should -Be 0
+            }
+
+            It "Should skip whitespace-only arguments" {
+                # Note: Empty strings in array are filtered by the function
+                $result = Get-SanitizedChunkArgs -ChunkArgs @('/LEV:1', '   ', '  ', '/S')
+                $result.Count | Should -Be 2
+                $result | Should -Contain '/LEV:1'
+                $result | Should -Contain '/S'
+            }
+        }
     }
 }

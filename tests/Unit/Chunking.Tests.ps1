@@ -773,5 +773,67 @@ InModuleScope 'Robocurse' {
                 $filesOnlyChunks[0].SourcePath | Should -Be "C:\Root"
             }
         }
+
+        Context "Get-DirectoryChunks - MinSizeBytes Behavior" {
+            It "Should accept small directory as single chunk when below MinSizeBytes" {
+                Mock Test-Path { $true }
+                Mock Get-DirectoryProfile {
+                    [PSCustomObject]@{
+                        Path = $Path
+                        TotalSize = 50MB  # Below MinSizeBytes of 100MB
+                        FileCount = 100
+                        DirCount = 2
+                        AvgFileSize = 500KB
+                        LastScanned = Get-Date
+                    }
+                }
+                Mock Get-DirectoryChildren { @("C:\Small\Sub1", "C:\Small\Sub2") }
+
+                # MinSizeBytes = 100MB, so 50MB directory should be accepted as single chunk
+                $chunks = Get-DirectoryChunks -Path "C:\Small" -DestinationRoot "D:\Backup" `
+                    -MaxSizeBytes 1GB -MinSizeBytes 100MB
+
+                $chunks.Count | Should -Be 1
+                $chunks[0].SourcePath | Should -Be "C:\Small"
+            }
+
+            It "Should recurse into children when directory is above MinSizeBytes but below MaxSizeBytes" {
+                Mock Test-Path { $true }
+                Mock Get-DirectoryProfile {
+                    param($Path)
+                    if ($Path -eq "C:\Medium") {
+                        [PSCustomObject]@{
+                            Path = $Path
+                            TotalSize = 500MB  # Above MinSizeBytes (100MB) and below MaxSizeBytes (1GB)
+                            FileCount = 20000   # But above MaxFiles threshold
+                            DirCount = 2
+                            AvgFileSize = 25KB
+                            LastScanned = Get-Date
+                        }
+                    }
+                    else {
+                        [PSCustomObject]@{
+                            Path = $Path
+                            TotalSize = 200MB
+                            FileCount = 5000
+                            DirCount = 0
+                            AvgFileSize = 40KB
+                            LastScanned = Get-Date
+                        }
+                    }
+                }
+                Mock Get-DirectoryChildren {
+                    param($Path)
+                    if ($Path -eq "C:\Medium") { @("C:\Medium\Sub1", "C:\Medium\Sub2") } else { @() }
+                }
+                Mock Get-FilesAtLevel { @() }
+
+                # Size is above MinSizeBytes but FileCount exceeds MaxFiles, so it should recurse
+                $chunks = Get-DirectoryChunks -Path "C:\Medium" -DestinationRoot "D:\Backup" `
+                    -MaxSizeBytes 1GB -MaxFiles 10000 -MinSizeBytes 100MB
+
+                $chunks.Count | Should -Be 2  # Two subdirectory chunks
+            }
+        }
     }
 }

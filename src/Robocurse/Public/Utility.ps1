@@ -359,6 +359,66 @@ function Get-SanitizedExcludePatterns {
     return $safePatterns
 }
 
+function Get-SanitizedChunkArgs {
+    <#
+    .SYNOPSIS
+        Validates and returns only safe robocopy chunk arguments
+    .DESCRIPTION
+        ChunkArgs are intended for robocopy switches like /LEV:1.
+        This function validates each argument against a whitelist of safe
+        robocopy switch patterns to prevent command injection.
+    .PARAMETER ChunkArgs
+        Array of chunk arguments to validate
+    .OUTPUTS
+        Array of validated, safe arguments
+    .EXAMPLE
+        $safeArgs = Get-SanitizedChunkArgs -ChunkArgs @("/LEV:1", "/S")
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [string[]]$ChunkArgs
+    )
+
+    $safeArgs = @()
+
+    # Whitelist of safe robocopy switch patterns
+    # These are switches that might legitimately be added per-chunk
+    $safePatterns = @(
+        '^/LEV:\d+$',      # Level depth (e.g., /LEV:1)
+        '^/S$',            # Copy subdirectories (non-empty only)
+        '^/E$',            # Copy subdirectories (including empty)
+        '^/MAXAGE:\d+$',   # Max file age
+        '^/MINAGE:\d+$',   # Min file age
+        '^/MAXLAD:\d+$',   # Max last access date
+        '^/MINLAD:\d+$'    # Min last access date
+    )
+
+    foreach ($arg in $ChunkArgs) {
+        if ([string]::IsNullOrWhiteSpace($arg)) {
+            continue
+        }
+
+        $isSafe = $false
+        foreach ($pattern in $safePatterns) {
+            if ($arg -match $pattern) {
+                $isSafe = $true
+                break
+            }
+        }
+
+        if ($isSafe) {
+            $safeArgs += $arg
+        }
+        else {
+            Write-RobocurseLog -Message "Rejected unsafe chunk argument: $arg" `
+                -Level 'Warning' -Component 'Security'
+        }
+    }
+
+    return $safeArgs
+}
+
 function Test-SourcePathAccessible {
     <#
     .SYNOPSIS

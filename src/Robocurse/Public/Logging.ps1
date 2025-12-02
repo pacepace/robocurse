@@ -23,9 +23,17 @@ function Initialize-LogSession {
     #>
     param(
         [string]$LogRoot = ".\Logs",
+        [ValidateRange(1, 365)]
         [int]$CompressAfterDays = $script:LogCompressAfterDays,
+        [ValidateRange(1, 3650)]
         [int]$DeleteAfterDays = $script:LogDeleteAfterDays
     )
+
+    # Validate that CompressAfterDays is less than DeleteAfterDays
+    if ($CompressAfterDays -ge $DeleteAfterDays) {
+        Write-Warning "CompressAfterDays ($CompressAfterDays) should be less than DeleteAfterDays ($DeleteAfterDays). Adjusting CompressAfterDays to $([Math]::Max(1, $DeleteAfterDays - 7))."
+        $CompressAfterDays = [Math]::Max(1, $DeleteAfterDays - 7)
+    }
 
     # Generate unique session ID based on timestamp
     $timestamp = Get-Date -Format "HHmmss"
@@ -162,7 +170,12 @@ function Write-RobocurseLog {
 
     # Write to SIEM if requested
     if ($WriteSiem) {
-        $eventType = if ($Level -eq 'Error') { 'ChunkError' } else { 'SessionStart' }
+        # Map log level to appropriate SIEM event type
+        $eventType = switch ($Level) {
+            'Error'   { 'ChunkError' }
+            'Warning' { 'ChunkError' }  # Warnings should also use ChunkError, not SessionStart
+            default   { 'ChunkError' }  # Fallback for any SIEM-worthy level
+        }
         Write-SiemEvent -EventType $eventType -Data @{
             Level = $Level
             Component = $Component
@@ -268,13 +281,21 @@ function Invoke-LogRotation {
     #>
     param(
         [string]$LogRoot = ".\Logs",
+        [ValidateRange(1, 365)]
         [int]$CompressAfterDays = $script:LogCompressAfterDays,
+        [ValidateRange(1, 3650)]
         [int]$DeleteAfterDays = $script:LogDeleteAfterDays
     )
 
     if (-not (Test-Path $LogRoot)) {
         Write-Verbose "Log root directory does not exist: $LogRoot"
         return
+    }
+
+    # Validate that CompressAfterDays is less than DeleteAfterDays
+    if ($CompressAfterDays -ge $DeleteAfterDays) {
+        Write-Warning "CompressAfterDays ($CompressAfterDays) should be less than DeleteAfterDays ($DeleteAfterDays). Adjusting CompressAfterDays to $([Math]::Max(1, $DeleteAfterDays - 7))."
+        $CompressAfterDays = [Math]::Max(1, $DeleteAfterDays - 7)
     }
 
     $now = Get-Date

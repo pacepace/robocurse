@@ -87,6 +87,14 @@ function Get-DirectoryChunks {
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
     }
 
+    # Check if directory is above MinSizeBytes - if not, accept as single chunk to reduce overhead
+    # This prevents creating many tiny chunks which add more overhead than benefit
+    if ($profile.TotalSize -lt $MinSizeBytes) {
+        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $($profile.TotalSize))" -Level Debug
+        $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
+        return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
+    }
+
     # Directory is too big - recurse into children
     $children = Get-DirectoryChildren -Path $Path
 
@@ -98,8 +106,9 @@ function Get-DirectoryChunks {
     }
 
     # Recurse into each child
+    # Use List<> instead of array concatenation for O(N) instead of O(N²) performance
     Write-RobocurseLog "Directory too large, recursing into $($children.Count) children: $Path" -Level Debug
-    $chunks = @()
+    $chunkList = [System.Collections.Generic.List[PSCustomObject]]::new()
     foreach ($child in $children) {
         $childChunks = Get-DirectoryChunks `
             -Path $child `
@@ -111,7 +120,9 @@ function Get-DirectoryChunks {
             -MinSizeBytes $MinSizeBytes `
             -CurrentDepth ($CurrentDepth + 1)
 
-        $chunks += $childChunks
+        foreach ($chunk in $childChunks) {
+            $chunkList.Add($chunk)
+        }
     }
 
     # Handle files at this level (not in any subdir)
@@ -119,10 +130,10 @@ function Get-DirectoryChunks {
     if ($filesAtLevel.Count -gt 0) {
         Write-RobocurseLog "Found $($filesAtLevel.Count) files at level: $Path" -Level Debug
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
-        $chunks += New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath
+        $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath))
     }
 
-    return $chunks
+    return $chunkList.ToArray()
 }
 
 function Get-FilesAtLevel {

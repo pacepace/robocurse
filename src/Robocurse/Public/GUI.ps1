@@ -179,9 +179,17 @@ function Initialize-RobocurseGui {
     .DESCRIPTION
         Loads XAML from Resources folder, wires up event handlers, initializes the UI state.
         Only works on Windows due to WPF dependency.
+    .PARAMETER ConfigPath
+        Path to the configuration file. Defaults to .\config.json
     .OUTPUTS
         Window object if successful, $null if not supported
     #>
+    param(
+        [string]$ConfigPath = ".\config.json"
+    )
+
+    # Store ConfigPath in script scope for use by event handlers and background jobs
+    $script:ConfigPath = $ConfigPath
 
     # Check platform
     if (-not (Test-IsWindowsPlatform)) {
@@ -229,7 +237,7 @@ function Initialize-RobocurseGui {
     Initialize-EventHandlers
 
     # Load config and populate UI
-    $script:Config = Get-RobocurseConfig -Path $ConfigPath
+    $script:Config = Get-RobocurseConfig -Path $script:ConfigPath
     Update-ProfileList
 
     # Restore saved GUI state (window position, size, worker count, selected profile)
@@ -254,57 +262,131 @@ function Initialize-RobocurseGui {
     return $script:Window
 }
 
+function Invoke-SafeEventHandler {
+    <#
+    .SYNOPSIS
+        Wraps event handler code in try-catch for safe execution
+    .DESCRIPTION
+        Prevents GUI crashes from unhandled exceptions in event handlers.
+        Logs errors and shows user-friendly message.
+    .PARAMETER ScriptBlock
+        The event handler code to execute safely
+    .PARAMETER HandlerName
+        Name of the handler for logging (optional)
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock,
+
+        [string]$HandlerName = "EventHandler"
+    )
+
+    try {
+        & $ScriptBlock
+    }
+    catch {
+        $errorMsg = "Error in $HandlerName : $($_.Exception.Message)"
+        Write-GuiLog $errorMsg
+        try {
+            [System.Windows.MessageBox]::Show(
+                "An error occurred: $($_.Exception.Message)",
+                "Error",
+                "OK",
+                "Error"
+            )
+        }
+        catch {
+            # If even the message box fails, just log it
+            Write-Warning $errorMsg
+        }
+    }
+}
+
 function Initialize-EventHandlers {
     <#
     .SYNOPSIS
         Wires up all GUI event handlers
+    .DESCRIPTION
+        All handlers are wrapped in error boundaries to prevent GUI crashes.
     #>
 
     # Profile list selection
     $script:Controls.lstProfiles.Add_SelectionChanged({
-        $selected = $script:Controls.lstProfiles.SelectedItem
-        if ($selected) {
-            Load-ProfileToForm -Profile $selected
+        Invoke-SafeEventHandler -HandlerName "ProfileSelection" -ScriptBlock {
+            $selected = $script:Controls.lstProfiles.SelectedItem
+            if ($selected) {
+                Load-ProfileToForm -Profile $selected
+            }
         }
     })
 
     # Add/Remove profile buttons
-    $script:Controls.btnAddProfile.Add_Click({ Add-NewProfile })
-    $script:Controls.btnRemoveProfile.Add_Click({ Remove-SelectedProfile })
+    $script:Controls.btnAddProfile.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "AddProfile" -ScriptBlock { Add-NewProfile }
+    })
+    $script:Controls.btnRemoveProfile.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "RemoveProfile" -ScriptBlock { Remove-SelectedProfile }
+    })
 
     # Browse buttons
     $script:Controls.btnBrowseSource.Add_Click({
-        $path = Show-FolderBrowser -Description "Select source folder"
-        if ($path) { $script:Controls.txtSource.Text = $path }
+        Invoke-SafeEventHandler -HandlerName "BrowseSource" -ScriptBlock {
+            $path = Show-FolderBrowser -Description "Select source folder"
+            if ($path) { $script:Controls.txtSource.Text = $path }
+        }
     })
     $script:Controls.btnBrowseDest.Add_Click({
-        $path = Show-FolderBrowser -Description "Select destination folder"
-        if ($path) { $script:Controls.txtDest.Text = $path }
+        Invoke-SafeEventHandler -HandlerName "BrowseDest" -ScriptBlock {
+            $path = Show-FolderBrowser -Description "Select destination folder"
+            if ($path) { $script:Controls.txtDest.Text = $path }
+        }
     })
 
     # Workers slider
     $script:Controls.sldWorkers.Add_ValueChanged({
-        $script:Controls.txtWorkerCount.Text = [int]$script:Controls.sldWorkers.Value
+        Invoke-SafeEventHandler -HandlerName "WorkerSlider" -ScriptBlock {
+            $script:Controls.txtWorkerCount.Text = [int]$script:Controls.sldWorkers.Value
+        }
     })
 
-    # Run buttons
-    $script:Controls.btnRunAll.Add_Click({ Start-GuiReplication -AllProfiles })
-    $script:Controls.btnRunSelected.Add_Click({ Start-GuiReplication -SelectedOnly })
-    $script:Controls.btnStop.Add_Click({ Request-Stop })
+    # Run buttons - most critical, need error handling
+    $script:Controls.btnRunAll.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "RunAll" -ScriptBlock { Start-GuiReplication -AllProfiles }
+    })
+    $script:Controls.btnRunSelected.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "RunSelected" -ScriptBlock { Start-GuiReplication -SelectedOnly }
+    })
+    $script:Controls.btnStop.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "Stop" -ScriptBlock { Request-Stop }
+    })
 
     # Schedule button
-    $script:Controls.btnSchedule.Add_Click({ Show-ScheduleDialog })
+    $script:Controls.btnSchedule.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "Schedule" -ScriptBlock { Show-ScheduleDialog }
+    })
 
     # Form field changes - save to profile
     @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
-        $script:Controls[$_].Add_LostFocus({ Save-ProfileFromForm })
+        $script:Controls[$_].Add_LostFocus({
+            Invoke-SafeEventHandler -HandlerName "SaveProfile" -ScriptBlock { Save-ProfileFromForm }
+        })
     }
-    $script:Controls.chkUseVss.Add_Checked({ Save-ProfileFromForm })
-    $script:Controls.chkUseVss.Add_Unchecked({ Save-ProfileFromForm })
-    $script:Controls.cmbScanMode.Add_SelectionChanged({ Save-ProfileFromForm })
+    $script:Controls.chkUseVss.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "VssCheckbox" -ScriptBlock { Save-ProfileFromForm }
+    })
+    $script:Controls.chkUseVss.Add_Unchecked({
+        Invoke-SafeEventHandler -HandlerName "VssCheckbox" -ScriptBlock { Save-ProfileFromForm }
+    })
+    $script:Controls.cmbScanMode.Add_SelectionChanged({
+        Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock { Save-ProfileFromForm }
+    })
 
     # Window closing
-    $script:Window.Add_Closing({ Invoke-WindowClosingHandler -EventArgs $args[1] })
+    $script:Window.Add_Closing({
+        Invoke-SafeEventHandler -HandlerName "WindowClosing" -ScriptBlock {
+            Invoke-WindowClosingHandler -EventArgs $args[1]
+        }
+    })
 }
 
 function Invoke-WindowClosingHandler {
@@ -343,7 +425,7 @@ function Invoke-WindowClosingHandler {
     Close-ReplicationRunspace
 
     # Save configuration
-    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
+    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
     if (-not $saveResult.Success) {
         Write-GuiLog "Warning: Failed to save config on exit: $($saveResult.ErrorMessage)"
     }
@@ -682,7 +764,7 @@ function New-ReplicationRunspace {
     $powershell.AddArgument($script:OrchestrationState)
     $powershell.AddArgument($Profiles)
     $powershell.AddArgument($MaxWorkers)
-    $powershell.AddArgument($ConfigPath)
+    $powershell.AddArgument($script:ConfigPath)
 
     $handle = $powershell.BeginInvoke()
 
@@ -1102,7 +1184,7 @@ function Show-ScheduleDialog {
         # Check current task status
         $taskExists = Test-RobocurseTaskExists
         if ($taskExists) {
-            $taskInfo = Get-RobocurseTaskStatus
+            $taskInfo = Get-RobocurseTask
             if ($taskInfo) {
                 $txtStatus.Text = "Current task status: $($taskInfo.State)`nNext run: $($taskInfo.NextRunTime)"
             }
@@ -1146,7 +1228,7 @@ function Show-ScheduleDialog {
                     Write-GuiLog "Registering scheduled task..."
 
                     $result = Register-RobocurseTask `
-                        -ConfigPath $ConfigPath `
+                        -ConfigPath $script:ConfigPath `
                         -Schedule $scheduleType `
                         -Time "$($hour.ToString('00')):$($minute.ToString('00'))"
 
@@ -1189,7 +1271,7 @@ function Show-ScheduleDialog {
                     }
                 }
 
-                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
+                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
                 if (-not $saveResult.Success) {
                     Write-GuiLog "Warning: Failed to save config: $($saveResult.ErrorMessage)"
                 }
