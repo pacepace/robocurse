@@ -60,6 +60,8 @@
         'Get-DirectoryProfile'
         'Invoke-RobocopyList'
         'Get-DirectoryChildren'
+        'Get-DirectoryProfilesParallel'
+        'Clear-ProfileCache'
 
         # Chunking
         'Get-DirectoryChunks'

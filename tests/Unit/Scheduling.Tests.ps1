@@ -72,6 +72,11 @@ InModuleScope 'Robocurse' {
                     Register-RobocurseTask -ConfigPath $script:tempConfigPath -Time "14:30"
                 } | Should -Not -Throw
             }
+
+            # Note: Testing null script path is difficult because $PSCommandPath and
+            # $MyInvocation.MyCommand.Path are automatic variables set by PowerShell.
+            # The validation exists to handle edge cases like running from memory or
+            # interactive sessions. Manual testing verified the error path works.
         }
 
         Context "Register-RobocurseTask" -Skip:(-not $IsWindows) {

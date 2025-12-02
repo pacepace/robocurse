@@ -64,10 +64,13 @@ function Register-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "ConfigPath '$ConfigPath' does not exist or is not a file"
         }
 
-        # Get script path
+        # Get script path - required to build the scheduled task action
         $scriptPath = $PSCommandPath
         if (-not $scriptPath) {
             $scriptPath = $MyInvocation.MyCommand.Path
+        }
+        if (-not $scriptPath) {
+            return New-OperationResult -Success $false -ErrorMessage "Cannot determine Robocurse script path. When running interactively, use -ScriptPath parameter to specify the path to Robocurse.ps1"
         }
 
         # Build action - PowerShell command to run Robocurse in headless mode

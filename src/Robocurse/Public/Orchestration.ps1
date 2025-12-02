@@ -600,6 +600,11 @@ function Start-ProfileReplication {
         }
     }
 
+    # Per-profile MismatchSeverity override (falls back to global default)
+    if ($Profile.MismatchSeverity) {
+        $state.CurrentRobocopyOptions['MismatchSeverity'] = $Profile.MismatchSeverity
+    }
+
     Write-RobocurseLog -Message "Starting profile: $($Profile.Name)" `
         -Level 'Info' -Component 'Orchestrator'
 
@@ -905,7 +910,15 @@ function Complete-RobocopyJob {
     )
 
     $exitCode = $Job.Process.ExitCode
-    $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
+
+    # Get per-profile MismatchSeverity or use global default
+    $mismatchSeverity = $script:DefaultMismatchSeverity
+    $profileOptions = $script:OrchestrationState.CurrentRobocopyOptions
+    if ($profileOptions -and $profileOptions['MismatchSeverity']) {
+        $mismatchSeverity = $profileOptions['MismatchSeverity']
+    }
+
+    $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode -MismatchSeverity $mismatchSeverity
     $stats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
     $duration = [datetime]::Now - $Job.StartTime
 

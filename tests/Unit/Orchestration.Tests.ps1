@@ -836,6 +836,95 @@ InModuleScope 'Robocurse' {
 
                 $chunk.Status | Should -Be 'Failed'
             }
+
+            It "Should use per-profile MismatchSeverity when set" {
+                $mockProcess = [PSCustomObject]@{ ExitCode = 4 }
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test"
+                    DestinationPath = "D:\Test"
+                    Status = 'Pending'
+                }
+                $job = [PSCustomObject]@{
+                    Process = $mockProcess
+                    Chunk = $chunk
+                    StartTime = [datetime]::Now.AddSeconds(-10)
+                    LogPath = "C:\Logs\chunk.log"
+                }
+
+                # Set profile-level MismatchSeverity override
+                $script:OrchestrationState.CurrentRobocopyOptions = @{
+                    MismatchSeverity = 'Success'
+                }
+
+                Mock Get-RobocopyExitMeaning {
+                    param($ExitCode, $MismatchSeverity)
+                    # Verify the profile override was passed
+                    $MismatchSeverity | Should -Be 'Success'
+                    [PSCustomObject]@{
+                        Severity = 'Success'
+                        Message = 'Mismatches ignored per profile config'
+                        ShouldRetry = $false
+                    }
+                }
+
+                Mock ConvertFrom-RobocopyLog {
+                    [PSCustomObject]@{
+                        FilesCopied = 100
+                        BytesCopied = 1000000
+                    }
+                }
+
+                $result = Complete-RobocopyJob -Job $job
+
+                Should -Invoke Get-RobocopyExitMeaning -ParameterFilter {
+                    $MismatchSeverity -eq 'Success'
+                }
+            }
+
+            It "Should use global default MismatchSeverity when profile has no override" {
+                $mockProcess = [PSCustomObject]@{ ExitCode = 4 }
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test"
+                    DestinationPath = "D:\Test"
+                    Status = 'Pending'
+                }
+                $job = [PSCustomObject]@{
+                    Process = $mockProcess
+                    Chunk = $chunk
+                    StartTime = [datetime]::Now.AddSeconds(-10)
+                    LogPath = "C:\Logs\chunk.log"
+                }
+
+                # No MismatchSeverity in profile options
+                $script:OrchestrationState.CurrentRobocopyOptions = @{
+                    Switches = @('/COPYALL')
+                }
+
+                Mock Get-RobocopyExitMeaning {
+                    param($ExitCode, $MismatchSeverity)
+                    [PSCustomObject]@{
+                        Severity = $MismatchSeverity
+                        Message = 'Mismatches detected'
+                        ShouldRetry = $false
+                    }
+                }
+
+                Mock ConvertFrom-RobocopyLog {
+                    [PSCustomObject]@{
+                        FilesCopied = 100
+                        BytesCopied = 1000000
+                    }
+                }
+
+                $result = Complete-RobocopyJob -Job $job
+
+                # Should use the global default (Warning)
+                Should -Invoke Get-RobocopyExitMeaning -ParameterFilter {
+                    $MismatchSeverity -eq $script:DefaultMismatchSeverity
+                }
+            }
         }
 
         Context "Complete-CurrentProfile" {

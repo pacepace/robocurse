@@ -159,14 +159,28 @@ The bandwidth is dynamically divided among active jobs. For example:
 
 **Implementation Note**: Robocurse uses robocopy's `/IPG` (Inter-Packet Gap) flag, which introduces a delay between 512-byte packets. The IPG value is automatically calculated based on the per-job bandwidth allocation.
 
+**Caveat**: Bandwidth limiting via IPG is approximate, not precise. Actual throughput depends on file size distribution - copying many small files involves more overhead than few large files, so effective bandwidth may vary. This is a limitation of the IPG mechanism, not Robocurse. For strict bandwidth control, consider OS-level QoS policies.
+
 ### Mismatch Severity Configuration
 
-Control how robocopy exit code 4 (mismatches detected) is treated:
+Control how robocopy exit code 4 (mismatches detected) is treated. This can be set globally or per-profile:
 
 ```json
 "GlobalSettings": {
   "MismatchSeverity": "Warning"
 }
+```
+
+Or override per-profile:
+
+```json
+"SyncProfiles": [
+  {
+    "Name": "BidirectionalSync",
+    "MismatchSeverity": "Success",
+    ...
+  }
+]
 ```
 
 | Value | Behavior |
@@ -175,7 +189,7 @@ Control how robocopy exit code 4 (mismatches detected) is treated:
 | `Error` | Treat as error, trigger retry logic |
 | `Success` | Ignore mismatches entirely |
 
-This is useful for sync scenarios where mismatches are expected (e.g., bidirectional sync, or when destination files are intentionally modified).
+This is useful for sync scenarios where mismatches are expected (e.g., bidirectional sync, or when destination files are intentionally modified). Per-profile overrides allow different behaviors for different backup scenarios within the same configuration.
 
 ### VSS Configuration
 
