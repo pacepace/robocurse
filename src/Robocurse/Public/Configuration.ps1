@@ -294,7 +294,9 @@ function ConvertFrom-ConfigFileFormat {
             $rawProfile = $RawConfig.profiles.$profileName
 
             # Skip disabled profiles
-            if ($rawProfile.enabled -eq $false) {
+            # Explicitly check for $false; profiles without 'enabled' property default to enabled
+            # This explicit check handles: null (enabled), $true (enabled), $false (disabled)
+            if ($null -ne $rawProfile.enabled -and $rawProfile.enabled -eq $false) {
                 Write-Verbose "Skipping disabled profile: $profileName"
                 continue
             }
@@ -567,9 +569,12 @@ function Test-RobocurseConfig {
     }
 
     # Validate SyncProfiles
+    # Wrap in @() to ensure array-like behavior even if a single profile object is provided
+    # PowerShell's .Count on a single object can be unreliable
     if (($configPropertyNames -contains 'SyncProfiles') -and $Config.SyncProfiles) {
-        for ($i = 0; $i -lt $Config.SyncProfiles.Count; $i++) {
-            $profile = $Config.SyncProfiles[$i]
+        $profilesArray = @($Config.SyncProfiles)
+        for ($i = 0; $i -lt $profilesArray.Count; $i++) {
+            $profile = $profilesArray[$i]
             $profilePrefix = "SyncProfiles[$i]"
 
             # Ensure profile is an object with properties

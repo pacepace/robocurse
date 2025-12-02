@@ -161,13 +161,13 @@ function Restore-GuiState {
             $Window.WindowState = [System.Windows.WindowState]::Maximized
         }
 
-        # Restore worker count
-        if ($state.WorkerCount -gt 0 -and $script:Controls.sldWorkers) {
+        # Restore worker count (check $script:Controls exists first for headless safety)
+        if ($script:Controls -and $state.WorkerCount -gt 0 -and $script:Controls.sldWorkers) {
             $script:Controls.sldWorkers.Value = [math]::Min($state.WorkerCount, $script:Controls.sldWorkers.Maximum)
         }
 
         # Restore selected profile (after profile list is populated)
-        if ($state.SelectedProfile -and $script:Controls.lstProfiles) {
+        if ($script:Controls -and $state.SelectedProfile -and $script:Controls.lstProfiles) {
             $profileToSelect = $script:Controls.lstProfiles.Items | Where-Object { $_.Name -eq $state.SelectedProfile }
             if ($profileToSelect) {
                 $script:Controls.lstProfiles.SelectedItem = $profileToSelect
@@ -454,24 +454,23 @@ function Close-ReplicationRunspace {
         used for background replication. Called during window close
         and when replication completes.
 
-        Uses a script-level flag to prevent race conditions when multiple
-        threads attempt cleanup simultaneously (e.g., window close + completion handler).
+        Uses Interlocked.Exchange for atomic capture-and-clear to prevent
+        race conditions when multiple threads attempt cleanup simultaneously
+        (e.g., window close + completion handler firing at the same time).
     #>
     [CmdletBinding()]
     param()
 
-    # Thread-safe check and set using Interlocked
-    # This prevents multiple threads from cleaning up simultaneously
+    # Early exit if nothing to clean up
     if (-not $script:ReplicationPowerShell) { return }
 
-    # Capture reference and clear script variable atomically
-    # This ensures only one thread proceeds with cleanup
-    $psInstance = $script:ReplicationPowerShell
-    $handle = $script:ReplicationHandle
-    $script:ReplicationPowerShell = $null
-    $script:ReplicationHandle = $null
+    # Atomically capture and clear the PowerShell instance reference
+    # Interlocked.Exchange ensures only ONE thread gets the reference;
+    # all other threads will get $null and exit early
+    $psInstance = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationPowerShell, $null)
+    $handle = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationHandle, $null)
 
-    # If another thread already cleared the variables, exit
+    # If another thread already claimed the instance, exit
     if (-not $psInstance) { return }
 
     try {
@@ -588,16 +587,37 @@ function Save-ProfileFromForm {
     $selected.ScanMode = $script:Controls.cmbScanMode.Text
 
     # Parse numeric values with validation and bounds checking
+    # Helper function to provide visual feedback for input corrections
+    $showInputCorrected = {
+        param($control, $originalValue, $correctedValue, $fieldName)
+        $control.Text = $correctedValue.ToString()
+        $control.ToolTip = "Value '$originalValue' was corrected to '$correctedValue'"
+        # Flash the background briefly to indicate correction (uses existing theme colors)
+        $originalBg = $control.Background
+        $control.Background = [System.Windows.Media.Brushes]::DarkOrange
+        # Reset after 1.5 seconds using a dispatcher timer
+        $timer = [System.Windows.Threading.DispatcherTimer]::new()
+        $timer.Interval = [TimeSpan]::FromMilliseconds(1500)
+        $timer.Add_Tick({
+            $control.Background = $originalBg
+            $control.ToolTip = $null
+            $this.Stop()
+        })
+        $timer.Start()
+        Write-GuiLog "Input corrected: $fieldName '$originalValue' -> '$correctedValue'"
+    }
+
     # ChunkMaxSizeGB: valid range 1-1000 GB
     try {
         $value = [int]$script:Controls.txtMaxSize.Text
         $selected.ChunkMaxSizeGB = [Math]::Max(1, [Math]::Min(1000, $value))
         if ($value -ne $selected.ChunkMaxSizeGB) {
-            $script:Controls.txtMaxSize.Text = $selected.ChunkMaxSizeGB.ToString()
+            & $showInputCorrected $script:Controls.txtMaxSize $value $selected.ChunkMaxSizeGB "Max Size (GB)"
         }
     } catch {
+        $originalText = $script:Controls.txtMaxSize.Text
         $selected.ChunkMaxSizeGB = 10
-        $script:Controls.txtMaxSize.Text = "10"
+        & $showInputCorrected $script:Controls.txtMaxSize $originalText 10 "Max Size (GB)"
     }
 
     # ChunkMaxFiles: valid range 1000-10000000
@@ -605,11 +625,12 @@ function Save-ProfileFromForm {
         $value = [int]$script:Controls.txtMaxFiles.Text
         $selected.ChunkMaxFiles = [Math]::Max(1000, [Math]::Min(10000000, $value))
         if ($value -ne $selected.ChunkMaxFiles) {
-            $script:Controls.txtMaxFiles.Text = $selected.ChunkMaxFiles.ToString()
+            & $showInputCorrected $script:Controls.txtMaxFiles $value $selected.ChunkMaxFiles "Max Files"
         }
     } catch {
+        $originalText = $script:Controls.txtMaxFiles.Text
         $selected.ChunkMaxFiles = 50000
-        $script:Controls.txtMaxFiles.Text = "50000"
+        & $showInputCorrected $script:Controls.txtMaxFiles $originalText 50000 "Max Files"
     }
 
     # ChunkMaxDepth: valid range 1-20
@@ -617,11 +638,12 @@ function Save-ProfileFromForm {
         $value = [int]$script:Controls.txtMaxDepth.Text
         $selected.ChunkMaxDepth = [Math]::Max(1, [Math]::Min(20, $value))
         if ($value -ne $selected.ChunkMaxDepth) {
-            $script:Controls.txtMaxDepth.Text = $selected.ChunkMaxDepth.ToString()
+            & $showInputCorrected $script:Controls.txtMaxDepth $value $selected.ChunkMaxDepth "Max Depth"
         }
     } catch {
+        $originalText = $script:Controls.txtMaxDepth.Text
         $selected.ChunkMaxDepth = 5
-        $script:Controls.txtMaxDepth.Text = "5"
+        & $showInputCorrected $script:Controls.txtMaxDepth $originalText 5 "Max Depth"
     }
 
     # Refresh list display

@@ -440,9 +440,10 @@ function Convert-ToDestinationPath {
         throw "Path mismatch: SourcePath '$SourcePath' does not start with SourceRoot '$SourceRoot'. Cannot compute relative destination path."
     }
 
-    # Get the relative path (using original SourcePath to preserve original casing in output)
-    # We need to calculate the substring length from the normalized root
-    $relativePath = $SourcePath.Substring($SourceRoot.TrimEnd('\', '/').Length).TrimStart('\', '/')
+    # Get the relative path from the NORMALIZED source path using NORMALIZED root length
+    # This ensures consistency since StartsWith check already validated against normalized paths
+    # Using normalized length prevents off-by-one errors if Get-NormalizedPath does more than TrimEnd
+    $relativePath = $normalizedSource.Substring($normalizedSourceRoot.Length).TrimStart('\', '/')
 
     # Build destination path
     if ([string]::IsNullOrEmpty($relativePath)) {

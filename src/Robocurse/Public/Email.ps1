@@ -279,11 +279,27 @@ function Save-SmtpCredential {
             }
         }
         finally {
-            # Zero the byte array immediately - don't wait for GC
-            [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+            # Wrap each cleanup operation in its own try-catch to ensure
+            # all cleanup runs even if one operation fails
 
-            if ($credPtr -ne [IntPtr]::Zero) {
-                [System.Runtime.InteropServices.Marshal]::FreeHGlobal($credPtr)
+            # Zero the byte array immediately - don't wait for GC
+            try {
+                if ($null -ne $passwordBytes -and $passwordBytes.Length -gt 0) {
+                    [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+                }
+            }
+            catch {
+                # Ignore array clear errors - defensive cleanup
+            }
+
+            # Free unmanaged memory
+            try {
+                if ($credPtr -ne [IntPtr]::Zero) {
+                    [System.Runtime.InteropServices.Marshal]::FreeHGlobal($credPtr)
+                }
+            }
+            catch {
+                # Ignore free errors - may already be freed
             }
         }
     }

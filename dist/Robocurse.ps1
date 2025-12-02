@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 09:08:17
+    Built: 2025-12-02 09:51:37
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -1094,7 +1094,9 @@ function ConvertFrom-ConfigFileFormat {
             $rawProfile = $RawConfig.profiles.$profileName
 
             # Skip disabled profiles
-            if ($rawProfile.enabled -eq $false) {
+            # Explicitly check for $false; profiles without 'enabled' property default to enabled
+            # This explicit check handles: null (enabled), $true (enabled), $false (disabled)
+            if ($null -ne $rawProfile.enabled -and $rawProfile.enabled -eq $false) {
                 Write-Verbose "Skipping disabled profile: $profileName"
                 continue
             }
@@ -1367,9 +1369,12 @@ function Test-RobocurseConfig {
     }
 
     # Validate SyncProfiles
+    # Wrap in @() to ensure array-like behavior even if a single profile object is provided
+    # PowerShell's .Count on a single object can be unreliable
     if (($configPropertyNames -contains 'SyncProfiles') -and $Config.SyncProfiles) {
-        for ($i = 0; $i -lt $Config.SyncProfiles.Count; $i++) {
-            $profile = $Config.SyncProfiles[$i]
+        $profilesArray = @($Config.SyncProfiles)
+        for ($i = 0; $i -lt $profilesArray.Count; $i++) {
+            $profile = $profilesArray[$i]
             $profilePrefix = "SyncProfiles[$i]"
 
             # Ensure profile is an object with properties
@@ -2182,21 +2187,40 @@ function Set-CachedProfile {
 
     # Enforce cache size limit - if at max, remove oldest entries
     if ($script:ProfileCache.Count -ge $script:ProfileCacheMaxEntries) {
-        # Remove oldest 10% of CURRENT entries (not max capacity) based on LastScanned
-        # This ensures we actually free up space when cache is at capacity
+        # Use random sampling for approximate LRU eviction (similar to Redis's approach)
+        # Instead of O(n log n) full sort, we sample and sort O(k log k) where k << n
+        # This provides good-enough LRU behavior with much better performance
         $currentCount = $script:ProfileCache.Count
         $entriesToRemove = [math]::Ceiling($currentCount * 0.1)
 
-        # Only sort and remove if we have entries to remove
+        # Only evict if we have entries to remove
         if ($entriesToRemove -gt 0) {
-            $oldestEntries = $script:ProfileCache.ToArray() |
+            # Sample size: 5x the entries to remove (gives good statistical coverage)
+            $sampleSize = [math]::Min($entriesToRemove * 5, $currentCount)
+            $allEntries = $script:ProfileCache.ToArray()
+
+            if ($currentCount -le $sampleSize) {
+                # Small cache - just sort everything (fast enough)
+                $sample = $allEntries
+            }
+            else {
+                # Large cache - take random sample for approximate LRU
+                $random = [System.Random]::new()
+                $sample = $allEntries | Get-Random -Count $sampleSize
+            }
+
+            # Sort only the sample and take oldest entries
+            $oldestEntries = $sample |
                 Sort-Object { $_.Value.LastScanned } |
                 Select-Object -First $entriesToRemove
 
+            $removed = 0
             foreach ($entry in $oldestEntries) {
-                $script:ProfileCache.TryRemove($entry.Key, [ref]$null) | Out-Null
+                if ($script:ProfileCache.TryRemove($entry.Key, [ref]$null)) {
+                    $removed++
+                }
             }
-            Write-RobocurseLog "Cache at capacity ($currentCount entries), removed $entriesToRemove oldest entries" -Level Debug
+            Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $currentCount entries)" -Level Debug
         }
     }
 
@@ -2430,7 +2454,9 @@ function Get-DirectoryProfilesParallel {
                 }
             }
             finally {
-                $job.PowerShell.Dispose()
+                # Wrap disposal in try-catch to prevent one failed disposal from
+                # blocking cleanup of remaining jobs
+                try { $job.PowerShell.Dispose() } catch { }
             }
         }
 
@@ -2887,14 +2913,14 @@ function Convert-ToDestinationPath {
 
     # Check if SourcePath starts with SourceRoot (case-insensitive for Windows paths)
     if (-not $normalizedSource.StartsWith($normalizedSourceRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        Write-RobocurseLog "SourcePath '$SourcePath' does not start with SourceRoot '$SourceRoot'" -Level Warning
-        # If they don't match, just append source to dest
-        return Join-Path $normalizedDestRoot (Split-Path $SourcePath -Leaf)
+        # This is a configuration error - fail fast rather than silently creating unexpected paths
+        throw "Path mismatch: SourcePath '$SourcePath' does not start with SourceRoot '$SourceRoot'. Cannot compute relative destination path."
     }
 
-    # Get the relative path (using original SourcePath to preserve original casing in output)
-    # We need to calculate the substring length from the normalized root
-    $relativePath = $SourcePath.Substring($SourceRoot.TrimEnd('\', '/').Length).TrimStart('\', '/')
+    # Get the relative path from the NORMALIZED source path using NORMALIZED root length
+    # This ensures consistency since StartsWith check already validated against normalized paths
+    # Using normalized length prevents off-by-one errors if Get-NormalizedPath does more than TrimEnd
+    $relativePath = $normalizedSource.Substring($normalizedSourceRoot.Length).TrimStart('\', '/')
 
     # Build destination path
     if ([string]::IsNullOrEmpty($relativePath)) {
@@ -2967,9 +2993,14 @@ function Get-BandwidthThrottleIPG {
     $perJobBytesPerSec = $totalBytesPerSec / $effectiveJobs
 
     # Robocopy IPG is delay in ms between 512-byte packets
-    # Time per packet (ms) = (512 bytes * 8 bits * 1000 ms) / bits_per_second
-    # IPG = (4096000) / (perJobBytesPerSec * 8) = 512000 / perJobBytesPerSec
-    $ipg = [Math]::Ceiling(512000 / $perJobBytesPerSec)
+    # Formula derivation:
+    #   - Robocopy sends data in 512-byte packets
+    #   - IPG (Inter-Packet Gap) = time between packets in milliseconds
+    #   - To achieve target bytes/sec: IPG = (packet_size / target_bytes_per_sec) * 1000
+    #   - IPG = (512 / perJobBytesPerSec) * 1000 = 512000 / perJobBytesPerSec
+    $robocopyPacketSize = 512  # bytes per packet (robocopy default)
+    $msPerSecond = 1000
+    $ipg = [Math]::Ceiling(($robocopyPacketSize * $msPerSecond) / $perJobBytesPerSec)
 
     # Clamp to reasonable range (1ms to 10000ms)
     $ipg = [Math]::Max(1, [Math]::Min(10000, $ipg))
@@ -3268,6 +3299,7 @@ function Get-RobocopyExitMeaning {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
+        [ValidateRange(0, 255)]
         [int]$ExitCode,
 
         [ValidateSet("Warning", "Error", "Success")]
@@ -5449,7 +5481,9 @@ function Get-ETAEstimate {
         $secondsRemaining = $maxSeconds
     }
 
-    return [timespan]::FromSeconds([int]$secondsRemaining)
+    # Ensure value fits in Int32 range before casting (defensive programming)
+    $safeSeconds = [Math]::Min($secondsRemaining, [int]::MaxValue)
+    return [timespan]::FromSeconds([int]$safeSeconds)
 }
 
 #endregion
@@ -6483,11 +6517,27 @@ function Save-SmtpCredential {
             }
         }
         finally {
-            # Zero the byte array immediately - don't wait for GC
-            [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+            # Wrap each cleanup operation in its own try-catch to ensure
+            # all cleanup runs even if one operation fails
 
-            if ($credPtr -ne [IntPtr]::Zero) {
-                [System.Runtime.InteropServices.Marshal]::FreeHGlobal($credPtr)
+            # Zero the byte array immediately - don't wait for GC
+            try {
+                if ($null -ne $passwordBytes -and $passwordBytes.Length -gt 0) {
+                    [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+                }
+            }
+            catch {
+                # Ignore array clear errors - defensive cleanup
+            }
+
+            # Free unmanaged memory
+            try {
+                if ($credPtr -ne [IntPtr]::Zero) {
+                    [System.Runtime.InteropServices.Marshal]::FreeHGlobal($credPtr)
+                }
+            }
+            catch {
+                # Ignore free errors - may already be freed
             }
         }
     }
@@ -7624,13 +7674,13 @@ function Restore-GuiState {
             $Window.WindowState = [System.Windows.WindowState]::Maximized
         }
 
-        # Restore worker count
-        if ($state.WorkerCount -gt 0 -and $script:Controls.sldWorkers) {
+        # Restore worker count (check $script:Controls exists first for headless safety)
+        if ($script:Controls -and $state.WorkerCount -gt 0 -and $script:Controls.sldWorkers) {
             $script:Controls.sldWorkers.Value = [math]::Min($state.WorkerCount, $script:Controls.sldWorkers.Maximum)
         }
 
         # Restore selected profile (after profile list is populated)
-        if ($state.SelectedProfile -and $script:Controls.lstProfiles) {
+        if ($script:Controls -and $state.SelectedProfile -and $script:Controls.lstProfiles) {
             $profileToSelect = $script:Controls.lstProfiles.Items | Where-Object { $_.Name -eq $state.SelectedProfile }
             if ($profileToSelect) {
                 $script:Controls.lstProfiles.SelectedItem = $profileToSelect
@@ -7917,24 +7967,23 @@ function Close-ReplicationRunspace {
         used for background replication. Called during window close
         and when replication completes.
 
-        Uses a script-level flag to prevent race conditions when multiple
-        threads attempt cleanup simultaneously (e.g., window close + completion handler).
+        Uses Interlocked.Exchange for atomic capture-and-clear to prevent
+        race conditions when multiple threads attempt cleanup simultaneously
+        (e.g., window close + completion handler firing at the same time).
     #>
     [CmdletBinding()]
     param()
 
-    # Thread-safe check and set using Interlocked
-    # This prevents multiple threads from cleaning up simultaneously
+    # Early exit if nothing to clean up
     if (-not $script:ReplicationPowerShell) { return }
 
-    # Capture reference and clear script variable atomically
-    # This ensures only one thread proceeds with cleanup
-    $psInstance = $script:ReplicationPowerShell
-    $handle = $script:ReplicationHandle
-    $script:ReplicationPowerShell = $null
-    $script:ReplicationHandle = $null
+    # Atomically capture and clear the PowerShell instance reference
+    # Interlocked.Exchange ensures only ONE thread gets the reference;
+    # all other threads will get $null and exit early
+    $psInstance = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationPowerShell, $null)
+    $handle = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationHandle, $null)
 
-    # If another thread already cleared the variables, exit
+    # If another thread already claimed the instance, exit
     if (-not $psInstance) { return }
 
     try {
@@ -8051,16 +8100,37 @@ function Save-ProfileFromForm {
     $selected.ScanMode = $script:Controls.cmbScanMode.Text
 
     # Parse numeric values with validation and bounds checking
+    # Helper function to provide visual feedback for input corrections
+    $showInputCorrected = {
+        param($control, $originalValue, $correctedValue, $fieldName)
+        $control.Text = $correctedValue.ToString()
+        $control.ToolTip = "Value '$originalValue' was corrected to '$correctedValue'"
+        # Flash the background briefly to indicate correction (uses existing theme colors)
+        $originalBg = $control.Background
+        $control.Background = [System.Windows.Media.Brushes]::DarkOrange
+        # Reset after 1.5 seconds using a dispatcher timer
+        $timer = [System.Windows.Threading.DispatcherTimer]::new()
+        $timer.Interval = [TimeSpan]::FromMilliseconds(1500)
+        $timer.Add_Tick({
+            $control.Background = $originalBg
+            $control.ToolTip = $null
+            $this.Stop()
+        })
+        $timer.Start()
+        Write-GuiLog "Input corrected: $fieldName '$originalValue' -> '$correctedValue'"
+    }
+
     # ChunkMaxSizeGB: valid range 1-1000 GB
     try {
         $value = [int]$script:Controls.txtMaxSize.Text
         $selected.ChunkMaxSizeGB = [Math]::Max(1, [Math]::Min(1000, $value))
         if ($value -ne $selected.ChunkMaxSizeGB) {
-            $script:Controls.txtMaxSize.Text = $selected.ChunkMaxSizeGB.ToString()
+            & $showInputCorrected $script:Controls.txtMaxSize $value $selected.ChunkMaxSizeGB "Max Size (GB)"
         }
     } catch {
+        $originalText = $script:Controls.txtMaxSize.Text
         $selected.ChunkMaxSizeGB = 10
-        $script:Controls.txtMaxSize.Text = "10"
+        & $showInputCorrected $script:Controls.txtMaxSize $originalText 10 "Max Size (GB)"
     }
 
     # ChunkMaxFiles: valid range 1000-10000000
@@ -8068,11 +8138,12 @@ function Save-ProfileFromForm {
         $value = [int]$script:Controls.txtMaxFiles.Text
         $selected.ChunkMaxFiles = [Math]::Max(1000, [Math]::Min(10000000, $value))
         if ($value -ne $selected.ChunkMaxFiles) {
-            $script:Controls.txtMaxFiles.Text = $selected.ChunkMaxFiles.ToString()
+            & $showInputCorrected $script:Controls.txtMaxFiles $value $selected.ChunkMaxFiles "Max Files"
         }
     } catch {
+        $originalText = $script:Controls.txtMaxFiles.Text
         $selected.ChunkMaxFiles = 50000
-        $script:Controls.txtMaxFiles.Text = "50000"
+        & $showInputCorrected $script:Controls.txtMaxFiles $originalText 50000 "Max Files"
     }
 
     # ChunkMaxDepth: valid range 1-20
@@ -8080,11 +8151,12 @@ function Save-ProfileFromForm {
         $value = [int]$script:Controls.txtMaxDepth.Text
         $selected.ChunkMaxDepth = [Math]::Max(1, [Math]::Min(20, $value))
         if ($value -ne $selected.ChunkMaxDepth) {
-            $script:Controls.txtMaxDepth.Text = $selected.ChunkMaxDepth.ToString()
+            & $showInputCorrected $script:Controls.txtMaxDepth $value $selected.ChunkMaxDepth "Max Depth"
         }
     } catch {
+        $originalText = $script:Controls.txtMaxDepth.Text
         $selected.ChunkMaxDepth = 5
-        $script:Controls.txtMaxDepth.Text = "5"
+        & $showInputCorrected $script:Controls.txtMaxDepth $originalText 5 "Max Depth"
     }
 
     # Refresh list display

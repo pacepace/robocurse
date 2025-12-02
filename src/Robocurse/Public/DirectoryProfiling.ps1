@@ -267,21 +267,40 @@ function Set-CachedProfile {
 
     # Enforce cache size limit - if at max, remove oldest entries
     if ($script:ProfileCache.Count -ge $script:ProfileCacheMaxEntries) {
-        # Remove oldest 10% of CURRENT entries (not max capacity) based on LastScanned
-        # This ensures we actually free up space when cache is at capacity
+        # Use random sampling for approximate LRU eviction (similar to Redis's approach)
+        # Instead of O(n log n) full sort, we sample and sort O(k log k) where k << n
+        # This provides good-enough LRU behavior with much better performance
         $currentCount = $script:ProfileCache.Count
         $entriesToRemove = [math]::Ceiling($currentCount * 0.1)
 
-        # Only sort and remove if we have entries to remove
+        # Only evict if we have entries to remove
         if ($entriesToRemove -gt 0) {
-            $oldestEntries = $script:ProfileCache.ToArray() |
+            # Sample size: 5x the entries to remove (gives good statistical coverage)
+            $sampleSize = [math]::Min($entriesToRemove * 5, $currentCount)
+            $allEntries = $script:ProfileCache.ToArray()
+
+            if ($currentCount -le $sampleSize) {
+                # Small cache - just sort everything (fast enough)
+                $sample = $allEntries
+            }
+            else {
+                # Large cache - take random sample for approximate LRU
+                $random = [System.Random]::new()
+                $sample = $allEntries | Get-Random -Count $sampleSize
+            }
+
+            # Sort only the sample and take oldest entries
+            $oldestEntries = $sample |
                 Sort-Object { $_.Value.LastScanned } |
                 Select-Object -First $entriesToRemove
 
+            $removed = 0
             foreach ($entry in $oldestEntries) {
-                $script:ProfileCache.TryRemove($entry.Key, [ref]$null) | Out-Null
+                if ($script:ProfileCache.TryRemove($entry.Key, [ref]$null)) {
+                    $removed++
+                }
             }
-            Write-RobocurseLog "Cache at capacity ($currentCount entries), removed $entriesToRemove oldest entries" -Level Debug
+            Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $currentCount entries)" -Level Debug
         }
     }
 
