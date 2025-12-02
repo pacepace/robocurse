@@ -392,8 +392,8 @@ function Initialize-OrchestrationState {
     # Clear profile cache to prevent unbounded memory growth across runs
     Clear-ProfileCache
 
-    # Reset chunk ID counter
-    $script:ChunkIdCounter = [ref]0
+    # Reset chunk ID counter (plain integer - [ref] applied at Interlocked.Increment call site)
+    $script:ChunkIdCounter = 0
 
     # Clean up any orphaned VSS snapshots from crashed previous runs
     $orphansCleared = Clear-OrphanVssSnapshots

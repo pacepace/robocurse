@@ -125,6 +125,36 @@ InModuleScope 'Robocurse' {
                 Initialize-OrchestrationState
                 $script:OrchestrationState.CompletedChunkBytes | Should -Be 0
             }
+
+            It "Should reset ChunkIdCounter correctly for multi-run scenarios" {
+                # This test verifies the fix for the [ref]0 bug in Initialize-OrchestrationState
+                # Previously, $script:ChunkIdCounter was incorrectly set to [ref]0 which would
+                # cause Interlocked.Increment to fail on subsequent runs
+
+                # First run - initialize state which resets the counter
+                Initialize-OrchestrationState
+
+                # Verify ChunkIdCounter is a plain integer (not wrapped in [ref])
+                $script:ChunkIdCounter | Should -BeOfType [int]
+                $script:ChunkIdCounter | Should -Be 0
+
+                # Simulate what New-Chunk does - increment the counter
+                $firstId = [System.Threading.Interlocked]::Increment([ref]$script:ChunkIdCounter)
+                $firstId | Should -Be 1
+
+                # Second run - reinitialize (this is where the [ref]0 bug would manifest)
+                # If [ref]0 bug exists, this would set ChunkIdCounter to a reference object
+                Initialize-OrchestrationState
+
+                # Verify counter is still a plain integer after reset
+                $script:ChunkIdCounter | Should -BeOfType [int]
+                $script:ChunkIdCounter | Should -Be 0
+
+                # This increment would fail with [ref]0 bug because Interlocked.Increment
+                # would receive [ref][ref]0 instead of [ref]0
+                { $script:secondId = [System.Threading.Interlocked]::Increment([ref]$script:ChunkIdCounter) } | Should -Not -Throw
+                $script:secondId | Should -Be 1
+            }
         }
 
         Context "OrchestrationState - CompletedChunkBytes Counter" {

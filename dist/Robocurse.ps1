@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-01 23:19:39
+    Built: 2025-12-02 08:00:17
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -3644,20 +3644,27 @@ function Remove-ReplicationCheckpoint {
         Removes the checkpoint file after successful completion
     .OUTPUTS
         $true if removed, $false otherwise
+    .EXAMPLE
+        Remove-ReplicationCheckpoint -WhatIf
+        # Shows what would be removed without actually deleting
     #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
 
     $checkpointPath = Get-CheckpointPath
 
     if (Test-Path $checkpointPath) {
-        try {
-            Remove-Item -Path $checkpointPath -Force
-            Write-RobocurseLog -Message "Checkpoint file removed (replication complete)" `
-                -Level 'Debug' -Component 'Checkpoint'
-            return $true
-        }
-        catch {
-            Write-RobocurseLog -Message "Failed to remove checkpoint file: $($_.Exception.Message)" `
-                -Level 'Warning' -Component 'Checkpoint'
+        if ($PSCmdlet.ShouldProcess($checkpointPath, "Remove checkpoint file")) {
+            try {
+                Remove-Item -Path $checkpointPath -Force
+                Write-RobocurseLog -Message "Checkpoint file removed (replication complete)" `
+                    -Level 'Debug' -Component 'Checkpoint'
+                return $true
+            }
+            catch {
+                Write-RobocurseLog -Message "Failed to remove checkpoint file: $($_.Exception.Message)" `
+                    -Level 'Warning' -Component 'Checkpoint'
+            }
         }
     }
     return $false
@@ -4102,8 +4109,8 @@ function Initialize-OrchestrationState {
     # Clear profile cache to prevent unbounded memory growth across runs
     Clear-ProfileCache
 
-    # Reset chunk ID counter
-    $script:ChunkIdCounter = [ref]0
+    # Reset chunk ID counter (plain integer - [ref] applied at Interlocked.Increment call site)
+    $script:ChunkIdCounter = 0
 
     # Clean up any orphaned VSS snapshots from crashed previous runs
     $orphansCleared = Clear-OrphanVssSnapshots

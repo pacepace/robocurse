@@ -123,20 +123,27 @@ function Remove-ReplicationCheckpoint {
         Removes the checkpoint file after successful completion
     .OUTPUTS
         $true if removed, $false otherwise
+    .EXAMPLE
+        Remove-ReplicationCheckpoint -WhatIf
+        # Shows what would be removed without actually deleting
     #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
 
     $checkpointPath = Get-CheckpointPath
 
     if (Test-Path $checkpointPath) {
-        try {
-            Remove-Item -Path $checkpointPath -Force
-            Write-RobocurseLog -Message "Checkpoint file removed (replication complete)" `
-                -Level 'Debug' -Component 'Checkpoint'
-            return $true
-        }
-        catch {
-            Write-RobocurseLog -Message "Failed to remove checkpoint file: $($_.Exception.Message)" `
-                -Level 'Warning' -Component 'Checkpoint'
+        if ($PSCmdlet.ShouldProcess($checkpointPath, "Remove checkpoint file")) {
+            try {
+                Remove-Item -Path $checkpointPath -Force
+                Write-RobocurseLog -Message "Checkpoint file removed (replication complete)" `
+                    -Level 'Debug' -Component 'Checkpoint'
+                return $true
+            }
+            catch {
+                Write-RobocurseLog -Message "Failed to remove checkpoint file: $($_.Exception.Message)" `
+                    -Level 'Warning' -Component 'Checkpoint'
+            }
         }
     }
     return $false
