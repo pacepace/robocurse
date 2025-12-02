@@ -164,9 +164,18 @@ function Test-ChunkAlreadyCompleted {
         return $false
     }
 
+    # Guard against null SourcePath
+    if (-not $Chunk.SourcePath) {
+        return $false
+    }
+
     # Case-insensitive check for Windows paths
     $normalizedChunkPath = $Chunk.SourcePath.ToLowerInvariant()
     foreach ($completedPath in $Checkpoint.CompletedChunkPaths) {
+        # Skip null entries in the completed paths array
+        if (-not $completedPath) {
+            continue
+        }
         if ($completedPath.ToLowerInvariant() -eq $normalizedChunkPath) {
             return $true
         }

@@ -47,6 +47,12 @@ function Initialize-CredentialManager {
         return
     }
 
+    # Check if type already exists from a previous session
+    if (([System.Management.Automation.PSTypeName]'CredentialManager').Type) {
+        $script:CredentialManagerTypeAdded = $true
+        return
+    }
+
     try {
         $credManagerCode = @"
 using System;

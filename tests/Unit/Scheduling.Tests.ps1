@@ -77,6 +77,38 @@ InModuleScope 'Robocurse' {
             # $MyInvocation.MyCommand.Path are automatic variables set by PowerShell.
             # The validation exists to handle edge cases like running from memory or
             # interactive sessions. Manual testing verified the error path works.
+
+            It "Should accept explicit ScriptPath parameter" -Skip:(-not $IsWindows) {
+                Mock New-ScheduledTaskAction {
+                    param($Execute, $Argument)
+                    [PSCustomObject]@{
+                        Execute = $Execute
+                        Argument = $Argument
+                    }
+                }
+                Mock New-ScheduledTaskTrigger { [PSCustomObject]@{ Type = "Daily" } }
+                Mock New-ScheduledTaskPrincipal { [PSCustomObject]@{ UserId = "TestUser" } }
+                Mock New-ScheduledTaskSettingsSet { [PSCustomObject]@{ } }
+                Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
+                Mock Write-RobocurseLog { }
+
+                # Create a temp script file to use as ScriptPath
+                $tempScript = "$TestDrive/Robocurse.ps1"
+                '# Test script' | Set-Content $tempScript
+
+                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $tempScript
+
+                $result.Success | Should -Be $true
+                Should -Invoke New-ScheduledTaskAction -Times 1 -ParameterFilter {
+                    $Argument -match [regex]::Escape($tempScript)
+                }
+            }
+
+            It "Should throw when ScriptPath does not exist" {
+                {
+                    Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath "C:\NonExistent\Script.ps1"
+                } | Should -Throw "*does not exist*"
+            }
         }
 
         Context "Register-RobocurseTask" -Skip:(-not $IsWindows) {
@@ -562,6 +594,30 @@ InModuleScope 'Robocurse' {
 
                 # Task should NOT be disabled when using -WhatIf
                 Should -Invoke Disable-ScheduledTask -Times 0
+                $result.Success | Should -Be $true
+            }
+
+            It "Enable-RobocurseTask should support -WhatIf" {
+                Mock Get-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
+                Mock Enable-ScheduledTask { [PSCustomObject]@{ State = "Ready" } }
+                Mock Write-RobocurseLog { }
+
+                $result = Enable-RobocurseTask -TaskName "Test-Task" -WhatIf
+
+                # Task should NOT be enabled when using -WhatIf
+                Should -Invoke Enable-ScheduledTask -Times 0
+                $result.Success | Should -Be $true
+            }
+
+            It "Start-RobocurseTask should support -WhatIf" {
+                Mock Get-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
+                Mock Start-ScheduledTask { }
+                Mock Write-RobocurseLog { }
+
+                $result = Start-RobocurseTask -TaskName "Test-Task" -WhatIf
+
+                # Task should NOT be started when using -WhatIf
+                Should -Invoke Start-ScheduledTask -Times 0
                 $result.Success | Should -Be $true
             }
         }

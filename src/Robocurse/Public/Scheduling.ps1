@@ -18,6 +18,9 @@ function Register-RobocurseTask {
         Days for weekly schedule (Sunday, Monday, etc.). Default: @('Sunday')
     .PARAMETER RunAsSystem
         Run as SYSTEM account (requires admin). Default: $false
+    .PARAMETER ScriptPath
+        Explicit path to Robocurse.ps1 script. Use when running interactively
+        or when automatic path detection fails.
     .OUTPUTS
         OperationResult - Success=$true with Data=$TaskName on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
@@ -29,6 +32,9 @@ function Register-RobocurseTask {
     .EXAMPLE
         Register-RobocurseTask -ConfigPath "C:\config.json" -WhatIf
         # Shows what task would be created without actually registering it
+    .EXAMPLE
+        Register-RobocurseTask -ConfigPath "C:\config.json" -ScriptPath "C:\Scripts\Robocurse.ps1"
+        # Explicitly specify the script path for interactive sessions
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -49,7 +55,15 @@ function Register-RobocurseTask {
         [ValidateNotNullOrEmpty()]
         [string[]]$DaysOfWeek = @('Sunday'),
 
-        [switch]$RunAsSystem
+        [switch]$RunAsSystem,
+
+        [ValidateScript({
+            if ($_ -and -not (Test-Path -Path $_ -PathType Leaf)) {
+                throw "ScriptPath '$_' does not exist or is not a file"
+            }
+            $true
+        })]
+        [string]$ScriptPath
     )
 
     try {
@@ -64,22 +78,29 @@ function Register-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "ConfigPath '$ConfigPath' does not exist or is not a file"
         }
 
-        # Get script path - required to build the scheduled task action
-        $scriptPath = $PSCommandPath
-        if (-not $scriptPath) {
-            $scriptPath = $MyInvocation.MyCommand.Path
+        # Get script path - use explicit parameter if provided, otherwise auto-detect
+        $effectiveScriptPath = if ($ScriptPath) {
+            $ScriptPath
         }
-        if (-not $scriptPath) {
-            return New-OperationResult -Success $false -ErrorMessage "Cannot determine Robocurse script path. When running interactively, use -ScriptPath parameter to specify the path to Robocurse.ps1"
+        else {
+            $autoPath = $PSCommandPath
+            if (-not $autoPath) {
+                $autoPath = $MyInvocation.MyCommand.Path
+            }
+            $autoPath
+        }
+
+        if (-not $effectiveScriptPath) {
+            return New-OperationResult -Success $false -ErrorMessage "Cannot determine Robocurse script path. Use -ScriptPath parameter to specify the path to Robocurse.ps1"
         }
 
         # Build action - PowerShell command to run Robocurse in headless mode
-        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Headless -ConfigPath `"$ConfigPath`""
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$effectiveScriptPath`" -Headless -ConfigPath `"$ConfigPath`""
 
         $action = New-ScheduledTaskAction `
             -Execute "powershell.exe" `
             -Argument $arguments `
-            -WorkingDirectory (Split-Path $scriptPath -Parent)
+            -WorkingDirectory (Split-Path $effectiveScriptPath -Parent)
 
         # Build trigger based on schedule type
         $trigger = switch ($Schedule) {
@@ -165,6 +186,7 @@ function Unregister-RobocurseTask {
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
@@ -203,7 +225,9 @@ function Get-RobocurseTask {
     .EXAMPLE
         $taskInfo = Get-RobocurseTask -TaskName "Custom-Task"
     #>
+    [CmdletBinding()]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
@@ -249,8 +273,13 @@ function Start-RobocurseTask {
     .EXAMPLE
         $result = Start-RobocurseTask
         if ($result.Success) { "Task started" }
+    .EXAMPLE
+        Start-RobocurseTask -WhatIf
+        # Shows what would be started without actually triggering
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
@@ -261,8 +290,10 @@ function Start-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
-        Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
-        Write-RobocurseLog -Message "Manually triggered task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        if ($PSCmdlet.ShouldProcess($TaskName, "Start scheduled task")) {
+            Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+            Write-RobocurseLog -Message "Manually triggered task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        }
         return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
@@ -284,8 +315,13 @@ function Enable-RobocurseTask {
     .EXAMPLE
         $result = Enable-RobocurseTask
         if ($result.Success) { "Task enabled" }
+    .EXAMPLE
+        Enable-RobocurseTask -WhatIf
+        # Shows what would be enabled without actually enabling
     #>
+    [CmdletBinding(SupportsShouldProcess)]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
@@ -296,8 +332,10 @@ function Enable-RobocurseTask {
             return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
         }
 
-        Enable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
-        Write-RobocurseLog -Message "Enabled task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        if ($PSCmdlet.ShouldProcess($TaskName, "Enable scheduled task")) {
+            Enable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
+            Write-RobocurseLog -Message "Enabled task '$TaskName'" -Level 'Info' -Component 'Scheduler'
+        }
         return New-OperationResult -Success $true -Data $TaskName
     }
     catch {
@@ -326,6 +364,7 @@ function Disable-RobocurseTask {
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
@@ -361,7 +400,9 @@ function Test-RobocurseTaskExists {
     .EXAMPLE
         if (Test-RobocurseTaskExists) { "Task exists" }
     #>
+    [CmdletBinding()]
     param(
+        [ValidateNotNullOrEmpty()]
         [string]$TaskName = "Robocurse-Replication"
     )
 
