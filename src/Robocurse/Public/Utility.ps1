@@ -1,4 +1,4 @@
-# Robocurse Utility Functions
+﻿# Robocurse Utility Functions
 function Test-IsWindowsPlatform {
     <#
     .SYNOPSIS
@@ -452,7 +452,23 @@ function Test-SourcePathAccessible {
     )
 
     # Check if path exists
-    if (-not (Test-Path -Path $Path -PathType Container)) {
+    # Note: Test-Path can throw for UNC paths to unreachable servers on Windows
+    try {
+        $pathExists = Test-Path -Path $Path -PathType Container -ErrorAction Stop
+    }
+    catch {
+        # UNC paths to unreachable servers throw "The network path was not found"
+        if ($Path -match '^\\\\') {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Source path not accessible: '$Path'. Check network connectivity and share permissions." `
+                -ErrorRecord $_
+        }
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Error checking source path '$Path': $($_.Exception.Message)" `
+            -ErrorRecord $_
+    }
+
+    if (-not $pathExists) {
         # Provide more specific error for UNC paths
         if ($Path -match '^\\\\') {
             return New-OperationResult -Success $false `

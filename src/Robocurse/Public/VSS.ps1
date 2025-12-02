@@ -1,4 +1,4 @@
-# Robocurse Vss Functions
+﻿# Robocurse Vss Functions
 # Path to track active VSS snapshots (for orphan cleanup)
 # Handle cross-platform: TEMP on Windows, TMPDIR on macOS, /tmp fallback
 $script:VssTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
@@ -206,7 +206,10 @@ function Add-VssToTracking {
             $tracked = @()
             if (Test-Path $script:VssTrackingFile) {
                 try {
-                    $tracked = @(Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json)
+                    # Note: Don't wrap ConvertFrom-Json in @() with pipeline - PS 5.1 unwraps arrays
+                    # Assign first, then wrap to preserve array structure
+                    $parsedJson = Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json
+                    $tracked = @($parsedJson)
                 }
                 catch {
                     # File might be corrupted or empty - start fresh
@@ -220,7 +223,8 @@ function Add-VssToTracking {
                 CreatedAt = $SnapshotInfo.CreatedAt.ToString('o')
             }
 
-            $tracked | ConvertTo-Json -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
+            # Use -InputObject to preserve JSON array format (PS 5.1 compatibility)
+            ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
         }
     }
     catch {
@@ -251,7 +255,10 @@ function Remove-VssFromTracking {
             }
 
             try {
-                $tracked = @(Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json)
+                # Note: Don't wrap ConvertFrom-Json in @() with pipeline - PS 5.1 unwraps arrays
+                # Assign first, then wrap to preserve array structure
+                $parsedJson = Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json
+                $tracked = @($parsedJson)
             }
             catch {
                 # File might be corrupted - just remove it
@@ -264,7 +271,8 @@ function Remove-VssFromTracking {
             if ($tracked.Count -eq 0) {
                 Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
             } else {
-                $tracked | ConvertTo-Json -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
+                # Use -InputObject to preserve JSON array format (PS 5.1 compatibility)
+                ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
             }
         }
     }

@@ -1,4 +1,4 @@
-# Robocurse Progress Functions
+﻿# Robocurse Progress Functions
 function Update-ProgressStats {
     <#
     .SYNOPSIS

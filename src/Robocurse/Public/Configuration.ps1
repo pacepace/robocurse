@@ -1,4 +1,4 @@
-# Robocurse Configuration Functions
+﻿# Robocurse Configuration Functions
 function New-DefaultConfig {
     <#
     .SYNOPSIS
@@ -412,7 +412,9 @@ function Get-RobocurseConfig {
     # Try to load and parse the JSON file
     try {
         $jsonContent = Get-Content -Path $Path -Raw -ErrorAction Stop
-        $rawConfig = $jsonContent | ConvertFrom-Json -Depth 10 -ErrorAction Stop
+        # Note: -Depth parameter not available in PowerShell 5.1, omitting for compatibility
+        # PS 5.1 defaults to depth 1024 which is sufficient for config files
+        $rawConfig = $jsonContent | ConvertFrom-Json -ErrorAction Stop
 
         # Convert to internal format (handles both formats)
         $config = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig

@@ -1,4 +1,4 @@
-# Robocurse Robocopy wrapper Functions
+﻿# Robocurse Robocopy wrapper Functions
 # Script-level bandwidth limit (set from config during replication start)
 $script:BandwidthLimitMbps = 0
 

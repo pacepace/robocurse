@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 # Load module at discovery time so InModuleScope can find it
 # This must happen before InModuleScope is evaluated
@@ -815,14 +815,16 @@ InModuleScope 'Robocurse' {
             }
 
             It "Should return null if elapsed time is nearly zero (avoid division by zero)" {
-                # Start time is now - should have near-zero elapsed
-                $script:OrchestrationState.StartTime = [datetime]::Now
+                # Set start time slightly in the future (1 second ahead)
+                # This ensures elapsed time is negative/zero, triggering the <0.001s guard condition
+                # Windows timer resolution (~15ms) makes testing small positive times unreliable
+                $script:OrchestrationState.StartTime = [datetime]::Now.AddSeconds(1)
                 $script:OrchestrationState.TotalBytes = 10000000
                 $script:OrchestrationState.BytesComplete = 5000000
 
                 $eta = Get-ETAEstimate
 
-                # With nearly zero elapsed time, should return null to avoid division by zero
+                # With negative/zero elapsed time, should return null to avoid division by zero
                 $eta | Should -BeNullOrEmpty
             }
 

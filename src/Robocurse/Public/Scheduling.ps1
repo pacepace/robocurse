@@ -1,4 +1,4 @@
-# Robocurse Scheduling Functions
+﻿# Robocurse Scheduling Functions
 function Register-RobocurseTask {
     <#
     .SYNOPSIS

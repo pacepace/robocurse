@@ -1,4 +1,4 @@
-# Robocurse Orchestration Functions
+﻿# Robocurse Orchestration Functions
 # Script variable to track if C# type has been initialized (for lazy loading)
 $script:OrchestrationTypeInitialized = $false
 $script:OrchestrationState = $null

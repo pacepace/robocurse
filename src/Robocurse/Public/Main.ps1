@@ -1,4 +1,4 @@
-# Robocurse Main Entry Point Functions
+﻿# Robocurse Main Entry Point Functions
 
 function Show-RobocurseHelp {
     <#
@@ -291,7 +291,7 @@ function Start-RobocurseMain {
     if ($Headless) {
         # Phase 3a: Validate headless parameters
         if (-not $ProfileName -and -not $AllProfiles) {
-            Write-Error "Headless mode requires either -Profile <name> or -AllProfiles parameter."
+            Write-Error 'Headless mode requires either -Profile <name> or -AllProfiles parameter.'
             return 1
         }
 
@@ -301,7 +301,7 @@ function Start-RobocurseMain {
 
         # Phase 3b: Initialize logging
         try {
-            $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { ".\Logs" }
+            $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { '.\Logs' }
             $compressDays = if ($config.GlobalSettings.LogCompressAfterDays) { $config.GlobalSettings.LogCompressAfterDays } else { $script:LogCompressAfterDays }
             $deleteDays = if ($config.GlobalSettings.LogRetentionDays) { $config.GlobalSettings.LogRetentionDays } else { $script:LogDeleteAfterDays }
             Initialize-LogSession -LogRoot $logRoot -CompressAfterDays $compressDays -DeleteAfterDays $deleteDays

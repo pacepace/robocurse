@@ -1,4 +1,4 @@
-# Robocurse Checkpoint Functions
+﻿# Robocurse Checkpoint Functions
 # Handles checkpoint/resume functionality for crash recovery
 
 $script:CheckpointFileName = "robocurse-checkpoint.json"
@@ -82,10 +82,13 @@ function Save-ReplicationCheckpoint {
         $tempPath = "$checkpointPath.tmp"
         $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
 
-        # Use .NET File.Move with overwrite for atomic replacement
-        # This avoids TOCTOU race between Test-Path/Remove-Item/Move-Item
-        # On NTFS, this is an atomic operation
-        [System.IO.File]::Move($tempPath, $checkpointPath, $true)
+        # Use atomic replacement - remove existing then move
+        # Note: .NET Framework (PowerShell 5.1) doesn't support File.Move overwrite parameter
+        # so we need to remove first, then move
+        if (Test-Path $checkpointPath) {
+            Remove-Item -Path $checkpointPath -Force
+        }
+        [System.IO.File]::Move($tempPath, $checkpointPath)
 
         Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
             -Level 'Info' -Component 'Checkpoint'

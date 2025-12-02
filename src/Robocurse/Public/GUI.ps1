@@ -1,4 +1,4 @@
-# Robocurse Gui Functions
+﻿# Robocurse Gui Functions
 # XAML resources are stored in the Resources folder for maintainability.
 # The Get-XamlResource function loads them at runtime with fallback to embedded content.
 

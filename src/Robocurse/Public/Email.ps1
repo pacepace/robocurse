@@ -1,4 +1,4 @@
-# Robocurse Email Functions
+﻿# Robocurse Email Functions
 # Initialize Windows Credential Manager P/Invoke types (Windows only)
 $script:CredentialManagerTypeAdded = $false
 

@@ -1,4 +1,4 @@
-# Robocurse Directory profiling Functions
+﻿# Robocurse Directory profiling Functions
 # Script-level cache for directory profiles (thread-safe)
 # Uses OrdinalIgnoreCase comparer for Windows-style case-insensitive path matching
 # This is more correct than ToLowerInvariant() for international characters

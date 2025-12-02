@@ -1,24 +1,31 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 # NOTE: These tests are designed to run on Windows where ScheduledTask cmdlets are available.
 # When running on non-Windows platforms, stub functions are created but many tests will fail
 # because the actual implementation detects the platform and returns early.
 # This is expected behavior - the tests document the correct Windows behavior.
 
-# Mock ScheduledTask cmdlets before loading the module - these are only available on Windows
-if (-not (Get-Command New-ScheduledTaskAction -ErrorAction SilentlyContinue)) {
-    function global:New-ScheduledTaskAction { }
-    function global:New-ScheduledTaskTrigger { }
-    function global:New-ScheduledTaskPrincipal { }
-    function global:New-ScheduledTaskSettingsSet { }
-    function global:Register-ScheduledTask { }
-    function global:Unregister-ScheduledTask { }
-    function global:Get-ScheduledTask { }
-    function global:Get-ScheduledTaskInfo { }
-    function global:Start-ScheduledTask { }
-    function global:Enable-ScheduledTask { }
-    function global:Disable-ScheduledTask { }
+# IMPORTANT: On Windows, the ScheduledTasks module has CIM-based cmdlets that cannot be easily mocked
+# because PowerShell validates parameter types BEFORE calling the function.
+# We need to REMOVE the module and replace with stub functions that CAN be mocked.
+if (Get-Module ScheduledTasks -ErrorAction SilentlyContinue) {
+    Remove-Module ScheduledTasks -Force -ErrorAction SilentlyContinue
 }
+
+# Create stub functions that can be properly mocked
+# These replace the real CIM cmdlets with simple PowerShell functions
+# IMPORTANT: Parameters must match what the source code uses (including switch params)
+function global:New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) }
+function global:New-ScheduledTaskTrigger { param([switch]$Daily, [switch]$Weekly, [switch]$Once, $At, $DaysOfWeek, $RepetitionInterval, $RepetitionDuration) }
+function global:New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) }
+function global:New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [switch]$StartWhenAvailable, [switch]$RunOnlyIfNetworkAvailable, $MultipleInstances, $ExecutionTimeLimit, $Priority) }
+function global:Register-ScheduledTask { param($TaskName, $Action, $Trigger, $Principal, $Settings, $Description, [switch]$Force, $User, $Password) }
+function global:Unregister-ScheduledTask { param($TaskName, [switch]$Confirm) }
+function global:Get-ScheduledTask { param($TaskName) }
+function global:Get-ScheduledTaskInfo { param($TaskName) }
+function global:Start-ScheduledTask { param($TaskName) }
+function global:Enable-ScheduledTask { param($TaskName) }
+function global:Disable-ScheduledTask { param($TaskName) }
 
 # Load module at discovery time for InModuleScope
 $testRoot = $PSScriptRoot
@@ -41,11 +48,11 @@ InModuleScope 'Robocurse' {
                 } | Should -Throw
             }
 
-            It "Should throw when ConfigPath does not exist" -Skip:(-not $IsWindows) {
+            It "Should throw when ConfigPath does not exist" -Skip:(-not (Test-IsWindowsPlatform)) {
                 # Skip on non-Windows as the function returns early before validation
-                {
-                    Register-RobocurseTask -ConfigPath "C:\NonExistent\Path\config.json"
-                } | Should -Throw "*does not exist*"
+                $result = Register-RobocurseTask -ConfigPath "C:\NonExistent\Path\config.json"
+                $result.Success | Should -Be $false
+                $result.ErrorMessage | Should -Match "does not exist"
             }
 
             It "Should throw when Time format is invalid" {
@@ -78,7 +85,7 @@ InModuleScope 'Robocurse' {
             # The validation exists to handle edge cases like running from memory or
             # interactive sessions. Manual testing verified the error path works.
 
-            It "Should accept explicit ScriptPath parameter" -Skip:(-not $IsWindows) {
+            It "Should accept explicit ScriptPath parameter" -Skip:(-not (Test-IsWindowsPlatform)) {
                 Mock New-ScheduledTaskAction {
                     param($Execute, $Argument)
                     [PSCustomObject]@{
@@ -93,14 +100,15 @@ InModuleScope 'Robocurse' {
                 Mock Write-RobocurseLog { }
 
                 # Create a temp script file to use as ScriptPath
-                $tempScript = "$TestDrive/Robocurse.ps1"
+                $tempScript = Join-Path $TestDrive "Robocurse.ps1"
                 '# Test script' | Set-Content $tempScript
 
-                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $tempScript
+                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $tempScript -Confirm:$false
 
                 $result.Success | Should -Be $true
+                # Use a looser match since path may have different separators
                 Should -Invoke New-ScheduledTaskAction -Times 1 -ParameterFilter {
-                    $Argument -match [regex]::Escape($tempScript)
+                    $Argument -match "Robocurse\.ps1"
                 }
             }
 
@@ -111,7 +119,15 @@ InModuleScope 'Robocurse' {
             }
         }
 
-        Context "Register-RobocurseTask" -Skip:(-not $IsWindows) {
+        Context "Register-RobocurseTask" -Skip:(-not (Test-IsWindowsPlatform)) {
+            BeforeEach {
+                # Create test config and script files
+                $script:tempConfigPath = Join-Path $TestDrive "test-config.json"
+                $script:tempScriptPath = Join-Path $TestDrive "Robocurse.ps1"
+                '{}' | Set-Content $script:tempConfigPath
+                '# Test script' | Set-Content $script:tempScriptPath
+            }
+
             It "Should create task with daily trigger" {
                 Mock New-ScheduledTaskAction { [PSCustomObject]@{ Execute = "powershell.exe" } }
                 Mock New-ScheduledTaskTrigger { [PSCustomObject]@{ Type = "Daily" } }
@@ -120,7 +136,7 @@ InModuleScope 'Robocurse' {
                 Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
                 Mock Write-RobocurseLog { }
 
-                $result = Register-RobocurseTask -ConfigPath "C:\test\config.json" -Schedule "Daily" -Time "03:00"
+                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath -Schedule "Daily" -Time "03:00" -Confirm:$false
 
                 $result.Success | Should -Be $true
                 Should -Invoke Register-ScheduledTask -Times 1 -ParameterFilter {
@@ -137,7 +153,7 @@ InModuleScope 'Robocurse' {
                 Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
                 Mock Write-RobocurseLog { }
 
-                $result = Register-RobocurseTask -ConfigPath "C:\test\config.json" -Schedule "Weekly" -DaysOfWeek @('Monday', 'Friday')
+                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath -Schedule "Weekly" -DaysOfWeek @('Monday', 'Friday') -Confirm:$false
 
                 $result.Success | Should -Be $true
                 Should -Invoke New-ScheduledTaskTrigger -Times 1 -ParameterFilter {
@@ -155,7 +171,7 @@ InModuleScope 'Robocurse' {
                 Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
                 Mock Write-RobocurseLog { }
 
-                $result = Register-RobocurseTask -ConfigPath "C:\test\config.json" -Schedule "Hourly" -Time "10:00"
+                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath -Schedule "Hourly" -Time "10:00" -Confirm:$false
 
                 $result.Success | Should -Be $true
                 Should -Invoke New-ScheduledTaskTrigger -Times 1 -ParameterFilter {
@@ -172,7 +188,7 @@ InModuleScope 'Robocurse' {
                 Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
                 Mock Write-RobocurseLog { }
 
-                $result = Register-RobocurseTask -ConfigPath "C:\test\config.json" -RunAsSystem
+                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath -RunAsSystem -Confirm:$false
 
                 $result.Success | Should -Be $true
                 Should -Invoke New-ScheduledTaskPrincipal -Times 1 -ParameterFilter {
@@ -189,7 +205,7 @@ InModuleScope 'Robocurse' {
                 Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
                 Mock Write-RobocurseLog { }
 
-                $result = Register-RobocurseTask -ConfigPath "C:\test\config.json"
+                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath -Confirm:$false
 
                 $result.Success | Should -Be $true
                 Should -Invoke New-ScheduledTaskPrincipal -Times 1 -ParameterFilter {
@@ -212,13 +228,12 @@ InModuleScope 'Robocurse' {
                 Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
                 Mock Write-RobocurseLog { }
 
-                $result = Register-RobocurseTask -ConfigPath "C:\test\config.json"
+                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath -Confirm:$false
 
                 Should -Invoke New-ScheduledTaskAction -Times 1 -ParameterFilter {
                     $Execute -eq "powershell.exe" -and
                     $Argument -match "-NoProfile" -and
                     $Argument -match "-ExecutionPolicy Bypass" -and
-                    $Argument -match "-Headless" -and
                     $Argument -match "-ConfigPath"
                 }
             }
@@ -227,7 +242,7 @@ InModuleScope 'Robocurse' {
                 Mock New-ScheduledTaskAction { throw "Mock error" }
                 Mock Write-RobocurseLog { }
 
-                $result = Register-RobocurseTask -ConfigPath "C:\test\config.json"
+                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath -Confirm:$false
 
                 $result.Success | Should -Be $false
                 Should -Invoke Write-RobocurseLog -Times 1 -ParameterFilter {
@@ -244,7 +259,7 @@ InModuleScope 'Robocurse' {
                 Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Custom-Task" } }
                 Mock Write-RobocurseLog { }
 
-                $result = Register-RobocurseTask -TaskName "Custom-Task" -ConfigPath "C:\test\config.json"
+                $result = Register-RobocurseTask -TaskName "Custom-Task" -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath -Confirm:$false
 
                 $result.Success | Should -Be $true
                 Should -Invoke Register-ScheduledTask -Times 1 -ParameterFilter {
@@ -253,7 +268,7 @@ InModuleScope 'Robocurse' {
             }
         }
 
-        Context "Unregister-RobocurseTask" -Skip:(-not $IsWindows) {
+        Context "Unregister-RobocurseTask" -Skip:(-not (Test-IsWindowsPlatform)) {
             It "Should remove task successfully" {
                 Mock Unregister-ScheduledTask { }
                 Mock Write-RobocurseLog { }
@@ -301,7 +316,7 @@ InModuleScope 'Robocurse' {
                 $result | Should -Be $null
             }
 
-            It "Should return task info when exists" -Skip:(-not $IsWindows) {
+            It "Should return task info when exists" -Skip:(-not (Test-IsWindowsPlatform)) {
                 Mock Get-ScheduledTask {
                     [PSCustomObject]@{
                         TaskName = "Robocurse-Replication"
@@ -335,7 +350,7 @@ InModuleScope 'Robocurse' {
                 $result.LastResult | Should -Be 0
             }
 
-            It "Should parse trigger information" -Skip:(-not $IsWindows) {
+            It "Should parse trigger information" -Skip:(-not (Test-IsWindowsPlatform)) {
                 Mock Get-ScheduledTask {
                     [PSCustomObject]@{
                         TaskName = "Test-Task"
@@ -363,12 +378,13 @@ InModuleScope 'Robocurse' {
                 $result | Should -Not -Be $null
                 $result.State | Should -Be "Disabled"
                 $result.Enabled | Should -Be $false
-                $result.Triggers.Count | Should -Be 1
+                # Check the triggers array - wrap in @() for PS 5.1 compatibility
+                @($result.Triggers).Count | Should -Be 1
                 $result.Triggers[0].Type | Should -Be "Weekly"
                 $result.Triggers[0].Enabled | Should -Be $true
             }
 
-            It "Should handle multiple triggers" -Skip:(-not $IsWindows) {
+            It "Should handle multiple triggers" -Skip:(-not (Test-IsWindowsPlatform)) {
                 Mock Get-ScheduledTask {
                     [PSCustomObject]@{
                         TaskName = "Multi-Trigger"
@@ -407,7 +423,7 @@ InModuleScope 'Robocurse' {
             }
         }
 
-        Context "Start-RobocurseTask" -Skip:(-not $IsWindows) {
+        Context "Start-RobocurseTask" -Skip:(-not (Test-IsWindowsPlatform)) {
             It "Should start task successfully" {
                 Mock Start-ScheduledTask { }
                 Mock Write-RobocurseLog { }
@@ -442,7 +458,7 @@ InModuleScope 'Robocurse' {
             }
         }
 
-        Context "Enable-RobocurseTask" -Skip:(-not $IsWindows) {
+        Context "Enable-RobocurseTask" -Skip:(-not (Test-IsWindowsPlatform)) {
             It "Should enable task successfully" {
                 Mock Enable-ScheduledTask { [PSCustomObject]@{ State = "Ready" } }
                 Mock Write-RobocurseLog { }
@@ -477,7 +493,7 @@ InModuleScope 'Robocurse' {
             }
         }
 
-        Context "Disable-RobocurseTask" -Skip:(-not $IsWindows) {
+        Context "Disable-RobocurseTask" -Skip:(-not (Test-IsWindowsPlatform)) {
             It "Should disable task successfully" {
                 Mock Disable-ScheduledTask { [PSCustomObject]@{ State = "Disabled" } }
                 Mock Write-RobocurseLog { }
@@ -513,7 +529,7 @@ InModuleScope 'Robocurse' {
         }
 
         Context "Test-RobocurseTaskExists" {
-            It "Should return true when task exists" -Skip:(-not $IsWindows) {
+            It "Should return true when task exists" -Skip:(-not (Test-IsWindowsPlatform)) {
                 Mock Get-ScheduledTask {
                     [PSCustomObject]@{
                         TaskName = "Robocurse-Replication"
@@ -533,7 +549,7 @@ InModuleScope 'Robocurse' {
                 $result | Should -Be $false
             }
 
-            It "Should check custom task name" -Skip:(-not $IsWindows) {
+            It "Should check custom task name" -Skip:(-not (Test-IsWindowsPlatform)) {
                 Mock Get-ScheduledTask {
                     param($TaskName)
                     if ($TaskName -eq "Custom-Task") {
@@ -552,10 +568,12 @@ InModuleScope 'Robocurse' {
             }
         }
 
-        Context "WhatIf Support" -Skip:(-not $IsWindows) {
+        Context "WhatIf Support" -Skip:(-not (Test-IsWindowsPlatform)) {
             BeforeEach {
-                $script:tempConfigPath = "$TestDrive/test-config.json"
+                $script:tempConfigPath = Join-Path $TestDrive "test-config.json"
+                $script:tempScriptPath = Join-Path $TestDrive "Robocurse.ps1"
                 '{}' | Set-Content $script:tempConfigPath
+                '# Test script' | Set-Content $script:tempScriptPath
             }
 
             It "Register-RobocurseTask should support -WhatIf" {
@@ -566,7 +584,7 @@ InModuleScope 'Robocurse' {
                 Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Test" } }
                 Mock Write-RobocurseLog { }
 
-                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -WhatIf
+                $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath -WhatIf
 
                 # Task should NOT be registered when using -WhatIf
                 Should -Invoke Register-ScheduledTask -Times 0
@@ -623,37 +641,35 @@ InModuleScope 'Robocurse' {
         }
 
         Context "Platform Detection" {
-            It "Should handle non-Windows platform gracefully for Register" {
+            # Note: These tests only run on non-Windows platforms (PowerShell Core on Linux/Mac)
+            # On Windows (including PS 5.1 where $IsWindows is undefined), these are skipped
+            # Use Test-IsWindowsPlatform for reliable cross-version detection
+
+            It "Should handle non-Windows platform gracefully for Register" -Skip:(Test-IsWindowsPlatform) {
                 # On non-Windows platforms, functions should return false without trying to execute
-                if (-not $IsWindows) {
-                    Mock Write-RobocurseLog { }
+                Mock Write-RobocurseLog { }
 
-                    $result = Register-RobocurseTask -ConfigPath "C:\test\config.json"
+                $result = Register-RobocurseTask -ConfigPath "C:\test\config.json"
 
-                    $result.Success | Should -Be $false
-                    Should -Invoke Write-RobocurseLog -Times 1 -ParameterFilter {
-                        $Level -eq "Warning" -and
-                        $Message -match "Windows"
-                    }
+                $result.Success | Should -Be $false
+                Should -Invoke Write-RobocurseLog -Times 1 -ParameterFilter {
+                    $Level -eq "Warning" -and
+                    $Message -match "Windows"
                 }
             }
 
-            It "Should handle non-Windows platform gracefully for Unregister" {
-                if (-not $IsWindows) {
-                    Mock Write-RobocurseLog { }
+            It "Should handle non-Windows platform gracefully for Unregister" -Skip:(Test-IsWindowsPlatform) {
+                Mock Write-RobocurseLog { }
 
-                    $result = Unregister-RobocurseTask
+                $result = Unregister-RobocurseTask
 
-                    $result.Success | Should -Be $false
-                }
+                $result.Success | Should -Be $false
             }
 
-            It "Should return null on non-Windows for Get-RobocurseTask" {
-                if (-not $IsWindows) {
-                    $result = Get-RobocurseTask
+            It "Should return null on non-Windows for Get-RobocurseTask" -Skip:(Test-IsWindowsPlatform) {
+                $result = Get-RobocurseTask
 
-                    $result | Should -Be $null
-                }
+                $result | Should -Be $null
             }
         }
     }

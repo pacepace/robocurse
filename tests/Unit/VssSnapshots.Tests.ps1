@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 # VssSnapshots.Tests.ps1
 # Unit tests for VSS (Volume Shadow Copy) snapshot functions

@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     # Load Robocurse functions using TestHelper
     . "$PSScriptRoot\..\TestHelper.ps1"
     Initialize-RobocurseForTesting

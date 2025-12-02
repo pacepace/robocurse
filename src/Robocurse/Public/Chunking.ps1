@@ -1,4 +1,4 @@
-# Robocurse Chunking Functions
+﻿# Robocurse Chunking Functions
 # Script-level counter for unique chunk IDs (plain integer, use [ref] when calling Interlocked)
 $script:ChunkIdCounter = 0
 
@@ -154,7 +154,8 @@ function Get-FilesAtLevel {
 
     try {
         $files = Get-ChildItem -Path $Path -File -ErrorAction Stop
-        return $files
+        # Wrap in @() to ensure array return even for single file (PS 5.1 compatibility)
+        return @($files)
     }
     catch {
         Write-RobocurseLog "Error getting files at level '$Path': $_" -Level Warning

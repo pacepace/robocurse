@@ -1,4 +1,4 @@
-# Robocurse Logging Functions
+﻿# Robocurse Logging Functions
 # Script-scoped variables for current session state
 $script:CurrentSessionId = $null
 $script:LogMutexTimeoutMs = 5000  # 5 seconds timeout for mutex acquisition

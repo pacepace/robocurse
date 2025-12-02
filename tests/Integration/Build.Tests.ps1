@@ -1,25 +1,34 @@
-# Build validation tests to ensure the monolith is built correctly
+﻿# Build validation tests to ensure the monolith is built correctly
 # These tests verify that all required modules are included and functions are exported
 
+BeforeDiscovery {
+    # Define paths at discovery time for -Skip evaluation and data-driven tests
+    $script:projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $script:buildScript = Join-Path $script:projectRoot "build\Build-Robocurse.ps1"
+    $script:distPath = Join-Path $script:projectRoot "dist\Robocurse.ps1"
+    $script:srcPath = Join-Path $script:projectRoot "src\Robocurse\Public"
+}
+
 BeforeAll {
-    $projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $buildScript = Join-Path $projectRoot "build\Build-Robocurse.ps1"
-    $distPath = Join-Path $projectRoot "dist\Robocurse.ps1"
-    $srcPath = Join-Path $projectRoot "src\Robocurse\Public"
+    # Re-assign for test execution
+    $script:projectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    $script:buildScript = Join-Path $script:projectRoot "build\Build-Robocurse.ps1"
+    $script:distPath = Join-Path $script:projectRoot "dist\Robocurse.ps1"
+    $script:srcPath = Join-Path $script:projectRoot "src\Robocurse\Public"
 }
 
 Describe "Build Script Configuration" {
     It "Should have build script present" {
-        Test-Path $buildScript | Should -Be $true
+        Test-Path $script:buildScript | Should -Be $true
     }
 
     It "Should include Checkpoint.ps1 in module order" {
-        $buildContent = Get-Content $buildScript -Raw
+        $buildContent = Get-Content $script:buildScript -Raw
         $buildContent | Should -Match "Checkpoint\.ps1"
     }
 
     It "Should include all required modules in correct order" {
-        $buildContent = Get-Content $buildScript -Raw
+        $buildContent = Get-Content $script:buildScript -Raw
 
         # These modules MUST be in the build script
         $requiredModules = @(
@@ -45,7 +54,7 @@ Describe "Build Script Configuration" {
     }
 
     It "Should have Checkpoint.ps1 before Orchestration.ps1" {
-        $buildContent = Get-Content $buildScript -Raw
+        $buildContent = Get-Content $script:buildScript -Raw
 
         # Find positions of both modules in the content
         $checkpointPos = $buildContent.IndexOf('Checkpoint.ps1')
@@ -55,10 +64,10 @@ Describe "Build Script Configuration" {
     }
 }
 
-Describe "Built Monolith Validation" -Skip:(-not (Test-Path $distPath)) {
+Describe "Built Monolith Validation" -Skip:(-not (Test-Path $script:distPath)) {
     BeforeAll {
         # Read the monolith content for analysis
-        $script:monolithContent = Get-Content $distPath -Raw
+        $script:monolithContent = Get-Content $script:distPath -Raw
     }
 
     Context "Module Inclusion" {
@@ -94,7 +103,7 @@ Describe "Built Monolith Validation" -Skip:(-not (Test-Path $distPath)) {
         }
 
         It "Should contain Scheduling functions" {
-            $script:monolithContent | Should -Match "function Register-RobocurseSchedule"
+            $script:monolithContent | Should -Match "function Register-RobocurseTask"
         }
 
         It "Should contain GUI functions" {
@@ -124,7 +133,7 @@ Describe "Built Monolith Validation" -Skip:(-not (Test-Path $distPath)) {
 
 Describe "Module Manifest Validation" {
     BeforeAll {
-        $manifestPath = Join-Path $projectRoot "src\Robocurse\Robocurse.psd1"
+        $manifestPath = Join-Path $script:projectRoot "src\Robocurse\Robocurse.psd1"
         $script:manifestContent = Get-Content $manifestPath -Raw
     }
 
@@ -172,7 +181,7 @@ Describe "Source Module Validation" {
 
         foreach ($module in $requiredModules) {
             It "Should have $module" {
-                $modulePath = Join-Path $srcPath $module
+                $modulePath = Join-Path $script:srcPath $module
                 Test-Path $modulePath | Should -Be $true
             }
         }

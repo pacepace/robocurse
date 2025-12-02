@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 # Load module at discovery time for InModuleScope
 $testRoot = $PSScriptRoot

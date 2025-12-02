@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pwsh -Command \"Invoke-Pester -Path tests -PassThru -Output Detailed\")",
+      "Bash(powershell.exe -Command:*)",
+      "Bash(powershell.exe -File:*)",
+      "Bash(echo:*)",
+      "WebSearch"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

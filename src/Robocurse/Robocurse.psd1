@@ -1,4 +1,4 @@
-@{
+﻿@{
     # Module manifest for Robocurse
 
     # Script module file associated with this manifest

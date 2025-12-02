@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     # Load Robocurse functions using TestHelper
     . "$PSScriptRoot\..\TestHelper.ps1"
     Initialize-RobocurseForTesting
@@ -894,9 +894,9 @@ Describe "Configuration Management" {
                 }
             }
 
-            $result = ConvertFrom-ProfileSources -ProfileName "TestProfile" -RawProfile $rawProfile
+            $result = @(ConvertFrom-ProfileSources -ProfileName "TestProfile" -RawProfile $rawProfile)
 
-            $result.Count | Should -Be 1
+            @($result).Count | Should -Be 1
             $result[0].Name | Should -Be "TestProfile-Source1"
             $result[0].Source | Should -Be "C:\TestSource"
             $result[0].Destination | Should -Be "D:\TestDest"
@@ -971,10 +971,10 @@ Describe "Configuration Management" {
                 destination = [PSCustomObject]@{ path = "D:\Dest" }
             }
 
-            $result = ConvertFrom-ProfileSources -ProfileName "Disabled" -RawProfile $rawProfile
+            $result = @(ConvertFrom-ProfileSources -ProfileName "Disabled" -RawProfile $rawProfile)
 
             # Profile is expanded even if marked disabled
-            $result.Count | Should -Be 1
+            @($result).Count | Should -Be 1
             $result[0].Name | Should -Be "Disabled-Source1"
         }
 

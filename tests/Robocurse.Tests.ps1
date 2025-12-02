@@ -1,27 +1,27 @@
-BeforeAll {
+﻿BeforeAll {
     # Load Robocurse functions using TestHelper
     # This supports both modular (src/) and monolith (Robocurse.ps1) structures
     . "$PSScriptRoot\TestHelper.ps1"
     Initialize-RobocurseForTesting
 
     # For backward compatibility, also set $mainScriptPath for tests that need it
-    $script:mainScriptPath = Join-Path $PSScriptRoot ".." "Robocurse.ps1"
+    $script:mainScriptPath = Join-Path (Join-Path $PSScriptRoot "..") "Robocurse.ps1"
 }
 
 Describe "Robocurse Main Script" {
     Context "Module Loading" {
         It "Should have module manifest" {
-            $manifestPath = Join-Path $PSScriptRoot ".." "src" "Robocurse" "Robocurse.psd1"
+            $manifestPath = Join-Path (Join-Path (Join-Path (Join-Path $PSScriptRoot "..") "src") "Robocurse") "Robocurse.psd1"
             Test-Path $manifestPath | Should -Be $true
         }
 
         It "Should have module loader" {
-            $modulePath = Join-Path $PSScriptRoot ".." "src" "Robocurse" "Robocurse.psm1"
+            $modulePath = Join-Path (Join-Path (Join-Path (Join-Path $PSScriptRoot "..") "src") "Robocurse") "Robocurse.psm1"
             Test-Path $modulePath | Should -Be $true
         }
 
         It "Should have all required public module files" {
-            $publicPath = Join-Path $PSScriptRoot ".." "src" "Robocurse" "Public"
+            $publicPath = Join-Path (Join-Path (Join-Path (Join-Path $PSScriptRoot "..") "src") "Robocurse") "Public"
             $requiredFiles = @(
                 'Utility.ps1', 'Configuration.ps1', 'Logging.ps1', 'DirectoryProfiling.ps1',
                 'Chunking.ps1', 'Robocopy.ps1', 'Orchestration.ps1', 'Progress.ps1',
@@ -192,17 +192,17 @@ Describe "Robocurse Main Script" {
 Describe "Configuration File" {
     Context "Example Configuration" {
         It "Should have example config file" {
-            $configPath = Join-Path $PSScriptRoot ".." "Robocurse.config.json"
+            $configPath = Join-Path (Join-Path $PSScriptRoot "..") "Robocurse.config.json"
             Test-Path $configPath | Should -Be $true
         }
 
         It "Should be valid JSON" {
-            $configPath = Join-Path $PSScriptRoot ".." "Robocurse.config.json"
+            $configPath = Join-Path (Join-Path $PSScriptRoot "..") "Robocurse.config.json"
             { Get-Content $configPath -Raw | ConvertFrom-Json } | Should -Not -Throw
         }
 
         It "Should have required top-level properties" {
-            $configPath = Join-Path $PSScriptRoot ".." "Robocurse.config.json"
+            $configPath = Join-Path (Join-Path $PSScriptRoot "..") "Robocurse.config.json"
             $config = Get-Content $configPath -Raw | ConvertFrom-Json
 
             $config.PSObject.Properties.Name | Should -Contain "profiles"

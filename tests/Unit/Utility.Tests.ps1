@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 # Load module at discovery time for InModuleScope
 $testRoot = $PSScriptRoot
@@ -15,7 +15,7 @@ InModuleScope 'Robocurse' {
                 $result | Should -BeOfType [bool]
             }
 
-            It "Should return true on Windows" -Skip:(-not $IsWindows) {
+            It "Should return true on Windows" -Skip:(-not (Test-IsWindowsPlatform)) {
                 Test-IsWindowsPlatform | Should -Be $true
             }
         }
@@ -153,7 +153,7 @@ InModuleScope 'Robocurse' {
                 $result.ErrorMessage | Should -Match "parent does not exist"
             }
 
-            It "Should handle estimated size parameter" -Skip:(-not $IsWindows) {
+            It "Should handle estimated size parameter" -Skip:(-not (Test-IsWindowsPlatform)) {
                 # This test needs a real path on Windows to check disk space
                 $result = Test-DestinationDiskSpace -Path $TestDrive -EstimatedSizeBytes 1MB
 

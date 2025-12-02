@@ -1,4 +1,4 @@
-# Robocurse PowerShell Module
+﻿# Robocurse PowerShell Module
 # Multi-share parallel robocopy orchestrator for Windows environments.
 
 #region ==================== MODULE CONFIGURATION ====================
