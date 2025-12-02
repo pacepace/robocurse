@@ -212,6 +212,12 @@ function ConvertFrom-ProfileSources {
     $expandedProfiles = @()
     $description = if ($RawProfile.description) { $RawProfile.description } else { "" }
 
+    # Handle null or missing sources array
+    if ($null -eq $RawProfile.sources -or $RawProfile.sources.Count -eq 0) {
+        Write-RobocurseLog -Message "Profile '$ProfileName' has no sources defined, skipping" -Level 'Warning' -Component 'Config'
+        return $expandedProfiles
+    }
+
     for ($i = 0; $i -lt $RawProfile.sources.Count; $i++) {
         $sourceInfo = $RawProfile.sources[$i]
         $expandedProfile = [PSCustomObject]@{
@@ -580,6 +586,30 @@ function Test-RobocurseConfig {
             if (($propertyNames -contains 'Destination') -and -not [string]::IsNullOrWhiteSpace($profile.Destination)) {
                 if (-not (Test-PathFormat -Path $profile.Destination)) {
                     $errors += "$profilePrefix.Destination has invalid path format: $($profile.Destination)"
+                }
+            }
+
+            # Validate chunk configuration if present
+            if ($propertyNames -contains 'ChunkMaxFiles') {
+                $maxFiles = $profile.ChunkMaxFiles
+                if ($null -ne $maxFiles -and ($maxFiles -lt 1 -or $maxFiles -gt 10000000)) {
+                    $errors += "$profilePrefix.ChunkMaxFiles must be between 1 and 10000000 (current: $maxFiles)"
+                }
+            }
+
+            if ($propertyNames -contains 'ChunkMaxSizeGB') {
+                $maxSizeGB = $profile.ChunkMaxSizeGB
+                if ($null -ne $maxSizeGB -and ($maxSizeGB -lt 0.001 -or $maxSizeGB -gt 1024)) {
+                    $errors += "$profilePrefix.ChunkMaxSizeGB must be between 0.001 and 1024 (current: $maxSizeGB)"
+                }
+            }
+
+            # Validate that ChunkMaxSizeGB > ChunkMinSizeGB if both are specified
+            if (($propertyNames -contains 'ChunkMaxSizeGB') -and ($propertyNames -contains 'ChunkMinSizeGB')) {
+                $maxSizeGB = $profile.ChunkMaxSizeGB
+                $minSizeGB = $profile.ChunkMinSizeGB
+                if ($null -ne $maxSizeGB -and $null -ne $minSizeGB -and $maxSizeGB -le $minSizeGB) {
+                    $errors += "$profilePrefix.ChunkMaxSizeGB ($maxSizeGB) must be greater than ChunkMinSizeGB ($minSizeGB)"
                 }
             }
         }

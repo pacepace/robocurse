@@ -852,6 +852,12 @@ function Start-ChunkJob {
         Starts a robocopy process for the specified chunk, applying:
         - Profile-specific robocopy options
         - Dynamic bandwidth throttling (IPG) based on aggregate limit and active jobs
+
+        BANDWIDTH THROTTLING NOTE:
+        IPG (Inter-Packet Gap) is recalculated fresh for each job start, including retries.
+        This ensures new/retried jobs get the correct bandwidth share based on CURRENT active
+        job count. Running jobs keep their original IPG (robocopy limitation - /IPG is set
+        at process start). As jobs complete, new jobs automatically get more bandwidth.
     .PARAMETER Chunk
         Chunk object to replicate
     .OUTPUTS

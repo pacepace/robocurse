@@ -4,6 +4,75 @@
 $script:VssTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
 $script:VssTrackingFile = Join-Path $script:VssTempDir "Robocurse-VSS-Tracking.json"
 
+function Test-VssPrivileges {
+    <#
+    .SYNOPSIS
+        Checks if the current session has privileges required for VSS operations
+    .DESCRIPTION
+        VSS snapshot creation requires Administrator privileges on Windows.
+        This function performs a preflight check to verify privileges before
+        attempting VSS operations that would otherwise fail.
+
+        Also checks that the VSS service is running.
+    .OUTPUTS
+        OperationResult - Success=$true if all checks pass, Success=$false with details on failure
+    .EXAMPLE
+        $check = Test-VssPrivileges
+        if (-not $check.Success) {
+            Write-Warning "VSS not available: $($check.ErrorMessage)"
+        }
+    #>
+
+    # Skip if not Windows
+    if (-not (Test-IsWindowsPlatform)) {
+        return New-OperationResult -Success $false -ErrorMessage "VSS is only available on Windows platforms"
+    }
+
+    $issues = @()
+
+    # Check for Administrator privileges
+    try {
+        $currentPrincipal = [System.Security.Principal.WindowsPrincipal]::new(
+            [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        )
+        $isAdmin = $currentPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+
+        if (-not $isAdmin) {
+            $issues += "Administrator privileges required for VSS operations. Run PowerShell as Administrator."
+        }
+    }
+    catch {
+        $issues += "Unable to check administrator privileges: $($_.Exception.Message)"
+    }
+
+    # Check if VSS service is running
+    try {
+        $vssService = Get-Service -Name 'VSS' -ErrorAction SilentlyContinue
+        if ($null -eq $vssService) {
+            $issues += "VSS (Volume Shadow Copy) service not found"
+        }
+        elseif ($vssService.Status -ne 'Running') {
+            # VSS service is demand-start, so not running is OK - it will start when needed
+            # But if it's disabled, that's a problem
+            if ($vssService.StartType -eq 'Disabled') {
+                $issues += "VSS service is disabled. Enable it via services.msc or: Set-Service -Name VSS -StartupType Manual"
+            }
+        }
+    }
+    catch {
+        $issues += "Unable to check VSS service status: $($_.Exception.Message)"
+    }
+
+    if ($issues.Count -gt 0) {
+        $errorMsg = $issues -join "; "
+        Write-RobocurseLog -Message "VSS privilege check failed: $errorMsg" -Level 'Warning' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage $errorMsg
+    }
+
+    Write-RobocurseLog -Message "VSS privilege check passed" -Level 'Debug' -Component 'VSS'
+    return New-OperationResult -Success $true -Data "All VSS prerequisites met"
+}
+
 function Clear-OrphanVssSnapshots {
     <#
     .SYNOPSIS
@@ -157,8 +226,15 @@ function New-VssSnapshot {
     .DESCRIPTION
         Creates a Volume Shadow Copy snapshot using WMI. The snapshot is created as
         "ClientAccessible" type which can be read by applications.
+
+        Supports retry logic for transient failures (lock contention, VSS busy).
+        Configurable via -RetryCount and -RetryDelaySeconds parameters.
     .PARAMETER SourcePath
         Path on the volume to snapshot (used to determine volume)
+    .PARAMETER RetryCount
+        Number of retry attempts for transient failures (default: 3)
+    .PARAMETER RetryDelaySeconds
+        Delay between retry attempts in seconds (default: 5)
     .OUTPUTS
         OperationResult - Success=$true with Data=SnapshotInfo (ShadowId, ShadowPath, SourceVolume, CreatedAt),
         Success=$false with ErrorMessage on failure
@@ -167,6 +243,9 @@ function New-VssSnapshot {
     .EXAMPLE
         $result = New-VssSnapshot -SourcePath "C:\Users"
         if ($result.Success) { $snapshot = $result.Data }
+    .EXAMPLE
+        $result = New-VssSnapshot -SourcePath "C:\Data" -RetryCount 5 -RetryDelaySeconds 10
+        # More aggressive retry for busy systems
     #>
     param(
         [Parameter(Mandatory)]
@@ -180,6 +259,80 @@ function New-VssSnapshot {
             }
             $true
         })]
+        [string]$SourcePath,
+
+        [ValidateRange(0, 10)]
+        [int]$RetryCount = 3,
+
+        [ValidateRange(1, 60)]
+        [int]$RetryDelaySeconds = 5
+    )
+
+    # Retry loop for transient VSS failures (lock contention, VSS busy, etc.)
+    $attempt = 0
+    $lastError = $null
+
+    while ($attempt -le $RetryCount) {
+        $attempt++
+        $isRetry = $attempt -gt 1
+
+        if ($isRetry) {
+            Write-RobocurseLog -Message "VSS snapshot retry $($attempt - 1)/$RetryCount for '$SourcePath' after ${RetryDelaySeconds}s delay" `
+                -Level 'Warning' -Component 'VSS'
+            Start-Sleep -Seconds $RetryDelaySeconds
+        }
+
+        $result = New-VssSnapshotInternal -SourcePath $SourcePath
+        if ($result.Success) {
+            if ($isRetry) {
+                Write-RobocurseLog -Message "VSS snapshot succeeded on retry $($attempt - 1)" -Level 'Info' -Component 'VSS'
+            }
+            return $result
+        }
+
+        $lastError = $result.ErrorMessage
+
+        # Check if error is retryable (transient failures)
+        # Non-retryable: invalid path, permissions, VSS not supported
+        # Retryable: VSS busy, lock contention, timeout
+        $retryablePatterns = @(
+            'busy',
+            'timeout',
+            'lock',
+            'in use',
+            '0x8004230F',  # Insufficient storage (might clear up)
+            '0x80042316',  # VSS service not running (might start up)
+            'try again'
+        )
+
+        $isRetryable = $false
+        foreach ($pattern in $retryablePatterns) {
+            if ($lastError -match $pattern) {
+                $isRetryable = $true
+                break
+            }
+        }
+
+        if (-not $isRetryable) {
+            Write-RobocurseLog -Message "VSS snapshot failed with non-retryable error: $lastError" -Level 'Error' -Component 'VSS'
+            return $result
+        }
+    }
+
+    # All retries exhausted
+    Write-RobocurseLog -Message "VSS snapshot failed after $RetryCount retries: $lastError" -Level 'Error' -Component 'VSS'
+    return New-OperationResult -Success $false -ErrorMessage "VSS snapshot failed after $RetryCount retries: $lastError"
+}
+
+function New-VssSnapshotInternal {
+    <#
+    .SYNOPSIS
+        Internal function that performs the actual VSS snapshot creation
+    .DESCRIPTION
+        Called by New-VssSnapshot. Separated for retry logic.
+    #>
+    param(
+        [Parameter(Mandatory)]
         [string]$SourcePath
     )
 

@@ -340,6 +340,38 @@ InModuleScope 'Robocurse' {
                 $cmd.Parameters['SourcePath'].ParameterType.Name | Should -Be 'String'
                 $cmd.Parameters['SourcePath'].Attributes.Mandatory | Should -Contain $true
             }
+
+            It "Should have RetryCount parameter with valid range" {
+                $cmd = Get-Command New-VssSnapshot
+                $cmd.Parameters.Keys | Should -Contain 'RetryCount'
+                $cmd.Parameters['RetryCount'].ParameterType.Name | Should -Be 'Int32'
+            }
+
+            It "Should have RetryDelaySeconds parameter with valid range" {
+                $cmd = Get-Command New-VssSnapshot
+                $cmd.Parameters.Keys | Should -Contain 'RetryDelaySeconds'
+                $cmd.Parameters['RetryDelaySeconds'].ParameterType.Name | Should -Be 'Int32'
+            }
+        }
+
+        Context "Test-VssPrivileges - Function Structure" {
+            It "Should be defined" {
+                Get-Command Test-VssPrivileges | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should return OperationResult object" {
+                $result = Test-VssPrivileges
+                $result.PSObject.Properties.Name | Should -Contain 'Success'
+                $result.PSObject.Properties.Name | Should -Contain 'ErrorMessage'
+            }
+
+            It "Should return false on non-Windows platforms" {
+                if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+                    $result = Test-VssPrivileges
+                    $result.Success | Should -Be $false
+                    $result.ErrorMessage | Should -Match "Windows"
+                }
+            }
         }
 
         Context "Remove-VssSnapshot - Function Structure" {

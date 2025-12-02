@@ -94,10 +94,19 @@ function Get-SmtpCredential {
     if ($envUser -and $envPass) {
         try {
             $securePass = ConvertTo-SecureString -String $envPass -AsPlainText -Force
+            # AUDIT: Log credential retrieval from environment
+            Write-RobocurseLog -Message "SMTP credential retrieved from environment variables (user: $envUser)" `
+                -Level 'Info' -Component 'Email'
+            Write-SiemEvent -EventType 'ConfigChange' -Data @{
+                action = 'CredentialRetrieved'
+                source = 'EnvironmentVariable'
+                target = $Target
+                user = $envUser
+            }
             return New-Object System.Management.Automation.PSCredential($envUser, $securePass)
         }
         catch {
-            Write-RobocurseLog -Message "Failed to read credential from environment: $_" -Level 'Debug' -Component 'Email'
+            Write-RobocurseLog -Message "Failed to read credential from environment: $_" -Level 'Warning' -Component 'Email'
         }
     }
 
@@ -126,6 +135,16 @@ function Get-SmtpCredential {
                         # immediately after SecureString creation. See README Security Considerations.
                         $password = [System.Text.Encoding]::Unicode.GetString($passwordBytes)
                         $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
+
+                        # AUDIT: Log credential retrieval from Windows Credential Manager
+                        Write-RobocurseLog -Message "SMTP credential retrieved from Windows Credential Manager (target: $Target, user: $($credential.UserName))" `
+                            -Level 'Info' -Component 'Email'
+                        Write-SiemEvent -EventType 'ConfigChange' -Data @{
+                            action = 'CredentialRetrieved'
+                            source = 'WindowsCredentialManager'
+                            target = $Target
+                            user = $credential.UserName
+                        }
 
                         return New-Object System.Management.Automation.PSCredential($credential.UserName, $securePassword)
                     }
@@ -560,7 +579,7 @@ function Send-CompletionEmail {
     # Get credential
     $credential = Get-SmtpCredential -Target $Config.CredentialTarget
     if (-not $credential) {
-        Write-RobocurseLog -Message "SMTP credential not found: $($Config.CredentialTarget)" -Level 'Error' -Component 'Email'
+        Write-RobocurseLog -Message "SMTP credential not found: $($Config.CredentialTarget)" -Level 'Warning' -Component 'Email'
         return New-OperationResult -Success $false -ErrorMessage "SMTP credential not found: $($Config.CredentialTarget)"
     }
 

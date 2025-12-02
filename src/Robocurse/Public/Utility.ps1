@@ -22,6 +22,55 @@ function Test-IsWindowsPlatform {
 
 # Cached path to robocopy.exe (validated once at startup)
 $script:RobocopyPath = $null
+# User-provided override path (set via Set-RobocopyPath)
+$script:RobocopyPathOverride = $null
+
+function Set-RobocopyPath {
+    <#
+    .SYNOPSIS
+        Sets an explicit path to robocopy.exe
+    .DESCRIPTION
+        Allows overriding the automatic robocopy detection with a specific path.
+        Useful for portable installations, development environments, or when
+        robocopy is installed in a non-standard location.
+    .PARAMETER Path
+        Full path to robocopy.exe
+    .OUTPUTS
+        OperationResult - Success=$true if path is valid, Success=$false if not found
+    .EXAMPLE
+        Set-RobocopyPath -Path "D:\Tools\robocopy.exe"
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -Path $Path -PathType Leaf)) {
+        return New-OperationResult -Success $false -ErrorMessage "Robocopy not found at specified path: $Path"
+    }
+
+    # Verify it's actually robocopy by checking file name
+    $fileName = [System.IO.Path]::GetFileName($Path)
+    if ($fileName -ne 'robocopy.exe') {
+        return New-OperationResult -Success $false -ErrorMessage "Specified path does not point to robocopy.exe: $Path"
+    }
+
+    $script:RobocopyPathOverride = $Path
+    $script:RobocopyPath = $Path
+    Write-RobocurseLog -Message "Robocopy path set to: $Path" -Level 'Info' -Component 'Utility'
+    return New-OperationResult -Success $true -Data $Path
+}
+
+function Clear-RobocopyPath {
+    <#
+    .SYNOPSIS
+        Clears the robocopy path override, reverting to automatic detection
+    #>
+    $script:RobocopyPathOverride = $null
+    $script:RobocopyPath = $null
+    Write-RobocurseLog -Message "Robocopy path override cleared, reverting to auto-detection" -Level 'Info' -Component 'Utility'
+}
 
 function Test-RobocopyAvailable {
     <#
@@ -29,8 +78,9 @@ function Test-RobocopyAvailable {
         Validates that robocopy.exe is available on the system
     .DESCRIPTION
         Checks for robocopy.exe in the following order:
-        1. System32 directory (most reliable, Windows only)
-        2. PATH environment variable
+        1. User-specified override path (set via Set-RobocopyPath)
+        2. System32 directory (most reliable, Windows only)
+        3. PATH environment variable
         Caches the validated path in $script:RobocopyPath for use by Start-RobocopyJob.
         On non-Windows systems, returns failure (robocopy is Windows-only).
     .OUTPUTS
@@ -43,6 +93,18 @@ function Test-RobocopyAvailable {
     # Return cached result if already validated
     if ($script:RobocopyPath) {
         return New-OperationResult -Success $true -Data $script:RobocopyPath
+    }
+
+    # Check user-provided override first
+    if ($script:RobocopyPathOverride) {
+        if (Test-Path -Path $script:RobocopyPathOverride -PathType Leaf) {
+            $script:RobocopyPath = $script:RobocopyPathOverride
+            return New-OperationResult -Success $true -Data $script:RobocopyPath
+        }
+        else {
+            # Override set but file no longer exists
+            return New-OperationResult -Success $false -ErrorMessage "Robocopy override path no longer valid: $($script:RobocopyPathOverride)"
+        }
     }
 
     # Check System32 first (most reliable location on Windows)
@@ -64,7 +126,7 @@ function Test-RobocopyAvailable {
 
     # Not found - provide helpful error message
     $expectedPath = if ($env:SystemRoot) { "$env:SystemRoot\System32\robocopy.exe" } else { "System32\robocopy.exe (Windows only)" }
-    return New-OperationResult -Success $false -ErrorMessage "robocopy.exe not found. Expected at '$expectedPath' or in PATH. Robocopy is a Windows-only utility."
+    return New-OperationResult -Success $false -ErrorMessage "robocopy.exe not found. Expected at '$expectedPath' or in PATH. Use Set-RobocopyPath to specify a custom location."
 }
 
 function New-OperationResult {

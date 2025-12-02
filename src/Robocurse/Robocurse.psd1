@@ -31,6 +31,8 @@
         'Test-IsWindowsPlatform'
         'Test-IsBeingDotSourced'
         'Test-RobocopyAvailable'
+        'Set-RobocopyPath'
+        'Clear-RobocopyPath'
         'ConvertTo-SafeFilename'
         'Get-NormalizedCacheKey'
         'New-OperationResult'
@@ -91,6 +93,7 @@
         'Get-ETAEstimate'
 
         # VSS
+        'Test-VssPrivileges'
         'New-VssSnapshot'
         'Remove-VssSnapshot'
         'Get-VssPath'

@@ -418,6 +418,8 @@ function ConvertFrom-RobocopyLog {
     )
 
     # Initialize result with zero values
+    # ParseSuccess indicates if we successfully extracted statistics from the log
+    # ParseWarning contains any non-fatal issues encountered during parsing
     $result = [PSCustomObject]@{
         FilesCopied = 0
         FilesSkipped = 0
@@ -428,10 +430,13 @@ function ConvertFrom-RobocopyLog {
         BytesCopied = 0
         Speed = ""
         CurrentFile = ""
+        ParseSuccess = $false
+        ParseWarning = $null
     }
 
     # Check if log file exists
     if (-not (Test-Path $LogPath)) {
+        $result.ParseWarning = "Log file does not exist: $LogPath"
         return $result
     }
 
@@ -444,8 +449,9 @@ function ConvertFrom-RobocopyLog {
         $fs.Close()
     }
     catch {
-        # If we can't read the file, log the error and return zeros
-        Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level Warning
+        # If we can't read the file, log the warning and return zeros
+        $result.ParseWarning = "Failed to read log file: $($_.Exception.Message)"
+        Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level 'Warning' -Component 'Robocopy'
         return $result
     }
 
@@ -503,6 +509,9 @@ function ConvertFrom-RobocopyLog {
 
         # If we found at least 3 matching lines, parse them
         if ($statsLines.Count -ge 3) {
+            # Mark as successful parse (we found stats lines)
+            $result.ParseSuccess = $true
+
             # Last 3 lines: Dirs, Files, Bytes (in order)
             $dirsLine = $statsLines[$statsLines.Count - 3]
             $filesLine = $statsLines[$statsLines.Count - 2]
@@ -565,7 +574,20 @@ function ConvertFrom-RobocopyLog {
     }
     catch {
         # Log parsing errors but don't fail - return partial results
-        Write-RobocurseLog "Error parsing robocopy log '$LogPath': $_" -Level Warning
+        $result.ParseWarning = "Parse error: $($_.Exception.Message)"
+        Write-RobocurseLog "Error parsing robocopy log '$LogPath': $_" -Level 'Warning' -Component 'Robocopy'
+    }
+
+    # If we didn't find stats lines, this might be an in-progress job or unexpected format
+    if (-not $result.ParseSuccess) {
+        # Only warn if file had content (empty file is normal for just-started jobs)
+        if ($content -and $content.Length -gt 100) {
+            if (-not $result.ParseWarning) {
+                $result.ParseWarning = "No statistics found in log file (job may be in progress or log format unexpected)"
+            }
+            Write-RobocurseLog "Could not extract statistics from robocopy log '$LogPath' ($($content.Length) bytes) - job may still be in progress" `
+                -Level 'Debug' -Component 'Robocopy'
+        }
     }
 
     return $result

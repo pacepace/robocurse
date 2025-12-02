@@ -1084,4 +1084,113 @@ Describe "Configuration Management" {
             Test-SafeConfigPath -Path "C:\config`r.json" | Should -Be $false
         }
     }
+
+    Context "Test-RobocurseConfig - Chunk Configuration Validation" {
+        It "Should validate ChunkMaxFiles range (too low)" {
+            $config = New-DefaultConfig
+            $config.SyncProfiles = @(
+                [PSCustomObject]@{
+                    Name = "Test"
+                    Source = "C:\Source"
+                    Destination = "D:\Backup"
+                    ChunkMaxFiles = 0
+                }
+            )
+            $result = Test-RobocurseConfig -Config $config
+
+            $result.IsValid | Should -Be $false
+            $result.Errors | Should -Match "ChunkMaxFiles must be between 1 and 10000000"
+        }
+
+        It "Should validate ChunkMaxFiles range (too high)" {
+            $config = New-DefaultConfig
+            $config.SyncProfiles = @(
+                [PSCustomObject]@{
+                    Name = "Test"
+                    Source = "C:\Source"
+                    Destination = "D:\Backup"
+                    ChunkMaxFiles = 20000000
+                }
+            )
+            $result = Test-RobocurseConfig -Config $config
+
+            $result.IsValid | Should -Be $false
+            $result.Errors | Should -Match "ChunkMaxFiles must be between 1 and 10000000"
+        }
+
+        It "Should validate ChunkMaxSizeGB range (too low)" {
+            $config = New-DefaultConfig
+            $config.SyncProfiles = @(
+                [PSCustomObject]@{
+                    Name = "Test"
+                    Source = "C:\Source"
+                    Destination = "D:\Backup"
+                    ChunkMaxSizeGB = 0
+                }
+            )
+            $result = Test-RobocurseConfig -Config $config
+
+            $result.IsValid | Should -Be $false
+            $result.Errors | Should -Match "ChunkMaxSizeGB must be between 0.001 and 1024"
+        }
+
+        It "Should validate ChunkMaxSizeGB > ChunkMinSizeGB" {
+            $config = New-DefaultConfig
+            $config.SyncProfiles = @(
+                [PSCustomObject]@{
+                    Name = "Test"
+                    Source = "C:\Source"
+                    Destination = "D:\Backup"
+                    ChunkMaxSizeGB = 1
+                    ChunkMinSizeGB = 5
+                }
+            )
+            $result = Test-RobocurseConfig -Config $config
+
+            $result.IsValid | Should -Be $false
+            $result.Errors | Should -Match "ChunkMaxSizeGB.*greater than.*ChunkMinSizeGB"
+        }
+
+        It "Should accept valid chunk configuration" {
+            $config = New-DefaultConfig
+            $config.SyncProfiles = @(
+                [PSCustomObject]@{
+                    Name = "Test"
+                    Source = "C:\Source"
+                    Destination = "D:\Backup"
+                    ChunkMaxSizeGB = 10
+                    ChunkMinSizeGB = 0.1
+                    ChunkMaxFiles = 50000
+                }
+            )
+            $result = Test-RobocurseConfig -Config $config
+
+            $result.IsValid | Should -Be $true
+        }
+    }
+
+    Context "ConvertFrom-ProfileSources - Null Safety" {
+        It "Should handle null sources gracefully" {
+            # This tests that the function doesn't throw when sources is null
+            $profile = [PSCustomObject]@{
+                description = "Test profile"
+                sources = $null
+                destination = "D:\Backup"
+            }
+
+            $result = ConvertFrom-ProfileSources -ProfileName "TestProfile" -RawProfile $profile
+            $result | Should -HaveCount 0
+        }
+
+        It "Should handle empty sources array" {
+            $profile = [PSCustomObject]@{
+                description = "Test profile"
+                sources = @()
+                destination = "D:\Backup"
+            }
+
+            $result = ConvertFrom-ProfileSources -ProfileName "TestProfile" -RawProfile $profile
+            $result | Should -HaveCount 0
+        }
+    }
 }

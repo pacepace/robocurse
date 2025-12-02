@@ -874,4 +874,94 @@ Describe "Robocopy Wrapper" {
             $argString | Should -Not -Match '/XF'
         }
     }
+
+    Context "Set-RobocopyPath and Clear-RobocopyPath" {
+        It "Set-RobocopyPath should return failure for non-existent path" {
+            $result = Set-RobocopyPath -Path "C:\NonExistent\robocopy.exe"
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "not found"
+        }
+
+        It "Set-RobocopyPath should return failure for non-robocopy file" {
+            # Use a file that exists but is not robocopy.exe
+            $testFile = "$TestDrive\notrobocopy.exe"
+            "" | Set-Content $testFile
+            $result = Set-RobocopyPath -Path $testFile
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Match "does not point to robocopy.exe"
+        }
+
+        It "Set-RobocopyPath should have correct function signature" {
+            $cmd = Get-Command Set-RobocopyPath
+            $cmd.Parameters.Keys | Should -Contain 'Path'
+            $cmd.Parameters['Path'].Attributes.Mandatory | Should -Contain $true
+        }
+
+        It "Clear-RobocopyPath should exist and be callable" {
+            Get-Command Clear-RobocopyPath | Should -Not -BeNullOrEmpty
+            { Clear-RobocopyPath } | Should -Not -Throw
+        }
+    }
+
+    Context "ConvertFrom-RobocopyLog - Parse Resilience" {
+        BeforeEach {
+            # Use Join-Path for cross-platform compatibility
+            $script:testLogPath = Join-Path $TestDrive "test_robocopy.log"
+        }
+
+        It "Should include ParseSuccess and ParseWarning in result" {
+            "" | Set-Content $script:testLogPath
+
+            $result = ConvertFrom-RobocopyLog -LogPath $script:testLogPath
+            $result.PSObject.Properties.Name | Should -Contain 'ParseSuccess'
+            $result.PSObject.Properties.Name | Should -Contain 'ParseWarning'
+        }
+
+        It "Should set ParseSuccess=false for empty log file" {
+            "" | Set-Content $script:testLogPath
+
+            $result = ConvertFrom-RobocopyLog -LogPath $script:testLogPath
+            $result.ParseSuccess | Should -Be $false
+        }
+
+        It "Should set ParseWarning for non-existent log file" {
+            $result = ConvertFrom-RobocopyLog -LogPath (Join-Path $TestDrive "nonexistent.log")
+            $result.ParseSuccess | Should -Be $false
+            $result.ParseWarning | Should -Match "does not exist"
+        }
+
+        It "Should return zero counts when log file is empty" {
+            "" | Set-Content $script:testLogPath
+
+            $result = ConvertFrom-RobocopyLog -LogPath $script:testLogPath
+            $result.FilesCopied | Should -Be 0
+            $result.FilesSkipped | Should -Be 0
+            $result.FilesFailed | Should -Be 0
+            $result.BytesCopied | Should -Be 0
+        }
+
+        It "Should parse valid robocopy log format and set ParseSuccess=true" {
+            $logContent = @"
+-------------------------------------------------------------------------------
+   ROBOCOPY     ::     Robust File Copy for Windows
+-------------------------------------------------------------------------------
+
+  Started : Sunday, January 1, 2024 10:00:00 AM
+   Source : C:\Source\
+     Dest : D:\Destination\
+
+                Total    Copied   Skipped  Mismatch    FAILED    Extras
+    Dirs :         5         3         2         0         0         0
+   Files :       100        50        49         0         1         0
+   Bytes :    10.5 m     5.2 m     5.3 m         0       256         0
+"@
+            $logContent | Set-Content $script:testLogPath
+
+            $result = ConvertFrom-RobocopyLog -LogPath $script:testLogPath
+            $result.ParseSuccess | Should -Be $true
+            $result.FilesCopied | Should -Be 50
+            $result.FilesSkipped | Should -Be 49
+            $result.FilesFailed | Should -Be 1
+        }
+    }
 }

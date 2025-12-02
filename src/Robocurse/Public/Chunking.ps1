@@ -58,6 +58,11 @@ function Get-DirectoryChunks {
         throw "Path '$Path' does not exist or is not a directory"
     }
 
+    # Validate chunk size constraints
+    if ($MaxSizeBytes -le $MinSizeBytes) {
+        throw "MaxSizeBytes ($MaxSizeBytes) must be greater than MinSizeBytes ($MinSizeBytes)"
+    }
+
     # Default SourceRoot to Path if not specified (for initial call)
     if ([string]::IsNullOrEmpty($SourceRoot)) {
         $SourceRoot = $Path

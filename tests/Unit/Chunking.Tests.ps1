@@ -48,6 +48,42 @@ InModuleScope 'Robocurse' {
                     Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" -MaxDepth -1
                 } | Should -Throw
             }
+
+            It "Should throw when MaxSizeBytes is less than or equal to MinSizeBytes" {
+                $testDir = New-Item -ItemType Directory -Path "$TestDrive/testdir5" -Force
+                {
+                    Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" `
+                        -MaxSizeBytes 100MB -MinSizeBytes 200MB
+                } | Should -Throw "*MaxSizeBytes*greater than*MinSizeBytes*"
+            }
+
+            It "Should throw when MaxSizeBytes equals MinSizeBytes" {
+                $testDir = New-Item -ItemType Directory -Path "$TestDrive/testdir6" -Force
+                {
+                    Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" `
+                        -MaxSizeBytes 100MB -MinSizeBytes 100MB
+                } | Should -Throw "*MaxSizeBytes*greater than*MinSizeBytes*"
+            }
+
+            It "Should accept valid chunk size constraints" {
+                Mock Test-Path { $true }
+                Mock Get-DirectoryProfile {
+                    [PSCustomObject]@{
+                        Path = $Path
+                        TotalSize = 50MB
+                        FileCount = 100
+                        DirCount = 0
+                        AvgFileSize = 500KB
+                        LastScanned = Get-Date
+                    }
+                }
+
+                # MaxSizeBytes > MinSizeBytes should work
+                $chunks = Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" `
+                    -MaxSizeBytes 1GB -MinSizeBytes 100MB
+
+                $chunks | Should -Not -BeNullOrEmpty
+            }
         }
 
         Context "Get-DirectoryChunks - Simple Cases" {
