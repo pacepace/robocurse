@@ -20,6 +20,10 @@ Robocurse is a PowerShell-based tool designed to manage multiple robocopy instan
 - **Aggregate Bandwidth Throttling**: Dynamic bandwidth limiting across all concurrent jobs
 - **VSS Orphan Cleanup**: Automatic cleanup of VSS snapshots from crashed runs
 - **Enhanced Logging**: Function name and line number tracing for troubleshooting
+- **Dry-Run Mode**: Preview what would be copied without actually copying
+- **Configurable Mismatch Severity**: Control how robocopy exit code 4 (mismatches) is treated
+- **GUI State Persistence**: Window position, size, and settings remembered between sessions
+- **Real-Time Error Display**: Errors from background replication shown immediately in GUI
 
 ## Prerequisites
 
@@ -128,6 +132,24 @@ The bandwidth is dynamically divided among active jobs. For example:
 
 **Implementation Note**: Robocurse uses robocopy's `/IPG` (Inter-Packet Gap) flag, which introduces a delay between 512-byte packets. The IPG value is automatically calculated based on the per-job bandwidth allocation.
 
+### Mismatch Severity Configuration
+
+Control how robocopy exit code 4 (mismatches detected) is treated:
+
+```json
+"GlobalSettings": {
+  "MismatchSeverity": "Warning"
+}
+```
+
+| Value | Behavior |
+|-------|----------|
+| `Warning` | (Default) Log as warning, don't trigger retry |
+| `Error` | Treat as error, trigger retry logic |
+| `Success` | Ignore mismatches entirely |
+
+This is useful for sync scenarios where mismatches are expected (e.g., bidirectional sync, or when destination files are intentionally modified).
+
 ### VSS Orphan Cleanup
 
 If Robocurse crashes or is terminated while VSS snapshots are active, those snapshots may be left behind consuming disk space. Robocurse automatically cleans up orphaned snapshots from previous failed runs at startup.
@@ -166,6 +188,19 @@ Specify a different configuration file:
 ```powershell
 .\Robocurse.ps1 -ConfigPath "C:\Configs\custom-config.json" -Headless -Profile "WeeklyFull"
 ```
+
+### Dry-Run Mode
+
+Preview what would be copied without actually performing the copy:
+
+```powershell
+.\Robocurse.ps1 -Headless -Profile "DailyBackup" -DryRun
+```
+
+This runs robocopy with the `/L` flag, which lists files that would be copied without actually copying them. Useful for:
+- Verifying your profile configuration before a real run
+- Estimating how long a replication will take
+- Checking what files have changed since the last sync
 
 ### Display Help
 

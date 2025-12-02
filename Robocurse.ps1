@@ -73,6 +73,7 @@ param(
     [Alias('Profile')]
     [string]$SyncProfile,
     [switch]$AllProfiles,
+    [switch]$DryRun,
     [switch]$Help
 )
 
@@ -150,6 +151,11 @@ $script:GuiLogMaxLines = 500
 # 10 errors provides useful context without overwhelming the email.
 $script:EmailMaxErrorsDisplay = 10
 
+# Default mismatch severity
+# Controls how robocopy exit code 4 (mismatches) is treated.
+# Valid values: "Warning" (default), "Error", "Success" (ignore mismatches)
+$script:DefaultMismatchSeverity = "Warning"
+
 # Orchestration intervals
 # Polling interval in milliseconds for replication tick loop.
 # 500ms balances responsiveness with CPU overhead.
@@ -163,6 +169,9 @@ $script:HeadlessProgressIntervalSeconds = 10
 # Save checkpoint every N completed chunks (also saved on failures).
 # 10 chunks balances disk I/O with recovery granularity.
 $script:CheckpointSaveFrequency = 10
+
+# Dry-run mode state (set during replication, used by Start-ChunkJob)
+$script:DryRunMode = $false
 
 #endregion
 
@@ -560,6 +569,7 @@ function New-DefaultConfig {
             LogPath = ".\Logs"
             LogCompressAfterDays = $script:LogCompressAfterDays
             LogRetentionDays = $script:LogDeleteAfterDays
+            MismatchSeverity = $script:DefaultMismatchSeverity  # "Warning", "Error", or "Success"
         }
         Email = [PSCustomObject]@{
             Enabled = $false
@@ -929,6 +939,15 @@ function Get-RobocurseConfig {
 
         # Convert to internal format (handles both formats)
         $config = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+
+        # Validate configuration and log any warnings
+        $validation = Test-RobocurseConfig -Config $config
+        if (-not $validation.IsValid) {
+            foreach ($err in $validation.Errors) {
+                Write-Warning "Configuration validation: $err"
+            }
+            # Still return the config - let the caller decide if validation errors are fatal
+        }
 
         Write-Verbose "Configuration loaded successfully from '$Path'"
         return $config
@@ -1743,15 +1762,9 @@ function Get-NormalizedCacheKey {
     .SYNOPSIS
         Normalizes a path for use as a cache key
     .DESCRIPTION
-        Creates a consistent cache key from a path by:
-        - Removing trailing slashes
-        - Converting forward slashes to backslashes
-
-        Note: Case normalization is NOT done here because the ProfileCache
-        uses StringComparer.OrdinalIgnoreCase, which handles case-insensitive
-        matching correctly for international characters. This is more accurate
-        than ToLowerInvariant() which can have issues with certain Unicode
-        characters (e.g., Turkish i, German ß).
+        Wrapper around Get-NormalizedPath for backward compatibility.
+        The ProfileCache uses StringComparer.OrdinalIgnoreCase for
+        case-insensitive matching.
     .PARAMETER Path
         Path to normalize
     .OUTPUTS
@@ -1762,13 +1775,8 @@ function Get-NormalizedCacheKey {
         [string]$Path
     )
 
-    # Convert forward slashes to backslashes for consistency
-    $normalized = $Path.Replace('/', '\')
-
-    # Remove trailing slashes
-    $normalized = $normalized.TrimEnd('\')
-
-    return $normalized
+    # Delegate to unified path normalization function
+    return Get-NormalizedPath -Path $Path
 }
 
 function Get-CachedProfile {
@@ -2389,11 +2397,16 @@ function New-RobocopyArguments {
         Hashtable of robocopy options (see Start-RobocopyJob for details)
     .PARAMETER ChunkArgs
         Additional arguments specific to the chunk (e.g., /LEV:1)
+    .PARAMETER DryRun
+        If true, adds /L flag to list what would be copied without copying
     .OUTPUTS
         String[] - Array of robocopy arguments ready to join
     .EXAMPLE
         $args = New-RobocopyArguments -SourcePath "C:\Source" -DestinationPath "D:\Dest" -LogPath "C:\log.txt"
         $argString = $args -join ' '
+    .EXAMPLE
+        $args = New-RobocopyArguments -SourcePath "C:\Source" -DestinationPath "D:\Dest" -LogPath "C:\log.txt" -DryRun
+        # Returns args with /L flag for preview mode
     #>
     param(
         [Parameter(Mandatory)]
@@ -2413,7 +2426,9 @@ function New-RobocopyArguments {
 
         [hashtable]$RobocopyOptions = @{},
 
-        [string[]]$ChunkArgs = @()
+        [string[]]$ChunkArgs = @(),
+
+        [switch]$DryRun
     )
 
     # Validate paths for command injection before using them
@@ -2502,6 +2517,11 @@ function New-RobocopyArguments {
         $argList.Add($arg)
     }
 
+    # Dry-run mode: /L lists what would be copied without actually copying
+    if ($DryRun) {
+        $argList.Add("/L")
+    }
+
     return $argList.ToArray()
 }
 
@@ -2527,8 +2547,10 @@ function Start-RobocopyJob {
         - InterPacketGapMs: Bandwidth throttling - milliseconds between packets (robocopy /IPG:n)
           Use this to limit network bandwidth consumption. Higher values = slower transfer.
           Example: 50 gives roughly 40 Mbps per job, 100 gives roughly 20 Mbps.
+    .PARAMETER DryRun
+        If true, runs robocopy with /L flag (list only, no actual copying)
     .OUTPUTS
-        PSCustomObject with Process, Chunk, StartTime, LogPath
+        PSCustomObject with Process, Chunk, StartTime, LogPath, DryRun
     .EXAMPLE
         $options = @{
             Switches = @("/COPYALL", "/DCOPY:DAT")
@@ -2538,6 +2560,9 @@ function Start-RobocopyJob {
             InterPacketGapMs = 50  # Throttle bandwidth
         }
         Start-RobocopyJob -Chunk $chunk -LogPath $logPath -RobocopyOptions $options
+    .EXAMPLE
+        Start-RobocopyJob -Chunk $chunk -LogPath $logPath -DryRun
+        # Preview mode - shows what would be copied
     #>
     param(
         [Parameter(Mandatory)]
@@ -2551,7 +2576,9 @@ function Start-RobocopyJob {
         [ValidateRange(1, 128)]
         [int]$ThreadsPerJob = $script:DefaultThreadsPerJob,
 
-        [hashtable]$RobocopyOptions = @{}
+        [hashtable]$RobocopyOptions = @{},
+
+        [switch]$DryRun
     )
 
     # Validate Chunk properties
@@ -2570,7 +2597,8 @@ function Start-RobocopyJob {
         -LogPath $LogPath `
         -ThreadsPerJob $ThreadsPerJob `
         -RobocopyOptions $RobocopyOptions `
-        -ChunkArgs $chunkArgs
+        -ChunkArgs $chunkArgs `
+        -DryRun:$DryRun
 
     # Create process start info
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -2592,6 +2620,7 @@ function Start-RobocopyJob {
         Chunk = $Chunk
         StartTime = [datetime]::Now
         LogPath = $LogPath
+        DryRun = $DryRun.IsPresent
     }
 }
 
@@ -2601,6 +2630,11 @@ function Get-RobocopyExitMeaning {
         Interprets robocopy exit code using bitmask logic
     .PARAMETER ExitCode
         Robocopy exit code (bitmask)
+    .PARAMETER MismatchSeverity
+        How to treat mismatch exit codes (bit 2/value 4). Valid values:
+        - "Warning" (default): Treat as warning but not failure
+        - "Error": Treat as error, trigger retry
+        - "Success": Ignore mismatches entirely
     .OUTPUTS
         PSCustomObject with Severity, Message, ShouldRetry, and bit flags
     .NOTES
@@ -2613,7 +2647,10 @@ function Get-RobocopyExitMeaning {
     #>
     param(
         [Parameter(Mandatory)]
-        [int]$ExitCode
+        [int]$ExitCode,
+
+        [ValidateSet("Warning", "Error", "Success")]
+        [string]$MismatchSeverity = $script:DefaultMismatchSeverity
     )
 
     # Parse bitmask flags
@@ -2641,8 +2678,10 @@ function Get-RobocopyExitMeaning {
         $result.ShouldRetry = $true
     }
     elseif ($result.MismatchesFound) {
-        $result.Severity = "Warning"
+        # Configurable severity for mismatches
+        $result.Severity = $MismatchSeverity
         $result.Message = "Mismatched files detected"
+        $result.ShouldRetry = ($MismatchSeverity -eq "Error")
     }
     elseif ($result.ExtrasDetected) {
         $result.Severity = "Success"
@@ -2720,18 +2759,48 @@ function ConvertFrom-RobocopyLog {
     #
     # Strategy: Find lines that match the stats pattern (text : numbers) directly
     # Column order: Total, Copied, Skipped, Mismatch, FAILED, Extras
+    #
+    # Locale considerations:
+    #   - Some locales use comma as decimal separator (1,5 instead of 1.5)
+    #   - Some use period as thousands separator (1.000 instead of 1000)
+    #   - We normalize by replacing commas with periods and removing spaces in numbers
 
     try {
         $lines = $content -split "`n"
 
         # Find all lines that match the stats pattern: "label : numbers"
         # The last 3 such lines should be Dirs, Files, Bytes
-        $statsPattern = ':\s*([\d.]+)\s*[kmgt]?\s+([\d.]+)\s*[kmgt]?\s+([\d.]+)\s*[kmgt]?\s+([\d.]+)\s*[kmgt]?\s+([\d.]+)\s*[kmgt]?\s+([\d.]+)'
+        # Pattern accepts both . and , as potential decimal separators
+        # Note: Don't allow spaces within number groups as that breaks column separation
+        $statsPattern = ':\s*([\d.,]+)\s*[kmgt]?\s+([\d.,]+)\s*[kmgt]?\s+([\d.,]+)\s*[kmgt]?\s+([\d.,]+)\s*[kmgt]?\s+([\d.,]+)\s*[kmgt]?\s+([\d.,]+)'
         $statsLines = @()
         foreach ($line in $lines) {
             if ($line -match $statsPattern) {
                 $statsLines += $line
             }
+        }
+
+        # Helper function to parse locale-flexible numbers
+        $parseLocaleNumber = {
+            param([string]$numStr)
+            if ([string]::IsNullOrWhiteSpace($numStr)) { return 0 }
+            # Remove spaces (thousands separator in some locales)
+            $cleaned = $numStr -replace '\s', ''
+            # If there's exactly one comma and it appears to be a decimal separator
+            # (no other periods, or comma comes after period), treat it as decimal
+            if ($cleaned -match '^[\d.]+,\d{1,2}$') {
+                # Looks like European format: 1.234,56 -> 1234.56
+                $cleaned = $cleaned -replace '\.', '' -replace ',', '.'
+            }
+            elseif ($cleaned -match ',') {
+                # Multiple commas or comma not in decimal position - likely thousands separator
+                $cleaned = $cleaned -replace ',', ''
+            }
+            $parsedValue = 0.0
+            if ([double]::TryParse($cleaned, [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$parsedValue)) {
+                return $parsedValue
+            }
+            return 0
         }
 
         # If we found at least 3 matching lines, parse them
@@ -2743,36 +2812,31 @@ function ConvertFrom-RobocopyLog {
 
             # Parse Dirs line (all integers)
             if ($dirsLine -match $statsPattern) {
-                $parsedValue = 0
-                if ([int]::TryParse($matches[2], [ref]$parsedValue)) { $result.DirsCopied = $parsedValue }
-                if ([int]::TryParse($matches[3], [ref]$parsedValue)) { $result.DirsSkipped = $parsedValue }
-                if ([int]::TryParse($matches[5], [ref]$parsedValue)) { $result.DirsFailed = $parsedValue }
+                $result.DirsCopied = [int](& $parseLocaleNumber $matches[2])
+                $result.DirsSkipped = [int](& $parseLocaleNumber $matches[3])
+                $result.DirsFailed = [int](& $parseLocaleNumber $matches[5])
             }
 
             # Parse Files line (all integers)
             if ($filesLine -match $statsPattern) {
-                $parsedValue = 0
-                if ([int]::TryParse($matches[2], [ref]$parsedValue)) { $result.FilesCopied = $parsedValue }
-                if ([int]::TryParse($matches[3], [ref]$parsedValue)) { $result.FilesSkipped = $parsedValue }
-                if ([int]::TryParse($matches[5], [ref]$parsedValue)) { $result.FilesFailed = $parsedValue }
+                $result.FilesCopied = [int](& $parseLocaleNumber $matches[2])
+                $result.FilesSkipped = [int](& $parseLocaleNumber $matches[3])
+                $result.FilesFailed = [int](& $parseLocaleNumber $matches[5])
             }
 
             # Parse Bytes line - need to handle unit suffixes (k, m, g, t)
             # Pattern: captures number+unit pairs (Total, Copied with their units)
-            $bytesPattern = ':\s*([\d.]+)\s*([kmgt]?)\s+([\d.]+)\s*([kmgt]?)'
+            $bytesPattern = ':\s*([\d.,]+)\s*([kmgt]?)\s+([\d.,]+)\s*([kmgt]?)'
             if ($bytesLine -match $bytesPattern) {
-                $parsedDouble = 0.0
-                if ([double]::TryParse($matches[3], [ref]$parsedDouble)) {
-                    $byteValue = $parsedDouble
-                    $unit = if ($matches[4]) { $matches[4].ToLower() } else { '' }
+                $byteValue = & $parseLocaleNumber $matches[3]
+                $unit = if ($matches[4]) { $matches[4].ToLower() } else { '' }
 
-                    $result.BytesCopied = switch ($unit) {
-                        'k' { [long]($byteValue * 1KB) }
-                        'm' { [long]($byteValue * 1MB) }
-                        'g' { [long]($byteValue * 1GB) }
-                        't' { [long]($byteValue * 1TB) }
-                        default { [long]$byteValue }
-                    }
+                $result.BytesCopied = switch ($unit) {
+                    'k' { [long]($byteValue * 1KB) }
+                    'm' { [long]($byteValue * 1MB) }
+                    'g' { [long]($byteValue * 1GB) }
+                    't' { [long]($byteValue * 1TB) }
+                    default { [long]$byteValue }
                 }
             }
         }
@@ -3034,6 +3098,14 @@ namespace Robocurse
             return Interlocked.Add(ref _completedChunkFiles, files);
         }
 
+        // Snapshot of files at profile start (for per-profile file counting)
+        private long _profileStartFiles;
+        public long ProfileStartFiles
+        {
+            get { return Interlocked.Read(ref _profileStartFiles); }
+            set { Interlocked.Exchange(ref _profileStartFiles, value); }
+        }
+
         // Timing (nullable DateTime via object boxing)
         private object _startTime;
         public object StartTime
@@ -3093,6 +3165,25 @@ namespace Robocurse
         public ConcurrentQueue<object> CompletedChunks { get; private set; }  // Queue for ordering
         public ConcurrentQueue<object> FailedChunks { get; private set; }     // Queue for consistency
         public ConcurrentQueue<object> ProfileResults { get; private set; }   // Accumulated results
+        public ConcurrentQueue<string> ErrorMessages { get; private set; }    // Real-time error streaming
+
+        /// <summary>Add an error message to the queue for GUI consumption</summary>
+        public void EnqueueError(string message)
+        {
+            ErrorMessages.Enqueue(message);
+        }
+
+        /// <summary>Dequeue all pending error messages</summary>
+        public string[] DequeueErrors()
+        {
+            var errors = new System.Collections.Generic.List<string>();
+            string error;
+            while (ErrorMessages.TryDequeue(out error))
+            {
+                errors.Add(error);
+            }
+            return errors.ToArray();
+        }
 
         /// <summary>Create a new orchestration state with fresh collections</summary>
         public OrchestrationState()
@@ -3103,6 +3194,7 @@ namespace Robocurse
             CompletedChunks = new ConcurrentQueue<object>();
             FailedChunks = new ConcurrentQueue<object>();
             ProfileResults = new ConcurrentQueue<object>();
+            ErrorMessages = new ConcurrentQueue<string>();
         }
 
         /// <summary>Reset state for a new replication run</summary>
@@ -3139,6 +3231,7 @@ namespace Robocurse
             CompletedChunks = new ConcurrentQueue<object>();
             FailedChunks = new ConcurrentQueue<object>();
             ProfileResults = new ConcurrentQueue<object>();
+            ErrorMessages = new ConcurrentQueue<string>();
         }
 
         /// <summary>Reset collections for a new profile within the same run</summary>
@@ -3457,6 +3550,8 @@ function Start-ReplicationRun {
         Scriptblock called when chunk finishes
     .PARAMETER OnProfileComplete
         Scriptblock called when profile finishes
+    .PARAMETER DryRun
+        Preview mode - runs robocopy with /L flag to show what would be copied
     #>
     param(
         [Parameter(Mandatory)]
@@ -3490,6 +3585,8 @@ function Start-ReplicationRun {
 
         [switch]$IgnoreCheckpoint,
 
+        [switch]$DryRun,
+
         [scriptblock]$OnProgress,
         [scriptblock]$OnChunkComplete,
         [scriptblock]$OnProfileComplete
@@ -3516,6 +3613,13 @@ function Start-ReplicationRun {
     if ($BandwidthLimitMbps -gt 0) {
         Write-RobocurseLog -Message "Aggregate bandwidth limit: $BandwidthLimitMbps Mbps across all jobs" `
             -Level 'Info' -Component 'Orchestrator'
+    }
+
+    # Set dry-run mode for Start-ChunkJob to use
+    $script:DryRunMode = $DryRun.IsPresent
+    if ($script:DryRunMode) {
+        Write-RobocurseLog -Message "DRY-RUN MODE: No files will be copied (robocopy /L)" `
+            -Level 'Warning' -Component 'Orchestrator'
     }
 
     # Validate robocopy is available before starting
@@ -3568,6 +3672,7 @@ function Start-ProfileReplication {
     $state = $script:OrchestrationState
     $state.CurrentProfile = $Profile
     $state.ProfileStartTime = [datetime]::Now
+    $state.ProfileStartFiles = $state.CompletedChunkFiles  # Snapshot for per-profile file counting
 
     # Extract robocopy options from profile
     $state.CurrentRobocopyOptions = @{}
@@ -3740,7 +3845,8 @@ function Start-ChunkJob {
     # Start the robocopy job with effective options
     $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath `
         -ThreadsPerJob $script:DefaultThreadsPerJob `
-        -RobocopyOptions $effectiveOptions
+        -RobocopyOptions $effectiveOptions `
+        -DryRun:$script:DryRunMode
 
     return $job
 }
@@ -3937,6 +4043,10 @@ function Invoke-FailedChunkHandler {
         $chunk.Status = 'Failed'
         $script:OrchestrationState.FailedChunks.Enqueue($chunk)
 
+        # Enqueue error for real-time GUI display
+        $errorMsg = "Chunk $($chunk.ChunkId) failed: $($chunk.SourcePath) - $($Result.ExitMeaning.Message) (Exit code: $($Result.ExitCode))"
+        $script:OrchestrationState.EnqueueError($errorMsg)
+
         Write-RobocurseLog -Message "Chunk $($chunk.ChunkId) failed permanently after $($chunk.RetryCount) attempts" `
             -Level 'Error' -Component 'Orchestrator'
 
@@ -3977,6 +4087,9 @@ function Complete-CurrentProfile {
         }
     }
 
+    # Calculate files copied for this profile (delta from profile start)
+    $profileFilesCopied = $state.CompletedChunkFiles - $state.ProfileStartFiles
+
     # Store profile result for email/reporting (prevents memory leak by summarizing)
     $profileResult = [PSCustomObject]@{
         Name = $state.CurrentProfile.Name
@@ -3985,7 +4098,7 @@ function Complete-CurrentProfile {
         ChunksTotal = $state.TotalChunks
         ChunksFailed = $failedChunksArray.Count
         BytesCopied = $profileBytesCopied
-        FilesCopied = 0  # Would need per-chunk tracking to calculate accurately
+        FilesCopied = $profileFilesCopied
         Duration = $profileDuration
         Errors = @($failedChunksArray | ForEach-Object { "Chunk $($_.ChunkId): $($_.SourcePath)" })
     }
@@ -6023,6 +6136,139 @@ $script:MainWindowXaml = @'
 </Window>
 '@
 
+function Get-GuiSettingsPath {
+    <#
+    .SYNOPSIS
+        Gets the path to the GUI settings file
+    #>
+    $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $PSCommandPath }
+    return Join-Path $scriptDir "Robocurse.settings.json"
+}
+
+function Get-GuiState {
+    <#
+    .SYNOPSIS
+        Loads GUI state from settings file
+    .OUTPUTS
+        PSCustomObject with saved state or $null if not found
+    #>
+    $settingsPath = Get-GuiSettingsPath
+    if (-not (Test-Path $settingsPath)) {
+        return $null
+    }
+
+    try {
+        $json = Get-Content -Path $settingsPath -Raw -ErrorAction Stop
+        return $json | ConvertFrom-Json
+    }
+    catch {
+        Write-Verbose "Failed to load GUI settings: $_"
+        return $null
+    }
+}
+
+function Save-GuiState {
+    <#
+    .SYNOPSIS
+        Saves GUI state to settings file
+    .PARAMETER Window
+        WPF Window object
+    .PARAMETER WorkerCount
+        Current worker slider value
+    .PARAMETER SelectedProfileName
+        Name of currently selected profile
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [System.Windows.Window]$Window,
+
+        [int]$WorkerCount,
+
+        [string]$SelectedProfileName
+    )
+
+    try {
+        $state = [PSCustomObject]@{
+            WindowLeft = $Window.Left
+            WindowTop = $Window.Top
+            WindowWidth = $Window.Width
+            WindowHeight = $Window.Height
+            WindowState = $Window.WindowState.ToString()
+            WorkerCount = $WorkerCount
+            SelectedProfile = $SelectedProfileName
+            SavedAt = [datetime]::Now.ToString('o')
+        }
+
+        $settingsPath = Get-GuiSettingsPath
+        $state | ConvertTo-Json -Depth 3 | Set-Content -Path $settingsPath -Encoding UTF8 -ErrorAction Stop
+        Write-Verbose "GUI state saved to $settingsPath"
+    }
+    catch {
+        Write-Verbose "Failed to save GUI settings: $_"
+    }
+}
+
+function Restore-GuiState {
+    <#
+    .SYNOPSIS
+        Restores GUI state from settings file
+    .PARAMETER Window
+        WPF Window object to restore state to
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [System.Windows.Window]$Window
+    )
+
+    $state = Get-GuiState
+    if ($null -eq $state) {
+        return
+    }
+
+    try {
+        # Restore window position and size (validate bounds are on screen)
+        if ($state.WindowLeft -ne $null -and $state.WindowTop -ne $null) {
+            # Basic bounds check - ensure window is at least partially visible
+            $screenWidth = [System.Windows.SystemParameters]::VirtualScreenWidth
+            $screenHeight = [System.Windows.SystemParameters]::VirtualScreenHeight
+
+            if ($state.WindowLeft -ge -100 -and $state.WindowLeft -lt $screenWidth -and
+                $state.WindowTop -ge -100 -and $state.WindowTop -lt $screenHeight) {
+                $Window.Left = $state.WindowLeft
+                $Window.Top = $state.WindowTop
+            }
+        }
+
+        if ($state.WindowWidth -gt 0 -and $state.WindowHeight -gt 0) {
+            $Window.Width = $state.WindowWidth
+            $Window.Height = $state.WindowHeight
+        }
+
+        # Restore window state (but not Minimized - that would be annoying)
+        if ($state.WindowState -eq 'Maximized') {
+            $Window.WindowState = [System.Windows.WindowState]::Maximized
+        }
+
+        # Restore worker count
+        if ($state.WorkerCount -gt 0 -and $script:Controls.sldWorkers) {
+            $script:Controls.sldWorkers.Value = [math]::Min($state.WorkerCount, $script:Controls.sldWorkers.Maximum)
+        }
+
+        # Restore selected profile (after profile list is populated)
+        if ($state.SelectedProfile -and $script:Controls.lstProfiles) {
+            $profileToSelect = $script:Controls.lstProfiles.Items | Where-Object { $_.Name -eq $state.SelectedProfile }
+            if ($profileToSelect) {
+                $script:Controls.lstProfiles.SelectedItem = $profileToSelect
+            }
+        }
+
+        Write-Verbose "GUI state restored"
+    }
+    catch {
+        Write-Verbose "Failed to restore GUI settings: $_"
+    }
+}
+
 function Initialize-RobocurseGui {
     <#
     .SYNOPSIS
@@ -6081,6 +6327,18 @@ function Initialize-RobocurseGui {
     # Load config and populate UI
     $script:Config = Get-RobocurseConfig -Path $ConfigPath
     Update-ProfileList
+
+    # Restore saved GUI state (window position, size, worker count, selected profile)
+    Restore-GuiState -Window $script:Window
+
+    # Save GUI state on window close
+    $script:Window.Add_Closing({
+        $selectedProfile = $script:Controls.lstProfiles.SelectedItem
+        $selectedName = if ($selectedProfile) { $selectedProfile.Name } else { $null }
+        $workerCount = [int]$script:Controls.sldWorkers.Value
+
+        Save-GuiState -Window $script:Window -WorkerCount $workerCount -SelectedProfileName $selectedName
+    })
 
     # Initialize progress timer
     $script:ProgressTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -6789,6 +7047,7 @@ function Update-GuiProgress {
         - Only rebuilds display list when chunk counts change
         - Uses efficient ToArray() snapshot for thread-safe iteration
         - Limits displayed items to prevent UI sluggishness
+        - Dequeues and displays real-time error messages from background thread
     #>
 
     try {
@@ -6796,6 +7055,14 @@ function Update-GuiProgress {
 
         # Update progress text (always - lightweight)
         Update-GuiProgressText -Status $status
+
+        # Dequeue and display any pending error messages from background thread
+        if ($script:OrchestrationState) {
+            $errors = $script:OrchestrationState.DequeueErrors()
+            foreach ($err in $errors) {
+                Write-GuiLog "[ERROR] $err"
+            }
+        }
 
         # Update chunk grid - only when state changes
         if ($script:OrchestrationState -and (Test-ChunkGridNeedsRebuild)) {
@@ -7107,6 +7374,7 @@ OPTIONS:
     -ConfigPath <path>  Path to configuration file (default: .\Robocurse.config.json)
     -Profile <name>     Run a specific profile by name
     -AllProfiles        Run all enabled profiles (headless mode only)
+    -DryRun             Preview mode - show what would be copied without copying
     -Help               Display this help message
 
 EXAMPLES:
@@ -7118,6 +7386,9 @@ EXAMPLES:
 
     .\Robocurse.ps1 -Headless -AllProfiles
         Run all enabled profiles in headless mode
+
+    .\Robocurse.ps1 -Headless -Profile "DailyBackup" -DryRun
+        Preview what would be copied without actually copying
 
     .\Robocurse.ps1 -ConfigPath "C:\Configs\custom.json" -Headless -AllProfiles
         Run with custom configuration file
@@ -7138,6 +7409,8 @@ function Invoke-HeadlessReplication {
         Maximum concurrent robocopy processes
     .PARAMETER BandwidthLimitMbps
         Aggregate bandwidth limit in Mbps (0 = unlimited)
+    .PARAMETER DryRun
+        Preview mode - show what would be copied without copying
     .OUTPUTS
         Exit code: 0 for success, 1 for failures
     #>
@@ -7150,19 +7423,25 @@ function Invoke-HeadlessReplication {
 
         [int]$MaxConcurrentJobs,
 
-        [int]$BandwidthLimitMbps = 0
+        [int]$BandwidthLimitMbps = 0,
+
+        [switch]$DryRun
     )
 
     $profileNames = ($ProfilesToRun | ForEach-Object { $_.Name }) -join ", "
-    Write-Host "Starting replication for profile(s): $profileNames"
+    $modeStr = if ($DryRun) { " (DRY-RUN MODE)" } else { "" }
+    Write-Host "Starting replication for profile(s): $profileNames$modeStr"
     Write-Host "Max concurrent jobs: $MaxConcurrentJobs"
     if ($BandwidthLimitMbps -gt 0) {
         Write-Host "Bandwidth limit: $BandwidthLimitMbps Mbps (aggregate)"
     }
+    if ($DryRun) {
+        Write-Host "*** DRY-RUN MODE: No files will be copied ***" -ForegroundColor Yellow
+    }
     Write-Host ""
 
     # Start replication with bandwidth throttling
-    Start-ReplicationRun -Profiles $ProfilesToRun -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps
+    Start-ReplicationRun -Profiles $ProfilesToRun -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps -DryRun:$DryRun
 
     # Track last progress output time for throttling
     $lastProgressOutput = [datetime]::MinValue
@@ -7280,6 +7559,7 @@ function Start-RobocurseMain {
         [string]$ConfigPath,
         [string]$ProfileName,
         [switch]$AllProfiles,
+        [switch]$DryRun,
         [switch]$ShowHelp
     )
 
@@ -7378,7 +7658,7 @@ function Start-RobocurseMain {
 
             # Run headless replication
             return Invoke-HeadlessReplication -Config $config -ProfilesToRun $profilesToRun `
-                -MaxConcurrentJobs $maxJobs -BandwidthLimitMbps $bandwidthLimit
+                -MaxConcurrentJobs $maxJobs -BandwidthLimitMbps $bandwidthLimit -DryRun:$DryRun
         }
         else {
             # Launch GUI
@@ -7408,7 +7688,7 @@ if ($Help) {
 # Use the Test-IsBeingDotSourced function to detect dot-sourcing
 # This avoids duplicating the call stack detection logic
 if (-not (Test-IsBeingDotSourced)) {
-    $exitCode = Start-RobocurseMain -Headless:$Headless -ConfigPath $ConfigPath -ProfileName $SyncProfile -AllProfiles:$AllProfiles -ShowHelp:$Help
+    $exitCode = Start-RobocurseMain -Headless:$Headless -ConfigPath $ConfigPath -ProfileName $SyncProfile -AllProfiles:$AllProfiles -DryRun:$DryRun -ShowHelp:$Help
     exit $exitCode
 }
 

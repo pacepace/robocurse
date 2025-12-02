@@ -138,6 +138,26 @@ Describe "Robocopy Wrapper" {
             $result.MismatchesFound | Should -Be $true
             $result.Severity | Should -Be "Warning"
         }
+
+        It "Should allow configurable mismatch severity as Error" {
+            $result = Get-RobocopyExitMeaning -ExitCode 4 -MismatchSeverity "Error"
+            $result.Severity | Should -Be "Error"
+            $result.MismatchesFound | Should -Be $true
+            $result.ShouldRetry | Should -Be $true
+        }
+
+        It "Should allow configurable mismatch severity as Success" {
+            $result = Get-RobocopyExitMeaning -ExitCode 4 -MismatchSeverity "Success"
+            $result.Severity | Should -Be "Success"
+            $result.MismatchesFound | Should -Be $true
+            $result.ShouldRetry | Should -Be $false
+        }
+
+        It "Should default mismatch severity to Warning" {
+            $result = Get-RobocopyExitMeaning -ExitCode 4
+            $result.Severity | Should -Be "Warning"
+            $result.ShouldRetry | Should -Be $false
+        }
     }
 
     Context "ConvertFrom-RobocopyLog" {
@@ -528,6 +548,33 @@ Describe "Robocopy Wrapper" {
             $argString = $args -join ' '
             $argString | Should -Match '/R:5'
             $argString | Should -Match '/W:30'
+        }
+
+        It "Should include /L flag when DryRun is specified" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -DryRun
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/L'
+        }
+
+        It "Should not include /L flag when DryRun is not specified" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt"
+
+            $argString = $args -join ' '
+            $argString | Should -Not -Match ' /L$| /L '  # Match /L at end or followed by space (not /LOG)
+        }
+
+        It "Should have DryRun parameter" {
+            $cmd = Get-Command New-RobocopyArguments
+            $cmd.Parameters.ContainsKey('DryRun') | Should -Be $true
+            $cmd.Parameters['DryRun'].ParameterType.Name | Should -Be 'SwitchParameter'
         }
     }
 
