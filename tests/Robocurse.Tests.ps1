@@ -1,12 +1,9 @@
 BeforeAll {
-    # Dot-source the main script to load functions
-    # Set test mode to prevent GUI from launching
-    $script:TestMode = $true
-
     # Get the path to the main script
     $mainScriptPath = Join-Path $PSScriptRoot ".." "Robocurse.ps1"
 
-    # Load the script with -Help to prevent execution
+    # Dot-source the script to load functions
+    # The script now auto-detects dot-sourcing and skips main execution
     . $mainScriptPath -Help
 }
 

@@ -125,6 +125,35 @@ Describe "VSS Snapshots - Platform Independent Tests" {
 
             $result | Should -Match "HarddiskVolumeShadowCopy1\\Windows\\System32"
         }
+
+        It "Should accept VssSnapshot object parameter" {
+            $snapshot = [PSCustomObject]@{
+                ShadowId     = "{TEST-1234-5678-90AB-CDEF12345678}"
+                ShadowPath   = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy99"
+                SourceVolume = "E:"
+                CreatedAt    = [datetime]::Now
+            }
+
+            $result = Get-VssPath -OriginalPath "E:\Data\MyFiles" -VssSnapshot $snapshot
+
+            $result | Should -Be "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy99\Data\MyFiles"
+        }
+
+        It "Should produce same result with VssSnapshot object vs individual parameters" {
+            $snapshot = [PSCustomObject]@{
+                ShadowId     = "{TEST-SAME-5678-90AB-CDEF12345678}"
+                ShadowPath   = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy50"
+                SourceVolume = "D:"
+                CreatedAt    = [datetime]::Now
+            }
+
+            $resultWithObject = Get-VssPath -OriginalPath "D:\Projects\Code" -VssSnapshot $snapshot
+            $resultWithParams = Get-VssPath -OriginalPath "D:\Projects\Code" `
+                -ShadowPath $snapshot.ShadowPath `
+                -SourceVolume $snapshot.SourceVolume
+
+            $resultWithObject | Should -Be $resultWithParams
+        }
     }
 
     Context "Test-VssSupported" {

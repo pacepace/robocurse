@@ -1,6 +1,5 @@
 BeforeAll {
-    # Load the main script in test mode
-    $script:TestMode = $true
+    # Load the main script - it auto-detects dot-sourcing and skips main execution
     $mainScriptPath = Join-Path $PSScriptRoot ".." ".." "Robocurse.ps1"
     . $mainScriptPath -Help
 

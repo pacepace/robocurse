@@ -1,10 +1,7 @@
 BeforeAll {
-    # Set test mode before loading the script to prevent execution
-    $script:TestMode = $true
-
-    # Load the main script (without -Help to avoid early exit)
+    # Load the main script - it auto-detects dot-sourcing and skips main execution
     $mainScriptPath = Join-Path $PSScriptRoot ".." ".." "Robocurse.ps1"
-    . $mainScriptPath
+    . $mainScriptPath -Help
 
     # Create temporary test directory - handle both Windows and Unix-like systems
     $tempBase = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
@@ -541,6 +538,137 @@ Describe "Configuration Management" {
             $config.SyncProfiles[0].Name | Should -Be "TestBackup"
             $config.SyncProfiles[0].Source | Should -Be "C:\TestSource"
             $config.SyncProfiles[0].Destination | Should -Be "D:\TestDest"
+        }
+    }
+
+    Context "Multi-Source Profile Handling" {
+        It "Should expand multi-source profile into separate sync profiles" {
+            $rawConfig = [PSCustomObject]@{
+                profiles = [PSCustomObject]@{
+                    MultiSourceBackup = [PSCustomObject]@{
+                        description = "Backup from multiple locations"
+                        enabled = $true
+                        sources = @(
+                            [PSCustomObject]@{
+                                path = "C:\Source1"
+                                useVss = $false
+                            },
+                            [PSCustomObject]@{
+                                path = "D:\Source2"
+                                useVss = $true
+                            },
+                            [PSCustomObject]@{
+                                path = "E:\Source3"
+                                useVss = $false
+                            }
+                        )
+                        destination = [PSCustomObject]@{
+                            path = "F:\Backups"
+                        }
+                        chunking = [PSCustomObject]@{
+                            maxChunkSizeGB = 25
+                        }
+                    }
+                }
+            }
+
+            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+
+            # Should create 3 separate profiles
+            $result.SyncProfiles.Count | Should -Be 3
+
+            # Check first expanded profile
+            $result.SyncProfiles[0].Name | Should -Be "MultiSourceBackup-Source1"
+            $result.SyncProfiles[0].Source | Should -Be "C:\Source1"
+            $result.SyncProfiles[0].Destination | Should -Be "F:\Backups"
+            $result.SyncProfiles[0].UseVss | Should -Be $false
+            $result.SyncProfiles[0].ChunkMaxSizeGB | Should -Be 25
+
+            # Check second expanded profile
+            $result.SyncProfiles[1].Name | Should -Be "MultiSourceBackup-Source2"
+            $result.SyncProfiles[1].Source | Should -Be "D:\Source2"
+            $result.SyncProfiles[1].Destination | Should -Be "F:\Backups"
+            $result.SyncProfiles[1].UseVss | Should -Be $true
+
+            # Check third expanded profile
+            $result.SyncProfiles[2].Name | Should -Be "MultiSourceBackup-Source3"
+            $result.SyncProfiles[2].Source | Should -Be "E:\Source3"
+            $result.SyncProfiles[2].UseVss | Should -Be $false
+        }
+
+        It "Should preserve ParentProfile property for expanded profiles" {
+            $rawConfig = [PSCustomObject]@{
+                profiles = [PSCustomObject]@{
+                    ParentBackup = [PSCustomObject]@{
+                        enabled = $true
+                        sources = @(
+                            [PSCustomObject]@{ path = "C:\Source1" },
+                            [PSCustomObject]@{ path = "D:\Source2" }
+                        )
+                        destination = [PSCustomObject]@{ path = "E:\Dest" }
+                    }
+                }
+            }
+
+            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+
+            $result.SyncProfiles[0].ParentProfile | Should -Be "ParentBackup"
+            $result.SyncProfiles[1].ParentProfile | Should -Be "ParentBackup"
+        }
+
+        It "Should not expand single-source profile" {
+            $rawConfig = [PSCustomObject]@{
+                profiles = [PSCustomObject]@{
+                    SingleSourceBackup = [PSCustomObject]@{
+                        enabled = $true
+                        sources = @(
+                            [PSCustomObject]@{
+                                path = "C:\OnlySource"
+                                useVss = $true
+                            }
+                        )
+                        destination = [PSCustomObject]@{ path = "D:\Dest" }
+                    }
+                }
+            }
+
+            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+
+            # Should remain as single profile with original name
+            $result.SyncProfiles.Count | Should -Be 1
+            $result.SyncProfiles[0].Name | Should -Be "SingleSourceBackup"
+            $result.SyncProfiles[0].Source | Should -Be "C:\OnlySource"
+        }
+
+        It "Should copy robocopy options to all expanded profiles" {
+            $rawConfig = [PSCustomObject]@{
+                profiles = [PSCustomObject]@{
+                    SharedOptionsBackup = [PSCustomObject]@{
+                        enabled = $true
+                        sources = @(
+                            [PSCustomObject]@{ path = "C:\Source1" },
+                            [PSCustomObject]@{ path = "D:\Source2" }
+                        )
+                        destination = [PSCustomObject]@{ path = "E:\Dest" }
+                        robocopy = [PSCustomObject]@{
+                            switches = @("/MIR", "/COPYALL")
+                            excludeFiles = @("*.tmp", "*.log")
+                            excludeDirs = @("temp", "cache")
+                        }
+                    }
+                }
+            }
+
+            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+
+            # Both profiles should have the same robocopy options
+            $result.SyncProfiles[0].RobocopyOptions.Switches | Should -Contain "/MIR"
+            $result.SyncProfiles[0].RobocopyOptions.ExcludeFiles | Should -Contain "*.tmp"
+            $result.SyncProfiles[0].RobocopyOptions.ExcludeDirs | Should -Contain "temp"
+
+            $result.SyncProfiles[1].RobocopyOptions.Switches | Should -Contain "/COPYALL"
+            $result.SyncProfiles[1].RobocopyOptions.ExcludeFiles | Should -Contain "*.log"
+            $result.SyncProfiles[1].RobocopyOptions.ExcludeDirs | Should -Contain "cache"
         }
     }
 }

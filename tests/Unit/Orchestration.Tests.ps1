@@ -690,4 +690,152 @@ Describe "Orchestration" {
             $chunk.Status | Should -Be 'Failed'
         }
     }
+
+    Context "Complete-CurrentProfile" {
+        BeforeEach {
+            # Set up a running profile
+            $script:OrchestrationState.CurrentProfile = [PSCustomObject]@{
+                Name = "TestProfile"
+                Source = "C:\Source"
+                Destination = "D:\Dest"
+            }
+            $script:OrchestrationState.ProfileStartTime = [datetime]::Now.AddMinutes(-5)
+            $script:OrchestrationState.Phase = "Replicating"
+            $script:OrchestrationState.TotalChunks = 10
+            $script:OrchestrationState.ProfileIndex = 0
+            $script:OrchestrationState.Profiles = @($script:OrchestrationState.CurrentProfile)
+
+            # Add some completed chunks
+            $script:OrchestrationState.CompletedChunks.Add([PSCustomObject]@{
+                ChunkId = 1
+                SourcePath = "C:\Source\Dir1"
+                EstimatedSize = 1000000
+            })
+            $script:OrchestrationState.CompletedChunks.Add([PSCustomObject]@{
+                ChunkId = 2
+                SourcePath = "C:\Source\Dir2"
+                EstimatedSize = 2000000
+            })
+
+            # Add a failed chunk
+            $script:OrchestrationState.FailedChunks.Add([PSCustomObject]@{
+                ChunkId = 3
+                SourcePath = "C:\Source\Dir3"
+            })
+        }
+
+        It "Should create ProfileResults with statistics" {
+            Complete-CurrentProfile
+
+            $script:OrchestrationState.ProfileResults | Should -Not -BeNullOrEmpty
+            $script:OrchestrationState.ProfileResults.Count | Should -Be 1
+
+            $pr = $script:OrchestrationState.ProfileResults[0]
+            $pr.Name | Should -Be "TestProfile"
+            $pr.ChunksComplete | Should -Be 2
+            $pr.ChunksFailed | Should -Be 1
+            $pr.BytesCopied | Should -Be 3000000
+        }
+
+        It "Should clear CompletedChunks after profile completes" {
+            $script:OrchestrationState.CompletedChunks.Count | Should -Be 2
+
+            Complete-CurrentProfile
+
+            $script:OrchestrationState.CompletedChunks.Count | Should -Be 0
+        }
+
+        It "Should clear FailedChunks after profile completes" {
+            $script:OrchestrationState.FailedChunks.Count | Should -Be 1
+
+            Complete-CurrentProfile
+
+            $script:OrchestrationState.FailedChunks.Count | Should -Be 0
+        }
+
+        It "Should set status to Warning when there are failed chunks" {
+            Complete-CurrentProfile
+
+            $script:OrchestrationState.ProfileResults[0].Status | Should -Be 'Warning'
+        }
+
+        It "Should set status to Success when all chunks succeed" {
+            # Clear failed chunks
+            $script:OrchestrationState.FailedChunks = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+
+            Complete-CurrentProfile
+
+            $script:OrchestrationState.ProfileResults[0].Status | Should -Be 'Success'
+        }
+
+        It "Should invoke OnProfileComplete callback" {
+            $callbackInvoked = $false
+            $script:OnProfileComplete = {
+                param($Profile)
+                $script:callbackInvoked = $true
+            }
+
+            Complete-CurrentProfile
+
+            $script:callbackInvoked | Should -Be $true
+        }
+
+        It "Should advance to next profile if more profiles exist" {
+            $script:OrchestrationState.Profiles = @(
+                [PSCustomObject]@{ Name = "Profile1"; Source = "C:\S1"; Destination = "D:\D1" },
+                [PSCustomObject]@{ Name = "Profile2"; Source = "C:\S2"; Destination = "D:\D2" }
+            )
+            $script:OrchestrationState.ProfileIndex = 0
+            $script:OrchestrationState.CurrentProfile = $script:OrchestrationState.Profiles[0]
+
+            Mock Start-ProfileReplication { }
+
+            Complete-CurrentProfile
+
+            $script:OrchestrationState.ProfileIndex | Should -Be 1
+            Should -Invoke Start-ProfileReplication -Times 1
+        }
+
+        It "Should set Phase to Complete when all profiles done" {
+            # Single profile, already at index 0
+            $script:OrchestrationState.ProfileIndex = 0
+            $script:OrchestrationState.Profiles = @($script:OrchestrationState.CurrentProfile)
+            $script:OrchestrationState.StartTime = [datetime]::Now.AddMinutes(-5)
+
+            Complete-CurrentProfile
+
+            $script:OrchestrationState.Phase | Should -Be "Complete"
+        }
+    }
+
+    Context "New-OperationResult" {
+        It "Should create success result" {
+            $result = New-OperationResult -Success $true -Data "TestData"
+
+            $result.Success | Should -Be $true
+            $result.Data | Should -Be "TestData"
+            $result.ErrorMessage | Should -BeNullOrEmpty
+        }
+
+        It "Should create failure result with error message" {
+            $result = New-OperationResult -Success $false -ErrorMessage "Something went wrong"
+
+            $result.Success | Should -Be $false
+            $result.ErrorMessage | Should -Be "Something went wrong"
+            $result.Data | Should -BeNullOrEmpty
+        }
+
+        It "Should include ErrorRecord when provided" {
+            try {
+                throw "Test error"
+            }
+            catch {
+                $result = New-OperationResult -Success $false -ErrorMessage "Caught error" -ErrorRecord $_
+            }
+
+            $result.Success | Should -Be $false
+            $result.ErrorRecord | Should -Not -BeNullOrEmpty
+            $result.ErrorRecord.Exception.Message | Should -Be "Test error"
+        }
+    }
 }

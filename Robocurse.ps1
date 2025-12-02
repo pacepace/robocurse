@@ -70,6 +70,7 @@ param(
     [switch]$Headless,
     [string]$ConfigPath = ".\Robocurse.config.json",
     [string]$Profile,
+    [switch]$AllProfiles,
     [switch]$Help
 )
 
@@ -153,6 +154,67 @@ function Test-IsWindowsPlatform {
         return $true  # PowerShell 5.1 only runs on Windows
     }
     return $IsWindows
+}
+
+function New-OperationResult {
+    <#
+    .SYNOPSIS
+        Creates a standardized operation result object
+    .DESCRIPTION
+        Provides a consistent pattern for functions that may succeed or fail.
+        Use this for operations where the caller needs to know both success status
+        and any error details without throwing exceptions.
+    .PARAMETER Success
+        Whether the operation succeeded
+    .PARAMETER Data
+        Result data on success (optional)
+    .PARAMETER ErrorMessage
+        Error message on failure (optional)
+    .PARAMETER ErrorRecord
+        Original error record for debugging (optional)
+    .OUTPUTS
+        PSCustomObject with Success, Data, ErrorMessage, ErrorRecord
+    .EXAMPLE
+        return New-OperationResult -Success $true -Data $config
+    .EXAMPLE
+        return New-OperationResult -Success $false -ErrorMessage "File not found" -ErrorRecord $_
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [bool]$Success,
+
+        [object]$Data = $null,
+
+        [string]$ErrorMessage = "",
+
+        [System.Management.Automation.ErrorRecord]$ErrorRecord = $null
+    )
+
+    return [PSCustomObject]@{
+        Success      = $Success
+        Data         = $Data
+        ErrorMessage = $ErrorMessage
+        ErrorRecord  = $ErrorRecord
+    }
+}
+
+function Test-IsBeingDotSourced {
+    <#
+    .SYNOPSIS
+        Detects if the script is being dot-sourced vs executed directly
+    .DESCRIPTION
+        Used to prevent main execution when loading functions for testing.
+        Returns $true if the script is being dot-sourced (. .\script.ps1)
+        Returns $false if the script is being executed directly (.\script.ps1)
+    .OUTPUTS
+        Boolean
+    #>
+    # When dot-sourced, $MyInvocation.InvocationName is "." or the script path
+    # When executed directly, $MyInvocation.InvocationName is the script path
+    # We check if we're being called from another script's context
+    $callStack = Get-PSCallStack
+    # If there's more than just the current scope and global, we're being dot-sourced
+    return $callStack.Count -gt 2
 }
 
 #endregion
@@ -308,12 +370,88 @@ function ConvertFrom-ConfigFileFormat {
             }
 
             # Handle source - can be single path or sources array
+            # Multi-source profiles are expanded into separate sync profiles
             if ($rawProfile.sources -and $rawProfile.sources.Count -gt 0) {
-                # Use first source for now (multi-source support is a future feature)
-                $firstSource = $rawProfile.sources[0]
-                $syncProfile.Source = $firstSource.path
-                if ($firstSource.useVss) {
-                    $syncProfile.UseVss = $true
+                if ($rawProfile.sources.Count -eq 1) {
+                    # Single source - use the profile name as-is
+                    $syncProfile.Source = $rawProfile.sources[0].path
+                    if ($rawProfile.sources[0].useVss) {
+                        $syncProfile.UseVss = $true
+                    }
+                }
+                else {
+                    # Multiple sources - create separate profiles for each
+                    Write-Verbose "Profile '$profileName' has $($rawProfile.sources.Count) sources - expanding"
+                    for ($i = 0; $i -lt $rawProfile.sources.Count; $i++) {
+                        $sourceInfo = $rawProfile.sources[$i]
+                        $expandedProfile = [PSCustomObject]@{
+                            Name = "$profileName-Source$($i + 1)"
+                            Description = "$($syncProfile.Description) (Source $($i + 1))"
+                            Source = $sourceInfo.path
+                            Destination = ""  # Will be set below
+                            UseVss = if ($sourceInfo.useVss) { $true } else { $false }
+                            ScanMode = "Smart"
+                            ChunkMaxSizeGB = 10
+                            ChunkMaxFiles = 50000
+                            ChunkMaxDepth = 5
+                            RobocopyOptions = @{}
+                            Enabled = $true
+                            ParentProfile = $profileName  # Track origin for logging
+                        }
+
+                        # Handle destination (shared across all sources in the profile)
+                        if ($rawProfile.destination -and $rawProfile.destination.path) {
+                            $expandedProfile.Destination = $rawProfile.destination.path
+                        }
+                        elseif ($rawProfile.destination -is [string]) {
+                            $expandedProfile.Destination = $rawProfile.destination
+                        }
+
+                        # Copy chunking settings
+                        if ($rawProfile.chunking) {
+                            if ($rawProfile.chunking.maxChunkSizeGB) {
+                                $expandedProfile.ChunkMaxSizeGB = $rawProfile.chunking.maxChunkSizeGB
+                            }
+                            if ($rawProfile.chunking.parallelChunks) {
+                                $expandedProfile | Add-Member -MemberType NoteProperty -Name 'ParallelChunks' -Value $rawProfile.chunking.parallelChunks -Force
+                            }
+                            if ($rawProfile.chunking.maxDepthToScan) {
+                                $expandedProfile.ChunkMaxDepth = $rawProfile.chunking.maxDepthToScan
+                            }
+                            if ($rawProfile.chunking.strategy) {
+                                $expandedProfile.ScanMode = switch ($rawProfile.chunking.strategy) {
+                                    'auto' { 'Smart' }
+                                    'balanced' { 'Smart' }
+                                    'aggressive' { 'Smart' }
+                                    'flat' { 'Flat' }
+                                    default { 'Smart' }
+                                }
+                            }
+                        }
+
+                        # Copy robocopy options
+                        $expandedRobocopyOptions = @{
+                            Switches = @()
+                            ExcludeFiles = @()
+                            ExcludeDirs = @()
+                        }
+                        if ($rawProfile.robocopy) {
+                            if ($rawProfile.robocopy.switches) {
+                                $expandedRobocopyOptions.Switches = @($rawProfile.robocopy.switches)
+                            }
+                            if ($rawProfile.robocopy.excludeFiles) {
+                                $expandedRobocopyOptions.ExcludeFiles = @($rawProfile.robocopy.excludeFiles)
+                            }
+                            if ($rawProfile.robocopy.excludeDirs) {
+                                $expandedRobocopyOptions.ExcludeDirs = @($rawProfile.robocopy.excludeDirs)
+                            }
+                        }
+                        $expandedProfile.RobocopyOptions = $expandedRobocopyOptions
+
+                        $syncProfiles += $expandedProfile
+                    }
+                    # Skip adding the original syncProfile since we've expanded it
+                    continue
                 }
             }
             elseif ($rawProfile.source) {
@@ -1963,45 +2101,56 @@ function ConvertFrom-RobocopyLog {
     #    Files :     1000       500       500         0         5         0
     #    Bytes :   1.0 g   500.0 m   500.0 m         0    10.0 k         0
 
-    # Parse Files line
-    if ($content -match '\s+Files\s*:\s+(\d+)\s+(\d+)\s+(\d+)\s+\d+\s+(\d+)') {
-        $result.FilesCopied = [int]$matches[2]
-        $result.FilesSkipped = [int]$matches[3]
-        $result.FilesFailed = [int]$matches[4]
-    }
+    try {
+        # Parse Files line
+        if ($content -match '\s+Files\s*:\s+(\d+)\s+(\d+)\s+(\d+)\s+\d+\s+(\d+)') {
+            $parsedValue = 0
+            if ([int]::TryParse($matches[2], [ref]$parsedValue)) { $result.FilesCopied = $parsedValue }
+            if ([int]::TryParse($matches[3], [ref]$parsedValue)) { $result.FilesSkipped = $parsedValue }
+            if ([int]::TryParse($matches[4], [ref]$parsedValue)) { $result.FilesFailed = $parsedValue }
+        }
 
-    # Parse Dirs line
-    if ($content -match '\s+Dirs\s*:\s+(\d+)\s+(\d+)\s+(\d+)\s+\d+\s+(\d+)') {
-        $result.DirsCopied = [int]$matches[2]
-        $result.DirsSkipped = [int]$matches[3]
-        $result.DirsFailed = [int]$matches[4]
-    }
+        # Parse Dirs line
+        if ($content -match '\s+Dirs\s*:\s+(\d+)\s+(\d+)\s+(\d+)\s+\d+\s+(\d+)') {
+            $parsedValue = 0
+            if ([int]::TryParse($matches[2], [ref]$parsedValue)) { $result.DirsCopied = $parsedValue }
+            if ([int]::TryParse($matches[3], [ref]$parsedValue)) { $result.DirsSkipped = $parsedValue }
+            if ([int]::TryParse($matches[4], [ref]$parsedValue)) { $result.DirsFailed = $parsedValue }
+        }
 
-    # Parse Bytes line - extract number and convert units
-    if ($content -match '\s+Bytes\s*:\s+[\d.]+\s+[kmgt]?\s+([\d.]+)\s+([kmgt]?)') {
-        $byteValue = [double]$matches[1]
-        $unit = $matches[2]
+        # Parse Bytes line - extract number and convert units
+        if ($content -match '\s+Bytes\s*:\s+[\d.]+\s+[kmgt]?\s+([\d.]+)\s+([kmgt]?)') {
+            $parsedDouble = 0.0
+            if ([double]::TryParse($matches[1], [ref]$parsedDouble)) {
+                $byteValue = $parsedDouble
+                $unit = $matches[2].ToLower()
 
-        switch ($unit) {
-            'k' { $result.BytesCopied = [long]($byteValue * 1KB) }
-            'm' { $result.BytesCopied = [long]($byteValue * 1MB) }
-            'g' { $result.BytesCopied = [long]($byteValue * 1GB) }
-            't' { $result.BytesCopied = [long]($byteValue * 1TB) }
-            default { $result.BytesCopied = [long]$byteValue }
+                $result.BytesCopied = switch ($unit) {
+                    'k' { [long]($byteValue * 1KB) }
+                    'm' { [long]($byteValue * 1MB) }
+                    'g' { [long]($byteValue * 1GB) }
+                    't' { [long]($byteValue * 1TB) }
+                    default { [long]$byteValue }
+                }
+            }
+        }
+
+        # Parse Speed line (MegaBytes/min format)
+        if ($content -match 'Speed\s*:\s*([\d.]+)\s+MegaBytes/min') {
+            $result.Speed = "$($matches[1]) MB/min"
+        }
+
+        # Parse current file from progress lines (last occurrence)
+        # Formats: "New File", "Newer", "*EXTRA File"
+        $progressMatches = [regex]::Matches($content, '\s+(New File|Newer|\*EXTRA File)\s+[\d.]+\s+[kmgt]?\s+(.+)$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+        if ($progressMatches.Count -gt 0) {
+            $lastMatch = $progressMatches[$progressMatches.Count - 1]
+            $result.CurrentFile = $lastMatch.Groups[2].Value.Trim()
         }
     }
-
-    # Parse Speed line (MegaBytes/min format)
-    if ($content -match 'Speed\s*:\s*([\d.]+)\s+MegaBytes/min') {
-        $result.Speed = "$($matches[1]) MB/min"
-    }
-
-    # Parse current file from progress lines (last occurrence)
-    # Formats: "New File", "Newer", "*EXTRA File"
-    $progressMatches = [regex]::Matches($content, '\s+(New File|Newer|\*EXTRA File)\s+[\d.]+\s+[kmgt]?\s+(.+)$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
-    if ($progressMatches.Count -gt 0) {
-        $lastMatch = $progressMatches[$progressMatches.Count - 1]
-        $result.CurrentFile = $lastMatch.Groups[2].Value.Trim()
+    catch {
+        # Log parsing errors but don't fail - return partial results
+        Write-RobocurseLog "Error parsing robocopy log '$LogPath': $_" -Level Warning
     }
 
     return $result
@@ -2578,6 +2727,10 @@ function Complete-CurrentProfile {
     <#
     .SYNOPSIS
         Completes the current profile and moves to next
+    .DESCRIPTION
+        Handles profile completion: logs results, cleans up VSS snapshots,
+        stores profile results for email reporting, and advances to next profile.
+        Also clears completed chunks to prevent memory growth during long runs.
     #>
     $state = $script:OrchestrationState
 
@@ -2587,13 +2740,43 @@ function Complete-CurrentProfile {
 
     $profileDuration = [datetime]::Now - $state.ProfileStartTime
 
+    # Calculate profile statistics before clearing
+    $completedChunksArray = $state.CompletedChunks.ToArray()
+    $failedChunksArray = $state.FailedChunks.ToArray()
+
+    $profileBytesCopied = 0
+    foreach ($chunk in $completedChunksArray) {
+        if ($chunk.EstimatedSize) {
+            $profileBytesCopied += $chunk.EstimatedSize
+        }
+    }
+
+    # Store profile result for email/reporting (prevents memory leak by summarizing)
+    $profileResult = [PSCustomObject]@{
+        Name = $state.CurrentProfile.Name
+        Status = if ($failedChunksArray.Count -gt 0) { 'Warning' } else { 'Success' }
+        ChunksComplete = $completedChunksArray.Count
+        ChunksTotal = $state.TotalChunks
+        ChunksFailed = $failedChunksArray.Count
+        BytesCopied = $profileBytesCopied
+        FilesCopied = 0  # Would need per-chunk tracking to calculate accurately
+        Duration = $profileDuration
+        Errors = @($failedChunksArray | ForEach-Object { "Chunk $($_.ChunkId): $($_.SourcePath)" })
+    }
+
+    # Initialize ProfileResults array if needed
+    if ($null -eq $state.ProfileResults) {
+        $state | Add-Member -MemberType NoteProperty -Name 'ProfileResults' -Value @() -Force
+    }
+    $state.ProfileResults += $profileResult
+
     Write-RobocurseLog -Message "Profile complete: $($state.CurrentProfile.Name) in $($profileDuration.ToString('hh\:mm\:ss'))" `
         -Level 'Info' -Component 'Orchestrator'
 
     Write-SiemEvent -EventType 'ProfileComplete' -Data @{
         profileName = $state.CurrentProfile.Name
-        chunksCompleted = $state.CompletedChunks.Count
-        chunksFailed = $state.FailedChunks.Count
+        chunksCompleted = $completedChunksArray.Count
+        chunksFailed = $failedChunksArray.Count
         durationMs = $profileDuration.TotalMilliseconds
     }
 
@@ -2621,6 +2804,11 @@ function Complete-CurrentProfile {
         & $script:OnProfileComplete $state.CurrentProfile
     }
 
+    # Clear completed/failed chunks to prevent memory leak during multi-profile runs
+    # Results are preserved in ProfileResults for email/reporting
+    $state.CompletedChunks = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+    $state.FailedChunks = [System.Collections.Concurrent.ConcurrentBag[PSCustomObject]]::new()
+
     # Move to next profile
     $state.ProfileIndex++
     if ($state.ProfileIndex -lt $state.Profiles.Count) {
@@ -2637,7 +2825,7 @@ function Complete-CurrentProfile {
         Write-SiemEvent -EventType 'SessionEnd' -Data @{
             profileCount = $state.Profiles.Count
             totalChunks = $state.CompletedCount
-            failedChunks = $state.FailedChunks.Count
+            failedChunks = ($state.ProfileResults | Measure-Object -Property ChunksFailed -Sum).Sum
             durationMs = $totalDuration.TotalMilliseconds
         }
     }
@@ -2999,14 +3187,27 @@ function Get-VssPath {
     .DESCRIPTION
         Translates a path from the original volume to the shadow copy volume.
         Example: C:\Users\John\Documents -> \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
+
+        Supports two calling conventions:
+        1. With VssSnapshot object (preferred):
+           Get-VssPath -OriginalPath "C:\Users" -VssSnapshot $snapshot
+        2. With individual parameters (legacy/testing):
+           Get-VssPath -OriginalPath "C:\Users" -ShadowPath "\\?\..." -SourceVolume "C:"
     .PARAMETER OriginalPath
         Original path (e.g., C:\Users\John\Documents)
+    .PARAMETER VssSnapshot
+        VSS snapshot object from New-VssSnapshot (contains ShadowPath and SourceVolume)
     .PARAMETER ShadowPath
         VSS shadow path (e.g., \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1)
+        Only required if VssSnapshot is not provided.
     .PARAMETER SourceVolume
         Source volume (e.g., C:)
+        Only required if VssSnapshot is not provided.
     .OUTPUTS
         Converted path pointing to shadow copy
+    .EXAMPLE
+        Get-VssPath -OriginalPath "C:\Users\John\Documents" -VssSnapshot $snapshot
+        Returns: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
     .EXAMPLE
         Get-VssPath -OriginalPath "C:\Users\John\Documents" `
                     -ShadowPath "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1" `
@@ -3017,12 +3218,21 @@ function Get-VssPath {
         [Parameter(Mandatory)]
         [string]$OriginalPath,
 
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory, ParameterSetName = 'VssSnapshot')]
+        [PSCustomObject]$VssSnapshot,
+
+        [Parameter(Mandatory, ParameterSetName = 'Individual')]
         [string]$ShadowPath,
 
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory, ParameterSetName = 'Individual')]
         [string]$SourceVolume
     )
+
+    # Extract values from VssSnapshot if provided
+    if ($PSCmdlet.ParameterSetName -eq 'VssSnapshot') {
+        $ShadowPath = $VssSnapshot.ShadowPath
+        $SourceVolume = $VssSnapshot.SourceVolume
+    }
 
     # Ensure SourceVolume ends with colon (C:)
     $volumePrefix = $SourceVolume.TrimEnd('\', '/')
@@ -3138,9 +3348,7 @@ function Invoke-WithVssSnapshot {
         Write-RobocurseLog -Message "Creating VSS snapshot for $SourcePath" -Level 'Info' -Component 'VSS'
         $snapshot = New-VssSnapshot -SourcePath $SourcePath
 
-        $vssPath = Get-VssPath -OriginalPath $SourcePath `
-            -ShadowPath $snapshot.ShadowPath `
-            -SourceVolume $snapshot.SourceVolume
+        $vssPath = Get-VssPath -OriginalPath $SourcePath -VssSnapshot $snapshot
 
         Write-RobocurseLog -Message "VSS path: $vssPath" -Level 'Debug' -Component 'VSS'
 
@@ -4806,44 +5014,107 @@ function Start-GuiReplication {
     Initialize-OrchestrationState
 
     # Start replication in a background runspace
-    # IMPORTANT: We pass the orchestration state object by reference so both
-    # the GUI thread and worker thread operate on the same concurrent collections
+    # IMPORTANT: We must dot-source the script to load all functions into the runspace
+    # The orchestration state uses concurrent collections for thread-safe sharing
+
+    # Get the path to this script for dot-sourcing into the runspace
+    $scriptPath = $PSCommandPath
+    if (-not $scriptPath) {
+        $scriptPath = Join-Path (Get-Location) "Robocurse.ps1"
+    }
+
     $runspace = [runspacefactory]::CreateRunspace()
+    $runspace.ApartmentState = [System.Threading.ApartmentState]::STA
+    $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
     $runspace.Open()
 
-    # Pass shared state and parameters to the runspace
-    $runspace.SessionStateProxy.SetVariable("SharedOrchestrationState", $script:OrchestrationState)
-    $runspace.SessionStateProxy.SetVariable("profilesToRun", $profilesToRun)
-    $runspace.SessionStateProxy.SetVariable("maxWorkers", $maxWorkers)
-
-    # Execute replication in background - note we set the script variable from the passed-in state
+    # Execute replication in background
+    # We dot-source the script to load functions, pass the shared state, and run
     $powershell = [powershell]::Create()
     $powershell.Runspace = $runspace
-    $powershell.AddScript({
-        param($sharedState, $profiles, $workers)
-        # Reference the shared state from the parent runspace
-        $script:OrchestrationState = $sharedState
-        Start-ReplicationRun -Profiles $profiles -MaxConcurrentJobs $workers
+
+    # Build a script that loads the main script and runs replication
+    # Note: We pass the orchestration state as a reference so both threads share it
+    # Callbacks are intentionally NOT shared - GUI uses timer-based polling instead
+    $backgroundScript = @"
+        param(`$ScriptPath, `$SharedState, `$Profiles, `$MaxWorkers, `$ConfigPath)
+
+        # Load the script to get all functions (with -Help to prevent main execution)
+        . `$ScriptPath -Help
+
+        # Override the script-scoped state with our shared instance
+        # This is safe because ConcurrentDictionary/ConcurrentQueue/ConcurrentBag are thread-safe
+        `$script:OrchestrationState = `$SharedState
+
+        # Clear callbacks - GUI mode uses timer-based polling, not callbacks
+        # This prevents any thread-safety issues with callback invocation
+        `$script:OnProgress = `$null
+        `$script:OnChunkComplete = `$null
+        `$script:OnProfileComplete = `$null
+
+        # Start replication
+        Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers
 
         # Run the orchestration loop until complete
-        while ($script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
-            Invoke-ReplicationTick -MaxConcurrentJobs $workers
+        while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
+            Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
             Start-Sleep -Milliseconds 250
         }
-    }).AddArgument($script:OrchestrationState).AddArgument($profilesToRun).AddArgument($maxWorkers)
+"@
+
+    $powershell.AddScript($backgroundScript)
+    $powershell.AddArgument($scriptPath)
+    $powershell.AddArgument($script:OrchestrationState)
+    $powershell.AddArgument($profilesToRun)
+    $powershell.AddArgument($maxWorkers)
+    $powershell.AddArgument($ConfigPath)
 
     $script:ReplicationHandle = $powershell.BeginInvoke()
     $script:ReplicationPowerShell = $powershell
+    $script:ReplicationRunspace = $runspace
 }
 
 function Complete-GuiReplication {
     <#
     .SYNOPSIS
         Called when replication completes
+    .DESCRIPTION
+        Handles GUI cleanup after replication: stops timer, re-enables buttons,
+        disposes of background runspace resources, and shows completion message.
     #>
 
     # Stop timer
     $script:ProgressTimer.Stop()
+
+    # Dispose of background runspace resources to prevent memory leaks
+    if ($script:ReplicationPowerShell) {
+        try {
+            # End the async invocation if still running
+            if ($script:ReplicationHandle -and -not $script:ReplicationHandle.IsCompleted) {
+                $script:ReplicationPowerShell.Stop()
+            }
+            elseif ($script:ReplicationHandle) {
+                # Collect any remaining output
+                $script:ReplicationPowerShell.EndInvoke($script:ReplicationHandle) | Out-Null
+            }
+
+            # Dispose the runspace
+            if ($script:ReplicationPowerShell.Runspace) {
+                $script:ReplicationPowerShell.Runspace.Close()
+                $script:ReplicationPowerShell.Runspace.Dispose()
+            }
+
+            # Dispose the PowerShell instance
+            $script:ReplicationPowerShell.Dispose()
+        }
+        catch {
+            Write-GuiLog "Warning: Error disposing runspace: $($_.Exception.Message)"
+        }
+        finally {
+            $script:ReplicationPowerShell = $null
+            $script:ReplicationHandle = $null
+        }
+    }
 
     # Re-enable buttons
     $script:Controls.btnRunAll.IsEnabled = $true
@@ -5010,18 +5281,23 @@ function Show-GuiError {
 function Show-ScheduleDialog {
     <#
     .SYNOPSIS
-        Shows schedule configuration dialog
+        Shows schedule configuration dialog and registers/unregisters the scheduled task
+    .DESCRIPTION
+        Displays a dialog for configuring scheduled runs. When OK is clicked,
+        the configuration is saved AND the Windows Task Scheduler task is
+        actually created or removed based on the enabled state.
     #>
 
     $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Configure Schedule"
-        Height="300" Width="400"
+        Height="350" Width="450"
         WindowStartupLocation="CenterScreen"
         Background="#1E1E1E">
     <Grid Margin="15">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -5032,21 +5308,23 @@ function Show-ScheduleDialog {
         <CheckBox x:Name="chkEnabled" Content="Enable Scheduled Runs" Foreground="#E0E0E0" FontWeight="Bold"/>
 
         <StackPanel Grid.Row="1" Margin="0,15,0,0">
-            <Label Content="Run Time:" Foreground="#E0E0E0"/>
-            <TextBox x:Name="txtTime" Background="#2D2D2D" Foreground="#E0E0E0" Padding="5" Text="02:00"/>
+            <Label Content="Run Time (HH:MM):" Foreground="#E0E0E0"/>
+            <TextBox x:Name="txtTime" Background="#2D2D2D" Foreground="#E0E0E0" Padding="5" Text="02:00" Width="100" HorizontalAlignment="Left"/>
         </StackPanel>
 
         <StackPanel Grid.Row="2" Margin="0,15,0,0">
-            <Label Content="Run On:" Foreground="#E0E0E0"/>
-            <ComboBox x:Name="cmbFrequency" Background="#2D2D2D" Foreground="#E0E0E0">
+            <Label Content="Frequency:" Foreground="#E0E0E0"/>
+            <ComboBox x:Name="cmbFrequency" Background="#2D2D2D" Foreground="#E0E0E0" Width="150" HorizontalAlignment="Left">
                 <ComboBoxItem Content="Daily" IsSelected="True"/>
                 <ComboBoxItem Content="Weekdays"/>
-                <ComboBoxItem Content="Weekends"/>
+                <ComboBoxItem Content="Hourly"/>
             </ComboBox>
         </StackPanel>
 
-        <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button x:Name="btnOk" Content="OK" Width="80" Margin="0,0,10,0" Background="#0078D4" Foreground="White" Padding="10,5"/>
+        <TextBlock Grid.Row="3" x:Name="txtStatus" Foreground="#808080" Margin="0,15,0,0" TextWrapping="Wrap"/>
+
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="btnOk" Content="Apply" Width="80" Margin="0,0,10,0" Background="#0078D4" Foreground="White" Padding="10,5"/>
             <Button x:Name="btnCancel" Content="Cancel" Width="80" Background="#4A4A4A" Foreground="White" Padding="10,5"/>
         </StackPanel>
     </Grid>
@@ -5062,21 +5340,123 @@ function Show-ScheduleDialog {
         $chkEnabled = $dialog.FindName("chkEnabled")
         $txtTime = $dialog.FindName("txtTime")
         $cmbFrequency = $dialog.FindName("cmbFrequency")
+        $txtStatus = $dialog.FindName("txtStatus")
         $btnOk = $dialog.FindName("btnOk")
         $btnCancel = $dialog.FindName("btnCancel")
 
         # Load current settings
         $chkEnabled.IsChecked = $script:Config.Schedule.Enabled
-        $txtTime.Text = $script:Config.Schedule.Time
+        $txtTime.Text = if ($script:Config.Schedule.Time) { $script:Config.Schedule.Time } else { "02:00" }
+
+        # Check current task status
+        $taskExists = Test-RobocurseTaskExists
+        if ($taskExists) {
+            $taskInfo = Get-RobocurseTaskStatus
+            if ($taskInfo) {
+                $txtStatus.Text = "Current task status: $($taskInfo.State)`nNext run: $($taskInfo.NextRunTime)"
+            }
+        }
+        else {
+            $txtStatus.Text = "No scheduled task currently configured."
+        }
 
         # Button handlers
         $btnOk.Add_Click({
-            $script:Config.Schedule.Enabled = $chkEnabled.IsChecked
-            $script:Config.Schedule.Time = $txtTime.Text
-            $script:Config.Schedule.Days = @($cmbFrequency.Text)
-            Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
-            Write-GuiLog "Schedule updated: Enabled=$($chkEnabled.IsChecked), Time=$($txtTime.Text)"
-            $dialog.Close()
+            try {
+                # Parse time
+                $timeParts = $txtTime.Text -split ':'
+                if ($timeParts.Count -ne 2) {
+                    [System.Windows.MessageBox]::Show("Invalid time format. Use HH:MM", "Error", "OK", "Error")
+                    return
+                }
+                $hour = [int]$timeParts[0]
+                $minute = [int]$timeParts[1]
+
+                if ($hour -lt 0 -or $hour -gt 23 -or $minute -lt 0 -or $minute -gt 59) {
+                    [System.Windows.MessageBox]::Show("Invalid time. Hour must be 0-23, minute must be 0-59", "Error", "OK", "Error")
+                    return
+                }
+
+                # Determine schedule type
+                $scheduleType = switch ($cmbFrequency.Text) {
+                    "Daily" { "Daily" }
+                    "Weekdays" { "Weekdays" }
+                    "Hourly" { "Hourly" }
+                    default { "Daily" }
+                }
+
+                # Update config
+                $script:Config.Schedule.Enabled = $chkEnabled.IsChecked
+                $script:Config.Schedule.Time = $txtTime.Text
+                $script:Config.Schedule.ScheduleType = $scheduleType
+
+                if ($chkEnabled.IsChecked) {
+                    # Register/update the task
+                    Write-GuiLog "Registering scheduled task..."
+
+                    # Get the script path for the scheduled task
+                    $scriptPath = $PSCommandPath
+                    if (-not $scriptPath) {
+                        $scriptPath = Join-Path (Get-Location) "Robocurse.ps1"
+                    }
+
+                    $result = Register-RobocurseTask `
+                        -ScriptPath $scriptPath `
+                        -ConfigPath $ConfigPath `
+                        -ScheduleType $scheduleType `
+                        -Time "$($hour.ToString('00')):$($minute.ToString('00'))"
+
+                    if ($result) {
+                        Write-GuiLog "Scheduled task registered successfully"
+                        [System.Windows.MessageBox]::Show(
+                            "Scheduled task has been registered.`n`nThe task will run $scheduleType at $($txtTime.Text).",
+                            "Schedule Configured",
+                            "OK",
+                            "Information"
+                        )
+                    }
+                    else {
+                        Write-GuiLog "Failed to register scheduled task"
+                        [System.Windows.MessageBox]::Show(
+                            "Failed to register scheduled task.`nCheck that you have administrator privileges.",
+                            "Error",
+                            "OK",
+                            "Error"
+                        )
+                    }
+                }
+                else {
+                    # Remove the task if it exists
+                    if ($taskExists) {
+                        Write-GuiLog "Removing scheduled task..."
+                        $result = Unregister-RobocurseTask
+                        if ($result) {
+                            Write-GuiLog "Scheduled task removed"
+                            [System.Windows.MessageBox]::Show(
+                                "Scheduled task has been removed.",
+                                "Schedule Disabled",
+                                "OK",
+                                "Information"
+                            )
+                        }
+                        else {
+                            Write-GuiLog "Failed to remove scheduled task"
+                        }
+                    }
+                }
+
+                Save-RobocurseConfig -Config $script:Config -Path $ConfigPath
+                $dialog.Close()
+            }
+            catch {
+                [System.Windows.MessageBox]::Show(
+                    "Error configuring schedule: $($_.Exception.Message)",
+                    "Error",
+                    "OK",
+                    "Error"
+                )
+                Write-GuiLog "Error configuring schedule: $($_.Exception.Message)"
+            }
         })
 
         $btnCancel.Add_Click({ $dialog.Close() })
@@ -5108,7 +5488,8 @@ USAGE:
 OPTIONS:
     -Headless           Run in headless mode without GUI
     -ConfigPath <path>  Path to configuration file (default: .\Robocurse.config.json)
-    -Profile <name>     Profile name from configuration file
+    -Profile <name>     Run a specific profile by name
+    -AllProfiles        Run all enabled profiles (headless mode only)
     -Help               Display this help message
 
 EXAMPLES:
@@ -5118,21 +5499,167 @@ EXAMPLES:
     .\Robocurse.ps1 -Headless -Profile "DailyBackup"
         Run in headless mode with the DailyBackup profile
 
-    .\Robocurse.ps1 -ConfigPath "C:\Configs\custom.json" -Headless
+    .\Robocurse.ps1 -Headless -AllProfiles
+        Run all enabled profiles in headless mode
+
+    .\Robocurse.ps1 -ConfigPath "C:\Configs\custom.json" -Headless -AllProfiles
         Run with custom configuration file
 
 For more information, see README.md
 "@
 }
 
-# Main entry point
-if ($Help) {
-    Show-RobocurseHelp
-    exit 0
+function Invoke-HeadlessReplication {
+    <#
+    .SYNOPSIS
+        Runs replication in headless mode with progress output and email notification
+    .PARAMETER Config
+        Configuration object
+    .PARAMETER ProfilesToRun
+        Array of profile objects to run
+    .PARAMETER MaxConcurrentJobs
+        Maximum concurrent robocopy processes
+    .OUTPUTS
+        Exit code: 0 for success, 1 for failures
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject[]]$ProfilesToRun,
+
+        [int]$MaxConcurrentJobs
+    )
+
+    $profileNames = ($ProfilesToRun | ForEach-Object { $_.Name }) -join ", "
+    Write-Host "Starting replication for profile(s): $profileNames"
+    Write-Host "Max concurrent jobs: $MaxConcurrentJobs"
+    Write-Host ""
+
+    # Start replication
+    Start-ReplicationRun -Profiles $ProfilesToRun -MaxConcurrentJobs $MaxConcurrentJobs
+
+    # Track last progress output time for throttling
+    $lastProgressOutput = [datetime]::MinValue
+    $progressInterval = [timespan]::FromSeconds(10)
+
+    # Run the orchestration loop with progress output
+    while ($script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
+        Invoke-ReplicationTick -MaxConcurrentJobs $MaxConcurrentJobs
+
+        # Output progress every 10 seconds
+        $now = [datetime]::Now
+        if (($now - $lastProgressOutput) -gt $progressInterval) {
+            $status = Get-OrchestrationStatus
+            $progressPct = if ($status.ChunksTotal -gt 0) {
+                [math]::Round(($status.ChunksComplete / $status.ChunksTotal) * 100, 1)
+            } else { 0 }
+
+            $etaStr = if ($status.ETA) { $status.ETA.ToString('hh\:mm\:ss') } else { "--:--:--" }
+            $elapsedStr = $status.Elapsed.ToString('hh\:mm\:ss')
+            $bytesStr = Format-FileSize -Bytes $status.BytesComplete
+
+            Write-Host "[${elapsedStr}] Profile: $($status.CurrentProfile) | Progress: ${progressPct}% | Chunks: $($status.ChunksComplete)/$($status.ChunksTotal) | Copied: $bytesStr | ETA: $etaStr"
+
+            $lastProgressOutput = $now
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+
+    # Get final status
+    $status = Get-OrchestrationStatus
+    $totalFailed = if ($script:OrchestrationState.ProfileResults) {
+        ($script:OrchestrationState.ProfileResults | Measure-Object -Property ChunksFailed -Sum).Sum
+    } else { $status.ChunksFailed }
+
+    # Build results object for email
+    $totalBytesCopied = if ($script:OrchestrationState.ProfileResults) {
+        ($script:OrchestrationState.ProfileResults | Measure-Object -Property BytesCopied -Sum).Sum
+    } else { $status.BytesComplete }
+
+    $allErrors = @()
+    if ($script:OrchestrationState.ProfileResults) {
+        foreach ($pr in $script:OrchestrationState.ProfileResults) {
+            $allErrors += $pr.Errors
+        }
+    }
+
+    $results = [PSCustomObject]@{
+        Duration = $status.Elapsed
+        TotalBytesCopied = $totalBytesCopied
+        TotalFilesCopied = 0  # Would need chunk-level tracking
+        TotalErrors = $totalFailed
+        Profiles = $script:OrchestrationState.ProfileResults
+        Errors = $allErrors
+    }
+
+    # Determine overall status
+    $emailStatus = if ($totalFailed -gt 0) { 'Warning' } else { 'Success' }
+    if ($script:OrchestrationState.Phase -eq 'Stopped') {
+        $emailStatus = 'Failed'
+    }
+
+    # Report results to console
+    Write-Host ""
+    Write-Host "=========================================="
+    Write-Host "Replication Complete"
+    Write-Host "=========================================="
+    Write-Host "  Duration: $($status.Elapsed.ToString('hh\:mm\:ss'))"
+    Write-Host "  Total data copied: $(Format-FileSize -Bytes $totalBytesCopied)"
+    Write-Host "  Total chunks failed: $totalFailed"
+    Write-Host ""
+
+    if ($script:OrchestrationState.ProfileResults) {
+        Write-Host "Profile Summary:"
+        foreach ($pr in $script:OrchestrationState.ProfileResults) {
+            $prStatus = if ($pr.ChunksFailed -gt 0) { "[WARN]" } else { "[OK]" }
+            Write-Host "  $prStatus $($pr.Name): $($pr.ChunksComplete)/$($pr.ChunksTotal) chunks, $(Format-FileSize -Bytes $pr.BytesCopied)"
+        }
+        Write-Host ""
+    }
+
+    # Send email notification if configured
+    if ($Config.Email -and $Config.Email.Enabled) {
+        Write-Host "Sending completion email..."
+        try {
+            Send-CompletionEmail -Config $Config.Email -Results $results -Status $emailStatus
+            Write-Host "Email sent successfully."
+        }
+        catch {
+            Write-Warning "Failed to send email: $($_.Exception.Message)"
+        }
+    }
+
+    # Return exit code
+    if ($totalFailed -gt 0 -or $script:OrchestrationState.Phase -eq 'Stopped') {
+        return 1
+    }
+    return 0
 }
 
-# Prevent execution during test mode
-if (-not $script:TestMode) {
+function Start-RobocurseMain {
+    <#
+    .SYNOPSIS
+        Main entry point function for Robocurse
+    .DESCRIPTION
+        Handles parameter validation, configuration loading, and launches
+        either GUI or headless mode. Separated from script body for testability.
+    #>
+    param(
+        [switch]$Headless,
+        [string]$ConfigPath,
+        [string]$ProfileName,
+        [switch]$AllProfiles,
+        [switch]$ShowHelp
+    )
+
+    if ($ShowHelp) {
+        Show-RobocurseHelp
+        return 0
+    }
+
     try {
         # Load configuration
         if (Test-Path $ConfigPath) {
@@ -5145,28 +5672,47 @@ if (-not $script:TestMode) {
                 $config = New-DefaultConfig
             }
             else {
-                throw "Configuration file required for headless mode"
+                throw "Configuration file required for headless mode: $ConfigPath"
             }
         }
 
         # Launch appropriate interface
         if ($Headless) {
-            # Run in headless mode
-            if (-not $Profile) {
-                throw "Profile parameter required for headless mode. Use -Profile <name>"
+            # Validate headless parameters
+            if (-not $ProfileName -and -not $AllProfiles) {
+                throw "Headless mode requires either -Profile <name> or -AllProfiles parameter."
             }
 
-            # Initialize logging for headless mode with config-based retention settings
+            if ($ProfileName -and $AllProfiles) {
+                Write-Warning "-Profile and -AllProfiles both specified. Using -Profile '$ProfileName'."
+            }
+
+            # Initialize logging for headless mode
             $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { ".\Logs" }
             $compressDays = if ($config.GlobalSettings.LogCompressAfterDays) { $config.GlobalSettings.LogCompressAfterDays } else { $script:LogCompressAfterDays }
             $deleteDays = if ($config.GlobalSettings.LogRetentionDays) { $config.GlobalSettings.LogRetentionDays } else { $script:LogDeleteAfterDays }
             Initialize-LogSession -LogRoot $logRoot -CompressAfterDays $compressDays -DeleteAfterDays $deleteDays
 
-            # Find the specified profile
-            $targetProfile = $config.SyncProfiles | Where-Object { $_.Name -eq $Profile }
-            if (-not $targetProfile) {
-                $availableProfiles = ($config.SyncProfiles | ForEach-Object { $_.Name }) -join ", "
-                throw "Profile '$Profile' not found. Available profiles: $availableProfiles"
+            # Determine which profiles to run
+            $profilesToRun = @()
+            if ($ProfileName) {
+                # Run specific profile
+                $targetProfile = $config.SyncProfiles | Where-Object { $_.Name -eq $ProfileName }
+                if (-not $targetProfile) {
+                    $availableProfiles = ($config.SyncProfiles | ForEach-Object { $_.Name }) -join ", "
+                    throw "Profile '$ProfileName' not found. Available profiles: $availableProfiles"
+                }
+                $profilesToRun = @($targetProfile)
+            }
+            else {
+                # Run all enabled profiles
+                $profilesToRun = @($config.SyncProfiles | Where-Object {
+                    # Check for explicit Enabled property, default to true if not present
+                    $_.PSObject.Properties['Enabled'] -eq $null -or $_.Enabled -eq $true
+                })
+                if ($profilesToRun.Count -eq 0) {
+                    throw "No enabled profiles found in configuration."
+                }
             }
 
             # Get concurrency settings
@@ -5176,34 +5722,15 @@ if (-not $script:TestMode) {
                 $script:DefaultMaxConcurrentJobs
             }
 
-            Write-Host "Starting replication for profile: $Profile"
-            Write-Host "Max concurrent jobs: $maxJobs"
-
-            # Start replication with the profile
-            Start-ReplicationRun -Profiles @($targetProfile) -MaxConcurrentJobs $maxJobs
-
-            # Run the orchestration loop until complete
-            while ($script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
-                Invoke-ReplicationTick -MaxConcurrentJobs $maxJobs
-                Start-Sleep -Milliseconds 500
-            }
-
-            # Report results
-            $status = Get-OrchestrationStatus
-            Write-Host "`nReplication complete."
-            Write-Host "  Chunks completed: $($status.ChunksComplete)/$($status.ChunksTotal)"
-            Write-Host "  Chunks failed: $($status.ChunksFailed)"
-            Write-Host "  Duration: $($status.Elapsed.ToString('hh\:mm\:ss'))"
-
-            if ($status.ChunksFailed -gt 0) {
-                exit 1
-            }
+            # Run headless replication
+            return Invoke-HeadlessReplication -Config $config -ProfilesToRun $profilesToRun -MaxConcurrentJobs $maxJobs
         }
         else {
             # Launch GUI
             $window = Initialize-RobocurseGui
             if ($window) {
                 $window.ShowDialog() | Out-Null
+                return 0
             }
             else {
                 throw "Failed to initialize GUI. Try running with -Headless mode."
@@ -5212,8 +5739,25 @@ if (-not $script:TestMode) {
     }
     catch {
         Write-Error "Robocurse failed: $_"
-        exit 1
+        return 1
     }
+}
+
+# Main entry point - only execute if not being dot-sourced for testing
+# Check if -Help was passed (always process help)
+if ($Help) {
+    Show-RobocurseHelp
+    exit 0
+}
+
+# Detect if we're being dot-sourced by checking the call stack
+# When dot-sourced, there will be additional stack frames from the calling script
+$callStack = Get-PSCallStack
+$isBeingDotSourced = $callStack.Count -gt 2
+
+if (-not $isBeingDotSourced) {
+    $exitCode = Start-RobocurseMain -Headless:$Headless -ConfigPath $ConfigPath -ProfileName $Profile -AllProfiles:$AllProfiles -ShowHelp:$Help
+    exit $exitCode
 }
 
 #endregion
