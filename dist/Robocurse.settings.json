@@ -1,10 +1,10 @@
 ﻿{
-    "WindowLeft":  168,
-    "WindowTop":  35,
+    "WindowLeft":  208,
+    "WindowTop":  48,
     "WindowWidth":  1028,
     "WindowHeight":  691,
     "WindowState":  "Normal",
     "WorkerCount":  4,
-    "SelectedProfile":  "DailyBackup-Source2",
-    "SavedAt":  "2025-12-02T16:55:39.9636878-08:00"
+    "SelectedProfile":  "DailyBackup-Server1",
+    "SavedAt":  "2025-12-02T18:02:44.2205981-08:00"
 }

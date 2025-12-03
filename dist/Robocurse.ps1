@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 15:05:54
+    Built: 2025-12-02 18:03:09
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -175,6 +175,12 @@ $script:HeadlessProgressIntervalSeconds = 10
 # 10 chunks balances disk I/O with recovery granularity.
 $script:CheckpointSaveFrequency = 10
 
+# ETA calculation settings
+# Maximum ETA in days before capping. For very large replication jobs (petabyte scale),
+# ETAs can become unreasonably long. This cap provides a sensible upper bound.
+# Default is 365 days (1 year). Values beyond this display as "365+ days".
+$script:MaxEtaDays = 365
+
 # Health check settings
 # Interval in seconds between health status file updates during replication.
 # 30 seconds provides good monitoring granularity without excessive I/O.
@@ -289,12 +295,7 @@ function Test-RobocopyAvailable {
     [CmdletBinding()]
     param()
 
-    # Return cached result if already validated
-    if ($script:RobocopyPath) {
-        return New-OperationResult -Success $true -Data $script:RobocopyPath
-    }
-
-    # Check user-provided override first
+    # Check user-provided override first - always takes priority over cache
     if ($script:RobocopyPathOverride) {
         if (Test-Path -Path $script:RobocopyPathOverride -PathType Leaf) {
             $script:RobocopyPath = $script:RobocopyPathOverride
@@ -304,6 +305,11 @@ function Test-RobocopyAvailable {
             # Override set but file no longer exists
             return New-OperationResult -Success $false -ErrorMessage "Robocopy override path no longer valid: $($script:RobocopyPathOverride)"
         }
+    }
+
+    # Return cached result if already validated (checked after override to allow override changes)
+    if ($script:RobocopyPath) {
+        return New-OperationResult -Success $true -Data $script:RobocopyPath
     }
 
     # Check System32 first (most reliable location on Windows)
@@ -968,6 +974,7 @@ function New-DefaultConfig {
             Enabled = $false
             Time = "02:00"
             Days = @("Daily")
+            TaskName = ""  # Custom task name; empty = auto-generate unique name
         }
         SyncProfiles = @()
     }
@@ -1126,66 +1133,14 @@ function ConvertFrom-GlobalSettings {
     }
 }
 
-function ConvertFrom-ProfileSources {
+
+function ConvertFrom-FriendlyConfig {
     <#
     .SYNOPSIS
-        Expands multi-source profiles into separate sync profiles
-    .PARAMETER ProfileName
-        Name of the parent profile
-    .PARAMETER RawProfile
-        Raw profile object from JSON
-    .OUTPUTS
-        Array of expanded sync profile objects
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$ProfileName,
-
-        [Parameter(Mandatory)]
-        [PSCustomObject]$RawProfile
-    )
-
-    $expandedProfiles = @()
-    $description = if ($RawProfile.description) { $RawProfile.description } else { "" }
-
-    # Handle null or missing sources array
-    if ($null -eq $RawProfile.sources -or $RawProfile.sources.Count -eq 0) {
-        Write-RobocurseLog -Message "Profile '$ProfileName' has no sources defined, skipping" -Level 'Warning' -Component 'Config'
-        return $expandedProfiles
-    }
-
-    for ($i = 0; $i -lt $RawProfile.sources.Count; $i++) {
-        $sourceInfo = $RawProfile.sources[$i]
-        $expandedProfile = [PSCustomObject]@{
-            Name = "$ProfileName-Source$($i + 1)"
-            Description = "$description (Source $($i + 1))"
-            Source = $sourceInfo.path
-            Destination = Get-DestinationPathFromRaw -RawDestination $RawProfile.destination
-            UseVss = [bool]$sourceInfo.useVss
-            ScanMode = "Smart"
-            ChunkMaxSizeGB = 10
-            ChunkMaxFiles = 50000
-            ChunkMaxDepth = 5
-            RobocopyOptions = ConvertTo-RobocopyOptionsInternal -RawRobocopy $RawProfile.robocopy
-            Enabled = $true
-            ParentProfile = $ProfileName
-        }
-
-        ConvertTo-ChunkSettingsInternal -Profile $expandedProfile -RawChunking $RawProfile.chunking
-        $expandedProfiles += $expandedProfile
-    }
-
-    return $expandedProfiles
-}
-
-function ConvertFrom-ConfigFileFormat {
-    <#
-    .SYNOPSIS
-        Converts JSON config file format to internal format
+        Converts user-friendly JSON config format to internal format
     .DESCRIPTION
         The JSON config file uses a user-friendly format with:
-        - "profiles" as an object with profile names as keys
+        - "profiles" as an object with profile names as keys (one source per profile)
         - "global" with nested settings
 
         This function converts to the internal format with:
@@ -1202,11 +1157,11 @@ function ConvertFrom-ConfigFileFormat {
         [PSCustomObject]$RawConfig
     )
 
-    # Check if already in internal format (has SyncProfiles)
     $props = $RawConfig.PSObject.Properties.Name
-    if ($props -contains 'SyncProfiles') {
-        Write-Verbose "Config already in internal format"
-        return $RawConfig
+
+    # Validate this is the friendly format
+    if ($props -notcontains 'profiles') {
+        throw "Invalid config format: missing 'profiles' property. Config must use the friendly format."
     }
 
     # Start with default config as base
@@ -1217,29 +1172,20 @@ function ConvertFrom-ConfigFileFormat {
         ConvertFrom-GlobalSettings -RawGlobal $RawConfig.global -Config $config
     }
 
-    # Transform profiles
+    # Transform profiles - each profile has exactly one source
     $syncProfiles = @()
-    if ($props -contains 'profiles' -and $RawConfig.profiles) {
+    if ($RawConfig.profiles) {
         $profileNames = $RawConfig.profiles.PSObject.Properties.Name
         foreach ($profileName in $profileNames) {
             $rawProfile = $RawConfig.profiles.$profileName
 
             # Skip disabled profiles
-            # Explicitly check for $false; profiles without 'enabled' property default to enabled
-            # This explicit check handles: null (enabled), $true (enabled), $false (disabled)
             if ($null -ne $rawProfile.enabled -and $rawProfile.enabled -eq $false) {
                 Write-Verbose "Skipping disabled profile: $profileName"
                 continue
             }
 
-            # Handle multi-source profiles (expand into separate sync profiles)
-            if ($rawProfile.sources -and $rawProfile.sources.Count -gt 1) {
-                Write-Verbose "Profile '$profileName' has $($rawProfile.sources.Count) sources - expanding"
-                $syncProfiles += ConvertFrom-ProfileSources -ProfileName $profileName -RawProfile $rawProfile
-                continue
-            }
-
-            # Build single sync profile
+            # Build sync profile
             $syncProfile = [PSCustomObject]@{
                 Name = $profileName
                 Description = if ($rawProfile.description) { $rawProfile.description } else { "" }
@@ -1251,33 +1197,37 @@ function ConvertFrom-ConfigFileFormat {
                 ChunkMaxFiles = 50000
                 ChunkMaxDepth = 5
                 RobocopyOptions = @{}
+                Enabled = $true
             }
 
-            # Handle source - single source from array or direct property
-            if ($rawProfile.sources -and $rawProfile.sources.Count -eq 1) {
-                $syncProfile.Source = $rawProfile.sources[0].path
-                $syncProfile.UseVss = [bool]$rawProfile.sources[0].useVss
-            }
-            elseif ($rawProfile.source) {
-                $syncProfile.Source = $rawProfile.source
+            # Handle source - "source" property (string or object with path/useVss)
+            if ($rawProfile.source) {
+                if ($rawProfile.source -is [string]) {
+                    $syncProfile.Source = $rawProfile.source
+                }
+                elseif ($rawProfile.source.path) {
+                    $syncProfile.Source = $rawProfile.source.path
+                    if ($null -ne $rawProfile.source.useVss) {
+                        $syncProfile.UseVss = [bool]$rawProfile.source.useVss
+                    }
+                }
             }
 
-            # Handle destination using helper
+            # Handle destination
             $syncProfile.Destination = Get-DestinationPathFromRaw -RawDestination $rawProfile.destination
 
-            # Apply chunking settings using helper
+            # Apply chunking settings
             ConvertTo-ChunkSettingsInternal -Profile $syncProfile -RawChunking $rawProfile.chunking
 
-            # Handle robocopy settings using helper
+            # Handle robocopy settings
             $robocopyOptions = ConvertTo-RobocopyOptionsInternal -RawRobocopy $rawProfile.robocopy
 
-            # Handle retry policy (alternative location in config)
+            # Handle retry policy
             if ($rawProfile.retryPolicy) {
                 if ($rawProfile.retryPolicy.maxRetries) {
                     $robocopyOptions.RetryCount = $rawProfile.retryPolicy.maxRetries
                 }
                 if ($rawProfile.retryPolicy.retryDelayMinutes) {
-                    # Convert minutes to seconds for robocopy /W:
                     $robocopyOptions.RetryWait = $rawProfile.retryPolicy.retryDelayMinutes * 60
                 }
             }
@@ -1293,13 +1243,112 @@ function ConvertFrom-ConfigFileFormat {
     return $config
 }
 
+function ConvertTo-FriendlyConfig {
+    <#
+    .SYNOPSIS
+        Converts internal config format to user-friendly JSON format
+    .DESCRIPTION
+        Converts the internal format (SyncProfiles array, GlobalSettings) back to
+        the user-friendly format (profiles object, global nested settings).
+    .PARAMETER Config
+        Internal config object
+    .OUTPUTS
+        PSCustomObject in friendly format ready for JSON serialization
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    # Build friendly format
+    $friendly = [ordered]@{
+        version = "1.0"
+        profiles = [ordered]@{}
+        global = [ordered]@{
+            performance = [ordered]@{
+                maxConcurrentJobs = $Config.GlobalSettings.MaxConcurrentJobs
+                throttleNetworkMbps = $Config.GlobalSettings.BandwidthLimitMbps
+            }
+            logging = [ordered]@{
+                operationalLog = [ordered]@{
+                    path = $Config.GlobalSettings.LogPath
+                    rotation = [ordered]@{
+                        maxAgeDays = $Config.GlobalSettings.LogRetentionDays
+                    }
+                }
+            }
+            email = [ordered]@{
+                enabled = $Config.Email.Enabled
+                smtp = [ordered]@{
+                    server = $Config.Email.SmtpServer
+                    port = $Config.Email.Port
+                    useSsl = $Config.Email.UseTls
+                    credentialName = $Config.Email.CredentialTarget
+                }
+                from = $Config.Email.From
+                to = @($Config.Email.To)
+            }
+        }
+    }
+
+    # Convert each sync profile
+    foreach ($profile in $Config.SyncProfiles) {
+        $friendlyProfile = [ordered]@{
+            description = $profile.Description
+            enabled = if ($null -ne $profile.Enabled) { $profile.Enabled } else { $true }
+            source = [ordered]@{
+                path = $profile.Source
+                useVss = $profile.UseVss
+            }
+            destination = [ordered]@{
+                path = $profile.Destination
+            }
+            chunking = [ordered]@{
+                maxChunkSizeGB = $profile.ChunkMaxSizeGB
+                maxFiles = $profile.ChunkMaxFiles
+                maxDepthToScan = $profile.ChunkMaxDepth
+                strategy = switch ($profile.ScanMode) {
+                    'Smart' { 'auto' }
+                    'Flat' { 'flat' }
+                    default { 'auto' }
+                }
+            }
+        }
+
+        # Add robocopy options if present
+        if ($profile.RobocopyOptions) {
+            $robocopy = [ordered]@{}
+            if ($profile.RobocopyOptions.Switches) {
+                $robocopy.switches = @($profile.RobocopyOptions.Switches)
+            }
+            if ($profile.RobocopyOptions.ExcludeFiles) {
+                $robocopy.excludeFiles = @($profile.RobocopyOptions.ExcludeFiles)
+            }
+            if ($profile.RobocopyOptions.ExcludeDirs) {
+                $robocopy.excludeDirs = @($profile.RobocopyOptions.ExcludeDirs)
+            }
+            if ($robocopy.Count -gt 0) {
+                $friendlyProfile.robocopy = $robocopy
+            }
+        }
+
+        $friendly.profiles[$profile.Name] = [PSCustomObject]$friendlyProfile
+    }
+
+    return [PSCustomObject]$friendly
+}
+
 function Get-RobocurseConfig {
     <#
     .SYNOPSIS
         Loads configuration from JSON file
     .DESCRIPTION
         Loads and parses the Robocurse configuration from a JSON file.
-        Automatically detects and converts between JSON file format and internal format.
+        The config file must use the friendly format with:
+        - "profiles" object containing named profiles (one source per profile)
+        - "global" object with nested settings
+
         If the file doesn't exist, returns a default configuration.
         Handles malformed JSON gracefully by returning default config with a verbose message.
     .PARAMETER Path
@@ -1309,10 +1358,6 @@ function Get-RobocurseConfig {
     .NOTES
         Error Behavior: Returns default configuration on error. Never throws.
         Use -Verbose to see error details.
-
-        Supports two config formats:
-        1. JSON file format: profiles/global structure (user-friendly)
-        2. Internal format: SyncProfiles/GlobalSettings structure
     .EXAMPLE
         $config = Get-RobocurseConfig
         Loads configuration from default path
@@ -1341,12 +1386,10 @@ function Get-RobocurseConfig {
     # Try to load and parse the JSON file
     try {
         $jsonContent = Get-Content -Path $Path -Raw -ErrorAction Stop
-        # Note: -Depth parameter not available in PowerShell 5.1, omitting for compatibility
-        # PS 5.1 defaults to depth 1024 which is sufficient for config files
         $rawConfig = $jsonContent | ConvertFrom-Json -ErrorAction Stop
 
-        # Convert to internal format (handles both formats)
-        $config = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+        # Convert from friendly format to internal format
+        $config = ConvertFrom-FriendlyConfig -RawConfig $rawConfig
 
         # Validate configuration and log any warnings
         $validation = Test-RobocurseConfig -Config $config
@@ -1371,12 +1414,16 @@ function Get-RobocurseConfig {
 function Save-RobocurseConfig {
     <#
     .SYNOPSIS
-        Saves configuration to a JSON file
+        Saves configuration to a JSON file in friendly format
     .DESCRIPTION
         Saves the configuration object to a JSON file with pretty formatting.
+        The config is always saved in the user-friendly format with:
+        - "profiles" object containing named profiles
+        - "global" object with nested settings
+
         Creates the parent directory if it doesn't exist.
     .PARAMETER Config
-        Configuration object to save (PSCustomObject)
+        Configuration object to save (PSCustomObject in internal format)
     .PARAMETER Path
         Path to save the configuration file. Defaults to .\Robocurse.config.json
     .OUTPUTS
@@ -1413,8 +1460,11 @@ function Save-RobocurseConfig {
             Write-Verbose "Created directory: $parentDir"
         }
 
+        # Convert to friendly format before saving
+        $friendlyConfig = ConvertTo-FriendlyConfig -Config $Config
+
         # Convert to JSON and save
-        $jsonContent = $Config | ConvertTo-Json -Depth 10
+        $jsonContent = $friendlyConfig | ConvertTo-Json -Depth 10
         $jsonContent | Set-Content -Path $Path -Encoding UTF8 -ErrorAction Stop
 
         Write-Verbose "Configuration saved successfully to '$Path'"
@@ -1710,8 +1760,10 @@ function Invoke-WithLogMutex {
                 try { $mutex.ReleaseMutex() } catch {
                     # Cannot log here (infinite loop) - release failure is rare
                 }
+                # Dispose after release to avoid disposing while acquired
+                $mutex.Dispose()
             }
-            $mutex.Dispose()
+            # Note: Only dispose if we acquired it - otherwise caller still owns it
         }
     }
 }
@@ -2055,8 +2107,8 @@ function Invoke-LogRotation {
                 $dirDate = [DateTime]::ParseExact($dir.Name, "yyyy-MM-dd", $null)
 
                 # Skip if this is today's directory or yesterday's (may still be in use)
-                # Add 2-hour buffer to handle jobs spanning midnight
-                if ($dirDate.Date -ge $now.Date.AddHours(-2)) {
+                # Compare date parts only - AddDays(-1) is clearer than AddHours(-2) for "yesterday"
+                if ($dirDate.Date -ge $now.Date.AddDays(-1)) {
                     continue
                 }
 
@@ -2422,6 +2474,15 @@ function Set-CachedProfile {
     <#
     .SYNOPSIS
         Stores directory profile in cache (thread-safe)
+    .DESCRIPTION
+        Adds or updates a profile in the thread-safe cache. When the cache
+        exceeds the maximum entry count, uses approximate LRU eviction
+        (similar to Redis's approach) to remove old entries.
+
+        The eviction logic is designed to be safe under concurrent access:
+        - Uses TryAdd to prevent duplicate evictions
+        - Tolerates slight over-capacity during concurrent adds
+        - Does not require locks (relies on ConcurrentDictionary guarantees)
     .PARAMETER Profile
         Profile object to cache
     #>
@@ -2433,28 +2494,38 @@ function Set-CachedProfile {
     # Normalize path for cache key
     $cacheKey = Get-NormalizedCacheKey -Path $Profile.Path
 
-    # Enforce cache size limit - if at max, remove oldest entries
-    if ($script:ProfileCache.Count -ge $script:ProfileCacheMaxEntries) {
+    # Thread-safe add or update using ConcurrentDictionary indexer
+    # Do this FIRST to ensure the profile is always cached, even if eviction has issues
+    $script:ProfileCache[$cacheKey] = $Profile
+    Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level Debug
+
+    # Enforce cache size limit - if significantly over max, trigger eviction
+    # Use a 10% buffer to reduce eviction frequency under concurrent load
+    $maxWithBuffer = [int]($script:ProfileCacheMaxEntries * 1.1)
+    $currentCount = $script:ProfileCache.Count
+
+    if ($currentCount -gt $maxWithBuffer) {
         # Use random sampling for approximate LRU eviction (similar to Redis's approach)
         # Instead of O(n log n) full sort, we sample and sort O(k log k) where k << n
         # This provides good-enough LRU behavior with much better performance
-        $currentCount = $script:ProfileCache.Count
-        $entriesToRemove = [math]::Ceiling($currentCount * 0.1)
+        $entriesToRemove = $currentCount - $script:ProfileCacheMaxEntries
 
-        # Only evict if we have entries to remove
+        # Only evict if we have a meaningful number to remove (reduces contention)
         if ($entriesToRemove -gt 0) {
             # Sample size: 5x the entries to remove (gives good statistical coverage)
+            # Clamp to currentCount to handle edge cases
             $sampleSize = [math]::Min($entriesToRemove * 5, $currentCount)
-            $allEntries = $script:ProfileCache.ToArray()
 
-            if ($currentCount -le $sampleSize) {
+            # Take a snapshot for eviction - this is an atomic operation on ConcurrentDictionary
+            $allEntries = $script:ProfileCache.ToArray()
+            $snapshotCount = $allEntries.Count
+
+            if ($snapshotCount -le $sampleSize) {
                 # Small cache - just sort everything (fast enough)
                 $sample = $allEntries
             }
             else {
                 # Large cache - take random sample for approximate LRU
-                # Note: Get-Random uses proper internal seeding on PS 5.1+, no need
-                # to create a System.Random instance
                 $sample = $allEntries | Get-Random -Count $sampleSize
             }
 
@@ -2465,17 +2536,17 @@ function Set-CachedProfile {
 
             $removed = 0
             foreach ($entry in $oldestEntries) {
+                # TryRemove is atomic - if another thread already removed it, we just skip
                 if ($script:ProfileCache.TryRemove($entry.Key, [ref]$null)) {
                     $removed++
                 }
             }
-            Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $currentCount entries)" -Level Debug
+
+            if ($removed -gt 0) {
+                Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $snapshotCount entries)" -Level Debug
+            }
         }
     }
-
-    # Thread-safe add or update using ConcurrentDictionary indexer
-    $script:ProfileCache[$cacheKey] = $Profile
-    Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level Debug
 }
 
 function Clear-ProfileCache {
@@ -3889,6 +3960,194 @@ function Wait-RobocopyJob {
     }
 }
 
+function Test-RobocopyVerification {
+    <#
+    .SYNOPSIS
+        Verifies a copy operation by comparing source and destination
+    .DESCRIPTION
+        Runs robocopy in list mode (/L) to compare source and destination directories.
+        This is useful as a post-copy verification step to detect:
+        - Files that failed to copy silently
+        - Files that were modified during copy
+        - Timestamp mismatches (when using /FFT for FAT file time tolerance)
+
+        The function returns a verification result indicating whether the
+        directories are in sync and details about any discrepancies.
+    .PARAMETER SourcePath
+        Source directory path that was copied from
+    .PARAMETER DestinationPath
+        Destination directory path that was copied to
+    .PARAMETER UseFatTimeTolerance
+        Use FAT file system time tolerance (/FFT - 2 second granularity).
+        Useful when copying to/from FAT32 or network shares with time precision issues.
+    .PARAMETER RobocopyOptions
+        Optional hashtable of robocopy options (ExcludeFiles, ExcludeDirs) to match
+        the original copy operation
+    .OUTPUTS
+        PSCustomObject with:
+        - Verified: $true if source and destination are in sync
+        - MissingFiles: Count of files in source but not destination
+        - ExtraFiles: Count of files in destination but not source
+        - MismatchedFiles: Count of files with different sizes/timestamps
+        - Details: Detailed verification message
+        - LogPath: Path to verification log file
+    .EXAMPLE
+        $result = Test-RobocopyVerification -SourcePath "C:\Source" -DestinationPath "D:\Backup"
+        if ($result.Verified) { "Backup verified successfully" }
+    .EXAMPLE
+        # Verify with FAT time tolerance for network shares
+        $result = Test-RobocopyVerification -SourcePath "C:\Data" -DestinationPath "\\server\share" -UseFatTimeTolerance
+    .NOTES
+        This function is designed for post-copy verification and does NOT modify any files.
+        It uses robocopy /L (list-only) mode exclusively.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DestinationPath,
+
+        [switch]$UseFatTimeTolerance,
+
+        [hashtable]$RobocopyOptions = @{}
+    )
+
+    # Validate paths
+    $safeSourcePath = Get-SanitizedPath -Path $SourcePath -ParameterName "SourcePath"
+    $safeDestPath = Get-SanitizedPath -Path $DestinationPath -ParameterName "DestinationPath"
+
+    # Create temp log file for verification
+    $tempLogPath = Join-Path ([System.IO.Path]::GetTempPath()) "Robocurse-Verify-$([guid]::NewGuid().ToString('N')).log"
+
+    # Build verification arguments
+    # /L = List only (no copying)
+    # /E = Include subdirectories including empty
+    # /NJH /NJS = No job header/summary (cleaner parsing)
+    # /BYTES = Show sizes in bytes for precision
+    $argList = [System.Collections.Generic.List[string]]::new()
+    $argList.Add("`"$safeSourcePath`"")
+    $argList.Add("`"$safeDestPath`"")
+    $argList.Add("/L")
+    $argList.Add("/E")
+    $argList.Add("/NJH")
+    $argList.Add("/NJS")
+    $argList.Add("/BYTES")
+    $argList.Add("/R:0")
+    $argList.Add("/W:0")
+    $argList.Add("/LOG:`"$tempLogPath`"")
+
+    # Add FAT time tolerance if requested
+    if ($UseFatTimeTolerance) {
+        $argList.Add("/FFT")
+    }
+
+    # Add exclusions from original copy options
+    if ($RobocopyOptions.ExcludeFiles -and $RobocopyOptions.ExcludeFiles.Count -gt 0) {
+        $safeExcludeFiles = Get-SanitizedExcludePatterns -Patterns $RobocopyOptions.ExcludeFiles -Type 'Files'
+        if ($safeExcludeFiles.Count -gt 0) {
+            $argList.Add("/XF")
+            foreach ($pattern in $safeExcludeFiles) {
+                $argList.Add("`"$pattern`"")
+            }
+        }
+    }
+
+    if ($RobocopyOptions.ExcludeDirs -and $RobocopyOptions.ExcludeDirs.Count -gt 0) {
+        $safeExcludeDirs = Get-SanitizedExcludePatterns -Patterns $RobocopyOptions.ExcludeDirs -Type 'Dirs'
+        if ($safeExcludeDirs.Count -gt 0) {
+            $argList.Add("/XD")
+            foreach ($dir in $safeExcludeDirs) {
+                $argList.Add("`"$dir`"")
+            }
+        }
+    }
+
+    # Run robocopy in verification mode
+    $result = [PSCustomObject]@{
+        Verified = $false
+        MissingFiles = 0
+        ExtraFiles = 0
+        MismatchedFiles = 0
+        Details = ""
+        LogPath = $tempLogPath
+    }
+
+    try {
+        # Require validated robocopy path
+        if (-not $script:RobocopyPath) {
+            throw "Robocopy path not validated. Call Test-RobocopyAvailable before verification."
+        }
+
+        Write-RobocurseLog -Message "Running verification: $safeSourcePath -> $safeDestPath" -Level 'Debug' -Component 'Robocopy'
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $script:RobocopyPath
+        $psi.Arguments = $argList -join ' '
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $false
+        $psi.RedirectStandardError = $false
+
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $process.WaitForExit()
+
+        $exitCode = $process.ExitCode
+        $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
+
+        # Parse the verification log
+        if (Test-Path $tempLogPath) {
+            $logContent = Get-Content -Path $tempLogPath -Raw -ErrorAction SilentlyContinue
+
+            if ($logContent) {
+                # Count files that would be copied (missing from destination)
+                $newFileMatches = [regex]::Matches($logContent, '^\s*New File', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+                $result.MissingFiles = $newFileMatches.Count
+
+                # Count extra files (in destination but not source) - only with /MIR would remove them
+                $extraFileMatches = [regex]::Matches($logContent, '^\s*\*EXTRA File', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+                $result.ExtraFiles = $extraFileMatches.Count
+
+                # Count mismatched files (different size/time)
+                $newerMatches = [regex]::Matches($logContent, '^\s*(Newer|Older|Changed)', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+                $result.MismatchedFiles = $newerMatches.Count
+            }
+        }
+
+        # Determine verification status
+        # Exit codes 0-3 are generally successful states
+        # 0 = No changes needed (perfect sync)
+        # 1 = Files were different (would be copied)
+        # 2 = Extra files detected
+        # 3 = Both 1 and 2
+        $result.Verified = ($result.MissingFiles -eq 0 -and $result.MismatchedFiles -eq 0)
+
+        if ($result.Verified) {
+            $result.Details = "Verification passed: Source and destination are in sync"
+            if ($result.ExtraFiles -gt 0) {
+                $result.Details += " ($($result.ExtraFiles) extra files in destination)"
+            }
+        }
+        else {
+            $issues = @()
+            if ($result.MissingFiles -gt 0) { $issues += "$($result.MissingFiles) missing files" }
+            if ($result.MismatchedFiles -gt 0) { $issues += "$($result.MismatchedFiles) mismatched files" }
+            $result.Details = "Verification failed: " + ($issues -join ", ")
+        }
+
+        Write-RobocurseLog -Message "Verification result: $($result.Details)" -Level 'Info' -Component 'Robocopy'
+    }
+    catch {
+        $result.Details = "Verification error: $($_.Exception.Message)"
+        Write-RobocurseLog -Message "Verification failed: $_" -Level 'Error' -Component 'Robocopy'
+    }
+
+    return $result
+}
+
 #endregion
 
 #region ==================== CHECKPOINT ====================
@@ -3976,13 +4235,22 @@ function Save-ReplicationCheckpoint {
         $tempPath = "$checkpointPath.tmp"
         $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
 
-        # Use atomic replacement - remove existing then move
+        # Use atomic replacement with backup - prevents data loss on crash
         # Note: .NET Framework (PowerShell 5.1) doesn't support File.Move overwrite parameter
-        # so we need to remove first, then move
+        $backupPath = "$checkpointPath.bak"
         if (Test-Path $checkpointPath) {
-            Remove-Item -Path $checkpointPath -Force
+            # Move existing to backup first (atomic on same volume)
+            if (Test-Path $backupPath) {
+                Remove-Item -Path $backupPath -Force
+            }
+            [System.IO.File]::Move($checkpointPath, $backupPath)
         }
+        # Now move temp to final (if this fails, we still have the backup)
         [System.IO.File]::Move($tempPath, $checkpointPath)
+        # Clean up backup after successful replacement
+        if (Test-Path $backupPath) {
+            Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+        }
 
         Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
             -Level 'Info' -Component 'Checkpoint'
@@ -4470,12 +4738,20 @@ namespace Robocurse
         }
 
         /// <summary>Clear just the chunk collections (used between profiles)</summary>
+        /// <remarks>
+        /// Drains queues instead of reassigning references to prevent race conditions.
+        /// Reassigning collection references is NOT thread-safe - another thread could be
+        /// iterating with ToArray() during the assignment.
+        /// </remarks>
         public void ClearChunkCollections()
         {
-            ChunkQueue = new ConcurrentQueue<object>();
+            // Drain queues instead of replacing references (thread-safe)
+            object item;
+            while (ChunkQueue.TryDequeue(out item)) { }
+            while (CompletedChunks.TryDequeue(out item)) { }
+            while (FailedChunks.TryDequeue(out item)) { }
+            // ConcurrentDictionary.Clear() is atomic
             ActiveJobs.Clear();
-            CompletedChunks = new ConcurrentQueue<object>();
-            FailedChunks = new ConcurrentQueue<object>();
         }
 
         /// <summary>Get ProfileResults as an array for PowerShell enumeration</summary>
@@ -5050,7 +5326,9 @@ function Invoke-ReplicationTick {
                     -Level 'Error' -Component 'Orchestrator'
                 $chunk.RetryCount++
                 if ($chunk.RetryCount -lt $script:MaxChunkRetries) {
-                    $chunk.RetryAfter = [datetime]::Now.AddSeconds(5)
+                    # Use exponential backoff for consistency with Invoke-FailedChunkHandler
+                    $backoffDelay = Get-RetryBackoffDelay -RetryCount $chunk.RetryCount
+                    $chunk.RetryAfter = [datetime]::Now.AddSeconds($backoffDelay)
                     $chunksToRequeue.Add($chunk)
                 }
                 else {
@@ -5591,20 +5869,41 @@ function Write-HealthCheckStatus {
 function Get-HealthCheckStatus {
     <#
     .SYNOPSIS
-        Reads the health check status file
+        Reads the health check status file with staleness detection
     .DESCRIPTION
         Reads and returns the current health check status from the JSON file.
         Useful for external monitoring scripts or GUI status checks.
+
+        When MaxAgeSeconds is specified, the function checks if the status file
+        is stale (older than the specified age). This is useful for detecting
+        hung or crashed replication processes that stopped updating the health file.
+    .PARAMETER MaxAgeSeconds
+        Maximum age in seconds before the status is considered stale.
+        If the status file's LastUpdate is older than this, the returned
+        object will have IsStale=$true and Healthy=$false.
+        Default: 0 (no staleness check)
     .OUTPUTS
-        PSCustomObject with health status, or $null if file doesn't exist
+        PSCustomObject with health status, or $null if file doesn't exist.
+        When MaxAgeSeconds is specified, includes additional properties:
+        - IsStale: $true if the status file is older than MaxAgeSeconds
+        - StaleSeconds: How many seconds over the threshold (if stale)
     .EXAMPLE
         $status = Get-HealthCheckStatus
         if ($status -and -not $status.Healthy) {
             Send-Alert "Robocurse issue: $($status.Message)"
         }
+    .EXAMPLE
+        # Check for staleness (e.g., if health updates should occur every 30s)
+        $status = Get-HealthCheckStatus -MaxAgeSeconds 90
+        if ($status.IsStale) {
+            Send-Alert "Robocurse may be hung - no health update for $($status.StaleSeconds)s"
+        }
     #>
     [CmdletBinding()]
-    param()
+    param(
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$MaxAgeSeconds = 0
+    )
 
     if (-not (Test-Path $script:HealthCheckStatusFile)) {
         return $null
@@ -5612,7 +5911,30 @@ function Get-HealthCheckStatus {
 
     try {
         $content = Get-Content -Path $script:HealthCheckStatusFile -Raw -ErrorAction Stop
-        return $content | ConvertFrom-Json
+        $status = $content | ConvertFrom-Json
+
+        # Add staleness detection if MaxAgeSeconds specified
+        if ($MaxAgeSeconds -gt 0 -and $status.LastUpdate) {
+            $lastUpdate = [datetime]::Parse($status.LastUpdate)
+            $ageSeconds = ([datetime]::Now - $lastUpdate).TotalSeconds
+
+            # Add staleness properties
+            $status | Add-Member -NotePropertyName 'IsStale' -NotePropertyValue ($ageSeconds -gt $MaxAgeSeconds) -Force
+            $status | Add-Member -NotePropertyName 'AgeSeconds' -NotePropertyValue ([int]$ageSeconds) -Force
+
+            if ($status.IsStale) {
+                $status | Add-Member -NotePropertyName 'StaleSeconds' -NotePropertyValue ([int]($ageSeconds - $MaxAgeSeconds)) -Force
+                # Override Healthy to false if stale
+                $status.Healthy = $false
+                $status.Message = "Health check stale (no update for $([int]$ageSeconds)s, threshold: ${MaxAgeSeconds}s)"
+            }
+        }
+        else {
+            $status | Add-Member -NotePropertyName 'IsStale' -NotePropertyValue $false -Force
+            $status | Add-Member -NotePropertyName 'AgeSeconds' -NotePropertyValue 0 -Force
+        }
+
+        return $status
     }
     catch {
         Write-RobocurseLog -Message "Failed to read health check status: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
@@ -5633,12 +5955,14 @@ function Remove-HealthCheckStatus {
     param()
 
     if (Test-Path $script:HealthCheckStatusFile) {
-        try {
-            Remove-Item -Path $script:HealthCheckStatusFile -Force -ErrorAction Stop
-            Write-RobocurseLog -Message "Removed health check status file" -Level 'Debug' -Component 'Health'
-        }
-        catch {
-            Write-RobocurseLog -Message "Failed to remove health check status file: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
+        if ($PSCmdlet.ShouldProcess($script:HealthCheckStatusFile, "Remove health check status file")) {
+            try {
+                Remove-Item -Path $script:HealthCheckStatusFile -Force -ErrorAction Stop
+                Write-RobocurseLog -Message "Removed health check status file" -Level 'Debug' -Component 'Health'
+            }
+            catch {
+                Write-RobocurseLog -Message "Failed to remove health check status file: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
+            }
         }
     }
 
@@ -5808,11 +6132,19 @@ function Get-ETAEstimate {
 
     $secondsRemaining = $bytesRemaining / $bytesPerSecond
 
-    # Cap at reasonable maximum (30 days = 2,592,000 seconds) to prevent unreasonable ETA
+    # Cap at configurable maximum to prevent unreasonable ETA display
+    # Default is 365 days (configurable via $script:MaxEtaDays)
     # This is well below int32 max (2.1B), so the cast to [int] is always safe
-    $maxSeconds = 30.0 * 24.0 * 60.0 * 60.0
-    if ($secondsRemaining -gt $maxSeconds -or [double]::IsInfinity($secondsRemaining) -or [double]::IsNaN($secondsRemaining)) {
-        $secondsRemaining = $maxSeconds
+    $maxDays = if ($script:MaxEtaDays) { $script:MaxEtaDays } else { 365 }
+    $maxSeconds = $maxDays * 24.0 * 60.0 * 60.0
+
+    if ([double]::IsInfinity($secondsRemaining) -or [double]::IsNaN($secondsRemaining)) {
+        return $null
+    }
+
+    if ($secondsRemaining -gt $maxSeconds) {
+        # Return a special timespan that indicates "capped" - callers can detect via .TotalDays
+        return [timespan]::FromDays($maxDays)
     }
 
     return [timespan]::FromSeconds([int]$secondsRemaining)
@@ -6046,8 +6378,13 @@ function Add-VssToTracking {
                 CreatedAt = $SnapshotInfo.CreatedAt.ToString('o')
             }
 
-            # Use -InputObject to preserve JSON array format (PS 5.1 compatibility)
-            ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
+            # Atomic write: temp file then rename to prevent corruption on crash
+            $tempPath = "$($script:VssTrackingFile).tmp"
+            ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
+            if (Test-Path $script:VssTrackingFile) {
+                Remove-Item -Path $script:VssTrackingFile -Force
+            }
+            [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
         }
     }
     catch {
@@ -6094,8 +6431,13 @@ function Remove-VssFromTracking {
             if ($tracked.Count -eq 0) {
                 Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
             } else {
-                # Use -InputObject to preserve JSON array format (PS 5.1 compatibility)
-                ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
+                # Atomic write: temp file then rename to prevent corruption on crash
+                $tempPath = "$($script:VssTrackingFile).tmp"
+                ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
+                if (Test-Path $script:VssTrackingFile) {
+                    Remove-Item -Path $script:VssTrackingFile -Force
+                }
+                [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
             }
         }
     }
@@ -6226,13 +6568,20 @@ function New-VssSnapshot {
         # Check if error is retryable (transient failures)
         # Non-retryable: invalid path, permissions, VSS not supported
         # Retryable: VSS busy, lock contention, timeout
+        # Use HRESULT codes for language-independent detection where possible
         $retryablePatterns = @(
+            # HRESULT codes (language-independent)
+            '0x8004230F',  # VSS_E_INSUFFICIENT_STORAGE - Insufficient storage (might clear up)
+            '0x80042316',  # VSS_E_SNAPSHOT_SET_IN_PROGRESS - Another snapshot operation in progress
+            '0x80042302',  # VSS_E_OBJECT_NOT_FOUND - Object not found (transient state)
+            '0x80042317',  # VSS_E_MAXIMUM_NUMBER_OF_VOLUMES_REACHED - Might clear after cleanup
+            '0x8004231F',  # VSS_E_WRITERERROR_TIMEOUT - Writer timeout
+            '0x80042325',  # VSS_E_FLUSH_WRITES_TIMEOUT - Flush timeout
+            # English fallback patterns (for error messages without HRESULT)
             'busy',
             'timeout',
             'lock',
             'in use',
-            '0x8004230F',  # Insufficient storage (might clear up)
-            '0x80042316',  # VSS service not running (might start up)
             'try again'
         )
 
@@ -6977,15 +7326,33 @@ function Test-RemoteVssSupported {
                 }
             }
 
-            return New-OperationResult -Success $false -ErrorMessage "Win32_ShadowCopy class not available on '$serverName'"
+            return New-OperationResult -Success $false -ErrorMessage "Win32_ShadowCopy class not available on '$serverName'. Ensure VSS service is not disabled on the remote server."
         }
         finally {
             Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
         }
     }
     catch {
-        Write-RobocurseLog -Message "Cannot connect to remote server '$serverName': $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
-        return New-OperationResult -Success $false -ErrorMessage "Cannot connect to remote server '$serverName': $($_.Exception.Message)"
+        $errorMsg = $_.Exception.Message
+        $guidance = ""
+
+        # Provide actionable guidance based on common error patterns
+        if ($errorMsg -match 'Access is denied|Access denied') {
+            $guidance = " Ensure you have administrative rights on the remote server."
+        }
+        elseif ($errorMsg -match 'RPC server|unavailable|endpoint mapper') {
+            $guidance = " Ensure WinRM service is running on '$serverName'. Run 'Enable-PSRemoting -Force' on the remote server."
+        }
+        elseif ($errorMsg -match 'network path|not found|host.*unknown') {
+            $guidance = " Verify the server name is correct and network connectivity is available."
+        }
+        elseif ($errorMsg -match 'firewall|blocked') {
+            $guidance = " Check firewall rules on '$serverName' - WinRM (TCP 5985/5986) and WMI/DCOM must be allowed."
+        }
+
+        $fullError = "Cannot connect to remote server '$serverName': $errorMsg$guidance"
+        Write-RobocurseLog -Message $fullError -Level 'Warning' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage $fullError
     }
 }
 
@@ -8297,6 +8664,48 @@ function Test-EmailConfiguration {
 
 #region ==================== SCHEDULING ====================
 
+function Get-UniqueTaskName {
+    <#
+    .SYNOPSIS
+        Generates a unique task name based on config path
+    .DESCRIPTION
+        Creates a unique scheduled task name by hashing the config file path.
+        This prevents collisions when multiple Robocurse instances are deployed
+        with different configurations on the same machine.
+    .PARAMETER ConfigPath
+        Path to the configuration file
+    .PARAMETER Prefix
+        Optional prefix for the task name. Default: "Robocurse"
+    .OUTPUTS
+        String - Unique task name like "Robocurse-A1B2C3D4"
+    .EXAMPLE
+        Get-UniqueTaskName -ConfigPath "C:\configs\backup.json"
+        # Returns something like "Robocurse-7F3A2B1C"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ConfigPath,
+
+        [string]$Prefix = "Robocurse"
+    )
+
+    # Normalize path for consistent hashing
+    $normalizedPath = [System.IO.Path]::GetFullPath($ConfigPath).ToLowerInvariant()
+
+    # Create a short hash (first 8 chars of SHA256)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($normalizedPath))
+        $hashString = [BitConverter]::ToString($hashBytes).Replace("-", "").Substring(0, 8)
+    }
+    finally {
+        $sha256.Dispose()
+    }
+
+    return "$Prefix-$hashString"
+}
+
 function Register-RobocurseTask {
     <#
     .SYNOPSIS
@@ -8305,11 +8714,17 @@ function Register-RobocurseTask {
         Registers a Windows scheduled task to run Robocurse automatically.
         Supports daily, weekly, and hourly schedules with flexible configuration.
 
+        When TaskName is not specified, a unique name is auto-generated based on
+        the config file path hash. This prevents collisions when multiple Robocurse
+        instances are deployed with different configurations on the same machine.
+
         SECURITY NOTE: When using -RunAsSystem, the script path is validated to ensure
         it exists and has a .ps1 extension. For additional security, consider placing
         scripts in protected directories (e.g., Program Files) that require admin to modify.
     .PARAMETER TaskName
-        Name for the scheduled task. Default: "Robocurse-Replication"
+        Name for the scheduled task. If not specified, a unique name is auto-generated
+        based on the config file path (e.g., "Robocurse-7F3A2B1C"). This ensures
+        multiple Robocurse instances can coexist without task name collisions.
     .PARAMETER ConfigPath
         Path to config file (mandatory)
     .PARAMETER Schedule
@@ -8352,8 +8767,7 @@ function Register-RobocurseTask {
     #>
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     param(
-        [ValidateNotNullOrEmpty()]
-        [string]$TaskName = "Robocurse-Replication",
+        [string]$TaskName,  # If not specified, auto-generated from ConfigPath hash
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -8395,6 +8809,13 @@ function Register-RobocurseTask {
         # Validate config path exists (inside function body so mocks can intercept)
         if (-not (Test-Path -Path $ConfigPath -PathType Leaf)) {
             return New-OperationResult -Success $false -ErrorMessage "ConfigPath '$ConfigPath' does not exist or is not a file"
+        }
+
+        # Auto-generate unique task name if not specified
+        # This prevents collisions when multiple Robocurse instances use different configs
+        if ([string]::IsNullOrWhiteSpace($TaskName)) {
+            $TaskName = Get-UniqueTaskName -ConfigPath $ConfigPath
+            Write-RobocurseLog -Message "Auto-generated task name: $TaskName" -Level 'Info' -Component 'Scheduler'
         }
 
         # Get script path - use explicit parameter if provided, otherwise auto-detect
@@ -8590,24 +9011,29 @@ function Unregister-RobocurseTask {
         Removes the Robocurse scheduled task
     .DESCRIPTION
         Unregisters the specified scheduled task from Windows Task Scheduler.
+        If TaskName is not specified and ConfigPath is provided, derives the
+        task name from the config path hash (same logic as Register-RobocurseTask).
     .PARAMETER TaskName
-        Name of task to remove. Default: "Robocurse-Replication"
+        Name of task to remove. If not specified, must provide ConfigPath.
+    .PARAMETER ConfigPath
+        Path to config file. Used to derive task name if TaskName not specified.
     .OUTPUTS
         OperationResult - Success=$true with Data=$TaskName on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
-        $result = Unregister-RobocurseTask
+        $result = Unregister-RobocurseTask -TaskName "Robocurse-7F3A2B1C"
         if ($result.Success) { "Task removed" }
     .EXAMPLE
-        $result = Unregister-RobocurseTask -TaskName "Custom-Task"
-        if (-not $result.Success) { Write-Error $result.ErrorMessage }
+        $result = Unregister-RobocurseTask -ConfigPath "C:\config.json"
+        # Derives task name from config path, same as Register-RobocurseTask
     .EXAMPLE
-        Unregister-RobocurseTask -WhatIf
+        Unregister-RobocurseTask -TaskName "Custom-Task" -WhatIf
         # Shows what would be removed without actually deleting
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
-        [ValidateNotNullOrEmpty()]
-        [string]$TaskName = "Robocurse-Replication"
+        [string]$TaskName,
+
+        [string]$ConfigPath
     )
 
     try {
@@ -8615,6 +9041,14 @@ function Unregister-RobocurseTask {
         if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
             return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
+        }
+
+        # Derive task name from ConfigPath if not specified
+        if ([string]::IsNullOrWhiteSpace($TaskName)) {
+            if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
+                return New-OperationResult -Success $false -ErrorMessage "Either TaskName or ConfigPath must be specified"
+            }
+            $TaskName = Get-UniqueTaskName -ConfigPath $ConfigPath
         }
 
         if ($PSCmdlet.ShouldProcess($TaskName, "Unregister scheduled task")) {
@@ -9488,6 +9922,30 @@ function Initialize-EventHandlers {
             Invoke-SafeEventHandler -HandlerName "SaveProfile" -ScriptBlock { Save-ProfileFromForm }
         })
     }
+
+    # Numeric input validation - reject non-numeric characters in real-time
+    # This provides immediate feedback before the user finishes typing
+    @('txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
+        $control = $script:Controls[$_]
+        if ($control) {
+            $control.Add_PreviewTextInput({
+                param($sender, $e)
+                # Only allow digits (0-9)
+                $e.Handled = -not ($e.Text -match '^\d+$')
+            })
+            # Also handle paste - filter non-numeric content using DataObject.AddPastingHandler
+            # This is the correct WPF API for handling paste events
+            [System.Windows.DataObject]::AddPastingHandler($control, {
+                param($sender, $e)
+                if ($e.DataObject.GetDataPresent([System.Windows.DataFormats]::Text)) {
+                    $text = $e.DataObject.GetData([System.Windows.DataFormats]::Text)
+                    if ($text -notmatch '^\d+$') {
+                        $e.CancelCommand()
+                    }
+                }
+            })
+        }
+    }
     $script:Controls.chkUseVss.Add_Checked({
         Invoke-SafeEventHandler -HandlerName "VssCheckbox" -ScriptBlock { Save-ProfileFromForm }
     })
@@ -10294,18 +10752,29 @@ function Write-GuiLog {
     $timestamp = Get-Date -Format "HH:mm:ss"
     $line = "[$timestamp] $Message"
 
-    # Add to ring buffer
-    $script:GuiLogBuffer.Add($line)
+    # Thread-safe buffer update using lock
+    # Capture logText inside the lock to avoid race between buffer modification and join
+    $logText = $null
+    [System.Threading.Monitor]::Enter($script:GuiLogBuffer)
+    try {
+        # Add to ring buffer
+        $script:GuiLogBuffer.Add($line)
 
-    # Trim if over limit (remove oldest entries)
-    while ($script:GuiLogBuffer.Count -gt $script:GuiLogMaxLines) {
-        $script:GuiLogBuffer.RemoveAt(0)
+        # Trim if over limit (remove oldest entries)
+        while ($script:GuiLogBuffer.Count -gt $script:GuiLogMaxLines) {
+            $script:GuiLogBuffer.RemoveAt(0)
+        }
+
+        # Capture text while still holding the lock
+        $logText = $script:GuiLogBuffer -join "`n"
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:GuiLogBuffer)
     }
 
     # Use Dispatcher.BeginInvoke for thread safety - non-blocking async update
     # Using Invoke (synchronous) could cause deadlocks if called from background thread
     # while UI thread is busy
-    $logText = $script:GuiLogBuffer -join "`n"
     [void]$script:Window.Dispatcher.BeginInvoke([Action]{
         $script:Controls.txtLog.Text = $logText
         $script:Controls.svLog.ScrollToEnd()
