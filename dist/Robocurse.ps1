@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 19:44:10
+    Built: 2025-12-02 20:02:26
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -67,7 +67,9 @@ param(
     [string]$SyncProfile,
     [switch]$AllProfiles,
     [switch]$DryRun,
-    [switch]$Help
+    [switch]$Help,
+    # Internal: Load functions only without executing main entry point (for background runspace)
+    [switch]$LoadOnly
 )
 
 #region ==================== CONSTANTS ====================
@@ -5251,6 +5253,9 @@ function Start-ProfileReplication {
     $state.CompletedCount = 0
     $state.BytesComplete = 0
     $state.Phase = "Replicating"
+
+    # Debug: verify TotalChunks was set correctly
+    Write-Host "[DEBUG] Set TotalChunks = $($chunks.Count), verified read = $($state.TotalChunks)"
 
     Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($scanResult.TotalSize/1GB, 2)) GB" `
         -Level 'Info' -Component 'Orchestrator'
@@ -10657,8 +10662,8 @@ function New-ReplicationRunspace {
             try {
                 Write-Host "[BACKGROUND] Loading script from: `$ScriptPath"
                 Write-Host "[BACKGROUND] Config path: `$GuiConfigPath"
-                # Load the script to get all functions (with -Help to prevent main execution)
-                . `$ScriptPath -Help
+                # Load the script to get all functions (with -LoadOnly to prevent main execution)
+                . `$ScriptPath -LoadOnly
                 Write-Host "[BACKGROUND] Script loaded successfully"
             }
             catch {
@@ -10861,6 +10866,13 @@ function Complete-GuiReplication {
 
     # Show completion message
     $status = Get-OrchestrationStatus
+
+    # Debug: log raw state values to diagnose TotalChunks=0 issue
+    if ($script:OrchestrationState) {
+        Write-Host "[DEBUG] Raw state - TotalChunks: $($script:OrchestrationState.TotalChunks), CompletedCount: $($script:OrchestrationState.CompletedCount), Phase: $($script:OrchestrationState.Phase)"
+    }
+    Write-Host "[DEBUG] Status - ChunksTotal: $($status.ChunksTotal), ChunksComplete: $($status.ChunksComplete)"
+
     $message = "Replication completed!`n`nChunks: $($status.ChunksComplete)/$($status.ChunksTotal)`nFailed: $($status.ChunksFailed)"
 
     [System.Windows.MessageBox]::Show(
@@ -11804,6 +11816,11 @@ function Start-RobocurseMain {
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Main entry point - only execute if not being dot-sourced for testing
+# LoadOnly mode: Just load functions without any execution (for background runspace loading)
+if ($LoadOnly) {
+    return
+}
+
 # Check if -Help was passed (always process help)
 if ($Help) {
     Show-RobocurseHelp

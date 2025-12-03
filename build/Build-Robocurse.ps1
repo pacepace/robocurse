@@ -140,7 +140,9 @@ param(
     [string]$SyncProfile,
     [switch]$AllProfiles,
     [switch]$DryRun,
-    [switch]$Help
+    [switch]$Help,
+    # Internal: Load functions only without executing main entry point (for background runspace)
+    [switch]$LoadOnly
 )
 
 '@)
@@ -236,6 +238,11 @@ $script:RobocurseScriptPath = $PSCommandPath
 # Add main execution block (matches original monolith behavior)
 [void]$output.AppendLine(@'
 # Main entry point - only execute if not being dot-sourced for testing
+# LoadOnly mode: Just load functions without any execution (for background runspace loading)
+if ($LoadOnly) {
+    return
+}
+
 # Check if -Help was passed (always process help)
 if ($Help) {
     Show-RobocurseHelp

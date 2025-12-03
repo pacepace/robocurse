@@ -749,6 +749,9 @@ function Start-ProfileReplication {
     $state.BytesComplete = 0
     $state.Phase = "Replicating"
 
+    # Debug: verify TotalChunks was set correctly
+    Write-Host "[DEBUG] Set TotalChunks = $($chunks.Count), verified read = $($state.TotalChunks)"
+
     Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($scanResult.TotalSize/1GB, 2)) GB" `
         -Level 'Info' -Component 'Orchestrator'
 }

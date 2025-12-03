@@ -989,8 +989,8 @@ function New-ReplicationRunspace {
             try {
                 Write-Host "[BACKGROUND] Loading script from: `$ScriptPath"
                 Write-Host "[BACKGROUND] Config path: `$GuiConfigPath"
-                # Load the script to get all functions (with -Help to prevent main execution)
-                . `$ScriptPath -Help
+                # Load the script to get all functions (with -LoadOnly to prevent main execution)
+                . `$ScriptPath -LoadOnly
                 Write-Host "[BACKGROUND] Script loaded successfully"
             }
             catch {
@@ -1193,6 +1193,13 @@ function Complete-GuiReplication {
 
     # Show completion message
     $status = Get-OrchestrationStatus
+
+    # Debug: log raw state values to diagnose TotalChunks=0 issue
+    if ($script:OrchestrationState) {
+        Write-Host "[DEBUG] Raw state - TotalChunks: $($script:OrchestrationState.TotalChunks), CompletedCount: $($script:OrchestrationState.CompletedCount), Phase: $($script:OrchestrationState.Phase)"
+    }
+    Write-Host "[DEBUG] Status - ChunksTotal: $($status.ChunksTotal), ChunksComplete: $($status.ChunksComplete)"
+
     $message = "Replication completed!`n`nChunks: $($status.ChunksComplete)/$($status.ChunksTotal)`nFailed: $($status.ChunksFailed)"
 
     [System.Windows.MessageBox]::Show(
