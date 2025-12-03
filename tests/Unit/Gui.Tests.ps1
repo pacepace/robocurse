@@ -633,5 +633,51 @@ InModuleScope 'Robocurse' {
                 $dialog.Close()
             }
         }
+
+        Context "Completion Dialog Headless Tests" -Skip:(-not (Test-IsWindowsPlatform)) {
+            BeforeAll {
+                Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
+                Add-Type -AssemblyName PresentationCore -ErrorAction Stop
+                Add-Type -AssemblyName WindowsBase -ErrorAction Stop
+            }
+
+            It "Should load CompletionDialog XAML without error" {
+                $xaml = Get-XamlResource -ResourceName 'CompletionDialog.xaml'
+                $xaml | Should -Not -BeNullOrEmpty
+
+                # Parse the XAML - this is where TemplateBinding bugs would surface
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                { $dialog = [System.Windows.Markup.XamlReader]::Load($reader) } | Should -Not -Throw
+                $reader.Close()
+
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog | Should -BeOfType [System.Windows.Window]
+                $dialog.Title | Should -Match "Complete"
+
+                # Clean up
+                $dialog.Close()
+            }
+
+            It "Should have required completion dialog controls" {
+                $xaml = Get-XamlResource -ResourceName 'CompletionDialog.xaml'
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog.FindName('iconBorder') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('iconText') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtTitle') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtSubtitle') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtChunksValue') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtTotalValue') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtFailedValue') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('btnOk') | Should -Not -BeNullOrEmpty
+
+                $dialog.Close()
+            }
+        }
     }
 }

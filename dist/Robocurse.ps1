@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 20:47:17
+    Built: 2025-12-02 21:00:27
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -10797,9 +10797,9 @@ function Start-GuiReplication {
         [switch]$SelectedOnly
     )
 
-    # Get and validate profiles
-    $profilesToRun = Get-ProfilesToRun -AllProfiles:$AllProfiles -SelectedOnly:$SelectedOnly
-    if (-not $profilesToRun) { return }
+    # Get and validate profiles (force array context to handle PowerShell's single-item unwrapping)
+    $profilesToRun = @(Get-ProfilesToRun -AllProfiles:$AllProfiles -SelectedOnly:$SelectedOnly)
+    if ($profilesToRun.Count -eq 0) { return }
 
     # Update UI state for replication mode
     $script:Controls.btnRunAll.IsEnabled = $false

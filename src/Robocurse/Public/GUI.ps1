@@ -1078,9 +1078,9 @@ function Start-GuiReplication {
         [switch]$SelectedOnly
     )
 
-    # Get and validate profiles
-    $profilesToRun = Get-ProfilesToRun -AllProfiles:$AllProfiles -SelectedOnly:$SelectedOnly
-    if (-not $profilesToRun) { return }
+    # Get and validate profiles (force array context to handle PowerShell's single-item unwrapping)
+    $profilesToRun = @(Get-ProfilesToRun -AllProfiles:$AllProfiles -SelectedOnly:$SelectedOnly)
+    if ($profilesToRun.Count -eq 0) { return }
 
     # Update UI state for replication mode
     $script:Controls.btnRunAll.IsEnabled = $false
