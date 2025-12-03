@@ -22,7 +22,10 @@ function Invoke-RobocopyList {
     )
 
     # Wrapper so we can mock this in tests
-    $output = & robocopy $Source "\\?\NULL" /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
+    # Use a non-existent temp path as destination - robocopy /L lists without creating it
+    # Note: \\?\NULL doesn't work on all Windows versions, and src=dest doesn't list files
+    $nullDest = Join-Path $env:TEMP "robocurse-null-$(Get-Random)"
+    $output = & robocopy $Source $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
     # Ensure we always return an array (robocopy can return empty/null for root drives)
     if ($null -eq $output) {
         return @()
@@ -69,21 +72,31 @@ function ConvertFrom-RobocopyListOutput {
             continue
         }
 
-        # Lines starting with whitespace + number are files or directories
-        # Format: "          123456789    path\to\file.txt"
-        if ($line -match '^\s+(\d+)\s+(.+)$') {
+        # New File format: "    New File           2048    filename"
+        if ($line -match 'New File\s+(\d+)\s+(.+)$') {
             $size = [int64]$matches[1]
             $path = $matches[2].Trim()
-
-            # Lines ending with \ are directories
+            $fileCount++
+            $totalSize += $size
+            $files += [PSCustomObject]@{
+                Path = $path
+                Size = $size
+            }
+        }
+        # New Dir format: "  New Dir          3    D:\path\"
+        elseif ($line -match 'New Dir\s+\d+\s+(.+)$') {
+            $dirCount++
+        }
+        # Fallback: old format "          123456789    path\to\file.txt" (for compatibility)
+        elseif ($line -match '^\s+(\d+)\s+(.+)$') {
+            $size = [int64]$matches[1]
+            $path = $matches[2].Trim()
             if ($path.EndsWith('\')) {
                 $dirCount++
             }
             else {
-                # This is a file
                 $fileCount++
                 $totalSize += $size
-
                 $files += [PSCustomObject]@{
                     Path = $path
                     Size = $size

@@ -338,6 +338,37 @@ InModuleScope 'Robocurse' {
                 $result.FileCount | Should -Be 2
                 $result.TotalSize | Should -Be 3000
             }
+
+            It "Should parse New File format (robocopy with temp dest)" {
+                # This is the format when using a non-existent temp path as destination
+                $output = @(
+                    "	  New Dir          3	D:\",
+                    "	    New File  		    2048	boot.catalog",
+                    "	    New File  		 2628480	bootmgr.efi",
+                    "	    New File  		   80312	setup.exe",
+                    "	  New Dir          3	D:\boot\"
+                )
+
+                $result = ConvertFrom-RobocopyListOutput -Output $output
+
+                $result.FileCount | Should -Be 3
+                $result.DirCount | Should -Be 2
+                $result.TotalSize | Should -Be (2048 + 2628480 + 80312)
+            }
+
+            It "Should parse mixed old and new formats" {
+                $output = @(
+                    "	    New File  		 1000	newformat.txt",
+                    "          2000    oldformat.txt",
+                    "	  New Dir          1	D:\test\"
+                )
+
+                $result = ConvertFrom-RobocopyListOutput -Output $output
+
+                $result.FileCount | Should -Be 2
+                $result.DirCount | Should -Be 1
+                $result.TotalSize | Should -Be 3000
+            }
         }
 
         Context "Get-DirectoryProfilesParallel" {

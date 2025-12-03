@@ -15,7 +15,8 @@
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse; Invoke-Pester -Path tests\\Integration\\Build.Tests.ps1 -Output Detailed\")",
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse; .\\build\\Build-Robocurse.ps1\")",
       "Bash(del \"C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\test-runspace.ps1\")",
-      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse; Invoke-Pester -Path tests -PassThru -Output Detailed\")"
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse; Invoke-Pester -Path tests -PassThru -Output Detailed\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"robocopy ''D:\\'' ''\\?\\NULL'' /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1 | Select-Object -First 30\")"
     ],
     "deny": [],
     "ask": []
