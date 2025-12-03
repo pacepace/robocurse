@@ -8,6 +8,36 @@
         Background="Transparent"
         ResizeMode="NoResize">
 
+    <Window.Resources>
+        <!-- Button style that works with dynamic XamlReader loading (no TemplateBinding) -->
+        <Style x:Key="ModernButton" TargetType="Button">
+            <Setter Property="Background" Value="#0078D4"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="24,10"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="#0078D4" CornerRadius="4" Padding="24,10">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#1084D8"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#006CBD"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
     <Border Background="#1E1E1E" CornerRadius="8" BorderBrush="#3E3E3E" BorderThickness="1">
         <Grid Margin="24">
             <Grid.RowDefinitions>
@@ -19,7 +49,7 @@
 
             <!-- Header with icon and title -->
             <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,16">
-                <!-- Success checkmark icon (Unicode) -->
+                <!-- Success checkmark icon -->
                 <Border x:Name="iconBorder" Width="48" Height="48" CornerRadius="24" Background="#4CAF50" Margin="0,0,16,0">
                     <TextBlock x:Name="iconText" Text="&#x2713;" FontSize="28" Foreground="White"
                                HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold"/>
@@ -60,32 +90,8 @@
                 </StackPanel>
             </Grid>
 
-            <!-- OK Button -->
-            <Button x:Name="btnOk" Grid.Row="3" Content="OK"
-                    Background="#0078D4" Foreground="White"
-                    BorderThickness="0" Padding="24,10"
-                    FontSize="14" FontWeight="SemiBold"
-                    HorizontalAlignment="Center" Cursor="Hand">
-                <Button.Style>
-                    <Style TargetType="Button">
-                        <Setter Property="Template">
-                            <Setter.Value>
-                                <ControlTemplate TargetType="Button">
-                                    <Border x:Name="border" Background="{TemplateBinding Background}"
-                                            CornerRadius="4" Padding="{TemplateBinding Padding}">
-                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                                    </Border>
-                                    <ControlTemplate.Triggers>
-                                        <Trigger Property="IsMouseOver" Value="True">
-                                            <Setter TargetName="border" Property="Background" Value="#1084D8"/>
-                                        </Trigger>
-                                    </ControlTemplate.Triggers>
-                                </ControlTemplate>
-                            </Setter.Value>
-                        </Setter>
-                    </Style>
-                </Button.Style>
-            </Button>
+            <!-- OK Button with proper styling -->
+            <Button x:Name="btnOk" Grid.Row="3" Content="OK" Style="{StaticResource ModernButton}" HorizontalAlignment="Center"/>
         </Grid>
     </Border>
 </Window>
