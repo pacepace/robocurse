@@ -140,6 +140,10 @@ $script:DryRunMode = $false
 # Get the module's root directory
 $PSModuleRoot = $PSScriptRoot
 
+# Store the module path for background runspace loading
+# This will be used by New-ReplicationRunspace to load the module in the background thread
+$script:RobocurseModulePath = $PSModuleRoot
+
 # Load public functions (in dependency order)
 $publicFunctionOrder = @(
     'Utility.ps1'

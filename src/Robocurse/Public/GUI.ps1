@@ -201,6 +201,12 @@ function Initialize-RobocurseGui {
     # Store ConfigPath in script scope for use by event handlers and background jobs
     $script:ConfigPath = $ConfigPath
 
+    Write-Host "[DEBUG] Initializing Robocurse GUI..."
+    Write-Host "[DEBUG] ConfigPath: $ConfigPath"
+    Write-Host "[DEBUG] script:RobocurseModulePath: $script:RobocurseModulePath"
+    Write-Host "[DEBUG] script:RobocurseScriptPath: $script:RobocurseScriptPath"
+    Write-Host "[DEBUG] PSCommandPath: $PSCommandPath"
+
     # Check platform
     if (-not (Test-IsWindowsPlatform)) {
         Write-Warning "WPF GUI is only supported on Windows. Use -Headless mode on other platforms."
@@ -676,6 +682,12 @@ function Save-ProfileFromForm {
 
     # Refresh list display
     $script:Controls.lstProfiles.Items.Refresh()
+
+    # Auto-save config to disk
+    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+    if (-not $saveResult.Success) {
+        Write-GuiLog "Warning: Auto-save failed: $($saveResult.ErrorMessage)"
+    }
 }
 
 function Add-NewProfile {
@@ -707,6 +719,12 @@ function Add-NewProfile {
     # Update UI
     Update-ProfileList
     $script:Controls.lstProfiles.SelectedIndex = $script:Controls.lstProfiles.Items.Count - 1
+
+    # Auto-save config to disk
+    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+    if (-not $saveResult.Success) {
+        Write-GuiLog "Warning: Auto-save failed: $($saveResult.ErrorMessage)"
+    }
 
     Write-GuiLog "New profile created"
 }
@@ -740,6 +758,13 @@ function Remove-SelectedProfile {
     if ($result -eq 'Yes') {
         $script:Config.SyncProfiles = @($script:Config.SyncProfiles | Where-Object { $_ -ne $selected })
         Update-ProfileList
+
+        # Auto-save config to disk
+        $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+        if (-not $saveResult.Success) {
+            Write-GuiLog "Warning: Auto-save failed: $($saveResult.ErrorMessage)"
+        }
+
         Write-GuiLog "Profile '$($selected.Name)' removed"
     }
 }
@@ -833,10 +858,46 @@ function New-ReplicationRunspace {
         [int]$MaxWorkers
     )
 
-    # Get the path to this script for dot-sourcing into the runspace
-    $scriptPath = $PSCommandPath
-    if (-not $scriptPath) {
-        $scriptPath = Join-Path (Get-Location) "Robocurse.ps1"
+    # Determine how to load Robocurse in the background runspace
+    # Two modes: 1) Module mode (Import-Module), 2) Monolith mode (dot-source script)
+    $loadMode = $null
+    $loadPath = $null
+
+    # Check if we're running from a module (RobocurseModulePath is set by psm1)
+    if ($script:RobocurseModulePath -and (Test-Path (Join-Path $script:RobocurseModulePath "Robocurse.psd1"))) {
+        $loadMode = "Module"
+        $loadPath = $script:RobocurseModulePath
+    }
+    # Check if we have a stored script path (set by monolith)
+    elseif ($script:RobocurseScriptPath -and (Test-Path $script:RobocurseScriptPath)) {
+        $loadMode = "Script"
+        $loadPath = $script:RobocurseScriptPath
+    }
+    # Try PSCommandPath (works when running as standalone script)
+    elseif ($PSCommandPath -and (Test-Path $PSCommandPath)) {
+        $loadMode = "Script"
+        $loadPath = $PSCommandPath
+    }
+    # Fall back to looking for Robocurse.ps1 in current directory
+    else {
+        $fallbackPath = Join-Path (Get-Location) "Robocurse.ps1"
+        if (Test-Path $fallbackPath) {
+            $loadMode = "Script"
+            $loadPath = $fallbackPath
+        }
+    }
+
+    Write-Host "[DEBUG] Background runspace load mode: $loadMode"
+    Write-Host "[DEBUG] Background runspace load path: $loadPath"
+    Write-Host "[DEBUG] PSCommandPath: $PSCommandPath"
+    Write-Host "[DEBUG] script:RobocurseModulePath: $script:RobocurseModulePath"
+    Write-Host "[DEBUG] script:RobocurseScriptPath: $script:RobocurseScriptPath"
+
+    if (-not $loadMode -or -not $loadPath) {
+        $errorMsg = "Cannot find Robocurse module or script to load in background runspace. loadPath='$loadPath'"
+        Write-Host "[ERROR] $errorMsg"
+        Write-GuiLog "ERROR: $errorMsg"
+        throw $errorMsg
     }
 
     $runspace = [runspacefactory]::CreateRunspace()
@@ -848,35 +909,126 @@ function New-ReplicationRunspace {
     $powershell = [powershell]::Create()
     $powershell.Runspace = $runspace
 
-    # Build a script that loads the main script and runs replication
+    # Build a script that loads Robocurse and runs replication
     # Note: We pass the C# OrchestrationState object which is inherently thread-safe
     # Callbacks are intentionally NOT shared - GUI uses timer-based polling instead
-    $backgroundScript = @"
-        param(`$ScriptPath, `$SharedState, `$Profiles, `$MaxWorkers, `$ConfigPath)
+    if ($loadMode -eq "Module") {
+        $backgroundScript = @"
+            param(`$ModulePath, `$SharedState, `$Profiles, `$MaxWorkers, `$ConfigPath)
 
-        # Load the script to get all functions (with -Help to prevent main execution)
-        . `$ScriptPath -Help
+            try {
+                Write-Host "[BACKGROUND] Loading module from: `$ModulePath"
+                Import-Module `$ModulePath -Force -ErrorAction Stop
+                Write-Host "[BACKGROUND] Module loaded successfully"
+            }
+            catch {
+                Write-Host "[BACKGROUND] ERROR loading module: `$(`$_.Exception.Message)"
+                `$SharedState.EnqueueError("Failed to load module: `$(`$_.Exception.Message)")
+                `$SharedState.Phase = 'Complete'
+                return
+            }
 
-        # Use the shared C# OrchestrationState instance (thread-safe by design)
-        `$script:OrchestrationState = `$SharedState
+            # Initialize logging session (required for Write-RobocurseLog)
+            try {
+                Write-Host "[BACKGROUND] Initializing log session..."
+                `$config = Get-RobocurseConfig -Path `$ConfigPath
+                `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+                Initialize-LogSession -LogRoot `$logRoot
+                Write-Host "[BACKGROUND] Log session initialized"
+            }
+            catch {
+                Write-Host "[BACKGROUND] WARNING: Failed to initialize logging: `$(`$_.Exception.Message)"
+                # Continue anyway - logging is not critical for replication
+            }
 
-        # Clear callbacks - GUI mode uses timer-based polling, not callbacks
-        `$script:OnProgress = `$null
-        `$script:OnChunkComplete = `$null
-        `$script:OnProfileComplete = `$null
+            # Use the shared C# OrchestrationState instance (thread-safe by design)
+            `$script:OrchestrationState = `$SharedState
 
-        # Start replication with -SkipInitialization since UI thread already initialized
-        Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
+            # Clear callbacks - GUI mode uses timer-based polling, not callbacks
+            `$script:OnProgress = `$null
+            `$script:OnChunkComplete = `$null
+            `$script:OnProfileComplete = `$null
 
-        # Run the orchestration loop until complete
-        while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
-            Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
-            Start-Sleep -Milliseconds 250
-        }
+            try {
+                Write-Host "[BACKGROUND] Starting replication run"
+                # Start replication with -SkipInitialization since UI thread already initialized
+                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
+
+                # Run the orchestration loop until complete
+                while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
+                    Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
+                    Start-Sleep -Milliseconds 250
+                }
+                Write-Host "[BACKGROUND] Replication loop complete, phase: `$(`$script:OrchestrationState.Phase)"
+            }
+            catch {
+                Write-Host "[BACKGROUND] ERROR in replication: `$(`$_.Exception.Message)"
+                `$SharedState.EnqueueError("Replication error: `$(`$_.Exception.Message)")
+                `$SharedState.Phase = 'Complete'
+            }
 "@
+    }
+    else {
+        # Script/monolith mode
+        $backgroundScript = @"
+            param(`$ScriptPath, `$SharedState, `$Profiles, `$MaxWorkers, `$ConfigPath)
+
+            try {
+                Write-Host "[BACKGROUND] Loading script from: `$ScriptPath"
+                # Load the script to get all functions (with -Help to prevent main execution)
+                . `$ScriptPath -Help
+                Write-Host "[BACKGROUND] Script loaded successfully"
+            }
+            catch {
+                Write-Host "[BACKGROUND] ERROR loading script: `$(`$_.Exception.Message)"
+                `$SharedState.EnqueueError("Failed to load script: `$(`$_.Exception.Message)")
+                `$SharedState.Phase = 'Complete'
+                return
+            }
+
+            # Initialize logging session (required for Write-RobocurseLog)
+            try {
+                Write-Host "[BACKGROUND] Initializing log session..."
+                `$config = Get-RobocurseConfig -Path `$ConfigPath
+                `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+                Initialize-LogSession -LogRoot `$logRoot
+                Write-Host "[BACKGROUND] Log session initialized"
+            }
+            catch {
+                Write-Host "[BACKGROUND] WARNING: Failed to initialize logging: `$(`$_.Exception.Message)"
+                # Continue anyway - logging is not critical for replication
+            }
+
+            # Use the shared C# OrchestrationState instance (thread-safe by design)
+            `$script:OrchestrationState = `$SharedState
+
+            # Clear callbacks - GUI mode uses timer-based polling, not callbacks
+            `$script:OnProgress = `$null
+            `$script:OnChunkComplete = `$null
+            `$script:OnProfileComplete = `$null
+
+            try {
+                Write-Host "[BACKGROUND] Starting replication run"
+                # Start replication with -SkipInitialization since UI thread already initialized
+                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
+
+                # Run the orchestration loop until complete
+                while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
+                    Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
+                    Start-Sleep -Milliseconds 250
+                }
+                Write-Host "[BACKGROUND] Replication loop complete, phase: `$(`$script:OrchestrationState.Phase)"
+            }
+            catch {
+                Write-Host "[BACKGROUND] ERROR in replication: `$(`$_.Exception.Message)"
+                `$SharedState.EnqueueError("Replication error: `$(`$_.Exception.Message)")
+                `$SharedState.Phase = 'Complete'
+            }
+"@
+    }
 
     $powershell.AddScript($backgroundScript)
-    $powershell.AddArgument($scriptPath)
+    $powershell.AddArgument($loadPath)
     $powershell.AddArgument($script:OrchestrationState)
     $powershell.AddArgument($Profiles)
     $powershell.AddArgument($MaxWorkers)
@@ -919,20 +1071,40 @@ function Start-GuiReplication {
     $script:Controls.dgChunks.ItemsSource = $null
 
     Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
+    foreach ($p in $profilesToRun) {
+        Write-Host "[DEBUG] Profile to run: $($p.Name) - Source: $($p.Source) - Dest: $($p.Destination)"
+    }
 
     # Get worker count and start progress timer
     $maxWorkers = [int]$script:Controls.sldWorkers.Value
+    Write-Host "[DEBUG] Max workers: $maxWorkers"
     $script:ProgressTimer.Start()
 
     # Initialize orchestration state (must happen before runspace creation)
+    Write-Host "[DEBUG] Initializing orchestration state..."
     Initialize-OrchestrationState
+    Write-Host "[DEBUG] Orchestration state initialized, phase: $($script:OrchestrationState.Phase)"
 
     # Create and start background runspace
-    $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers
+    Write-Host "[DEBUG] Creating background runspace..."
+    try {
+        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers
+        Write-Host "[DEBUG] Background runspace created successfully"
 
-    $script:ReplicationHandle = $runspaceInfo.Handle
-    $script:ReplicationPowerShell = $runspaceInfo.PowerShell
-    $script:ReplicationRunspace = $runspaceInfo.Runspace
+        $script:ReplicationHandle = $runspaceInfo.Handle
+        $script:ReplicationPowerShell = $runspaceInfo.PowerShell
+        $script:ReplicationRunspace = $runspaceInfo.Runspace
+    }
+    catch {
+        Write-Host "[ERROR] Failed to create background runspace: $($_.Exception.Message)"
+        Write-GuiLog "ERROR: Failed to start replication: $($_.Exception.Message)"
+        # Reset UI state
+        $script:Controls.btnRunAll.IsEnabled = $true
+        $script:Controls.btnRunSelected.IsEnabled = $true
+        $script:Controls.btnStop.IsEnabled = $false
+        $script:Controls.txtStatus.Text = "Ready"
+        $script:ProgressTimer.Stop()
+    }
 }
 
 function Complete-GuiReplication {
@@ -1165,6 +1337,13 @@ function Update-GuiProgress {
     try {
         $status = Get-OrchestrationStatus
 
+        # Periodic debug output (every 10 ticks = ~5 seconds)
+        if (-not $script:ProgressTickCount) { $script:ProgressTickCount = 0 }
+        $script:ProgressTickCount++
+        if ($script:ProgressTickCount % 10 -eq 1) {
+            Write-Host "[DEBUG] Progress tick #$($script:ProgressTickCount): Phase=$($status.Phase), Chunks=$($status.ChunksComplete)/$($status.ChunksTotal), Active=$($status.ActiveJobs)"
+        }
+
         # Update progress text (always - lightweight)
         Update-GuiProgressText -Status $status
 
@@ -1178,15 +1357,18 @@ function Update-GuiProgress {
 
         # Update chunk grid - only when state changes
         if ($script:OrchestrationState -and (Test-ChunkGridNeedsRebuild)) {
-            $script:Controls.dgChunks.ItemsSource = Get-ChunkDisplayItems
+            # Force array context to prevent PowerShell unwrapping single items
+            $script:Controls.dgChunks.ItemsSource = @(Get-ChunkDisplayItems)
         }
 
         # Check if complete
         if ($status.Phase -eq 'Complete') {
+            Write-Host "[DEBUG] Replication complete, calling Complete-GuiReplication"
             Complete-GuiReplication
         }
     }
     catch {
+        Write-Host "[ERROR] Error updating progress: $_"
         Write-GuiLog "Error updating progress: $_"
     }
 }
@@ -1198,21 +1380,25 @@ $script:GuiLogDirty = $false  # Track if buffer needs to be flushed to UI
 function Write-GuiLog {
     <#
     .SYNOPSIS
-        Writes a message to the GUI log panel using a ring buffer
+        Writes a message to the GUI log panel and console
     .DESCRIPTION
         Uses a fixed-size ring buffer to prevent O(n²) string concatenation
         performance issues. When the buffer exceeds GuiLogMaxLines, oldest
         entries are removed. This keeps the GUI responsive during long runs.
+        Also writes to console for debugging visibility.
     .PARAMETER Message
         Message to log
     #>
     [CmdletBinding()]
     param([string]$Message)
 
-    if (-not $script:Controls.txtLog) { return }
-
     $timestamp = Get-Date -Format "HH:mm:ss"
     $line = "[$timestamp] $Message"
+
+    # Always write to console for debugging
+    Write-Host $line
+
+    if (-not $script:Controls.txtLog) { return }
 
     # Thread-safe buffer update using lock
     # Capture logText inside the lock to avoid race between buffer modification and join
