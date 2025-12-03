@@ -79,6 +79,7 @@ function New-DefaultConfig {
             LogCompressAfterDays = $script:LogCompressAfterDays
             LogRetentionDays = $script:LogDeleteAfterDays
             MismatchSeverity = $script:DefaultMismatchSeverity  # "Warning", "Error", or "Success"
+            VerboseFileLogging = $false  # If true, log every file copied; if false, only log summary
         }
         Email = [PSCustomObject]@{
             Enabled = $false
@@ -226,13 +227,19 @@ function ConvertFrom-GlobalSettings {
     }
 
     # Logging settings
-    if ($RawGlobal.logging -and $RawGlobal.logging.operationalLog) {
-        if ($RawGlobal.logging.operationalLog.path) {
-            # Use the log path directly (don't use Split-Path which breaks relative paths like ".\Logs")
-            $Config.GlobalSettings.LogPath = $RawGlobal.logging.operationalLog.path
+    if ($RawGlobal.logging) {
+        if ($RawGlobal.logging.operationalLog) {
+            if ($RawGlobal.logging.operationalLog.path) {
+                # Use the log path directly (don't use Split-Path which breaks relative paths like ".\Logs")
+                $Config.GlobalSettings.LogPath = $RawGlobal.logging.operationalLog.path
+            }
+            if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
+                $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays
+            }
         }
-        if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
-            $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays
+        # Verbose file logging - log every file name if true (default: false for smaller logs)
+        if ($null -ne $RawGlobal.logging.verboseFileLogging) {
+            $Config.GlobalSettings.VerboseFileLogging = [bool]$RawGlobal.logging.verboseFileLogging
         }
     }
 
@@ -396,6 +403,7 @@ function ConvertTo-FriendlyConfig {
                         maxAgeDays = $Config.GlobalSettings.LogRetentionDays
                     }
                 }
+                verboseFileLogging = $Config.GlobalSettings.VerboseFileLogging
             }
             email = [ordered]@{
                 enabled = $Config.Email.Enabled

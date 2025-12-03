@@ -170,7 +170,10 @@ function New-RobocopyArguments {
         [AllowEmptyCollection()]
         [string[]]$ChunkArgs,
 
-        [switch]$DryRun
+        [switch]$DryRun,
+
+        # If false (default), adds /NFL /NDL to suppress per-file logging for smaller log files
+        [switch]$VerboseFileLogging
     )
 
     # Handle null ChunkArgs (PS 5.1 unwraps empty arrays to null)
@@ -225,6 +228,13 @@ function New-RobocopyArguments {
     $argList.Add("/LOG:$(Format-QuotedPath -Path $safeLogPath)")
     $argList.Add("/TEE")
     $argList.Add("/NP")
+
+    # Suppress per-file logging unless verbose mode is enabled
+    # /NFL = No File List, /NDL = No Directory List
+    if (-not $VerboseFileLogging) {
+        $argList.Add("/NFL")
+        $argList.Add("/NDL")
+    }
     $argList.Add("/BYTES")
 
     # Junction handling
@@ -329,7 +339,10 @@ function Start-RobocopyJob {
 
         [hashtable]$RobocopyOptions = @{},
 
-        [switch]$DryRun
+        [switch]$DryRun,
+
+        # If true, log every file copied; if false (default), only log summary
+        [switch]$VerboseFileLogging
     )
 
     # Validate Chunk properties
@@ -349,7 +362,8 @@ function Start-RobocopyJob {
         -ThreadsPerJob $ThreadsPerJob `
         -RobocopyOptions $RobocopyOptions `
         -ChunkArgs $chunkArgs `
-        -DryRun:$DryRun
+        -DryRun:$DryRun `
+        -VerboseFileLogging:$VerboseFileLogging
 
     # Create process start info
     $psi = New-Object System.Diagnostics.ProcessStartInfo

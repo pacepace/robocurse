@@ -514,6 +514,9 @@ function Start-ReplicationRun {
 
         [switch]$DryRun,
 
+        # If true, log every file copied to robocopy log; if false (default), only summary
+        [switch]$VerboseFileLogging,
+
         [scriptblock]$OnProgress,
         [scriptblock]$OnChunkComplete,
         [scriptblock]$OnProfileComplete
@@ -548,6 +551,9 @@ function Start-ReplicationRun {
         Write-RobocurseLog -Message "DRY-RUN MODE: No files will be copied (robocopy /L)" `
             -Level 'Warning' -Component 'Orchestrator'
     }
+
+    # Set verbose file logging mode for Start-ChunkJob to use
+    $script:VerboseFileLoggingMode = $VerboseFileLogging.IsPresent
 
     # Validate robocopy is available before starting
     $robocopyCheck = Test-RobocopyAvailable
@@ -753,9 +759,6 @@ function Start-ProfileReplication {
     $state.BytesComplete = 0
     $state.Phase = "Replicating"
 
-    # Debug: verify TotalChunks was set correctly (can remove after confirming fix)
-    Write-Host "[DEBUG] Set TotalChunks = $($chunks.Count), verified read = $($state.TotalChunks)"
-
     Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($scanResult.TotalSize/1GB, 2)) GB" `
         -Level 'Info' -Component 'Orchestrator'
 }
@@ -827,7 +830,8 @@ function Start-ChunkJob {
     $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath `
         -ThreadsPerJob $script:DefaultThreadsPerJob `
         -RobocopyOptions $effectiveOptions `
-        -DryRun:$script:DryRunMode
+        -DryRun:$script:DryRunMode `
+        -VerboseFileLogging:$script:VerboseFileLoggingMode
 
     return $job
 }

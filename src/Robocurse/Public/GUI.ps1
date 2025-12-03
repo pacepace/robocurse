@@ -206,12 +206,6 @@ function Initialize-RobocurseGui {
         $script:ConfigPath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $ConfigPath))
     }
 
-    Write-Host "[DEBUG] Initializing Robocurse GUI..."
-    Write-Host "[DEBUG] ConfigPath: $($script:ConfigPath)"
-    Write-Host "[DEBUG] script:RobocurseModulePath: $script:RobocurseModulePath"
-    Write-Host "[DEBUG] script:RobocurseScriptPath: $script:RobocurseScriptPath"
-    Write-Host "[DEBUG] PSCommandPath: $PSCommandPath"
-
     # Check platform
     if (-not (Test-IsWindowsPlatform)) {
         Write-Warning "WPF GUI is only supported on Windows. Use -Headless mode on other platforms."
@@ -892,12 +886,6 @@ function New-ReplicationRunspace {
         }
     }
 
-    Write-Host "[DEBUG] Background runspace load mode: $loadMode"
-    Write-Host "[DEBUG] Background runspace load path: $loadPath"
-    Write-Host "[DEBUG] PSCommandPath: $PSCommandPath"
-    Write-Host "[DEBUG] script:RobocurseModulePath: $script:RobocurseModulePath"
-    Write-Host "[DEBUG] script:RobocurseScriptPath: $script:RobocurseScriptPath"
-
     if (-not $loadMode -or -not $loadPath) {
         $errorMsg = "Cannot find Robocurse module or script to load in background runspace. loadPath='$loadPath'"
         Write-Host "[ERROR] $errorMsg"
@@ -962,8 +950,14 @@ function New-ReplicationRunspace {
 
             try {
                 Write-Host "[BACKGROUND] Starting replication run"
+                # Get VerboseFileLogging from config
+                `$verboseLogging = `$false
+                `$bgConfig = Get-RobocurseConfig -Path `$ConfigPath
+                if (`$bgConfig.GlobalSettings.VerboseFileLogging) {
+                    `$verboseLogging = `$true
+                }
                 # Start replication with -SkipInitialization since UI thread already initialized
-                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
+                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
                 # Run the orchestration loop until complete
                 while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
@@ -1027,10 +1021,16 @@ function New-ReplicationRunspace {
             `$script:OnChunkComplete = `$null
             `$script:OnProfileComplete = `$null
 
+            # Get VerboseFileLogging from config
+            `$verboseLogging = `$false
+            if (`$config.GlobalSettings.VerboseFileLogging) {
+                `$verboseLogging = `$true
+            }
+
             try {
                 Write-Host "[BACKGROUND] Starting replication run"
                 # Start replication with -SkipInitialization since UI thread already initialized
-                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
+                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
                 # Run the orchestration loop until complete
                 while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
@@ -1091,25 +1091,17 @@ function Start-GuiReplication {
     $script:Controls.dgChunks.ItemsSource = $null
 
     Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
-    foreach ($p in $profilesToRun) {
-        Write-Host "[DEBUG] Profile to run: $($p.Name) - Source: $($p.Source) - Dest: $($p.Destination)"
-    }
 
     # Get worker count and start progress timer
     $maxWorkers = [int]$script:Controls.sldWorkers.Value
-    Write-Host "[DEBUG] Max workers: $maxWorkers"
     $script:ProgressTimer.Start()
 
     # Initialize orchestration state (must happen before runspace creation)
-    Write-Host "[DEBUG] Initializing orchestration state..."
     Initialize-OrchestrationState
-    Write-Host "[DEBUG] Orchestration state initialized, phase: $($script:OrchestrationState.Phase)"
 
     # Create and start background runspace
-    Write-Host "[DEBUG] Creating background runspace..."
     try {
         $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers
-        Write-Host "[DEBUG] Background runspace created successfully"
 
         $script:ReplicationHandle = $runspaceInfo.Handle
         $script:ReplicationPowerShell = $runspaceInfo.PowerShell
@@ -1193,12 +1185,6 @@ function Complete-GuiReplication {
 
     # Show completion message
     $status = Get-OrchestrationStatus
-
-    # Debug: log raw state values to diagnose TotalChunks=0 issue
-    if ($script:OrchestrationState) {
-        Write-Host "[DEBUG] Raw state - TotalChunks: $($script:OrchestrationState.TotalChunks), CompletedCount: $($script:OrchestrationState.CompletedCount), Phase: $($script:OrchestrationState.Phase)"
-    }
-    Write-Host "[DEBUG] Status - ChunksTotal: $($status.ChunksTotal), ChunksComplete: $($status.ChunksComplete)"
 
     $message = "Replication completed!`n`nChunks: $($status.ChunksComplete)/$($status.ChunksTotal)`nFailed: $($status.ChunksFailed)"
 
@@ -1364,13 +1350,6 @@ function Update-GuiProgress {
     try {
         $status = Get-OrchestrationStatus
 
-        # Periodic debug output (every 10 ticks = ~5 seconds)
-        if (-not $script:ProgressTickCount) { $script:ProgressTickCount = 0 }
-        $script:ProgressTickCount++
-        if ($script:ProgressTickCount % 10 -eq 1) {
-            Write-Host "[DEBUG] Progress tick #$($script:ProgressTickCount): Phase=$($status.Phase), Chunks=$($status.ChunksComplete)/$($status.ChunksTotal), Active=$($status.ActiveJobs)"
-        }
-
         # Update progress text (always - lightweight)
         Update-GuiProgressText -Status $status
 
@@ -1411,7 +1390,6 @@ function Update-GuiProgress {
 
         # Check if complete
         if ($status.Phase -eq 'Complete') {
-            Write-Host "[DEBUG] Replication complete, calling Complete-GuiReplication"
             Complete-GuiReplication
         }
     }

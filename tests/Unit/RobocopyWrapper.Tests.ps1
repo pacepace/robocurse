@@ -394,6 +394,13 @@ Describe "Robocopy Wrapper" {
             $cmd.Parameters['RobocopyOptions'].ParameterType.Name | Should -Be 'Hashtable'
         }
 
+        It "Should have VerboseFileLogging parameter" {
+            $cmd = Get-Command Start-RobocopyJob
+
+            $cmd.Parameters.ContainsKey('VerboseFileLogging') | Should -Be $true
+            $cmd.Parameters['VerboseFileLogging'].ParameterType.Name | Should -Be 'SwitchParameter'
+        }
+
         It "Should have InterPacketGapMs documented in function help" {
             # Check the RobocopyOptions parameter description mentions InterPacketGapMs
             $help = Get-Help Start-RobocopyJob -Parameter RobocopyOptions -ErrorAction SilentlyContinue
@@ -626,6 +633,35 @@ Describe "Robocopy Wrapper" {
             $cmd = Get-Command New-RobocopyArguments
             $cmd.Parameters.ContainsKey('DryRun') | Should -Be $true
             $cmd.Parameters['DryRun'].ParameterType.Name | Should -Be 'SwitchParameter'
+        }
+
+        It "Should include /NFL and /NDL by default (VerboseFileLogging disabled)" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt"
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/NFL'
+            $argString | Should -Match '/NDL'
+        }
+
+        It "Should exclude /NFL and /NDL when VerboseFileLogging is enabled" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -VerboseFileLogging
+
+            $argString = $args -join ' '
+            $argString | Should -Not -Match '/NFL'
+            $argString | Should -Not -Match '/NDL'
+        }
+
+        It "Should have VerboseFileLogging parameter" {
+            $cmd = Get-Command New-RobocopyArguments
+            $cmd.Parameters.ContainsKey('VerboseFileLogging') | Should -Be $true
+            $cmd.Parameters['VerboseFileLogging'].ParameterType.Name | Should -Be 'SwitchParameter'
         }
     }
 

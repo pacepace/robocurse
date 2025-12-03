@@ -23,7 +23,11 @@ function Invoke-RobocopyList {
 
     # Wrapper so we can mock this in tests
     $output = & robocopy $Source "\\?\NULL" /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
-    return $output
+    # Ensure we always return an array (robocopy can return empty/null for root drives)
+    if ($null -eq $output) {
+        return @()
+    }
+    return @($output)
 }
 
 function ConvertFrom-RobocopyListOutput {
@@ -39,8 +43,20 @@ function ConvertFrom-RobocopyListOutput {
     param(
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string[]]$Output
     )
+
+    # Handle null or empty output gracefully
+    if ($null -eq $Output -or $Output.Count -eq 0) {
+        return [PSCustomObject]@{
+            TotalSize = 0
+            FileCount = 0
+            DirCount = 0
+            Files = @()
+        }
+    }
 
     $totalSize = 0
     $fileCount = 0

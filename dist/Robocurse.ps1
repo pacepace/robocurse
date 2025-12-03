@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 20:08:27
+    Built: 2025-12-02 20:32:13
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -1015,6 +1015,7 @@ function New-DefaultConfig {
             LogCompressAfterDays = $script:LogCompressAfterDays
             LogRetentionDays = $script:LogDeleteAfterDays
             MismatchSeverity = $script:DefaultMismatchSeverity  # "Warning", "Error", or "Success"
+            VerboseFileLogging = $false  # If true, log every file copied; if false, only log summary
         }
         Email = [PSCustomObject]@{
             Enabled = $false
@@ -1162,13 +1163,19 @@ function ConvertFrom-GlobalSettings {
     }
 
     # Logging settings
-    if ($RawGlobal.logging -and $RawGlobal.logging.operationalLog) {
-        if ($RawGlobal.logging.operationalLog.path) {
-            # Use the log path directly (don't use Split-Path which breaks relative paths like ".\Logs")
-            $Config.GlobalSettings.LogPath = $RawGlobal.logging.operationalLog.path
+    if ($RawGlobal.logging) {
+        if ($RawGlobal.logging.operationalLog) {
+            if ($RawGlobal.logging.operationalLog.path) {
+                # Use the log path directly (don't use Split-Path which breaks relative paths like ".\Logs")
+                $Config.GlobalSettings.LogPath = $RawGlobal.logging.operationalLog.path
+            }
+            if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
+                $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays
+            }
         }
-        if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
-            $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays
+        # Verbose file logging - log every file name if true (default: false for smaller logs)
+        if ($null -ne $RawGlobal.logging.verboseFileLogging) {
+            $Config.GlobalSettings.VerboseFileLogging = [bool]$RawGlobal.logging.verboseFileLogging
         }
     }
 
@@ -1332,6 +1339,7 @@ function ConvertTo-FriendlyConfig {
                         maxAgeDays = $Config.GlobalSettings.LogRetentionDays
                     }
                 }
+                verboseFileLogging = $Config.GlobalSettings.VerboseFileLogging
             }
             email = [ordered]@{
                 enabled = $Config.Email.Enabled
@@ -2298,7 +2306,11 @@ function Invoke-RobocopyList {
 
     # Wrapper so we can mock this in tests
     $output = & robocopy $Source "\\?\NULL" /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
-    return $output
+    # Ensure we always return an array (robocopy can return empty/null for root drives)
+    if ($null -eq $output) {
+        return @()
+    }
+    return @($output)
 }
 
 function ConvertFrom-RobocopyListOutput {
@@ -2314,8 +2326,20 @@ function ConvertFrom-RobocopyListOutput {
     param(
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string[]]$Output
     )
+
+    # Handle null or empty output gracefully
+    if ($null -eq $Output -or $Output.Count -eq 0) {
+        return [PSCustomObject]@{
+            TotalSize = 0
+            FileCount = 0
+            DirCount = 0
+            Files = @()
+        }
+    }
 
     $totalSize = 0
     $fileCount = 0
@@ -3485,7 +3509,10 @@ function New-RobocopyArguments {
         [AllowEmptyCollection()]
         [string[]]$ChunkArgs,
 
-        [switch]$DryRun
+        [switch]$DryRun,
+
+        # If false (default), adds /NFL /NDL to suppress per-file logging for smaller log files
+        [switch]$VerboseFileLogging
     )
 
     # Handle null ChunkArgs (PS 5.1 unwraps empty arrays to null)
@@ -3540,6 +3567,13 @@ function New-RobocopyArguments {
     $argList.Add("/LOG:$(Format-QuotedPath -Path $safeLogPath)")
     $argList.Add("/TEE")
     $argList.Add("/NP")
+
+    # Suppress per-file logging unless verbose mode is enabled
+    # /NFL = No File List, /NDL = No Directory List
+    if (-not $VerboseFileLogging) {
+        $argList.Add("/NFL")
+        $argList.Add("/NDL")
+    }
     $argList.Add("/BYTES")
 
     # Junction handling
@@ -3644,7 +3678,10 @@ function Start-RobocopyJob {
 
         [hashtable]$RobocopyOptions = @{},
 
-        [switch]$DryRun
+        [switch]$DryRun,
+
+        # If true, log every file copied; if false (default), only log summary
+        [switch]$VerboseFileLogging
     )
 
     # Validate Chunk properties
@@ -3664,7 +3701,8 @@ function Start-RobocopyJob {
         -ThreadsPerJob $ThreadsPerJob `
         -RobocopyOptions $RobocopyOptions `
         -ChunkArgs $chunkArgs `
-        -DryRun:$DryRun
+        -DryRun:$DryRun `
+        -VerboseFileLogging:$VerboseFileLogging
 
     # Create process start info
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -5019,6 +5057,9 @@ function Start-ReplicationRun {
 
         [switch]$DryRun,
 
+        # If true, log every file copied to robocopy log; if false (default), only summary
+        [switch]$VerboseFileLogging,
+
         [scriptblock]$OnProgress,
         [scriptblock]$OnChunkComplete,
         [scriptblock]$OnProfileComplete
@@ -5053,6 +5094,9 @@ function Start-ReplicationRun {
         Write-RobocurseLog -Message "DRY-RUN MODE: No files will be copied (robocopy /L)" `
             -Level 'Warning' -Component 'Orchestrator'
     }
+
+    # Set verbose file logging mode for Start-ChunkJob to use
+    $script:VerboseFileLoggingMode = $VerboseFileLogging.IsPresent
 
     # Validate robocopy is available before starting
     $robocopyCheck = Test-RobocopyAvailable
@@ -5258,9 +5302,6 @@ function Start-ProfileReplication {
     $state.BytesComplete = 0
     $state.Phase = "Replicating"
 
-    # Debug: verify TotalChunks was set correctly (can remove after confirming fix)
-    Write-Host "[DEBUG] Set TotalChunks = $($chunks.Count), verified read = $($state.TotalChunks)"
-
     Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($scanResult.TotalSize/1GB, 2)) GB" `
         -Level 'Info' -Component 'Orchestrator'
 }
@@ -5332,7 +5373,8 @@ function Start-ChunkJob {
     $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath `
         -ThreadsPerJob $script:DefaultThreadsPerJob `
         -RobocopyOptions $effectiveOptions `
-        -DryRun:$script:DryRunMode
+        -DryRun:$script:DryRunMode `
+        -VerboseFileLogging:$script:VerboseFileLoggingMode
 
     return $job
 }
@@ -9624,12 +9666,6 @@ function Initialize-RobocurseGui {
         $script:ConfigPath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $ConfigPath))
     }
 
-    Write-Host "[DEBUG] Initializing Robocurse GUI..."
-    Write-Host "[DEBUG] ConfigPath: $($script:ConfigPath)"
-    Write-Host "[DEBUG] script:RobocurseModulePath: $script:RobocurseModulePath"
-    Write-Host "[DEBUG] script:RobocurseScriptPath: $script:RobocurseScriptPath"
-    Write-Host "[DEBUG] PSCommandPath: $PSCommandPath"
-
     # Check platform
     if (-not (Test-IsWindowsPlatform)) {
         Write-Warning "WPF GUI is only supported on Windows. Use -Headless mode on other platforms."
@@ -10569,12 +10605,6 @@ function New-ReplicationRunspace {
         }
     }
 
-    Write-Host "[DEBUG] Background runspace load mode: $loadMode"
-    Write-Host "[DEBUG] Background runspace load path: $loadPath"
-    Write-Host "[DEBUG] PSCommandPath: $PSCommandPath"
-    Write-Host "[DEBUG] script:RobocurseModulePath: $script:RobocurseModulePath"
-    Write-Host "[DEBUG] script:RobocurseScriptPath: $script:RobocurseScriptPath"
-
     if (-not $loadMode -or -not $loadPath) {
         $errorMsg = "Cannot find Robocurse module or script to load in background runspace. loadPath='$loadPath'"
         Write-Host "[ERROR] $errorMsg"
@@ -10639,8 +10669,14 @@ function New-ReplicationRunspace {
 
             try {
                 Write-Host "[BACKGROUND] Starting replication run"
+                # Get VerboseFileLogging from config
+                `$verboseLogging = `$false
+                `$bgConfig = Get-RobocurseConfig -Path `$ConfigPath
+                if (`$bgConfig.GlobalSettings.VerboseFileLogging) {
+                    `$verboseLogging = `$true
+                }
                 # Start replication with -SkipInitialization since UI thread already initialized
-                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
+                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
                 # Run the orchestration loop until complete
                 while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
@@ -10704,10 +10740,16 @@ function New-ReplicationRunspace {
             `$script:OnChunkComplete = `$null
             `$script:OnProfileComplete = `$null
 
+            # Get VerboseFileLogging from config
+            `$verboseLogging = `$false
+            if (`$config.GlobalSettings.VerboseFileLogging) {
+                `$verboseLogging = `$true
+            }
+
             try {
                 Write-Host "[BACKGROUND] Starting replication run"
                 # Start replication with -SkipInitialization since UI thread already initialized
-                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
+                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
                 # Run the orchestration loop until complete
                 while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
@@ -10768,25 +10810,17 @@ function Start-GuiReplication {
     $script:Controls.dgChunks.ItemsSource = $null
 
     Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
-    foreach ($p in $profilesToRun) {
-        Write-Host "[DEBUG] Profile to run: $($p.Name) - Source: $($p.Source) - Dest: $($p.Destination)"
-    }
 
     # Get worker count and start progress timer
     $maxWorkers = [int]$script:Controls.sldWorkers.Value
-    Write-Host "[DEBUG] Max workers: $maxWorkers"
     $script:ProgressTimer.Start()
 
     # Initialize orchestration state (must happen before runspace creation)
-    Write-Host "[DEBUG] Initializing orchestration state..."
     Initialize-OrchestrationState
-    Write-Host "[DEBUG] Orchestration state initialized, phase: $($script:OrchestrationState.Phase)"
 
     # Create and start background runspace
-    Write-Host "[DEBUG] Creating background runspace..."
     try {
         $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers
-        Write-Host "[DEBUG] Background runspace created successfully"
 
         $script:ReplicationHandle = $runspaceInfo.Handle
         $script:ReplicationPowerShell = $runspaceInfo.PowerShell
@@ -10870,12 +10904,6 @@ function Complete-GuiReplication {
 
     # Show completion message
     $status = Get-OrchestrationStatus
-
-    # Debug: log raw state values to diagnose TotalChunks=0 issue
-    if ($script:OrchestrationState) {
-        Write-Host "[DEBUG] Raw state - TotalChunks: $($script:OrchestrationState.TotalChunks), CompletedCount: $($script:OrchestrationState.CompletedCount), Phase: $($script:OrchestrationState.Phase)"
-    }
-    Write-Host "[DEBUG] Status - ChunksTotal: $($status.ChunksTotal), ChunksComplete: $($status.ChunksComplete)"
 
     $message = "Replication completed!`n`nChunks: $($status.ChunksComplete)/$($status.ChunksTotal)`nFailed: $($status.ChunksFailed)"
 
@@ -11041,13 +11069,6 @@ function Update-GuiProgress {
     try {
         $status = Get-OrchestrationStatus
 
-        # Periodic debug output (every 10 ticks = ~5 seconds)
-        if (-not $script:ProgressTickCount) { $script:ProgressTickCount = 0 }
-        $script:ProgressTickCount++
-        if ($script:ProgressTickCount % 10 -eq 1) {
-            Write-Host "[DEBUG] Progress tick #$($script:ProgressTickCount): Phase=$($status.Phase), Chunks=$($status.ChunksComplete)/$($status.ChunksTotal), Active=$($status.ActiveJobs)"
-        }
-
         # Update progress text (always - lightweight)
         Update-GuiProgressText -Status $status
 
@@ -11088,7 +11109,6 @@ function Update-GuiProgress {
 
         # Check if complete
         if ($status.Phase -eq 'Complete') {
-            Write-Host "[DEBUG] Replication complete, calling Complete-GuiReplication"
             Complete-GuiReplication
         }
     }
