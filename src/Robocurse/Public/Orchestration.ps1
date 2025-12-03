@@ -715,6 +715,9 @@ function Start-ProfileReplication {
     $maxFiles = if ($Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
     $maxDepth = if ($Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
+    Write-RobocurseLog -Message "Chunk settings: MaxSize=$([math]::Round($maxChunkBytes/1GB, 2))GB, MaxFiles=$maxFiles, MaxDepth=$maxDepth, Mode=$($Profile.ScanMode)" `
+        -Level 'Debug' -Component 'Orchestrator'
+
     $chunks = switch ($Profile.ScanMode) {
         'Flat' {
             New-FlatChunks `

@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 21:00:27
+    Built: 2025-12-02 21:22:33
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -5257,6 +5257,9 @@ function Start-ProfileReplication {
     $maxChunkBytes = if ($Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB * 1GB } else { $script:DefaultMaxChunkSizeBytes }
     $maxFiles = if ($Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
     $maxDepth = if ($Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
+
+    Write-RobocurseLog -Message "Chunk settings: MaxSize=$([math]::Round($maxChunkBytes/1GB, 2))GB, MaxFiles=$maxFiles, MaxDepth=$maxDepth, Mode=$($Profile.ScanMode)" `
+        -Level 'Debug' -Component 'Orchestrator'
 
     $chunks = switch ($Profile.ScanMode) {
         'Flat' {
@@ -10625,8 +10628,11 @@ function New-ReplicationRunspace {
     # Note: We pass the C# OrchestrationState object which is inherently thread-safe
     # Callbacks are intentionally NOT shared - GUI uses timer-based polling instead
     if ($loadMode -eq "Module") {
+        # NOTE: We pass ProfileNames (strings) instead of Profile objects because
+        # PSCustomObject properties don't reliably survive runspace boundaries.
+        # See CLAUDE.md for details on this pattern.
         $backgroundScript = @"
-            param(`$ModulePath, `$SharedState, `$Profiles, `$MaxWorkers, `$ConfigPath)
+            param(`$ModulePath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$ConfigPath)
 
             try {
                 Write-Host "[BACKGROUND] Loading module from: `$ModulePath"
@@ -10669,14 +10675,17 @@ function New-ReplicationRunspace {
 
             try {
                 Write-Host "[BACKGROUND] Starting replication run"
-                # Get VerboseFileLogging from config
-                `$verboseLogging = `$false
+                # Re-read config to get fresh profile data with all properties intact
+                # (PSCustomObject properties don't survive runspace boundaries - see CLAUDE.md)
                 `$bgConfig = Get-RobocurseConfig -Path `$ConfigPath
-                if (`$bgConfig.GlobalSettings.VerboseFileLogging) {
-                    `$verboseLogging = `$true
-                }
+                `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
+
+                # Look up profiles by name from freshly-loaded config
+                `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
+                Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
+
                 # Start replication with -SkipInitialization since UI thread already initialized
-                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+                Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
                 # Run the orchestration loop until complete
                 while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
@@ -10696,8 +10705,10 @@ function New-ReplicationRunspace {
         # Script/monolith mode
         # NOTE: We use $GuiConfigPath (not $ConfigPath) because dot-sourcing the script
         # would shadow our parameter with the script's own $ConfigPath parameter
+        # NOTE: We pass ProfileNames (strings) instead of Profile objects for consistency
+        # with module mode. See CLAUDE.md for the pattern.
         $backgroundScript = @"
-            param(`$ScriptPath, `$SharedState, `$Profiles, `$MaxWorkers, `$GuiConfigPath)
+            param(`$ScriptPath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$GuiConfigPath)
 
             try {
                 Write-Host "[BACKGROUND] Loading script from: `$ScriptPath"
@@ -10740,16 +10751,18 @@ function New-ReplicationRunspace {
             `$script:OnChunkComplete = `$null
             `$script:OnProfileComplete = `$null
 
-            # Get VerboseFileLogging from config
-            `$verboseLogging = `$false
-            if (`$config.GlobalSettings.VerboseFileLogging) {
-                `$verboseLogging = `$true
-            }
-
             try {
                 Write-Host "[BACKGROUND] Starting replication run"
+                # Re-read config to get fresh profile data (see CLAUDE.md for pattern)
+                `$bgConfig = Get-RobocurseConfig -Path `$GuiConfigPath
+                `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
+
+                # Look up profiles by name from freshly-loaded config
+                `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
+                Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
+
                 # Start replication with -SkipInitialization since UI thread already initialized
-                Start-ReplicationRun -Profiles `$Profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+                Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
                 # Run the orchestration loop until complete
                 while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
@@ -10769,7 +10782,9 @@ function New-ReplicationRunspace {
     $powershell.AddScript($backgroundScript)
     $powershell.AddArgument($loadPath)
     $powershell.AddArgument($script:OrchestrationState)
-    $powershell.AddArgument($Profiles)
+    # Pass profile names (strings) - background will look up from config (see CLAUDE.md)
+    $profileNames = @($Profiles | ForEach-Object { $_.Name })
+    $powershell.AddArgument($profileNames)
     $powershell.AddArgument($MaxWorkers)
     $powershell.AddArgument($script:ConfigPath)
 
@@ -10796,6 +10811,11 @@ function Start-GuiReplication {
         [switch]$AllProfiles,
         [switch]$SelectedOnly
     )
+
+    # Save any pending form changes before reading profiles
+    # This ensures changes like chunk size are captured even if user clicks Run
+    # without first clicking elsewhere to trigger LostFocus
+    Save-ProfileFromForm
 
     # Get and validate profiles (force array context to handle PowerShell's single-item unwrapping)
     $profilesToRun = @(Get-ProfilesToRun -AllProfiles:$AllProfiles -SelectedOnly:$SelectedOnly)
