@@ -34,10 +34,12 @@ BeforeDiscovery {
         $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
         if ($isAdmin) {
-            # Check VSS service is running
+            # Check VSS service exists and can be started (it's a demand-start service)
             try {
                 $vssService = Get-Service -Name 'VSS' -ErrorAction SilentlyContinue
-                $script:CanUseVss = $vssService -and $vssService.Status -eq 'Running'
+                # VSS is demand-start (Automatic) - it starts when needed, not always running
+                # Check that service exists and is not disabled
+                $script:CanUseVss = $vssService -and $vssService.StartType -ne 'Disabled'
             }
             catch {
                 $script:CanUseVss = $false
@@ -72,9 +74,10 @@ Describe "VSS Integration Tests" -Skip:(-not $script:CanUseVss) {
             $result.Success | Should -Be $true
         }
 
-        It "Should detect VSS service is running" {
+        It "Should detect VSS service is available" {
             $service = Get-Service -Name 'VSS'
-            $service.Status | Should -Be 'Running'
+            # VSS is demand-start - check it's not disabled rather than running
+            $service.StartType | Should -Not -Be 'Disabled'
         }
     }
 
@@ -143,21 +146,24 @@ Describe "VSS Integration Tests" -Skip:(-not $script:CanUseVss) {
             }
         }
 
-        It "Should translate local path to VSS path" -Skip:(-not $script:TestSnapshot) {
+        It "Should translate local path to VSS path" {
+            $script:TestSnapshot | Should -Not -BeNullOrEmpty -Because "BeforeAll should have created a snapshot"
             $vssPath = Get-VssPath -OriginalPath "C:\Windows\System32" -VssSnapshot $script:TestSnapshot
 
             $vssPath | Should -Match 'HarddiskVolumeShadowCopy'
             $vssPath | Should -Match 'Windows\\System32'
         }
 
-        It "Should translate root path correctly" -Skip:(-not $script:TestSnapshot) {
+        It "Should translate root path correctly" {
+            $script:TestSnapshot | Should -Not -BeNullOrEmpty -Because "BeforeAll should have created a snapshot"
             $vssPath = Get-VssPath -OriginalPath "C:\" -VssSnapshot $script:TestSnapshot
 
             $vssPath | Should -Match 'HarddiskVolumeShadowCopy'
             # Root path should end with the shadow copy path (no extra backslash)
         }
 
-        It "Should handle paths with spaces" -Skip:(-not $script:TestSnapshot) {
+        It "Should handle paths with spaces" {
+            $script:TestSnapshot | Should -Not -BeNullOrEmpty -Because "BeforeAll should have created a snapshot"
             $vssPath = Get-VssPath -OriginalPath "C:\Program Files" -VssSnapshot $script:TestSnapshot
 
             $vssPath | Should -Match 'HarddiskVolumeShadowCopy'
@@ -708,19 +714,59 @@ Describe "VSS Not Available Tests" -Skip:($script:CanUseVss) {
 
 
 # Remote VSS Integration Tests
-# These tests require:
-# - A remote file server accessible via UNC path
-# - Admin rights on the remote server
-# - PowerShell remoting enabled on the remote server
-# - CIM/WMI access to the remote server
+# ============================
 #
-# Set the environment variable ROBOCURSE_TEST_REMOTE_SHARE to a UNC path to enable these tests
-# Example: $env:ROBOCURSE_TEST_REMOTE_SHARE = "\\FileServer01\TestShare"
+# These tests verify Remote VSS functionality - creating VSS snapshots on remote file servers
+# and accessing them via UNC paths. This is essential for backing up network shares with
+# point-in-time consistency.
+#
+# REQUIREMENTS FOR REMOTE VSS TESTS:
+# ----------------------------------
+# 1. Environment Variable:
+#    Set ROBOCURSE_TEST_REMOTE_SHARE to a UNC path on the target server
+#    Example: $env:ROBOCURSE_TEST_REMOTE_SHARE = "\\FileServer01\TestShare"
+#    For localhost testing: $env:ROBOCURSE_TEST_REMOTE_SHARE = "\\localhost\C$\Windows\Temp"
+#
+# 2. Remote Server Requirements:
+#    a) WinRM Service - Must be running on the remote server
+#       Fix: Run on remote server: Enable-PSRemoting -Force
+#
+#    b) PowerShell Remoting - Must be enabled and accessible
+#       Fix: Run on remote server: Enable-PSRemoting -Force -SkipNetworkProfileCheck
+#       Note: May need firewall rules for WinRM (TCP 5985/5986)
+#
+#    c) CIM/WMI Access - Required for VSS snapshot creation
+#       Fix: Ensure WMI service is running and firewall allows WMI traffic
+#       Test: New-CimSession -ComputerName <server>
+#
+#    d) Administrative Rights - Caller must have admin rights on remote server
+#       VSS snapshot creation requires administrative privileges
+#
+#    e) VSS Service - Must not be disabled on remote server
+#       Check: Get-Service VSS -ComputerName <server>
+#
+# 3. Network Requirements:
+#    - Server must be reachable (Test-Connection)
+#    - UNC path must be accessible (Test-Path \\server\share)
+#    - Firewall must allow: WinRM (5985/5986), WMI/DCOM, SMB (445)
+#
+# TROUBLESHOOTING:
+# ----------------
+# If tests are skipped, check each requirement:
+#   1. $env:ROBOCURSE_TEST_REMOTE_SHARE is set to valid UNC path
+#   2. Test-Connection -ComputerName <server> succeeds
+#   3. Invoke-Command -ComputerName <server> -ScriptBlock { $true } succeeds
+#   4. New-CimSession -ComputerName <server> succeeds
+#
+# For localhost testing (useful for CI/dev):
+#   Enable-PSRemoting -Force
+#   $env:ROBOCURSE_TEST_REMOTE_SHARE = "\\localhost\C$\Windows\Temp"
 
 BeforeDiscovery {
     # Check for remote VSS test capability
     $script:CanTestRemoteVss = $false
     $script:RemoteTestShare = $env:ROBOCURSE_TEST_REMOTE_SHARE
+    $script:RemoteVssSkipReason = "ROBOCURSE_TEST_REMOTE_SHARE environment variable not set"
 
     if ($script:RemoteTestShare -and $script:RemoteTestShare -match '^\\\\[^\\]+\\[^\\]+') {
         # Extract server name
@@ -730,23 +776,33 @@ BeforeDiscovery {
             # Test if we can reach the server and have remoting access
             try {
                 $canConnect = Test-Connection -ComputerName $testServer -Count 1 -Quiet -ErrorAction SilentlyContinue
-                if ($canConnect) {
-                    # Test PowerShell remoting
-                    $remotingTest = Invoke-Command -ComputerName $testServer -ScriptBlock { $true } -ErrorAction SilentlyContinue
-                    if ($remotingTest) {
-                        # Test CIM access
-                        $cimSession = New-CimSession -ComputerName $testServer -ErrorAction SilentlyContinue
-                        if ($cimSession) {
-                            $script:CanTestRemoteVss = $true
-                            Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
-                        }
+                if (-not $canConnect) {
+                    $script:RemoteVssSkipReason = "Cannot reach server '$testServer' - check network connectivity"
+                }
+                elseif (-not (Invoke-Command -ComputerName $testServer -ScriptBlock { $true } -ErrorAction SilentlyContinue)) {
+                    $script:RemoteVssSkipReason = "PowerShell Remoting failed to '$testServer' - run 'Enable-PSRemoting -Force' on remote server"
+                }
+                else {
+                    $cimSession = New-CimSession -ComputerName $testServer -ErrorAction SilentlyContinue
+                    if (-not $cimSession) {
+                        $script:RemoteVssSkipReason = "CIM/WMI session failed to '$testServer' - check WMI service and firewall rules"
+                    }
+                    else {
+                        $script:CanTestRemoteVss = $true
+                        $script:RemoteVssSkipReason = $null
+                        Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
                     }
                 }
             }
             catch {
-                $script:CanTestRemoteVss = $false
+                $script:RemoteVssSkipReason = "Remote VSS prerequisite check failed: $($_.Exception.Message)"
             }
         }
+    }
+
+    # Output skip reason for debugging (visible in Pester verbose output)
+    if (-not $script:CanTestRemoteVss -and $script:RemoteVssSkipReason) {
+        Write-Warning "Remote VSS tests will be skipped: $script:RemoteVssSkipReason"
     }
 }
 
@@ -850,8 +906,15 @@ Describe "Remote VSS Integration Tests" -Skip:(-not $script:CanTestRemoteVss) {
                     $junctionUncPath = $junctionResult.Data.JunctionUncPath
                     Test-Path $junctionUncPath | Should -Be $true
 
-                    # Verify files are accessible through junction
-                    $files = Get-ChildItem $junctionUncPath -File -ErrorAction SilentlyContinue
+                    # Get the VSS path for the specific test directory
+                    # The junction points to the share root, so we need to get the full VSS path
+                    $vssTestDirPath = Get-RemoteVssPath `
+                        -OriginalUncPath $script:RemoteTestDir `
+                        -VssSnapshot $snapshotResult.Data `
+                        -JunctionInfo $junctionResult.Data
+
+                    # Verify files are accessible through the VSS path to our test directory
+                    $files = Get-ChildItem $vssTestDirPath -File -ErrorAction SilentlyContinue
                     $files.Count | Should -BeGreaterOrEqual 2
                 }
                 finally {

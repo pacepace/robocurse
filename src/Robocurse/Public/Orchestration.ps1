@@ -350,12 +350,20 @@ namespace Robocurse
         }
 
         /// <summary>Clear just the chunk collections (used between profiles)</summary>
+        /// <remarks>
+        /// Drains queues instead of reassigning references to prevent race conditions.
+        /// Reassigning collection references is NOT thread-safe - another thread could be
+        /// iterating with ToArray() during the assignment.
+        /// </remarks>
         public void ClearChunkCollections()
         {
-            ChunkQueue = new ConcurrentQueue<object>();
+            // Drain queues instead of replacing references (thread-safe)
+            object item;
+            while (ChunkQueue.TryDequeue(out item)) { }
+            while (CompletedChunks.TryDequeue(out item)) { }
+            while (FailedChunks.TryDequeue(out item)) { }
+            // ConcurrentDictionary.Clear() is atomic
             ActiveJobs.Clear();
-            CompletedChunks = new ConcurrentQueue<object>();
-            FailedChunks = new ConcurrentQueue<object>();
         }
 
         /// <summary>Get ProfileResults as an array for PowerShell enumeration</summary>
@@ -930,7 +938,9 @@ function Invoke-ReplicationTick {
                     -Level 'Error' -Component 'Orchestrator'
                 $chunk.RetryCount++
                 if ($chunk.RetryCount -lt $script:MaxChunkRetries) {
-                    $chunk.RetryAfter = [datetime]::Now.AddSeconds(5)
+                    # Use exponential backoff for consistency with Invoke-FailedChunkHandler
+                    $backoffDelay = Get-RetryBackoffDelay -RetryCount $chunk.RetryCount
+                    $chunk.RetryAfter = [datetime]::Now.AddSeconds($backoffDelay)
                     $chunksToRequeue.Add($chunk)
                 }
                 else {
@@ -1513,12 +1523,14 @@ function Remove-HealthCheckStatus {
     param()
 
     if (Test-Path $script:HealthCheckStatusFile) {
-        try {
-            Remove-Item -Path $script:HealthCheckStatusFile -Force -ErrorAction Stop
-            Write-RobocurseLog -Message "Removed health check status file" -Level 'Debug' -Component 'Health'
-        }
-        catch {
-            Write-RobocurseLog -Message "Failed to remove health check status file: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
+        if ($PSCmdlet.ShouldProcess($script:HealthCheckStatusFile, "Remove health check status file")) {
+            try {
+                Remove-Item -Path $script:HealthCheckStatusFile -Force -ErrorAction Stop
+                Write-RobocurseLog -Message "Removed health check status file" -Level 'Debug' -Component 'Health'
+            }
+            catch {
+                Write-RobocurseLog -Message "Failed to remove health check status file: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
+            }
         }
     }
 

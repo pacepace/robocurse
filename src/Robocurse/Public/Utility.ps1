@@ -98,12 +98,7 @@ function Test-RobocopyAvailable {
     [CmdletBinding()]
     param()
 
-    # Return cached result if already validated
-    if ($script:RobocopyPath) {
-        return New-OperationResult -Success $true -Data $script:RobocopyPath
-    }
-
-    # Check user-provided override first
+    # Check user-provided override first - always takes priority over cache
     if ($script:RobocopyPathOverride) {
         if (Test-Path -Path $script:RobocopyPathOverride -PathType Leaf) {
             $script:RobocopyPath = $script:RobocopyPathOverride
@@ -113,6 +108,11 @@ function Test-RobocopyAvailable {
             # Override set but file no longer exists
             return New-OperationResult -Success $false -ErrorMessage "Robocopy override path no longer valid: $($script:RobocopyPathOverride)"
         }
+    }
+
+    # Return cached result if already validated (checked after override to allow override changes)
+    if ($script:RobocopyPath) {
+        return New-OperationResult -Success $true -Data $script:RobocopyPath
     }
 
     # Check System32 first (most reliable location on Windows)

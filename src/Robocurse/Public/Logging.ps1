@@ -48,8 +48,10 @@ function Invoke-WithLogMutex {
                 try { $mutex.ReleaseMutex() } catch {
                     # Cannot log here (infinite loop) - release failure is rare
                 }
+                # Dispose after release to avoid disposing while acquired
+                $mutex.Dispose()
             }
-            $mutex.Dispose()
+            # Note: Only dispose if we acquired it - otherwise caller still owns it
         }
     }
 }
@@ -393,8 +395,8 @@ function Invoke-LogRotation {
                 $dirDate = [DateTime]::ParseExact($dir.Name, "yyyy-MM-dd", $null)
 
                 # Skip if this is today's directory or yesterday's (may still be in use)
-                # Add 2-hour buffer to handle jobs spanning midnight
-                if ($dirDate.Date -ge $now.Date.AddHours(-2)) {
+                # Compare date parts only - AddDays(-1) is clearer than AddHours(-2) for "yesterday"
+                if ($dirDate.Date -ge $now.Date.AddDays(-1)) {
                     continue
                 }
 

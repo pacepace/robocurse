@@ -223,8 +223,13 @@ function Add-VssToTracking {
                 CreatedAt = $SnapshotInfo.CreatedAt.ToString('o')
             }
 
-            # Use -InputObject to preserve JSON array format (PS 5.1 compatibility)
-            ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
+            # Atomic write: temp file then rename to prevent corruption on crash
+            $tempPath = "$($script:VssTrackingFile).tmp"
+            ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
+            if (Test-Path $script:VssTrackingFile) {
+                Remove-Item -Path $script:VssTrackingFile -Force
+            }
+            [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
         }
     }
     catch {
@@ -271,8 +276,13 @@ function Remove-VssFromTracking {
             if ($tracked.Count -eq 0) {
                 Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
             } else {
-                # Use -InputObject to preserve JSON array format (PS 5.1 compatibility)
-                ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
+                # Atomic write: temp file then rename to prevent corruption on crash
+                $tempPath = "$($script:VssTrackingFile).tmp"
+                ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
+                if (Test-Path $script:VssTrackingFile) {
+                    Remove-Item -Path $script:VssTrackingFile -Force
+                }
+                [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
             }
         }
     }
@@ -403,13 +413,20 @@ function New-VssSnapshot {
         # Check if error is retryable (transient failures)
         # Non-retryable: invalid path, permissions, VSS not supported
         # Retryable: VSS busy, lock contention, timeout
+        # Use HRESULT codes for language-independent detection where possible
         $retryablePatterns = @(
+            # HRESULT codes (language-independent)
+            '0x8004230F',  # VSS_E_INSUFFICIENT_STORAGE - Insufficient storage (might clear up)
+            '0x80042316',  # VSS_E_SNAPSHOT_SET_IN_PROGRESS - Another snapshot operation in progress
+            '0x80042302',  # VSS_E_OBJECT_NOT_FOUND - Object not found (transient state)
+            '0x80042317',  # VSS_E_MAXIMUM_NUMBER_OF_VOLUMES_REACHED - Might clear after cleanup
+            '0x8004231F',  # VSS_E_WRITERERROR_TIMEOUT - Writer timeout
+            '0x80042325',  # VSS_E_FLUSH_WRITES_TIMEOUT - Flush timeout
+            # English fallback patterns (for error messages without HRESULT)
             'busy',
             'timeout',
             'lock',
             'in use',
-            '0x8004230F',  # Insufficient storage (might clear up)
-            '0x80042316',  # VSS service not running (might start up)
             'try again'
         )
 
@@ -1154,15 +1171,33 @@ function Test-RemoteVssSupported {
                 }
             }
 
-            return New-OperationResult -Success $false -ErrorMessage "Win32_ShadowCopy class not available on '$serverName'"
+            return New-OperationResult -Success $false -ErrorMessage "Win32_ShadowCopy class not available on '$serverName'. Ensure VSS service is not disabled on the remote server."
         }
         finally {
             Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
         }
     }
     catch {
-        Write-RobocurseLog -Message "Cannot connect to remote server '$serverName': $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
-        return New-OperationResult -Success $false -ErrorMessage "Cannot connect to remote server '$serverName': $($_.Exception.Message)"
+        $errorMsg = $_.Exception.Message
+        $guidance = ""
+
+        # Provide actionable guidance based on common error patterns
+        if ($errorMsg -match 'Access is denied|Access denied') {
+            $guidance = " Ensure you have administrative rights on the remote server."
+        }
+        elseif ($errorMsg -match 'RPC server|unavailable|endpoint mapper') {
+            $guidance = " Ensure WinRM service is running on '$serverName'. Run 'Enable-PSRemoting -Force' on the remote server."
+        }
+        elseif ($errorMsg -match 'network path|not found|host.*unknown') {
+            $guidance = " Verify the server name is correct and network connectivity is available."
+        }
+        elseif ($errorMsg -match 'firewall|blocked') {
+            $guidance = " Check firewall rules on '$serverName' - WinRM (TCP 5985/5986) and WMI/DCOM must be allowed."
+        }
+
+        $fullError = "Cannot connect to remote server '$serverName': $errorMsg$guidance"
+        Write-RobocurseLog -Message $fullError -Level 'Warning' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage $fullError
     }
 }
 

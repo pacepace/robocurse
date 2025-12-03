@@ -1190,18 +1190,29 @@ function Write-GuiLog {
     $timestamp = Get-Date -Format "HH:mm:ss"
     $line = "[$timestamp] $Message"
 
-    # Add to ring buffer
-    $script:GuiLogBuffer.Add($line)
+    # Thread-safe buffer update using lock
+    # Capture logText inside the lock to avoid race between buffer modification and join
+    $logText = $null
+    [System.Threading.Monitor]::Enter($script:GuiLogBuffer)
+    try {
+        # Add to ring buffer
+        $script:GuiLogBuffer.Add($line)
 
-    # Trim if over limit (remove oldest entries)
-    while ($script:GuiLogBuffer.Count -gt $script:GuiLogMaxLines) {
-        $script:GuiLogBuffer.RemoveAt(0)
+        # Trim if over limit (remove oldest entries)
+        while ($script:GuiLogBuffer.Count -gt $script:GuiLogMaxLines) {
+            $script:GuiLogBuffer.RemoveAt(0)
+        }
+
+        # Capture text while still holding the lock
+        $logText = $script:GuiLogBuffer -join "`n"
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:GuiLogBuffer)
     }
 
     # Use Dispatcher.BeginInvoke for thread safety - non-blocking async update
     # Using Invoke (synchronous) could cause deadlocks if called from background thread
     # while UI thread is busy
-    $logText = $script:GuiLogBuffer -join "`n"
     [void]$script:Window.Dispatcher.BeginInvoke([Action]{
         $script:Controls.txtLog.Text = $logText
         $script:Controls.svLog.ScrollToEnd()

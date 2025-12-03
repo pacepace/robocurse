@@ -82,13 +82,22 @@ function Save-ReplicationCheckpoint {
         $tempPath = "$checkpointPath.tmp"
         $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
 
-        # Use atomic replacement - remove existing then move
+        # Use atomic replacement with backup - prevents data loss on crash
         # Note: .NET Framework (PowerShell 5.1) doesn't support File.Move overwrite parameter
-        # so we need to remove first, then move
+        $backupPath = "$checkpointPath.bak"
         if (Test-Path $checkpointPath) {
-            Remove-Item -Path $checkpointPath -Force
+            # Move existing to backup first (atomic on same volume)
+            if (Test-Path $backupPath) {
+                Remove-Item -Path $backupPath -Force
+            }
+            [System.IO.File]::Move($checkpointPath, $backupPath)
         }
+        # Now move temp to final (if this fails, we still have the backup)
         [System.IO.File]::Move($tempPath, $checkpointPath)
+        # Clean up backup after successful replacement
+        if (Test-Path $backupPath) {
+            Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+        }
 
         Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
             -Level 'Info' -Component 'Checkpoint'
