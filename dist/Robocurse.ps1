@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 20:02:26
+    Built: 2025-12-02 20:08:27
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -5243,6 +5243,10 @@ function Start-ProfileReplication {
     # Clear chunk collections for the new profile using the C# class method
     $state.ClearChunkCollections()
 
+    # Force array context to handle PowerShell's single-item unwrapping
+    # Without @(), a single chunk becomes a scalar and .Count returns $null
+    $chunks = @($chunks)
+
     # Enqueue all chunks (RetryCount is now part of New-Chunk)
     foreach ($chunk in $chunks) {
         $state.ChunkQueue.Enqueue($chunk)
@@ -5254,7 +5258,7 @@ function Start-ProfileReplication {
     $state.BytesComplete = 0
     $state.Phase = "Replicating"
 
-    # Debug: verify TotalChunks was set correctly
+    # Debug: verify TotalChunks was set correctly (can remove after confirming fix)
     Write-Host "[DEBUG] Set TotalChunks = $($chunks.Count), verified read = $($state.TotalChunks)"
 
     Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($scanResult.TotalSize/1GB, 2)) GB" `
