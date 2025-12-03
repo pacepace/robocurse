@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 19:08:25
+    Built: 2025-12-02 19:10:52
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -9521,10 +9521,15 @@ function Initialize-RobocurseGui {
     )
 
     # Store ConfigPath in script scope for use by event handlers and background jobs
-    $script:ConfigPath = $ConfigPath
+    # Resolve to absolute path immediately - background runspaces have different working directories
+    if ([System.IO.Path]::IsPathRooted($ConfigPath)) {
+        $script:ConfigPath = $ConfigPath
+    } else {
+        $script:ConfigPath = Join-Path (Get-Location).Path $ConfigPath
+    }
 
     Write-Host "[DEBUG] Initializing Robocurse GUI..."
-    Write-Host "[DEBUG] ConfigPath: $ConfigPath"
+    Write-Host "[DEBUG] ConfigPath: $($script:ConfigPath)"
     Write-Host "[DEBUG] script:RobocurseModulePath: $script:RobocurseModulePath"
     Write-Host "[DEBUG] script:RobocurseScriptPath: $script:RobocurseScriptPath"
     Write-Host "[DEBUG] PSCommandPath: $PSCommandPath"
