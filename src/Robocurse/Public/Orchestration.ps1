@@ -781,6 +781,10 @@ function Start-ChunkJob {
     # Get log path for this chunk
     $logPath = Get-LogPath -Type 'ChunkJob' -ChunkId $Chunk.ChunkId
 
+    # Console output for visibility
+    Write-Host "[CHUNK START] Chunk $($Chunk.ChunkId): $($Chunk.SourcePath) -> $($Chunk.DestinationPath)"
+    Write-Host "  Log file: $logPath"
+
     Write-RobocurseLog -Message "Starting chunk $($Chunk.ChunkId): $($Chunk.SourcePath)" `
         -Level 'Debug' -Component 'Orchestrator'
 
@@ -1013,8 +1017,19 @@ function Complete-RobocopyJob {
         'Fatal'   { 'Failed' }
     }
 
-    # Log result
-    Write-RobocurseLog -Message "Chunk $($Job.Chunk.ChunkId) completed: $($exitMeaning.Message)" `
+    # Log result with error details if available
+    $logMessage = "Chunk $($Job.Chunk.ChunkId) completed: $($exitMeaning.Message) (exit code $exitCode)"
+    if ($exitMeaning.FatalError -or $exitMeaning.CopyErrors) {
+        if ($stats.ErrorMessage) {
+            $logMessage += " - Errors: $($stats.ErrorMessage)"
+        }
+        # Also output to console for visibility during GUI mode
+        Write-Host "[ROBOCOPY FAILURE] Chunk $($Job.Chunk.ChunkId): $($stats.ErrorMessage)" -ForegroundColor Red
+        Write-Host "  Source: $($Job.Chunk.SourcePath)" -ForegroundColor Red
+        Write-Host "  Destination: $($Job.Chunk.DestinationPath)" -ForegroundColor Red
+        Write-Host "  Log file: $($Job.LogPath)" -ForegroundColor Red
+    }
+    Write-RobocurseLog -Message $logMessage `
         -Level $(if ($exitMeaning.Severity -eq 'Success') { 'Info' } else { 'Warning' }) `
         -Component 'Orchestrator'
 

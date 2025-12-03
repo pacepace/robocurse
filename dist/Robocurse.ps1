@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 18:52:13
+    Built: 2025-12-02 19:05:05
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -3594,6 +3594,7 @@ function Start-RobocopyJob {
     $psi.RedirectStandardError = $false
 
     Write-RobocurseLog -Message "Robocopy args: $($argList -join ' ')" -Level 'Debug' -Component 'Robocopy'
+    Write-Host "[ROBOCOPY CMD] $($psi.FileName) $($psi.Arguments)"
 
     # Start the process
     $process = [System.Diagnostics.Process]::Start($psi)
@@ -3723,6 +3724,7 @@ function ConvertFrom-RobocopyLog {
         CurrentFile = ""
         ParseSuccess = $false
         ParseWarning = $null
+        ErrorMessage = $null  # Extracted error message(s) from robocopy output
     }
 
     # Check if log file exists
@@ -3886,6 +3888,32 @@ function ConvertFrom-RobocopyLog {
             }
             Write-RobocurseLog "Could not extract statistics from robocopy log '$LogPath' ($($content.Length) bytes) - job may still be in progress" `
                 -Level 'Debug' -Component 'Robocopy'
+        }
+    }
+
+    # Extract error messages from log content
+    # Robocopy error lines typically contain "ERROR" followed by error code and message
+    # Common patterns:
+    #   - "ERROR 5 (0x00000005) Access is denied."
+    #   - "ERROR 2 (0x00000002) The system cannot find the file specified."
+    #   - "ERROR 3 (0x00000003) The system cannot find the path specified."
+    #   - "ERROR : xxx" (generic error lines)
+    if ($content) {
+        $errorLines = @()
+        $lines = $content -split "`r?`n"
+        foreach ($line in $lines) {
+            # Match ERROR followed by error code or message
+            if ($line -match '\bERROR\s+(\d+|:)\s*(.*)') {
+                $trimmedLine = $line.Trim()
+                if ($trimmedLine -and $trimmedLine.Length -gt 5) {
+                    $errorLines += $trimmedLine
+                }
+            }
+        }
+        # Deduplicate and limit to first few unique errors
+        if ($errorLines.Count -gt 0) {
+            $uniqueErrors = $errorLines | Select-Object -Unique | Select-Object -First 5
+            $result.ErrorMessage = $uniqueErrors -join "; "
         }
     }
 
@@ -5169,6 +5197,10 @@ function Start-ChunkJob {
     # Get log path for this chunk
     $logPath = Get-LogPath -Type 'ChunkJob' -ChunkId $Chunk.ChunkId
 
+    # Console output for visibility
+    Write-Host "[CHUNK START] Chunk $($Chunk.ChunkId): $($Chunk.SourcePath) -> $($Chunk.DestinationPath)"
+    Write-Host "  Log file: $logPath"
+
     Write-RobocurseLog -Message "Starting chunk $($Chunk.ChunkId): $($Chunk.SourcePath)" `
         -Level 'Debug' -Component 'Orchestrator'
 
@@ -5401,8 +5433,19 @@ function Complete-RobocopyJob {
         'Fatal'   { 'Failed' }
     }
 
-    # Log result
-    Write-RobocurseLog -Message "Chunk $($Job.Chunk.ChunkId) completed: $($exitMeaning.Message)" `
+    # Log result with error details if available
+    $logMessage = "Chunk $($Job.Chunk.ChunkId) completed: $($exitMeaning.Message) (exit code $exitCode)"
+    if ($exitMeaning.FatalError -or $exitMeaning.CopyErrors) {
+        if ($stats.ErrorMessage) {
+            $logMessage += " - Errors: $($stats.ErrorMessage)"
+        }
+        # Also output to console for visibility during GUI mode
+        Write-Host "[ROBOCOPY FAILURE] Chunk $($Job.Chunk.ChunkId): $($stats.ErrorMessage)" -ForegroundColor Red
+        Write-Host "  Source: $($Job.Chunk.SourcePath)" -ForegroundColor Red
+        Write-Host "  Destination: $($Job.Chunk.DestinationPath)" -ForegroundColor Red
+        Write-Host "  Log file: $($Job.LogPath)" -ForegroundColor Red
+    }
+    Write-RobocurseLog -Message $logMessage `
         -Level $(if ($exitMeaning.Severity -eq 'Success') { 'Info' } else { 'Warning' }) `
         -Component 'Orchestrator'
 
@@ -10893,6 +10936,27 @@ function Update-GuiProgress {
             }
         }
 
+        # Flush background runspace output streams to console
+        if ($script:ReplicationPowerShell -and $script:ReplicationPowerShell.Streams) {
+            # Flush Information stream (Write-Host output)
+            foreach ($info in $script:ReplicationPowerShell.Streams.Information) {
+                Write-Host "[BACKGROUND] $($info.MessageData)"
+            }
+            $script:ReplicationPowerShell.Streams.Information.Clear()
+
+            # Flush Warning stream
+            foreach ($warn in $script:ReplicationPowerShell.Streams.Warning) {
+                Write-Host "[BACKGROUND WARNING] $warn" -ForegroundColor Yellow
+            }
+            $script:ReplicationPowerShell.Streams.Warning.Clear()
+
+            # Flush Error stream
+            foreach ($err in $script:ReplicationPowerShell.Streams.Error) {
+                Write-Host "[BACKGROUND ERROR] $($err.Exception.Message)" -ForegroundColor Red
+            }
+            $script:ReplicationPowerShell.Streams.Error.Clear()
+        }
+
         # Update chunk grid - only when state changes
         if ($script:OrchestrationState -and (Test-ChunkGridNeedsRebuild)) {
             # Force array context to prevent PowerShell unwrapping single items
@@ -10923,18 +10987,36 @@ function Write-GuiLog {
         Uses a fixed-size ring buffer to prevent O(n²) string concatenation
         performance issues. When the buffer exceeds GuiLogMaxLines, oldest
         entries are removed. This keeps the GUI responsive during long runs.
-        Also writes to console for debugging visibility.
+        Also writes to console for debugging visibility with caller info.
     .PARAMETER Message
         Message to log
     #>
     [CmdletBinding()]
     param([string]$Message)
 
-    $timestamp = Get-Date -Format "HH:mm:ss"
-    $line = "[$timestamp] $Message"
+    # Get caller information from call stack for console output
+    $callStack = Get-PSCallStack
+    $callerInfo = ""
+    if ($callStack.Count -gt 1) {
+        $caller = $callStack[1]
+        $functionName = if ($caller.FunctionName -and $caller.FunctionName -ne '<ScriptBlock>') {
+            $caller.FunctionName
+        } else {
+            'Main'
+        }
+        $lineNumber = $caller.ScriptLineNumber
+        $callerInfo = "[GUI] [${functionName}:${lineNumber}]"
+    }
 
-    # Always write to console for debugging
-    Write-Host $line
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $shortTimestamp = Get-Date -Format "HH:mm:ss"
+
+    # Console gets full format with caller info
+    $consoleLine = "${timestamp} [INFO] ${callerInfo} ${Message}"
+    Write-Host $consoleLine
+
+    # GUI panel gets shorter format (no caller info - too verbose for UI)
+    $guiLine = "[$shortTimestamp] $Message"
 
     if (-not $script:Controls.txtLog) { return }
 
@@ -10944,7 +11026,7 @@ function Write-GuiLog {
     [System.Threading.Monitor]::Enter($script:GuiLogBuffer)
     try {
         # Add to ring buffer
-        $script:GuiLogBuffer.Add($line)
+        $script:GuiLogBuffer.Add($guiLine)
 
         # Trim if over limit (remove oldest entries)
         while ($script:GuiLogBuffer.Count -gt $script:GuiLogMaxLines) {

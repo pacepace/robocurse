@@ -1355,6 +1355,27 @@ function Update-GuiProgress {
             }
         }
 
+        # Flush background runspace output streams to console
+        if ($script:ReplicationPowerShell -and $script:ReplicationPowerShell.Streams) {
+            # Flush Information stream (Write-Host output)
+            foreach ($info in $script:ReplicationPowerShell.Streams.Information) {
+                Write-Host "[BACKGROUND] $($info.MessageData)"
+            }
+            $script:ReplicationPowerShell.Streams.Information.Clear()
+
+            # Flush Warning stream
+            foreach ($warn in $script:ReplicationPowerShell.Streams.Warning) {
+                Write-Host "[BACKGROUND WARNING] $warn" -ForegroundColor Yellow
+            }
+            $script:ReplicationPowerShell.Streams.Warning.Clear()
+
+            # Flush Error stream
+            foreach ($err in $script:ReplicationPowerShell.Streams.Error) {
+                Write-Host "[BACKGROUND ERROR] $($err.Exception.Message)" -ForegroundColor Red
+            }
+            $script:ReplicationPowerShell.Streams.Error.Clear()
+        }
+
         # Update chunk grid - only when state changes
         if ($script:OrchestrationState -and (Test-ChunkGridNeedsRebuild)) {
             # Force array context to prevent PowerShell unwrapping single items
@@ -1385,18 +1406,36 @@ function Write-GuiLog {
         Uses a fixed-size ring buffer to prevent O(n²) string concatenation
         performance issues. When the buffer exceeds GuiLogMaxLines, oldest
         entries are removed. This keeps the GUI responsive during long runs.
-        Also writes to console for debugging visibility.
+        Also writes to console for debugging visibility with caller info.
     .PARAMETER Message
         Message to log
     #>
     [CmdletBinding()]
     param([string]$Message)
 
-    $timestamp = Get-Date -Format "HH:mm:ss"
-    $line = "[$timestamp] $Message"
+    # Get caller information from call stack for console output
+    $callStack = Get-PSCallStack
+    $callerInfo = ""
+    if ($callStack.Count -gt 1) {
+        $caller = $callStack[1]
+        $functionName = if ($caller.FunctionName -and $caller.FunctionName -ne '<ScriptBlock>') {
+            $caller.FunctionName
+        } else {
+            'Main'
+        }
+        $lineNumber = $caller.ScriptLineNumber
+        $callerInfo = "[GUI] [${functionName}:${lineNumber}]"
+    }
 
-    # Always write to console for debugging
-    Write-Host $line
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $shortTimestamp = Get-Date -Format "HH:mm:ss"
+
+    # Console gets full format with caller info
+    $consoleLine = "${timestamp} [INFO] ${callerInfo} ${Message}"
+    Write-Host $consoleLine
+
+    # GUI panel gets shorter format (no caller info - too verbose for UI)
+    $guiLine = "[$shortTimestamp] $Message"
 
     if (-not $script:Controls.txtLog) { return }
 
@@ -1406,7 +1445,7 @@ function Write-GuiLog {
     [System.Threading.Monitor]::Enter($script:GuiLogBuffer)
     try {
         # Add to ring buffer
-        $script:GuiLogBuffer.Add($line)
+        $script:GuiLogBuffer.Add($guiLine)
 
         # Trim if over limit (remove oldest entries)
         while ($script:GuiLogBuffer.Count -gt $script:GuiLogMaxLines) {

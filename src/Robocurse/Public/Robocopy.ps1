@@ -334,6 +334,7 @@ function Start-RobocopyJob {
     $psi.RedirectStandardError = $false
 
     Write-RobocurseLog -Message "Robocopy args: $($argList -join ' ')" -Level 'Debug' -Component 'Robocopy'
+    Write-Host "[ROBOCOPY CMD] $($psi.FileName) $($psi.Arguments)"
 
     # Start the process
     $process = [System.Diagnostics.Process]::Start($psi)
@@ -463,6 +464,7 @@ function ConvertFrom-RobocopyLog {
         CurrentFile = ""
         ParseSuccess = $false
         ParseWarning = $null
+        ErrorMessage = $null  # Extracted error message(s) from robocopy output
     }
 
     # Check if log file exists
@@ -626,6 +628,32 @@ function ConvertFrom-RobocopyLog {
             }
             Write-RobocurseLog "Could not extract statistics from robocopy log '$LogPath' ($($content.Length) bytes) - job may still be in progress" `
                 -Level 'Debug' -Component 'Robocopy'
+        }
+    }
+
+    # Extract error messages from log content
+    # Robocopy error lines typically contain "ERROR" followed by error code and message
+    # Common patterns:
+    #   - "ERROR 5 (0x00000005) Access is denied."
+    #   - "ERROR 2 (0x00000002) The system cannot find the file specified."
+    #   - "ERROR 3 (0x00000003) The system cannot find the path specified."
+    #   - "ERROR : xxx" (generic error lines)
+    if ($content) {
+        $errorLines = @()
+        $lines = $content -split "`r?`n"
+        foreach ($line in $lines) {
+            # Match ERROR followed by error code or message
+            if ($line -match '\bERROR\s+(\d+|:)\s*(.*)') {
+                $trimmedLine = $line.Trim()
+                if ($trimmedLine -and $trimmedLine.Length -gt 5) {
+                    $errorLines += $trimmedLine
+                }
+            }
+        }
+        # Deduplicate and limit to first few unique errors
+        if ($errorLines.Count -gt 0) {
+            $uniqueErrors = $errorLines | Select-Object -Unique | Select-Object -First 5
+            $result.ErrorMessage = $uniqueErrors -join "; "
         }
     }
 
