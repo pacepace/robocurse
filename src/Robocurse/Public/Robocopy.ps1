@@ -73,6 +73,40 @@ function Get-BandwidthThrottleIPG {
     return $ipg
 }
 
+function Format-QuotedPath {
+    <#
+    .SYNOPSIS
+        Properly quotes a path for use in command-line arguments
+    .DESCRIPTION
+        When a path ends with a backslash and is quoted (e.g., "D:\"), the
+        backslash-quote sequence (\" ) is interpreted as an escaped quote by
+        the Windows command-line parser. This causes argument parsing to fail.
+
+        This function doubles trailing backslashes to prevent this issue:
+        - "D:\" becomes "D:\\" (the \\ is parsed as a single \)
+        - "C:\Users\Test\" becomes "C:\Users\Test\\"
+        - "C:\Users\Test" stays "C:\Users\Test" (no trailing backslash)
+    .PARAMETER Path
+        The path to quote
+    .OUTPUTS
+        String - Properly quoted path safe for command-line use
+    .EXAMPLE
+        Format-QuotedPath -Path "D:\"  # Returns "D:\\"
+        Format-QuotedPath -Path "C:\Users\Test"  # Returns "C:\Users\Test"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    # If path ends with backslash, double it to escape the \" problem
+    if ($Path.EndsWith('\')) {
+        return "`"$Path\`""
+    }
+    return "`"$Path`""
+}
+
 function New-RobocopyArguments {
     <#
     .SYNOPSIS
@@ -160,9 +194,9 @@ function New-RobocopyArguments {
     # Build argument list
     $argList = [System.Collections.Generic.List[string]]::new()
 
-    # Source and destination (quoted for paths with spaces)
-    $argList.Add("`"$safeSourcePath`"")
-    $argList.Add("`"$safeDestPath`"")
+    # Source and destination (use Format-QuotedPath to handle trailing backslash escaping)
+    $argList.Add((Format-QuotedPath -Path $safeSourcePath))
+    $argList.Add((Format-QuotedPath -Path $safeDestPath))
 
     # Copy mode: /MIR (mirror with delete) or /E (copy subdirs including empty)
     $argList.Add($(if ($noMirror) { "/E" } else { "/MIR" }))
@@ -188,7 +222,7 @@ function New-RobocopyArguments {
     $argList.Add("/MT:$ThreadsPerJob")
     $argList.Add("/R:$retryCount")
     $argList.Add("/W:$retryWait")
-    $argList.Add("/LOG:`"$safeLogPath`"")
+    $argList.Add("/LOG:$(Format-QuotedPath -Path $safeLogPath)")
     $argList.Add("/TEE")
     $argList.Add("/NP")
     $argList.Add("/BYTES")
@@ -210,7 +244,7 @@ function New-RobocopyArguments {
         if ($safeExcludeFiles.Count -gt 0) {
             $argList.Add("/XF")
             foreach ($pattern in $safeExcludeFiles) {
-                $argList.Add("`"$pattern`"")
+                $argList.Add((Format-QuotedPath -Path $pattern))
             }
         }
     }
@@ -221,7 +255,7 @@ function New-RobocopyArguments {
         if ($safeExcludeDirs.Count -gt 0) {
             $argList.Add("/XD")
             foreach ($dir in $safeExcludeDirs) {
-                $argList.Add("`"$dir`"")
+                $argList.Add((Format-QuotedPath -Path $dir))
             }
         }
     }
@@ -797,8 +831,8 @@ function Test-RobocopyVerification {
     # /NJH /NJS = No job header/summary (cleaner parsing)
     # /BYTES = Show sizes in bytes for precision
     $argList = [System.Collections.Generic.List[string]]::new()
-    $argList.Add("`"$safeSourcePath`"")
-    $argList.Add("`"$safeDestPath`"")
+    $argList.Add((Format-QuotedPath -Path $safeSourcePath))
+    $argList.Add((Format-QuotedPath -Path $safeDestPath))
     $argList.Add("/L")
     $argList.Add("/E")
     $argList.Add("/NJH")
@@ -806,7 +840,7 @@ function Test-RobocopyVerification {
     $argList.Add("/BYTES")
     $argList.Add("/R:0")
     $argList.Add("/W:0")
-    $argList.Add("/LOG:`"$tempLogPath`"")
+    $argList.Add("/LOG:$(Format-QuotedPath -Path $tempLogPath)")
 
     # Add FAT time tolerance if requested
     if ($UseFatTimeTolerance) {
@@ -819,7 +853,7 @@ function Test-RobocopyVerification {
         if ($safeExcludeFiles.Count -gt 0) {
             $argList.Add("/XF")
             foreach ($pattern in $safeExcludeFiles) {
-                $argList.Add("`"$pattern`"")
+                $argList.Add((Format-QuotedPath -Path $pattern))
             }
         }
     }
@@ -829,7 +863,7 @@ function Test-RobocopyVerification {
         if ($safeExcludeDirs.Count -gt 0) {
             $argList.Add("/XD")
             foreach ($dir in $safeExcludeDirs) {
-                $argList.Add("`"$dir`"")
+                $argList.Add((Format-QuotedPath -Path $dir))
             }
         }
     }

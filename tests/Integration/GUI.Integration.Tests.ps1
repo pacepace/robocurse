@@ -519,6 +519,209 @@ InModuleScope 'Robocurse' {
                 $runspace.Close()
                 $runspace.Dispose()
             }
+
+            It "Should resolve log path from config in background runspace" {
+                # This test catches the bug where Initialize-LogSession fails
+                # because the config path or log path resolution is wrong
+
+                # Create a config with relative log path (the common case)
+                $configWithRelativeLog = @{
+                    global = @{
+                        logging = @{
+                            operationalLog = @{
+                                path = ".\Logs"
+                                rotation = @{ maxAgeDays = 30 }
+                            }
+                        }
+                    }
+                    profiles = @{
+                        TestProfile = @{
+                            source = "C:\TestSource"
+                            destination = "C:\TestDest"
+                            enabled = $true
+                        }
+                    }
+                }
+                $configWithRelativeLog | ConvertTo-Json -Depth 10 | Out-File $script:TempConfigPath -Encoding utf8
+
+                $runspace = [runspacefactory]::CreateRunspace()
+                $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+                $runspace.Open()
+
+                $powershell = [powershell]::Create()
+                $powershell.Runspace = $runspace
+
+                # This script mimics exactly what the GUI background runspace does
+                $testScript = @"
+                    param(`$ModulePath, `$ConfigPath)
+
+                    try {
+                        Import-Module `$ModulePath -Force -ErrorAction Stop
+
+                        `$config = Get-RobocurseConfig -Path `$ConfigPath
+                        `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+
+                        # DEBUG: What does the config actually contain?
+                        `$debugInfo = "ConfigPath=`$ConfigPath; LogPath=`$(`$config.GlobalSettings.LogPath); logRoot=`$logRoot"
+
+                        # Resolve relative paths based on config file directory
+                        if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
+                            `$configDir = Split-Path -Parent (Resolve-Path `$ConfigPath)
+                            `$logRoot = Join-Path `$configDir `$logRoot
+                        }
+
+                        # Try to initialize log session
+                        `$sessionResult = Initialize-LogSession -LogRoot `$logRoot
+
+                        # Verify log session works
+                        Write-RobocurseLog -Message "Test from background" -Level Info -Component Test
+
+                        # Return just a string (not the hashtable from Initialize-LogSession)
+                        Write-Output "SUCCESS: LogRoot=`$logRoot; Debug=`$debugInfo"
+                    }
+                    catch {
+                        Write-Output "ERROR: `$(`$_.Exception.Message)"
+                    }
+"@
+
+                $powershell.AddScript($testScript)
+                $powershell.AddArgument($script:RobocurseModulePath)
+                $powershell.AddArgument($script:TempConfigPath)
+
+                $handle = $powershell.BeginInvoke()
+                $timeout = [TimeSpan]::FromSeconds(15)
+                $handle.AsyncWaitHandle.WaitOne($timeout) | Out-Null
+
+                $result = $powershell.EndInvoke($handle)
+                # Get the last output (the string we want)
+                $resultString = @($result) | Where-Object { $_ -is [string] } | Select-Object -Last 1
+                $resultString | Should -Match "^SUCCESS:" -Because "Log session should initialize from config with relative path. Got: $resultString"
+
+                $powershell.Dispose()
+                $runspace.Close()
+                $runspace.Dispose()
+            }
+
+            It "Should return default config when path does not exist" {
+                # Get-RobocurseConfig returns a default config for non-existent paths
+                # This is intentional - allows fresh starts
+
+                $runspace = [runspacefactory]::CreateRunspace()
+                $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+                $runspace.Open()
+
+                $powershell = [powershell]::Create()
+                $powershell.Runspace = $runspace
+
+                $testScript = @"
+                    param(`$ModulePath)
+
+                    try {
+                        Import-Module `$ModulePath -Force -ErrorAction Stop
+
+                        # Use a path that definitely doesn't exist
+                        `$config = Get-RobocurseConfig -Path "C:\NonExistent\Path\config.json"
+
+                        if (`$config) {
+                            return "GOT_DEFAULT_CONFIG: SyncProfiles=`$(`$config.SyncProfiles.Count)"
+                        }
+                        return "GOT_NULL_CONFIG"
+                    }
+                    catch {
+                        return "THREW: `$(`$_.Exception.Message)"
+                    }
+"@
+
+                $powershell.AddScript($testScript)
+                $powershell.AddArgument($script:RobocurseModulePath)
+
+                $handle = $powershell.BeginInvoke()
+                $timeout = [TimeSpan]::FromSeconds(10)
+                $handle.AsyncWaitHandle.WaitOne($timeout) | Out-Null
+
+                $result = $powershell.EndInvoke($handle)
+                # Get-RobocurseConfig returns a default config with empty SyncProfiles
+                $result | Should -Match "GOT_DEFAULT_CONFIG" -Because "Non-existent paths should return default config"
+
+                $powershell.Dispose()
+                $runspace.Close()
+                $runspace.Dispose()
+            }
+
+            It "Should normalize log path without .\. sequences" {
+                # This test catches the bug where paths contain .\. or .\.\ sequences
+                # which cause ugly paths like C:\foo\.\.\Logs
+
+                # Create a config with relative log path
+                $configWithRelativeLog = @{
+                    global = @{
+                        logging = @{
+                            operationalLog = @{
+                                path = ".\Logs"
+                                rotation = @{ maxAgeDays = 30 }
+                            }
+                        }
+                    }
+                    profiles = @{
+                        TestProfile = @{
+                            source = "C:\TestSource"
+                            destination = "C:\TestDest"
+                            enabled = $true
+                        }
+                    }
+                }
+                $configWithRelativeLog | ConvertTo-Json -Depth 10 | Out-File $script:TempConfigPath -Encoding utf8
+
+                $runspace = [runspacefactory]::CreateRunspace()
+                $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+                $runspace.Open()
+
+                $powershell = [powershell]::Create()
+                $powershell.Runspace = $runspace
+
+                $testScript = @"
+                    param(`$ModulePath, `$ConfigPath)
+
+                    try {
+                        Import-Module `$ModulePath -Force -ErrorAction Stop
+
+                        `$config = Get-RobocurseConfig -Path `$ConfigPath
+                        `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+
+                        # Resolve relative paths based on config file directory and normalize
+                        if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
+                            `$configDir = Split-Path -Parent `$ConfigPath
+                            `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
+                        }
+
+                        # Check for problematic path patterns
+                        if (`$logRoot -match '\\\.\\\.' -or `$logRoot -match '\\\.\\' -or `$logRoot -match '\\\.$') {
+                            Write-Output "PATH_NOT_NORMALIZED: `$logRoot"
+                        }
+                        else {
+                            Write-Output "SUCCESS: `$logRoot"
+                        }
+                    }
+                    catch {
+                        Write-Output "ERROR: `$(`$_.Exception.Message)"
+                    }
+"@
+
+                $powershell.AddScript($testScript)
+                $powershell.AddArgument($script:RobocurseModulePath)
+                $powershell.AddArgument($script:TempConfigPath)
+
+                $handle = $powershell.BeginInvoke()
+                $timeout = [TimeSpan]::FromSeconds(15)
+                $handle.AsyncWaitHandle.WaitOne($timeout) | Out-Null
+
+                $result = @($powershell.EndInvoke($handle)) | Where-Object { $_ -is [string] } | Select-Object -Last 1
+                $result | Should -Match "^SUCCESS:" -Because "Log path should be normalized without .\. sequences. Got: $result"
+
+                $powershell.Dispose()
+                $runspace.Close()
+                $runspace.Dispose()
+            }
         }
     }
 }

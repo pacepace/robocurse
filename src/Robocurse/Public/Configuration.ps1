@@ -1,4 +1,58 @@
 ﻿# Robocurse Configuration Functions
+
+function Format-Json {
+    <#
+    .SYNOPSIS
+        Formats JSON with proper 2-space indentation
+    .DESCRIPTION
+        PowerShell's ConvertTo-Json produces ugly formatting with 4-space indentation
+        and inconsistent spacing. This function reformats JSON to use 2-space indentation
+        and consistent property spacing.
+    .PARAMETER Json
+        The JSON string to format
+    .PARAMETER Indent
+        Number of spaces per indentation level (default 2)
+    .OUTPUTS
+        Properly formatted JSON string
+    .EXAMPLE
+        $obj | ConvertTo-Json -Depth 10 | Format-Json
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [string]$Json,
+
+        [ValidateRange(1, 8)]
+        [int]$Indent = 2
+    )
+
+    $indentStr = ' ' * $Indent
+    $indentLevel = 0
+
+    $lines = $Json -split "`n"
+    $result = foreach ($line in $lines) {
+        # Decrease indent for closing brackets
+        if ($line -match '^\s*[\}\]]') {
+            $indentLevel--
+        }
+
+        # Build the formatted line
+        $trimmed = $line.TrimStart()
+        # Fix spacing: PowerShell adds extra spaces after colons
+        $trimmed = $trimmed -replace '":  ', '": '
+        $formattedLine = ($indentStr * $indentLevel) + $trimmed
+
+        # Increase indent for opening brackets
+        if ($line -match '[\{\[]\s*$') {
+            $indentLevel++
+        }
+
+        $formattedLine
+    }
+
+    $result -join "`n"
+}
+
 function New-DefaultConfig {
     <#
     .SYNOPSIS
@@ -528,8 +582,8 @@ function Save-RobocurseConfig {
         # Convert to friendly format before saving
         $friendlyConfig = ConvertTo-FriendlyConfig -Config $Config
 
-        # Convert to JSON and save
-        $jsonContent = $friendlyConfig | ConvertTo-Json -Depth 10
+        # Convert to JSON with proper 2-space indentation
+        $jsonContent = $friendlyConfig | ConvertTo-Json -Depth 10 | Format-Json
         $jsonContent | Set-Content -Path $Path -Encoding UTF8 -ErrorAction Stop
 
         Write-Verbose "Configuration saved successfully to '$Path'"

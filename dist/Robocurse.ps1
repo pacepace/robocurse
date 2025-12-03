@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 19:10:52
+    Built: 2025-12-02 19:44:10
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -934,6 +934,59 @@ function Test-SafeConfigPath {
 
 #region ==================== CONFIGURATION ====================
 
+function Format-Json {
+    <#
+    .SYNOPSIS
+        Formats JSON with proper 2-space indentation
+    .DESCRIPTION
+        PowerShell's ConvertTo-Json produces ugly formatting with 4-space indentation
+        and inconsistent spacing. This function reformats JSON to use 2-space indentation
+        and consistent property spacing.
+    .PARAMETER Json
+        The JSON string to format
+    .PARAMETER Indent
+        Number of spaces per indentation level (default 2)
+    .OUTPUTS
+        Properly formatted JSON string
+    .EXAMPLE
+        $obj | ConvertTo-Json -Depth 10 | Format-Json
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [string]$Json,
+
+        [ValidateRange(1, 8)]
+        [int]$Indent = 2
+    )
+
+    $indentStr = ' ' * $Indent
+    $indentLevel = 0
+
+    $lines = $Json -split "`n"
+    $result = foreach ($line in $lines) {
+        # Decrease indent for closing brackets
+        if ($line -match '^\s*[\}\]]') {
+            $indentLevel--
+        }
+
+        # Build the formatted line
+        $trimmed = $line.TrimStart()
+        # Fix spacing: PowerShell adds extra spaces after colons
+        $trimmed = $trimmed -replace '":  ', '": '
+        $formattedLine = ($indentStr * $indentLevel) + $trimmed
+
+        # Increase indent for opening brackets
+        if ($line -match '[\{\[]\s*$') {
+            $indentLevel++
+        }
+
+        $formattedLine
+    }
+
+    $result -join "`n"
+}
+
 function New-DefaultConfig {
     <#
     .SYNOPSIS
@@ -1463,8 +1516,8 @@ function Save-RobocurseConfig {
         # Convert to friendly format before saving
         $friendlyConfig = ConvertTo-FriendlyConfig -Config $Config
 
-        # Convert to JSON and save
-        $jsonContent = $friendlyConfig | ConvertTo-Json -Depth 10
+        # Convert to JSON with proper 2-space indentation
+        $jsonContent = $friendlyConfig | ConvertTo-Json -Depth 10 | Format-Json
         $jsonContent | Set-Content -Path $Path -Encoding UTF8 -ErrorAction Stop
 
         Write-Verbose "Configuration saved successfully to '$Path'"
@@ -3333,6 +3386,40 @@ function Get-BandwidthThrottleIPG {
     return $ipg
 }
 
+function Format-QuotedPath {
+    <#
+    .SYNOPSIS
+        Properly quotes a path for use in command-line arguments
+    .DESCRIPTION
+        When a path ends with a backslash and is quoted (e.g., "D:\"), the
+        backslash-quote sequence (\" ) is interpreted as an escaped quote by
+        the Windows command-line parser. This causes argument parsing to fail.
+
+        This function doubles trailing backslashes to prevent this issue:
+        - "D:\" becomes "D:\\" (the \\ is parsed as a single \)
+        - "C:\Users\Test\" becomes "C:\Users\Test\\"
+        - "C:\Users\Test" stays "C:\Users\Test" (no trailing backslash)
+    .PARAMETER Path
+        The path to quote
+    .OUTPUTS
+        String - Properly quoted path safe for command-line use
+    .EXAMPLE
+        Format-QuotedPath -Path "D:\"  # Returns "D:\\"
+        Format-QuotedPath -Path "C:\Users\Test"  # Returns "C:\Users\Test"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    # If path ends with backslash, double it to escape the \" problem
+    if ($Path.EndsWith('\')) {
+        return "`"$Path\`""
+    }
+    return "`"$Path`""
+}
+
 function New-RobocopyArguments {
     <#
     .SYNOPSIS
@@ -3420,9 +3507,9 @@ function New-RobocopyArguments {
     # Build argument list
     $argList = [System.Collections.Generic.List[string]]::new()
 
-    # Source and destination (quoted for paths with spaces)
-    $argList.Add("`"$safeSourcePath`"")
-    $argList.Add("`"$safeDestPath`"")
+    # Source and destination (use Format-QuotedPath to handle trailing backslash escaping)
+    $argList.Add((Format-QuotedPath -Path $safeSourcePath))
+    $argList.Add((Format-QuotedPath -Path $safeDestPath))
 
     # Copy mode: /MIR (mirror with delete) or /E (copy subdirs including empty)
     $argList.Add($(if ($noMirror) { "/E" } else { "/MIR" }))
@@ -3448,7 +3535,7 @@ function New-RobocopyArguments {
     $argList.Add("/MT:$ThreadsPerJob")
     $argList.Add("/R:$retryCount")
     $argList.Add("/W:$retryWait")
-    $argList.Add("/LOG:`"$safeLogPath`"")
+    $argList.Add("/LOG:$(Format-QuotedPath -Path $safeLogPath)")
     $argList.Add("/TEE")
     $argList.Add("/NP")
     $argList.Add("/BYTES")
@@ -3470,7 +3557,7 @@ function New-RobocopyArguments {
         if ($safeExcludeFiles.Count -gt 0) {
             $argList.Add("/XF")
             foreach ($pattern in $safeExcludeFiles) {
-                $argList.Add("`"$pattern`"")
+                $argList.Add((Format-QuotedPath -Path $pattern))
             }
         }
     }
@@ -3481,7 +3568,7 @@ function New-RobocopyArguments {
         if ($safeExcludeDirs.Count -gt 0) {
             $argList.Add("/XD")
             foreach ($dir in $safeExcludeDirs) {
-                $argList.Add("`"$dir`"")
+                $argList.Add((Format-QuotedPath -Path $dir))
             }
         }
     }
@@ -4057,8 +4144,8 @@ function Test-RobocopyVerification {
     # /NJH /NJS = No job header/summary (cleaner parsing)
     # /BYTES = Show sizes in bytes for precision
     $argList = [System.Collections.Generic.List[string]]::new()
-    $argList.Add("`"$safeSourcePath`"")
-    $argList.Add("`"$safeDestPath`"")
+    $argList.Add((Format-QuotedPath -Path $safeSourcePath))
+    $argList.Add((Format-QuotedPath -Path $safeDestPath))
     $argList.Add("/L")
     $argList.Add("/E")
     $argList.Add("/NJH")
@@ -4066,7 +4153,7 @@ function Test-RobocopyVerification {
     $argList.Add("/BYTES")
     $argList.Add("/R:0")
     $argList.Add("/W:0")
-    $argList.Add("/LOG:`"$tempLogPath`"")
+    $argList.Add("/LOG:$(Format-QuotedPath -Path $tempLogPath)")
 
     # Add FAT time tolerance if requested
     if ($UseFatTimeTolerance) {
@@ -4079,7 +4166,7 @@ function Test-RobocopyVerification {
         if ($safeExcludeFiles.Count -gt 0) {
             $argList.Add("/XF")
             foreach ($pattern in $safeExcludeFiles) {
-                $argList.Add("`"$pattern`"")
+                $argList.Add((Format-QuotedPath -Path $pattern))
             }
         }
     }
@@ -4089,7 +4176,7 @@ function Test-RobocopyVerification {
         if ($safeExcludeDirs.Count -gt 0) {
             $argList.Add("/XD")
             foreach ($dir in $safeExcludeDirs) {
-                $argList.Add("`"$dir`"")
+                $argList.Add((Format-QuotedPath -Path $dir))
             }
         }
     }
@@ -9523,9 +9610,9 @@ function Initialize-RobocurseGui {
     # Store ConfigPath in script scope for use by event handlers and background jobs
     # Resolve to absolute path immediately - background runspaces have different working directories
     if ([System.IO.Path]::IsPathRooted($ConfigPath)) {
-        $script:ConfigPath = $ConfigPath
+        $script:ConfigPath = [System.IO.Path]::GetFullPath($ConfigPath)
     } else {
-        $script:ConfigPath = Join-Path (Get-Location).Path $ConfigPath
+        $script:ConfigPath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $ConfigPath))
     }
 
     Write-Host "[DEBUG] Initializing Robocurse GUI..."
@@ -10519,10 +10606,10 @@ function New-ReplicationRunspace {
                 Write-Host "[BACKGROUND] Initializing log session..."
                 `$config = Get-RobocurseConfig -Path `$ConfigPath
                 `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
-                # Resolve relative paths based on config file directory
+                # Resolve relative paths based on config file directory and normalize
                 if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
-                    `$configDir = Split-Path -Parent (Resolve-Path `$ConfigPath)
-                    `$logRoot = Join-Path `$configDir `$logRoot
+                    `$configDir = Split-Path -Parent `$ConfigPath
+                    `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
                 }
                 Write-Host "[BACKGROUND] Log root: `$logRoot"
                 Initialize-LogSession -LogRoot `$logRoot
@@ -10562,11 +10649,14 @@ function New-ReplicationRunspace {
     }
     else {
         # Script/monolith mode
+        # NOTE: We use $GuiConfigPath (not $ConfigPath) because dot-sourcing the script
+        # would shadow our parameter with the script's own $ConfigPath parameter
         $backgroundScript = @"
-            param(`$ScriptPath, `$SharedState, `$Profiles, `$MaxWorkers, `$ConfigPath)
+            param(`$ScriptPath, `$SharedState, `$Profiles, `$MaxWorkers, `$GuiConfigPath)
 
             try {
                 Write-Host "[BACKGROUND] Loading script from: `$ScriptPath"
+                Write-Host "[BACKGROUND] Config path: `$GuiConfigPath"
                 # Load the script to get all functions (with -Help to prevent main execution)
                 . `$ScriptPath -Help
                 Write-Host "[BACKGROUND] Script loaded successfully"
@@ -10581,12 +10671,12 @@ function New-ReplicationRunspace {
             # Initialize logging session (required for Write-RobocurseLog)
             try {
                 Write-Host "[BACKGROUND] Initializing log session..."
-                `$config = Get-RobocurseConfig -Path `$ConfigPath
+                `$config = Get-RobocurseConfig -Path `$GuiConfigPath
                 `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
-                # Resolve relative paths based on config file directory
+                # Resolve relative paths based on config file directory and normalize
                 if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
-                    `$configDir = Split-Path -Parent (Resolve-Path `$ConfigPath)
-                    `$logRoot = Join-Path `$configDir `$logRoot
+                    `$configDir = Split-Path -Parent `$GuiConfigPath
+                    `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
                 }
                 Write-Host "[BACKGROUND] Log root: `$logRoot"
                 Initialize-LogSession -LogRoot `$logRoot

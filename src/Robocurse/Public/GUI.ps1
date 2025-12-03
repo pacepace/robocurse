@@ -201,9 +201,9 @@ function Initialize-RobocurseGui {
     # Store ConfigPath in script scope for use by event handlers and background jobs
     # Resolve to absolute path immediately - background runspaces have different working directories
     if ([System.IO.Path]::IsPathRooted($ConfigPath)) {
-        $script:ConfigPath = $ConfigPath
+        $script:ConfigPath = [System.IO.Path]::GetFullPath($ConfigPath)
     } else {
-        $script:ConfigPath = Join-Path (Get-Location).Path $ConfigPath
+        $script:ConfigPath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location).Path $ConfigPath))
     }
 
     Write-Host "[DEBUG] Initializing Robocurse GUI..."
@@ -938,10 +938,10 @@ function New-ReplicationRunspace {
                 Write-Host "[BACKGROUND] Initializing log session..."
                 `$config = Get-RobocurseConfig -Path `$ConfigPath
                 `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
-                # Resolve relative paths based on config file directory
+                # Resolve relative paths based on config file directory and normalize
                 if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
-                    `$configDir = Split-Path -Parent (Resolve-Path `$ConfigPath)
-                    `$logRoot = Join-Path `$configDir `$logRoot
+                    `$configDir = Split-Path -Parent `$ConfigPath
+                    `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
                 }
                 Write-Host "[BACKGROUND] Log root: `$logRoot"
                 Initialize-LogSession -LogRoot `$logRoot
@@ -981,11 +981,14 @@ function New-ReplicationRunspace {
     }
     else {
         # Script/monolith mode
+        # NOTE: We use $GuiConfigPath (not $ConfigPath) because dot-sourcing the script
+        # would shadow our parameter with the script's own $ConfigPath parameter
         $backgroundScript = @"
-            param(`$ScriptPath, `$SharedState, `$Profiles, `$MaxWorkers, `$ConfigPath)
+            param(`$ScriptPath, `$SharedState, `$Profiles, `$MaxWorkers, `$GuiConfigPath)
 
             try {
                 Write-Host "[BACKGROUND] Loading script from: `$ScriptPath"
+                Write-Host "[BACKGROUND] Config path: `$GuiConfigPath"
                 # Load the script to get all functions (with -Help to prevent main execution)
                 . `$ScriptPath -Help
                 Write-Host "[BACKGROUND] Script loaded successfully"
@@ -1000,12 +1003,12 @@ function New-ReplicationRunspace {
             # Initialize logging session (required for Write-RobocurseLog)
             try {
                 Write-Host "[BACKGROUND] Initializing log session..."
-                `$config = Get-RobocurseConfig -Path `$ConfigPath
+                `$config = Get-RobocurseConfig -Path `$GuiConfigPath
                 `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
-                # Resolve relative paths based on config file directory
+                # Resolve relative paths based on config file directory and normalize
                 if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
-                    `$configDir = Split-Path -Parent (Resolve-Path `$ConfigPath)
-                    `$logRoot = Join-Path `$configDir `$logRoot
+                    `$configDir = Split-Path -Parent `$GuiConfigPath
+                    `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
                 }
                 Write-Host "[BACKGROUND] Log root: `$logRoot"
                 Initialize-LogSession -LogRoot `$logRoot

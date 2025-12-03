@@ -587,6 +587,41 @@ Describe "Robocopy Wrapper" {
             $argString | Should -Not -Match ' /L$| /L '  # Match /L at end or followed by space (not /LOG)
         }
 
+        It "Should double trailing backslash on root drive paths" {
+            # This is critical: "D:\" without fix becomes "D:\" which parses as D:" with escaped quote
+            # Fix: "D:\" must become "D:\\" so robocopy sees D:\ as the source path
+            $args = New-RobocopyArguments `
+                -SourcePath "D:\" `
+                -DestinationPath "C:\Backup" `
+                -LogPath "C:\log.txt"
+
+            $argString = $args -join ' '
+            # The source should be "D:\\" not "D:\"
+            $argString | Should -Match '"D:\\\\"'
+        }
+
+        It "Should double trailing backslash on directory paths ending in backslash" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Users\Test\" `
+                -DestinationPath "D:\Backup" `
+                -LogPath "C:\log.txt"
+
+            $argString = $args -join ' '
+            $argString | Should -Match '"C:\\Users\\Test\\\\"'
+        }
+
+        It "Should not double backslash when path does not end with backslash" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Users\Test" `
+                -DestinationPath "D:\Backup" `
+                -LogPath "C:\log.txt"
+
+            $argString = $args -join ' '
+            # Should end with Test" not Test\\"
+            $argString | Should -Match '"C:\\Users\\Test"'
+            $argString | Should -Not -Match 'Test\\\\"'
+        }
+
         It "Should have DryRun parameter" {
             $cmd = Get-Command New-RobocopyArguments
             $cmd.Parameters.ContainsKey('DryRun') | Should -Be $true
@@ -915,6 +950,50 @@ Describe "Robocopy Wrapper" {
         It "Clear-RobocopyPath should exist and be callable" {
             Get-Command Clear-RobocopyPath | Should -Not -BeNullOrEmpty
             { Clear-RobocopyPath } | Should -Not -Throw
+        }
+    }
+
+    Context "Format-QuotedPath - Trailing Backslash Escaping" {
+        It "Should double trailing backslash to prevent escape sequence" {
+            # When path ends with \, the \" would be interpreted as an escaped quote
+            # Fix: "D:\" becomes "D:\\" so the \\ is parsed as single \
+            $result = Format-QuotedPath -Path "D:\"
+            $result | Should -Be '"D:\\"'
+        }
+
+        It "Should handle root drive path correctly" {
+            $result = Format-QuotedPath -Path "C:\"
+            $result | Should -Be '"C:\\"'
+        }
+
+        It "Should not double backslash when path does not end with backslash" {
+            $result = Format-QuotedPath -Path "C:\Users\Test"
+            $result | Should -Be '"C:\Users\Test"'
+        }
+
+        It "Should handle path ending with trailing backslash" {
+            $result = Format-QuotedPath -Path "C:\Users\Test\"
+            $result | Should -Be '"C:\Users\Test\\"'
+        }
+
+        It "Should handle UNC path without trailing backslash" {
+            $result = Format-QuotedPath -Path "\\server\share\folder"
+            $result | Should -Be '"\\server\share\folder"'
+        }
+
+        It "Should handle UNC path with trailing backslash" {
+            $result = Format-QuotedPath -Path "\\server\share\"
+            $result | Should -Be '"\\server\share\\"'
+        }
+
+        It "Should handle path with spaces" {
+            $result = Format-QuotedPath -Path "C:\Program Files\My App"
+            $result | Should -Be '"C:\Program Files\My App"'
+        }
+
+        It "Should handle path with spaces ending in backslash" {
+            $result = Format-QuotedPath -Path "C:\Program Files\"
+            $result | Should -Be '"C:\Program Files\\"'
         }
     }
 

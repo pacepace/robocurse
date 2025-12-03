@@ -12,7 +12,8 @@
       "Bash(powershell.exe -ExecutionPolicy Bypass -File \"C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\tests\\run-remote-vss-tests.ps1\")",
       "Bash(powershell.exe -ExecutionPolicy Bypass -File:*)",
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse; Invoke-Pester -Path tests\\Integration\\GUI.Integration.Tests.ps1 -Output Detailed\")",
-      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse; Invoke-Pester -Path tests\\Integration\\Build.Tests.ps1 -Output Detailed\")"
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse; Invoke-Pester -Path tests\\Integration\\Build.Tests.ps1 -Output Detailed\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse; .\\build\\Build-Robocurse.ps1\")"
     ],
     "deny": [],
     "ask": []
