@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 20:32:13
+    Built: 2025-12-02 20:39:29
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -10838,6 +10838,189 @@ function Start-GuiReplication {
     }
 }
 
+function Show-CompletionDialog {
+    <#
+    .SYNOPSIS
+        Shows a modern completion dialog with replication statistics
+    .PARAMETER ChunksComplete
+        Number of chunks completed successfully
+    .PARAMETER ChunksTotal
+        Total number of chunks
+    .PARAMETER ChunksFailed
+        Number of chunks that failed
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$ChunksComplete = 0,
+        [int]$ChunksTotal = 0,
+        [int]$ChunksFailed = 0
+    )
+
+    try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'CompletionDialog.xaml' -FallbackContent @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Replication Complete"
+        Height="280" Width="420"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize">
+
+    <Border Background="#1E1E1E" CornerRadius="8" BorderBrush="#3E3E3E" BorderThickness="1">
+        <Grid Margin="24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header with icon and title -->
+            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,16">
+                <!-- Success checkmark icon (Unicode) -->
+                <Border x:Name="iconBorder" Width="48" Height="48" CornerRadius="24" Background="#4CAF50" Margin="0,0,16,0">
+                    <TextBlock x:Name="iconText" Text="&#x2713;" FontSize="28" Foreground="White"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold"/>
+                </Border>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock x:Name="txtTitle" Text="Replication Complete" FontSize="20" FontWeight="SemiBold" Foreground="#E0E0E0"/>
+                    <TextBlock x:Name="txtSubtitle" Text="All tasks finished successfully" FontSize="12" Foreground="#808080" Margin="0,2,0,0"/>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Separator -->
+            <Border Grid.Row="1" Height="1" Background="#3E3E3E" Margin="0,0,0,16"/>
+
+            <!-- Stats panel -->
+            <Grid Grid.Row="2" Margin="0,0,0,20">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Chunks completed -->
+                <StackPanel Grid.Column="0" HorizontalAlignment="Center">
+                    <TextBlock x:Name="txtChunksValue" Text="0" FontSize="32" FontWeight="Bold" Foreground="#4CAF50" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Completed" FontSize="11" Foreground="#808080" HorizontalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Total chunks -->
+                <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                    <TextBlock x:Name="txtTotalValue" Text="0" FontSize="32" FontWeight="Bold" Foreground="#0078D4" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Total" FontSize="11" Foreground="#808080" HorizontalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Failed chunks -->
+                <StackPanel Grid.Column="2" HorizontalAlignment="Center">
+                    <TextBlock x:Name="txtFailedValue" Text="0" FontSize="32" FontWeight="Bold" Foreground="#808080" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Failed" FontSize="11" Foreground="#808080" HorizontalAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- OK Button -->
+            <Button x:Name="btnOk" Grid.Row="3" Content="OK"
+                    Background="#0078D4" Foreground="White"
+                    BorderThickness="0" Padding="24,10"
+                    FontSize="14" FontWeight="SemiBold"
+                    HorizontalAlignment="Center" Cursor="Hand">
+                <Button.Style>
+                    <Style TargetType="Button">
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="border" Background="{TemplateBinding Background}"
+                                            CornerRadius="4" Padding="{TemplateBinding Padding}">
+                                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="border" Property="Background" Value="#1084D8"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </Button.Style>
+            </Button>
+        </Grid>
+    </Border>
+</Window>
+
+'@
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $iconBorder = $dialog.FindName("iconBorder")
+        $iconText = $dialog.FindName("iconText")
+        $txtTitle = $dialog.FindName("txtTitle")
+        $txtSubtitle = $dialog.FindName("txtSubtitle")
+        $txtChunksValue = $dialog.FindName("txtChunksValue")
+        $txtTotalValue = $dialog.FindName("txtTotalValue")
+        $txtFailedValue = $dialog.FindName("txtFailedValue")
+        $btnOk = $dialog.FindName("btnOk")
+
+        # Set values
+        $txtChunksValue.Text = $ChunksComplete.ToString()
+        $txtTotalValue.Text = $ChunksTotal.ToString()
+        $txtFailedValue.Text = $ChunksFailed.ToString()
+
+        # Adjust appearance based on results
+        if ($ChunksFailed -gt 0) {
+            # Some failures - show warning state
+            $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
+            $iconText.Text = [char]0x26A0  # Warning triangle
+            $txtTitle.Text = "Replication Complete with Warnings"
+            $txtSubtitle.Text = "$ChunksFailed chunk(s) failed"
+            $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
+        }
+        elseif ($ChunksComplete -eq 0 -and $ChunksTotal -eq 0) {
+            # Nothing to do
+            $txtTitle.Text = "Replication Complete"
+            $txtSubtitle.Text = "No chunks to process"
+        }
+        else {
+            # All success
+            $txtTitle.Text = "Replication Complete"
+            $txtSubtitle.Text = "All tasks finished successfully"
+        }
+
+        # OK button handler
+        $btnOk.Add_Click({
+            $dialog.DialogResult = $true
+            $dialog.Close()
+        })
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+                $dialog.DragMove()
+            }
+        })
+
+        # Set owner to main window for proper modal behavior
+        $dialog.Owner = $script:Window
+        $dialog.ShowDialog() | Out-Null
+    }
+    catch {
+        Write-GuiLog "Error showing completion dialog: $($_.Exception.Message)"
+        # Fallback to simple message
+        [System.Windows.MessageBox]::Show(
+            "Replication completed!`n`nChunks: $ChunksComplete/$ChunksTotal`nFailed: $ChunksFailed",
+            "Replication Complete",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        )
+    }
+}
+
 function Complete-GuiReplication {
     <#
     .SYNOPSIS
@@ -10905,14 +11088,7 @@ function Complete-GuiReplication {
     # Show completion message
     $status = Get-OrchestrationStatus
 
-    $message = "Replication completed!`n`nChunks: $($status.ChunksComplete)/$($status.ChunksTotal)`nFailed: $($status.ChunksFailed)"
-
-    [System.Windows.MessageBox]::Show(
-        $message,
-        "Replication Complete",
-        [System.Windows.MessageBoxButton]::OK,
-        [System.Windows.MessageBoxImage]::Information
-    )
+    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
 
     Write-GuiLog "Replication completed: $($status.ChunksComplete)/$($status.ChunksTotal) chunks, $($status.ChunksFailed) failed"
 }

@@ -1119,6 +1119,96 @@ function Start-GuiReplication {
     }
 }
 
+function Show-CompletionDialog {
+    <#
+    .SYNOPSIS
+        Shows a modern completion dialog with replication statistics
+    .PARAMETER ChunksComplete
+        Number of chunks completed successfully
+    .PARAMETER ChunksTotal
+        Total number of chunks
+    .PARAMETER ChunksFailed
+        Number of chunks that failed
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$ChunksComplete = 0,
+        [int]$ChunksTotal = 0,
+        [int]$ChunksFailed = 0
+    )
+
+    try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'CompletionDialog.xaml'
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $iconBorder = $dialog.FindName("iconBorder")
+        $iconText = $dialog.FindName("iconText")
+        $txtTitle = $dialog.FindName("txtTitle")
+        $txtSubtitle = $dialog.FindName("txtSubtitle")
+        $txtChunksValue = $dialog.FindName("txtChunksValue")
+        $txtTotalValue = $dialog.FindName("txtTotalValue")
+        $txtFailedValue = $dialog.FindName("txtFailedValue")
+        $btnOk = $dialog.FindName("btnOk")
+
+        # Set values
+        $txtChunksValue.Text = $ChunksComplete.ToString()
+        $txtTotalValue.Text = $ChunksTotal.ToString()
+        $txtFailedValue.Text = $ChunksFailed.ToString()
+
+        # Adjust appearance based on results
+        if ($ChunksFailed -gt 0) {
+            # Some failures - show warning state
+            $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
+            $iconText.Text = [char]0x26A0  # Warning triangle
+            $txtTitle.Text = "Replication Complete with Warnings"
+            $txtSubtitle.Text = "$ChunksFailed chunk(s) failed"
+            $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
+        }
+        elseif ($ChunksComplete -eq 0 -and $ChunksTotal -eq 0) {
+            # Nothing to do
+            $txtTitle.Text = "Replication Complete"
+            $txtSubtitle.Text = "No chunks to process"
+        }
+        else {
+            # All success
+            $txtTitle.Text = "Replication Complete"
+            $txtSubtitle.Text = "All tasks finished successfully"
+        }
+
+        # OK button handler
+        $btnOk.Add_Click({
+            $dialog.DialogResult = $true
+            $dialog.Close()
+        })
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+                $dialog.DragMove()
+            }
+        })
+
+        # Set owner to main window for proper modal behavior
+        $dialog.Owner = $script:Window
+        $dialog.ShowDialog() | Out-Null
+    }
+    catch {
+        Write-GuiLog "Error showing completion dialog: $($_.Exception.Message)"
+        # Fallback to simple message
+        [System.Windows.MessageBox]::Show(
+            "Replication completed!`n`nChunks: $ChunksComplete/$ChunksTotal`nFailed: $ChunksFailed",
+            "Replication Complete",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        )
+    }
+}
+
 function Complete-GuiReplication {
     <#
     .SYNOPSIS
@@ -1186,14 +1276,7 @@ function Complete-GuiReplication {
     # Show completion message
     $status = Get-OrchestrationStatus
 
-    $message = "Replication completed!`n`nChunks: $($status.ChunksComplete)/$($status.ChunksTotal)`nFailed: $($status.ChunksFailed)"
-
-    [System.Windows.MessageBox]::Show(
-        $message,
-        "Replication Complete",
-        [System.Windows.MessageBoxButton]::OK,
-        [System.Windows.MessageBoxImage]::Information
-    )
+    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
 
     Write-GuiLog "Replication completed: $($status.ChunksComplete)/$($status.ChunksTotal) chunks, $($status.ChunksFailed) failed"
 }
