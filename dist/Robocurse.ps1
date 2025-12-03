@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 18:46:06
+    Built: 2025-12-02 18:52:13
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -11609,6 +11609,10 @@ function Start-RobocurseMain {
 
 #endregion
 
+
+# Store script path for background runspace loading (GUI mode)
+# This is needed because the background runspace needs to know where to load the script from
+$script:RobocurseScriptPath = $PSCommandPath
 
 # Main entry point - only execute if not being dot-sourced for testing
 # Check if -Help was passed (always process help)

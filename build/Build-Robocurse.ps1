@@ -224,9 +224,17 @@ foreach ($modulePath in $moduleOrder) {
 # Note: Main.ps1 contains Start-RobocurseMain which is the entry point
 # The entry point code below calls it with the script parameters
 
-# Add main execution block (matches original monolith behavior)
+# Add script path initialization for background runspace loading
 [void]$output.AppendLine(@'
 
+# Store script path for background runspace loading (GUI mode)
+# This is needed because the background runspace needs to know where to load the script from
+$script:RobocurseScriptPath = $PSCommandPath
+
+'@)
+
+# Add main execution block (matches original monolith behavior)
+[void]$output.AppendLine(@'
 # Main entry point - only execute if not being dot-sourced for testing
 # Check if -Help was passed (always process help)
 if ($Help) {

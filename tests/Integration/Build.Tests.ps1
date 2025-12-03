@@ -187,3 +187,162 @@ Describe "Source Module Validation" {
         }
     }
 }
+
+Describe "Monolith Background Runspace Support" -Skip:(-not (Test-Path $script:distPath)) {
+    BeforeAll {
+        $script:monolithContent = Get-Content $script:distPath -Raw
+        # Define Test-IsWindowsPlatform locally if not available (for -Skip evaluation)
+        if (-not (Get-Command 'Test-IsWindowsPlatform' -ErrorAction SilentlyContinue)) {
+            function script:Test-IsWindowsPlatform { return ($env:OS -eq 'Windows_NT') }
+        }
+    }
+
+    It "Should set RobocurseScriptPath for background runspace loading" {
+        # The monolith must set $script:RobocurseScriptPath so the GUI can load
+        # the script in a background runspace
+        $script:monolithContent | Should -Match '\$script:RobocurseScriptPath\s*=' -Because "Monolith must set RobocurseScriptPath for background runspace"
+    }
+
+    It "Should set RobocurseScriptPath before main execution" {
+        # Find position of RobocurseScriptPath assignment
+        $scriptPathPos = $script:monolithContent.IndexOf('$script:RobocurseScriptPath')
+
+        # Find position of Start-RobocurseMain call
+        $mainPos = $script:monolithContent.IndexOf('Start-RobocurseMain')
+
+        $scriptPathPos | Should -BeGreaterThan 0 -Because "RobocurseScriptPath should be set"
+        $scriptPathPos | Should -BeLessThan $mainPos -Because "RobocurseScriptPath must be set before main execution"
+    }
+
+    Context "Monolith Background Runspace Execution" -Skip:($env:OS -ne 'Windows_NT') {
+        BeforeAll {
+            # Create temp directories for test
+            $script:MonolithTestDir = Join-Path $env:TEMP "RobocurseMonolithTest_$(Get-Random)"
+            $script:MonolithLogDir = Join-Path $script:MonolithTestDir "Logs"
+            New-Item -ItemType Directory -Path $script:MonolithLogDir -Force | Out-Null
+
+            # Create a simple config file
+            $script:MonolithConfigPath = Join-Path $script:MonolithTestDir "test.config.json"
+            $config = @{
+                global = @{ concurrency = @{ maxJobs = 2 } }
+                profiles = @{
+                    TestProfile = @{
+                        source = "C:\TestSource"
+                        destination = "C:\TestDest"
+                        enabled = $true
+                    }
+                }
+            }
+            $config | ConvertTo-Json -Depth 10 | Out-File $script:MonolithConfigPath -Encoding utf8
+        }
+
+        AfterAll {
+            if (Test-Path $script:MonolithTestDir) {
+                Remove-Item -Path $script:MonolithTestDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It "Should be loadable in a background runspace with -Help" {
+            # This tests that the monolith can be dot-sourced with -Help
+            # which is how the GUI loads it in a background runspace
+
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+            $runspace.Open()
+
+            $powershell = [powershell]::Create()
+            $powershell.Runspace = $runspace
+
+            $testScript = @"
+                param(`$ScriptPath)
+
+                try {
+                    # This is exactly what the GUI background script does
+                    . `$ScriptPath -Help
+
+                    # Check that key functions are available
+                    if (-not (Get-Command 'Start-ReplicationRun' -ErrorAction SilentlyContinue)) {
+                        return "FAILED: Start-ReplicationRun not found"
+                    }
+                    if (-not (Get-Command 'Initialize-LogSession' -ErrorAction SilentlyContinue)) {
+                        return "FAILED: Initialize-LogSession not found"
+                    }
+                    if (-not (Get-Command 'Get-RobocurseConfig' -ErrorAction SilentlyContinue)) {
+                        return "FAILED: Get-RobocurseConfig not found"
+                    }
+
+                    # Check that RobocurseScriptPath was set
+                    if (-not `$script:RobocurseScriptPath) {
+                        return "FAILED: RobocurseScriptPath not set"
+                    }
+
+                    return "SUCCESS"
+                }
+                catch {
+                    return "ERROR: `$(`$_.Exception.Message)"
+                }
+"@
+
+            $powershell.AddScript($testScript)
+            $powershell.AddArgument($script:distPath)
+
+            $handle = $powershell.BeginInvoke()
+            $timeout = [TimeSpan]::FromSeconds(30)
+            $completed = $handle.AsyncWaitHandle.WaitOne($timeout)
+
+            $completed | Should -Be $true -Because "Monolith should load within timeout"
+
+            $result = $powershell.EndInvoke($handle)
+            $result | Should -Be "SUCCESS" -Because "Monolith should load all required functions in background runspace"
+
+            $powershell.Dispose()
+            $runspace.Close()
+            $runspace.Dispose()
+        }
+
+        It "Should be able to initialize log session after loading" {
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+            $runspace.Open()
+
+            $powershell = [powershell]::Create()
+            $powershell.Runspace = $runspace
+
+            $testScript = @"
+                param(`$ScriptPath, `$LogDir)
+
+                try {
+                    . `$ScriptPath -Help
+
+                    # Initialize log session (this is what was missing and caused the original bug)
+                    Initialize-LogSession -LogRoot `$LogDir
+
+                    # Verify we can now write logs
+                    Write-RobocurseLog -Message "Test from monolith" -Level Info -Component Test
+
+                    return "SUCCESS"
+                }
+                catch {
+                    return "ERROR: `$(`$_.Exception.Message)"
+                }
+"@
+
+            $powershell.AddScript($testScript)
+            $powershell.AddArgument($script:distPath)
+            $powershell.AddArgument($script:MonolithLogDir)
+
+            $handle = $powershell.BeginInvoke()
+            $timeout = [TimeSpan]::FromSeconds(30)
+            $handle.AsyncWaitHandle.WaitOne($timeout) | Out-Null
+
+            $result = $powershell.EndInvoke($handle)
+            # EndInvoke returns an array, get the last item (the return value)
+            $returnValue = @($result)[-1]
+            $returnValue | Should -Be "SUCCESS" -Because "Should be able to initialize logging in monolith background runspace"
+
+            $powershell.Dispose()
+            $runspace.Close()
+            $runspace.Dispose()
+        }
+    }
+}
