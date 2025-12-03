@@ -174,8 +174,8 @@ function ConvertFrom-GlobalSettings {
     # Logging settings
     if ($RawGlobal.logging -and $RawGlobal.logging.operationalLog) {
         if ($RawGlobal.logging.operationalLog.path) {
-            $logPath = Split-Path -Path $RawGlobal.logging.operationalLog.path -Parent
-            $Config.GlobalSettings.LogPath = $logPath
+            # Use the log path directly (don't use Split-Path which breaks relative paths like ".\Logs")
+            $Config.GlobalSettings.LogPath = $RawGlobal.logging.operationalLog.path
         }
         if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
             $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays

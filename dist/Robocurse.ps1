@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-02 19:05:05
+    Built: 2025-12-02 19:08:25
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -1109,8 +1109,8 @@ function ConvertFrom-GlobalSettings {
     # Logging settings
     if ($RawGlobal.logging -and $RawGlobal.logging.operationalLog) {
         if ($RawGlobal.logging.operationalLog.path) {
-            $logPath = Split-Path -Path $RawGlobal.logging.operationalLog.path -Parent
-            $Config.GlobalSettings.LogPath = $logPath
+            # Use the log path directly (don't use Split-Path which breaks relative paths like ".\Logs")
+            $Config.GlobalSettings.LogPath = $RawGlobal.logging.operationalLog.path
         }
         if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
             $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays
@@ -10514,6 +10514,12 @@ function New-ReplicationRunspace {
                 Write-Host "[BACKGROUND] Initializing log session..."
                 `$config = Get-RobocurseConfig -Path `$ConfigPath
                 `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+                # Resolve relative paths based on config file directory
+                if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
+                    `$configDir = Split-Path -Parent (Resolve-Path `$ConfigPath)
+                    `$logRoot = Join-Path `$configDir `$logRoot
+                }
+                Write-Host "[BACKGROUND] Log root: `$logRoot"
                 Initialize-LogSession -LogRoot `$logRoot
                 Write-Host "[BACKGROUND] Log session initialized"
             }
@@ -10572,6 +10578,12 @@ function New-ReplicationRunspace {
                 Write-Host "[BACKGROUND] Initializing log session..."
                 `$config = Get-RobocurseConfig -Path `$ConfigPath
                 `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+                # Resolve relative paths based on config file directory
+                if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
+                    `$configDir = Split-Path -Parent (Resolve-Path `$ConfigPath)
+                    `$logRoot = Join-Path `$configDir `$logRoot
+                }
+                Write-Host "[BACKGROUND] Log root: `$logRoot"
                 Initialize-LogSession -LogRoot `$logRoot
                 Write-Host "[BACKGROUND] Log session initialized"
             }

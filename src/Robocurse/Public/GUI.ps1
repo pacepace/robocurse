@@ -933,6 +933,12 @@ function New-ReplicationRunspace {
                 Write-Host "[BACKGROUND] Initializing log session..."
                 `$config = Get-RobocurseConfig -Path `$ConfigPath
                 `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+                # Resolve relative paths based on config file directory
+                if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
+                    `$configDir = Split-Path -Parent (Resolve-Path `$ConfigPath)
+                    `$logRoot = Join-Path `$configDir `$logRoot
+                }
+                Write-Host "[BACKGROUND] Log root: `$logRoot"
                 Initialize-LogSession -LogRoot `$logRoot
                 Write-Host "[BACKGROUND] Log session initialized"
             }
@@ -991,6 +997,12 @@ function New-ReplicationRunspace {
                 Write-Host "[BACKGROUND] Initializing log session..."
                 `$config = Get-RobocurseConfig -Path `$ConfigPath
                 `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+                # Resolve relative paths based on config file directory
+                if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
+                    `$configDir = Split-Path -Parent (Resolve-Path `$ConfigPath)
+                    `$logRoot = Join-Path `$configDir `$logRoot
+                }
+                Write-Host "[BACKGROUND] Log root: `$logRoot"
                 Initialize-LogSession -LogRoot `$logRoot
                 Write-Host "[BACKGROUND] Log session initialized"
             }
