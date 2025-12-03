@@ -699,3 +699,191 @@ function Wait-RobocopyJob {
         Stats = $finalStats
     }
 }
+
+function Test-RobocopyVerification {
+    <#
+    .SYNOPSIS
+        Verifies a copy operation by comparing source and destination
+    .DESCRIPTION
+        Runs robocopy in list mode (/L) to compare source and destination directories.
+        This is useful as a post-copy verification step to detect:
+        - Files that failed to copy silently
+        - Files that were modified during copy
+        - Timestamp mismatches (when using /FFT for FAT file time tolerance)
+
+        The function returns a verification result indicating whether the
+        directories are in sync and details about any discrepancies.
+    .PARAMETER SourcePath
+        Source directory path that was copied from
+    .PARAMETER DestinationPath
+        Destination directory path that was copied to
+    .PARAMETER UseFatTimeTolerance
+        Use FAT file system time tolerance (/FFT - 2 second granularity).
+        Useful when copying to/from FAT32 or network shares with time precision issues.
+    .PARAMETER RobocopyOptions
+        Optional hashtable of robocopy options (ExcludeFiles, ExcludeDirs) to match
+        the original copy operation
+    .OUTPUTS
+        PSCustomObject with:
+        - Verified: $true if source and destination are in sync
+        - MissingFiles: Count of files in source but not destination
+        - ExtraFiles: Count of files in destination but not source
+        - MismatchedFiles: Count of files with different sizes/timestamps
+        - Details: Detailed verification message
+        - LogPath: Path to verification log file
+    .EXAMPLE
+        $result = Test-RobocopyVerification -SourcePath "C:\Source" -DestinationPath "D:\Backup"
+        if ($result.Verified) { "Backup verified successfully" }
+    .EXAMPLE
+        # Verify with FAT time tolerance for network shares
+        $result = Test-RobocopyVerification -SourcePath "C:\Data" -DestinationPath "\\server\share" -UseFatTimeTolerance
+    .NOTES
+        This function is designed for post-copy verification and does NOT modify any files.
+        It uses robocopy /L (list-only) mode exclusively.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DestinationPath,
+
+        [switch]$UseFatTimeTolerance,
+
+        [hashtable]$RobocopyOptions = @{}
+    )
+
+    # Validate paths
+    $safeSourcePath = Get-SanitizedPath -Path $SourcePath -ParameterName "SourcePath"
+    $safeDestPath = Get-SanitizedPath -Path $DestinationPath -ParameterName "DestinationPath"
+
+    # Create temp log file for verification
+    $tempLogPath = Join-Path ([System.IO.Path]::GetTempPath()) "Robocurse-Verify-$([guid]::NewGuid().ToString('N')).log"
+
+    # Build verification arguments
+    # /L = List only (no copying)
+    # /E = Include subdirectories including empty
+    # /NJH /NJS = No job header/summary (cleaner parsing)
+    # /BYTES = Show sizes in bytes for precision
+    $argList = [System.Collections.Generic.List[string]]::new()
+    $argList.Add("`"$safeSourcePath`"")
+    $argList.Add("`"$safeDestPath`"")
+    $argList.Add("/L")
+    $argList.Add("/E")
+    $argList.Add("/NJH")
+    $argList.Add("/NJS")
+    $argList.Add("/BYTES")
+    $argList.Add("/R:0")
+    $argList.Add("/W:0")
+    $argList.Add("/LOG:`"$tempLogPath`"")
+
+    # Add FAT time tolerance if requested
+    if ($UseFatTimeTolerance) {
+        $argList.Add("/FFT")
+    }
+
+    # Add exclusions from original copy options
+    if ($RobocopyOptions.ExcludeFiles -and $RobocopyOptions.ExcludeFiles.Count -gt 0) {
+        $safeExcludeFiles = Get-SanitizedExcludePatterns -Patterns $RobocopyOptions.ExcludeFiles -Type 'Files'
+        if ($safeExcludeFiles.Count -gt 0) {
+            $argList.Add("/XF")
+            foreach ($pattern in $safeExcludeFiles) {
+                $argList.Add("`"$pattern`"")
+            }
+        }
+    }
+
+    if ($RobocopyOptions.ExcludeDirs -and $RobocopyOptions.ExcludeDirs.Count -gt 0) {
+        $safeExcludeDirs = Get-SanitizedExcludePatterns -Patterns $RobocopyOptions.ExcludeDirs -Type 'Dirs'
+        if ($safeExcludeDirs.Count -gt 0) {
+            $argList.Add("/XD")
+            foreach ($dir in $safeExcludeDirs) {
+                $argList.Add("`"$dir`"")
+            }
+        }
+    }
+
+    # Run robocopy in verification mode
+    $result = [PSCustomObject]@{
+        Verified = $false
+        MissingFiles = 0
+        ExtraFiles = 0
+        MismatchedFiles = 0
+        Details = ""
+        LogPath = $tempLogPath
+    }
+
+    try {
+        # Require validated robocopy path
+        if (-not $script:RobocopyPath) {
+            throw "Robocopy path not validated. Call Test-RobocopyAvailable before verification."
+        }
+
+        Write-RobocurseLog -Message "Running verification: $safeSourcePath -> $safeDestPath" -Level 'Debug' -Component 'Robocopy'
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $script:RobocopyPath
+        $psi.Arguments = $argList -join ' '
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $false
+        $psi.RedirectStandardError = $false
+
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $process.WaitForExit()
+
+        $exitCode = $process.ExitCode
+        $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
+
+        # Parse the verification log
+        if (Test-Path $tempLogPath) {
+            $logContent = Get-Content -Path $tempLogPath -Raw -ErrorAction SilentlyContinue
+
+            if ($logContent) {
+                # Count files that would be copied (missing from destination)
+                $newFileMatches = [regex]::Matches($logContent, '^\s*New File', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+                $result.MissingFiles = $newFileMatches.Count
+
+                # Count extra files (in destination but not source) - only with /MIR would remove them
+                $extraFileMatches = [regex]::Matches($logContent, '^\s*\*EXTRA File', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+                $result.ExtraFiles = $extraFileMatches.Count
+
+                # Count mismatched files (different size/time)
+                $newerMatches = [regex]::Matches($logContent, '^\s*(Newer|Older|Changed)', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+                $result.MismatchedFiles = $newerMatches.Count
+            }
+        }
+
+        # Determine verification status
+        # Exit codes 0-3 are generally successful states
+        # 0 = No changes needed (perfect sync)
+        # 1 = Files were different (would be copied)
+        # 2 = Extra files detected
+        # 3 = Both 1 and 2
+        $result.Verified = ($result.MissingFiles -eq 0 -and $result.MismatchedFiles -eq 0)
+
+        if ($result.Verified) {
+            $result.Details = "Verification passed: Source and destination are in sync"
+            if ($result.ExtraFiles -gt 0) {
+                $result.Details += " ($($result.ExtraFiles) extra files in destination)"
+            }
+        }
+        else {
+            $issues = @()
+            if ($result.MissingFiles -gt 0) { $issues += "$($result.MissingFiles) missing files" }
+            if ($result.MismatchedFiles -gt 0) { $issues += "$($result.MismatchedFiles) mismatched files" }
+            $result.Details = "Verification failed: " + ($issues -join ", ")
+        }
+
+        Write-RobocurseLog -Message "Verification result: $($result.Details)" -Level 'Info' -Component 'Robocopy'
+    }
+    catch {
+        $result.Details = "Verification error: $($_.Exception.Message)"
+        Write-RobocurseLog -Message "Verification failed: $_" -Level 'Error' -Component 'Robocopy'
+    }
+
+    return $result
+}

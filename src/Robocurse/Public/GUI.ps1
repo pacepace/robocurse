@@ -384,6 +384,30 @@ function Initialize-EventHandlers {
             Invoke-SafeEventHandler -HandlerName "SaveProfile" -ScriptBlock { Save-ProfileFromForm }
         })
     }
+
+    # Numeric input validation - reject non-numeric characters in real-time
+    # This provides immediate feedback before the user finishes typing
+    @('txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
+        $control = $script:Controls[$_]
+        if ($control) {
+            $control.Add_PreviewTextInput({
+                param($sender, $e)
+                # Only allow digits (0-9)
+                $e.Handled = -not ($e.Text -match '^\d+$')
+            })
+            # Also handle paste - filter non-numeric content using DataObject.AddPastingHandler
+            # This is the correct WPF API for handling paste events
+            [System.Windows.DataObject]::AddPastingHandler($control, {
+                param($sender, $e)
+                if ($e.DataObject.GetDataPresent([System.Windows.DataFormats]::Text)) {
+                    $text = $e.DataObject.GetData([System.Windows.DataFormats]::Text)
+                    if ($text -notmatch '^\d+$') {
+                        $e.CancelCommand()
+                    }
+                }
+            })
+        }
+    }
     $script:Controls.chkUseVss.Add_Checked({
         Invoke-SafeEventHandler -HandlerName "VssCheckbox" -ScriptBlock { Save-ProfileFromForm }
     })

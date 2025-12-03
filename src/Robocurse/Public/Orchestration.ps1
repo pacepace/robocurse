@@ -1481,20 +1481,41 @@ function Write-HealthCheckStatus {
 function Get-HealthCheckStatus {
     <#
     .SYNOPSIS
-        Reads the health check status file
+        Reads the health check status file with staleness detection
     .DESCRIPTION
         Reads and returns the current health check status from the JSON file.
         Useful for external monitoring scripts or GUI status checks.
+
+        When MaxAgeSeconds is specified, the function checks if the status file
+        is stale (older than the specified age). This is useful for detecting
+        hung or crashed replication processes that stopped updating the health file.
+    .PARAMETER MaxAgeSeconds
+        Maximum age in seconds before the status is considered stale.
+        If the status file's LastUpdate is older than this, the returned
+        object will have IsStale=$true and Healthy=$false.
+        Default: 0 (no staleness check)
     .OUTPUTS
-        PSCustomObject with health status, or $null if file doesn't exist
+        PSCustomObject with health status, or $null if file doesn't exist.
+        When MaxAgeSeconds is specified, includes additional properties:
+        - IsStale: $true if the status file is older than MaxAgeSeconds
+        - StaleSeconds: How many seconds over the threshold (if stale)
     .EXAMPLE
         $status = Get-HealthCheckStatus
         if ($status -and -not $status.Healthy) {
             Send-Alert "Robocurse issue: $($status.Message)"
         }
+    .EXAMPLE
+        # Check for staleness (e.g., if health updates should occur every 30s)
+        $status = Get-HealthCheckStatus -MaxAgeSeconds 90
+        if ($status.IsStale) {
+            Send-Alert "Robocurse may be hung - no health update for $($status.StaleSeconds)s"
+        }
     #>
     [CmdletBinding()]
-    param()
+    param(
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$MaxAgeSeconds = 0
+    )
 
     if (-not (Test-Path $script:HealthCheckStatusFile)) {
         return $null
@@ -1502,7 +1523,30 @@ function Get-HealthCheckStatus {
 
     try {
         $content = Get-Content -Path $script:HealthCheckStatusFile -Raw -ErrorAction Stop
-        return $content | ConvertFrom-Json
+        $status = $content | ConvertFrom-Json
+
+        # Add staleness detection if MaxAgeSeconds specified
+        if ($MaxAgeSeconds -gt 0 -and $status.LastUpdate) {
+            $lastUpdate = [datetime]::Parse($status.LastUpdate)
+            $ageSeconds = ([datetime]::Now - $lastUpdate).TotalSeconds
+
+            # Add staleness properties
+            $status | Add-Member -NotePropertyName 'IsStale' -NotePropertyValue ($ageSeconds -gt $MaxAgeSeconds) -Force
+            $status | Add-Member -NotePropertyName 'AgeSeconds' -NotePropertyValue ([int]$ageSeconds) -Force
+
+            if ($status.IsStale) {
+                $status | Add-Member -NotePropertyName 'StaleSeconds' -NotePropertyValue ([int]($ageSeconds - $MaxAgeSeconds)) -Force
+                # Override Healthy to false if stale
+                $status.Healthy = $false
+                $status.Message = "Health check stale (no update for $([int]$ageSeconds)s, threshold: ${MaxAgeSeconds}s)"
+            }
+        }
+        else {
+            $status | Add-Member -NotePropertyName 'IsStale' -NotePropertyValue $false -Force
+            $status | Add-Member -NotePropertyName 'AgeSeconds' -NotePropertyValue 0 -Force
+        }
+
+        return $status
     }
     catch {
         Write-RobocurseLog -Message "Failed to read health check status: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'

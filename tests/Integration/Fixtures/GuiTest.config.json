@@ -1,57 +1,66 @@
 ﻿{
-    "Version":  "1.0",
-    "GlobalSettings":  {
-                           "MaxConcurrentJobs":  4,
-                           "ThreadsPerJob":  8,
-                           "DefaultScanMode":  "Smart",
-                           "BandwidthLimitMbps":  0,
-                           "LogPath":  ".\\Logs",
-                           "LogCompressAfterDays":  7,
-                           "LogRetentionDays":  30,
-                           "MismatchSeverity":  "Warning"
-                       },
-    "Email":  {
-                  "Enabled":  false,
-                  "SmtpServer":  "",
-                  "Port":  587,
-                  "UseTls":  true,
-                  "CredentialTarget":  "Robocurse-SMTP",
-                  "From":  "",
-                  "To":  [
-
-                         ]
-              },
-    "Schedule":  {
-                     "Enabled":  false,
-                     "Time":  "02:00",
-                     "Days":  [
-                                  "Daily"
-                              ]
+    "version":  "1.0",
+    "profiles":  {
+                     "TestProfile1":  {
+                                          "description":  "First test profile for GUI tests",
+                                          "enabled":  true,
+                                          "source":  {
+                                                         "path":  "C:\\TestSource1",
+                                                         "useVss":  false
+                                                     },
+                                          "destination":  {
+                                                              "path":  "D:\\TestDest1"
+                                                          },
+                                          "chunking":  {
+                                                           "maxChunkSizeGB":  10,
+                                                           "maxFiles":  50000,
+                                                           "maxDepthToScan":  3,
+                                                           "strategy":  "auto"
+                                                       }
+                                      },
+                     "TestProfile2":  {
+                                          "description":  "Second test profile for GUI tests",
+                                          "enabled":  true,
+                                          "source":  {
+                                                         "path":  "C:\\TestSource2",
+                                                         "useVss":  true
+                                                     },
+                                          "destination":  {
+                                                              "path":  "D:\\TestDest2"
+                                                          },
+                                          "chunking":  {
+                                                           "maxChunkSizeGB":  20,
+                                                           "maxFiles":  50000,
+                                                           "maxDepthToScan":  5,
+                                                           "strategy":  "flat"
+                                                       }
+                                      }
                  },
-    "SyncProfiles":  [
-                         {
-                             "Name":  "TestProfile1",
-                             "Description":  "Test profile for GUI tests",
-                             "Source":  "C:\\TestSource",
-                             "Destination":  "C:\\TestDest",
-                             "Enabled":  true,
-                             "UseVss":  false,
-                             "ScanMode":  "Smart",
-                             "ChunkMaxSizeGB":  10,
-                             "ChunkMaxFiles":  50000,
-                             "ChunkMaxDepth":  5
-                         },
-                         {
-                             "Name":  "TestProfile2",
-                             "Description":  "Second test profile",
-                             "Source":  "C:\\TestSource2",
-                             "Destination":  "C:\\TestDest2",
-                             "Enabled":  false,
-                             "UseVss":  true,
-                             "ScanMode":  "Quick",
-                             "ChunkMaxSizeGB":  20,
-                             "ChunkMaxFiles":  100000,
-                             "ChunkMaxDepth":  3
-                         }
-                     ]
+    "global":  {
+                   "performance":  {
+                                       "maxConcurrentJobs":  4,
+                                       "throttleNetworkMbps":  0
+                                   },
+                   "logging":  {
+                                   "operationalLog":  {
+                                                          "path":  ".\\Logs",
+                                                          "rotation":  {
+                                                                           "maxAgeDays":  30
+                                                                       }
+                                                      }
+                               },
+                   "email":  {
+                                 "enabled":  false,
+                                 "smtp":  {
+                                              "server":  "",
+                                              "port":  587,
+                                              "useSsl":  true,
+                                              "credentialName":  "Robocurse-SMTP"
+                                          },
+                                 "from":  "",
+                                 "to":  [
+
+                                        ]
+                             }
+               }
 }

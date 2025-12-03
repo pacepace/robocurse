@@ -139,8 +139,9 @@ InModuleScope 'Robocurse' {
                 $result = Register-RobocurseTask -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath -Schedule "Daily" -Time "03:00" -Confirm:$false
 
                 $result.Success | Should -Be $true
+                # TaskName is now auto-generated from config path hash (e.g., "Robocurse-A1B2C3D4")
                 Should -Invoke Register-ScheduledTask -Times 1 -ParameterFilter {
-                    $TaskName -eq "Robocurse-Replication" -and
+                    $TaskName -like "Robocurse-*" -and
                     $Description -eq "Robocurse automatic directory replication"
                 }
             }
@@ -269,15 +270,22 @@ InModuleScope 'Robocurse' {
         }
 
         Context "Unregister-RobocurseTask" -Skip:(-not (Test-IsWindowsPlatform)) {
+            BeforeEach {
+                # Create test config file for deriving task name
+                $script:tempConfigPath = Join-Path $TestDrive "unregister-test-config.json"
+                '{}' | Set-Content $script:tempConfigPath
+            }
+
             It "Should remove task successfully" {
                 Mock Unregister-ScheduledTask { }
                 Mock Write-RobocurseLog { }
 
-                $result = Unregister-RobocurseTask
+                # Use explicit TaskName since ConfigPath derivation is tested separately
+                $result = Unregister-RobocurseTask -TaskName "Test-Task"
 
                 $result.Success | Should -Be $true
                 Should -Invoke Unregister-ScheduledTask -Times 1 -ParameterFilter {
-                    $TaskName -eq "Robocurse-Replication" -and
+                    $TaskName -eq "Test-Task" -and
                     $Confirm -eq $false
                 }
             }
@@ -298,12 +306,32 @@ InModuleScope 'Robocurse' {
                 Mock Unregister-ScheduledTask { throw "Task not found" }
                 Mock Write-RobocurseLog { }
 
-                $result = Unregister-RobocurseTask
+                $result = Unregister-RobocurseTask -TaskName "Failing-Task"
 
                 $result.Success | Should -Be $false
                 Should -Invoke Write-RobocurseLog -Times 1 -ParameterFilter {
                     $Level -eq "Error"
                 }
+            }
+
+            It "Should derive task name from ConfigPath" {
+                Mock Unregister-ScheduledTask { }
+                Mock Write-RobocurseLog { }
+
+                $result = Unregister-RobocurseTask -ConfigPath $script:tempConfigPath
+
+                $result.Success | Should -Be $true
+                # Task name should be auto-derived from config path
+                Should -Invoke Unregister-ScheduledTask -Times 1 -ParameterFilter {
+                    $TaskName -like "Robocurse-*"
+                }
+            }
+
+            It "Should return error when neither TaskName nor ConfigPath provided" {
+                $result = Unregister-RobocurseTask
+
+                $result.Success | Should -Be $false
+                $result.ErrorMessage | Should -BeLike "*Either TaskName or ConfigPath must be specified*"
             }
         }
 

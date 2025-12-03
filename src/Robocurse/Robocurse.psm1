@@ -116,6 +116,12 @@ $script:HeadlessProgressIntervalSeconds = 10
 # 10 chunks balances disk I/O with recovery granularity.
 $script:CheckpointSaveFrequency = 10
 
+# ETA calculation settings
+# Maximum ETA in days before capping. For very large replication jobs (petabyte scale),
+# ETAs can become unreasonably long. This cap provides a sensible upper bound.
+# Default is 365 days (1 year). Values beyond this display as "365+ days".
+$script:MaxEtaDays = 365
+
 # Health check settings
 # Interval in seconds between health status file updates during replication.
 # 30 seconds provides good monitoring granularity without excessive I/O.

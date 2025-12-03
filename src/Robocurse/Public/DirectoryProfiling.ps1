@@ -254,6 +254,15 @@ function Set-CachedProfile {
     <#
     .SYNOPSIS
         Stores directory profile in cache (thread-safe)
+    .DESCRIPTION
+        Adds or updates a profile in the thread-safe cache. When the cache
+        exceeds the maximum entry count, uses approximate LRU eviction
+        (similar to Redis's approach) to remove old entries.
+
+        The eviction logic is designed to be safe under concurrent access:
+        - Uses TryAdd to prevent duplicate evictions
+        - Tolerates slight over-capacity during concurrent adds
+        - Does not require locks (relies on ConcurrentDictionary guarantees)
     .PARAMETER Profile
         Profile object to cache
     #>
@@ -265,28 +274,38 @@ function Set-CachedProfile {
     # Normalize path for cache key
     $cacheKey = Get-NormalizedCacheKey -Path $Profile.Path
 
-    # Enforce cache size limit - if at max, remove oldest entries
-    if ($script:ProfileCache.Count -ge $script:ProfileCacheMaxEntries) {
+    # Thread-safe add or update using ConcurrentDictionary indexer
+    # Do this FIRST to ensure the profile is always cached, even if eviction has issues
+    $script:ProfileCache[$cacheKey] = $Profile
+    Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level Debug
+
+    # Enforce cache size limit - if significantly over max, trigger eviction
+    # Use a 10% buffer to reduce eviction frequency under concurrent load
+    $maxWithBuffer = [int]($script:ProfileCacheMaxEntries * 1.1)
+    $currentCount = $script:ProfileCache.Count
+
+    if ($currentCount -gt $maxWithBuffer) {
         # Use random sampling for approximate LRU eviction (similar to Redis's approach)
         # Instead of O(n log n) full sort, we sample and sort O(k log k) where k << n
         # This provides good-enough LRU behavior with much better performance
-        $currentCount = $script:ProfileCache.Count
-        $entriesToRemove = [math]::Ceiling($currentCount * 0.1)
+        $entriesToRemove = $currentCount - $script:ProfileCacheMaxEntries
 
-        # Only evict if we have entries to remove
+        # Only evict if we have a meaningful number to remove (reduces contention)
         if ($entriesToRemove -gt 0) {
             # Sample size: 5x the entries to remove (gives good statistical coverage)
+            # Clamp to currentCount to handle edge cases
             $sampleSize = [math]::Min($entriesToRemove * 5, $currentCount)
-            $allEntries = $script:ProfileCache.ToArray()
 
-            if ($currentCount -le $sampleSize) {
+            # Take a snapshot for eviction - this is an atomic operation on ConcurrentDictionary
+            $allEntries = $script:ProfileCache.ToArray()
+            $snapshotCount = $allEntries.Count
+
+            if ($snapshotCount -le $sampleSize) {
                 # Small cache - just sort everything (fast enough)
                 $sample = $allEntries
             }
             else {
                 # Large cache - take random sample for approximate LRU
-                # Note: Get-Random uses proper internal seeding on PS 5.1+, no need
-                # to create a System.Random instance
                 $sample = $allEntries | Get-Random -Count $sampleSize
             }
 
@@ -297,17 +316,17 @@ function Set-CachedProfile {
 
             $removed = 0
             foreach ($entry in $oldestEntries) {
+                # TryRemove is atomic - if another thread already removed it, we just skip
                 if ($script:ProfileCache.TryRemove($entry.Key, [ref]$null)) {
                     $removed++
                 }
             }
-            Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $currentCount entries)" -Level Debug
+
+            if ($removed -gt 0) {
+                Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $snapshotCount entries)" -Level Debug
+            }
         }
     }
-
-    # Thread-safe add or update using ConcurrentDictionary indexer
-    $script:ProfileCache[$cacheKey] = $Profile
-    Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level Debug
 }
 
 function Clear-ProfileCache {

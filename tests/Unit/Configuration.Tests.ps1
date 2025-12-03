@@ -55,9 +55,9 @@ Describe "Configuration Management" {
             $saved = Save-RobocurseConfig -Config $config -Path $tempPath
             $saved.Success | Should -Be $true
 
-            # Verify the JSON file contains an empty array
+            # Verify the JSON file saves in friendly format with empty profiles object
             $jsonContent = Get-Content $tempPath -Raw
-            $jsonContent | Should -Match '"SyncProfiles":\s*\[\s*\]'
+            $jsonContent | Should -Match '"profiles":\s*\{'
 
             # Verify it can be loaded back
             $reloaded = Get-RobocurseConfig -Path $tempPath
@@ -138,14 +138,15 @@ Describe "Configuration Management" {
             { Get-Content $script:TestConfigPath -Raw | ConvertFrom-Json } | Should -Not -Throw
         }
 
-        It "Should preserve configuration structure" {
+        It "Should preserve configuration structure in friendly format" {
             $config = New-DefaultConfig
             Save-RobocurseConfig -Config $config -Path $script:TestConfigPath
             $loaded = Get-Content $script:TestConfigPath -Raw | ConvertFrom-Json
 
-            $loaded.PSObject.Properties.Name | Should -Contain "Version"
-            $loaded.PSObject.Properties.Name | Should -Contain "GlobalSettings"
-            $loaded.PSObject.Properties.Name | Should -Contain "SyncProfiles"
+            # Saved in friendly format (profiles/global)
+            $loaded.PSObject.Properties.Name | Should -Contain "version"
+            $loaded.PSObject.Properties.Name | Should -Contain "profiles"
+            $loaded.PSObject.Properties.Name | Should -Contain "global"
         }
 
         It "Should create parent directory if it doesn't exist" {
@@ -328,171 +329,9 @@ Describe "Configuration Management" {
         }
     }
 
-    Context "ConvertFrom-ConfigFileFormat" {
-        It "Should pass through config already in internal format" {
-            $internalConfig = New-DefaultConfig
-            $internalConfig.SyncProfiles = @(
-                [PSCustomObject]@{
-                    Name = "TestProfile"
-                    Source = "C:\Source"
-                    Destination = "D:\Dest"
-                }
-            )
+    # ConvertFrom-FriendlyConfig tests are in the dedicated context below
 
-            $result = ConvertFrom-ConfigFileFormat -RawConfig $internalConfig
-
-            $result.SyncProfiles.Count | Should -Be 1
-            $result.SyncProfiles[0].Name | Should -Be "TestProfile"
-        }
-
-        It "Should convert JSON file format (profiles/global) to internal format" {
-            # Create a raw config in JSON file format
-            $rawConfig = [PSCustomObject]@{
-                profiles = [PSCustomObject]@{
-                    DailyBackup = [PSCustomObject]@{
-                        description = "Daily backup"
-                        enabled = $true
-                        sources = @(
-                            [PSCustomObject]@{
-                                path = "\\server\share"
-                                useVss = $true
-                            }
-                        )
-                        destination = [PSCustomObject]@{
-                            path = "D:\Backups"
-                        }
-                        robocopy = [PSCustomObject]@{
-                            switches = @("/COPYALL", "/DCOPY:DAT")
-                            excludeFiles = @("*.tmp")
-                            excludeDirs = @("temp")
-                        }
-                        chunking = [PSCustomObject]@{
-                            maxChunkSizeGB = 50
-                            strategy = "auto"
-                        }
-                    }
-                }
-                global = [PSCustomObject]@{
-                    performance = [PSCustomObject]@{
-                        maxConcurrentJobs = 8
-                    }
-                }
-            }
-
-            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
-
-            # Check global settings were converted
-            $result.GlobalSettings.MaxConcurrentJobs | Should -Be 8
-
-            # Check profile was converted
-            $result.SyncProfiles.Count | Should -Be 1
-            $result.SyncProfiles[0].Name | Should -Be "DailyBackup"
-            $result.SyncProfiles[0].Source | Should -Be "\\server\share"
-            $result.SyncProfiles[0].Destination | Should -Be "D:\Backups"
-            $result.SyncProfiles[0].UseVss | Should -Be $true
-            $result.SyncProfiles[0].ChunkMaxSizeGB | Should -Be 50
-            $result.SyncProfiles[0].ScanMode | Should -Be "Smart"
-
-            # Check robocopy options were converted
-            $result.SyncProfiles[0].RobocopyOptions.Switches | Should -Contain "/COPYALL"
-            $result.SyncProfiles[0].RobocopyOptions.ExcludeFiles | Should -Contain "*.tmp"
-            $result.SyncProfiles[0].RobocopyOptions.ExcludeDirs | Should -Contain "temp"
-        }
-
-        It "Should skip disabled profiles" {
-            $rawConfig = [PSCustomObject]@{
-                profiles = [PSCustomObject]@{
-                    EnabledProfile = [PSCustomObject]@{
-                        enabled = $true
-                        sources = @([PSCustomObject]@{ path = "C:\Source1" })
-                        destination = [PSCustomObject]@{ path = "D:\Dest1" }
-                    }
-                    DisabledProfile = [PSCustomObject]@{
-                        enabled = $false
-                        sources = @([PSCustomObject]@{ path = "C:\Source2" })
-                        destination = [PSCustomObject]@{ path = "D:\Dest2" }
-                    }
-                }
-            }
-
-            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
-
-            $result.SyncProfiles.Count | Should -Be 1
-            $result.SyncProfiles[0].Name | Should -Be "EnabledProfile"
-        }
-
-        It "Should handle retry policy conversion" {
-            $rawConfig = [PSCustomObject]@{
-                profiles = [PSCustomObject]@{
-                    TestProfile = [PSCustomObject]@{
-                        enabled = $true
-                        sources = @([PSCustomObject]@{ path = "C:\Source" })
-                        destination = [PSCustomObject]@{ path = "D:\Dest" }
-                        retryPolicy = [PSCustomObject]@{
-                            maxRetries = 5
-                            retryDelayMinutes = 2
-                        }
-                    }
-                }
-            }
-
-            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
-
-            $result.SyncProfiles[0].RobocopyOptions.RetryCount | Should -Be 5
-            # 2 minutes = 120 seconds
-            $result.SyncProfiles[0].RobocopyOptions.RetryWait | Should -Be 120
-        }
-
-        It "Should map chunking strategy to ScanMode" {
-            $rawConfig = [PSCustomObject]@{
-                profiles = [PSCustomObject]@{
-                    FlatProfile = [PSCustomObject]@{
-                        enabled = $true
-                        sources = @([PSCustomObject]@{ path = "C:\Source" })
-                        destination = [PSCustomObject]@{ path = "D:\Dest" }
-                        chunking = [PSCustomObject]@{
-                            strategy = "flat"
-                        }
-                    }
-                }
-            }
-
-            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
-
-            $result.SyncProfiles[0].ScanMode | Should -Be "Flat"
-        }
-
-        It "Should handle email settings conversion" {
-            $rawConfig = [PSCustomObject]@{
-                profiles = [PSCustomObject]@{}
-                global = [PSCustomObject]@{
-                    email = [PSCustomObject]@{
-                        enabled = $true
-                        smtp = [PSCustomObject]@{
-                            server = "smtp.test.com"
-                            port = 465
-                            useSsl = $true
-                            credentialName = "TestCred"
-                        }
-                        from = "sender@test.com"
-                        to = @("recipient@test.com")
-                    }
-                }
-            }
-
-            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
-
-            $result.Email.Enabled | Should -Be $true
-            $result.Email.SmtpServer | Should -Be "smtp.test.com"
-            $result.Email.Port | Should -Be 465
-            $result.Email.UseTls | Should -Be $true
-            $result.Email.CredentialTarget | Should -Be "TestCred"
-            $result.Email.From | Should -Be "sender@test.com"
-            $result.Email.To | Should -Contain "recipient@test.com"
-        }
-    }
-
-    Context "Get-RobocurseConfig with JSON file format" {
+    Context "Get-RobocurseConfig with friendly format" {
         BeforeEach {
             $script:TestConfigPath = Join-Path $script:TestDir "json-format-config.json"
         }
@@ -503,18 +342,16 @@ Describe "Configuration Management" {
             }
         }
 
-        It "Should load and convert JSON file format automatically" {
-            # Create a config file in JSON file format
+        It "Should load and convert friendly format automatically" {
+            # Create a config file in friendly format (single source per profile)
             $jsonFileFormat = @{
                 profiles = @{
                     TestBackup = @{
                         enabled = $true
-                        sources = @(
-                            @{
-                                path = "C:\TestSource"
-                                useVss = $false
-                            }
-                        )
+                        source = @{
+                            path = "C:\TestSource"
+                            useVss = $false
+                        }
                         destination = @{
                             path = "D:\TestDest"
                         }
@@ -539,136 +376,7 @@ Describe "Configuration Management" {
         }
     }
 
-    Context "Multi-Source Profile Handling" {
-        It "Should expand multi-source profile into separate sync profiles" {
-            $rawConfig = [PSCustomObject]@{
-                profiles = [PSCustomObject]@{
-                    MultiSourceBackup = [PSCustomObject]@{
-                        description = "Backup from multiple locations"
-                        enabled = $true
-                        sources = @(
-                            [PSCustomObject]@{
-                                path = "C:\Source1"
-                                useVss = $false
-                            },
-                            [PSCustomObject]@{
-                                path = "D:\Source2"
-                                useVss = $true
-                            },
-                            [PSCustomObject]@{
-                                path = "E:\Source3"
-                                useVss = $false
-                            }
-                        )
-                        destination = [PSCustomObject]@{
-                            path = "F:\Backups"
-                        }
-                        chunking = [PSCustomObject]@{
-                            maxChunkSizeGB = 25
-                        }
-                    }
-                }
-            }
-
-            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
-
-            # Should create 3 separate profiles
-            $result.SyncProfiles.Count | Should -Be 3
-
-            # Check first expanded profile
-            $result.SyncProfiles[0].Name | Should -Be "MultiSourceBackup-Source1"
-            $result.SyncProfiles[0].Source | Should -Be "C:\Source1"
-            $result.SyncProfiles[0].Destination | Should -Be "F:\Backups"
-            $result.SyncProfiles[0].UseVss | Should -Be $false
-            $result.SyncProfiles[0].ChunkMaxSizeGB | Should -Be 25
-
-            # Check second expanded profile
-            $result.SyncProfiles[1].Name | Should -Be "MultiSourceBackup-Source2"
-            $result.SyncProfiles[1].Source | Should -Be "D:\Source2"
-            $result.SyncProfiles[1].Destination | Should -Be "F:\Backups"
-            $result.SyncProfiles[1].UseVss | Should -Be $true
-
-            # Check third expanded profile
-            $result.SyncProfiles[2].Name | Should -Be "MultiSourceBackup-Source3"
-            $result.SyncProfiles[2].Source | Should -Be "E:\Source3"
-            $result.SyncProfiles[2].UseVss | Should -Be $false
-        }
-
-        It "Should preserve ParentProfile property for expanded profiles" {
-            $rawConfig = [PSCustomObject]@{
-                profiles = [PSCustomObject]@{
-                    ParentBackup = [PSCustomObject]@{
-                        enabled = $true
-                        sources = @(
-                            [PSCustomObject]@{ path = "C:\Source1" },
-                            [PSCustomObject]@{ path = "D:\Source2" }
-                        )
-                        destination = [PSCustomObject]@{ path = "E:\Dest" }
-                    }
-                }
-            }
-
-            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
-
-            $result.SyncProfiles[0].ParentProfile | Should -Be "ParentBackup"
-            $result.SyncProfiles[1].ParentProfile | Should -Be "ParentBackup"
-        }
-
-        It "Should not expand single-source profile" {
-            $rawConfig = [PSCustomObject]@{
-                profiles = [PSCustomObject]@{
-                    SingleSourceBackup = [PSCustomObject]@{
-                        enabled = $true
-                        sources = @(
-                            [PSCustomObject]@{
-                                path = "C:\OnlySource"
-                                useVss = $true
-                            }
-                        )
-                        destination = [PSCustomObject]@{ path = "D:\Dest" }
-                    }
-                }
-            }
-
-            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
-
-            # Should remain as single profile with original name
-            $result.SyncProfiles.Count | Should -Be 1
-            $result.SyncProfiles[0].Name | Should -Be "SingleSourceBackup"
-            $result.SyncProfiles[0].Source | Should -Be "C:\OnlySource"
-        }
-
-        It "Should copy robocopy options to all expanded profiles" {
-            $rawConfig = [PSCustomObject]@{
-                profiles = [PSCustomObject]@{
-                    SharedOptionsBackup = [PSCustomObject]@{
-                        enabled = $true
-                        sources = @(
-                            [PSCustomObject]@{ path = "C:\Source1" },
-                            [PSCustomObject]@{ path = "D:\Source2" }
-                        )
-                        destination = [PSCustomObject]@{ path = "E:\Dest" }
-                        robocopy = [PSCustomObject]@{
-                            switches = @("/MIR", "/COPYALL")
-                            excludeFiles = @("*.tmp", "*.log")
-                            excludeDirs = @("temp", "cache")
-                        }
-                    }
-                }
-            }
-
-            $result = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
-
-            # Both profiles should have the same robocopy options
-            $result.SyncProfiles[0].RobocopyOptions.Switches | Should -Contain "/MIR"
-            $result.SyncProfiles[0].RobocopyOptions.ExcludeFiles | Should -Contain "*.tmp"
-            $result.SyncProfiles[0].RobocopyOptions.ExcludeDirs | Should -Contain "temp"
-
-            $result.SyncProfiles[1].RobocopyOptions.Switches | Should -Contain "/COPYALL"
-            $result.SyncProfiles[1].RobocopyOptions.ExcludeFiles | Should -Contain "*.log"
-            $result.SyncProfiles[1].RobocopyOptions.ExcludeDirs | Should -Contain "cache"
-        }
-    }
+    # Multi-source profile handling removed - each profile now has exactly one source
 
     Context "Config Helper Functions" {
         Context "ConvertTo-RobocopyOptionsInternal" {
@@ -877,113 +585,201 @@ Describe "Configuration Management" {
         }
     }
 
-    Context "ConvertFrom-ProfileSources" {
-        It "Should convert single source profile" {
-            # Note: Function always appends -Source$n suffix, even for single source
-            $rawProfile = [PSCustomObject]@{
-                description = "Test profile"
-                enabled = $true
-                sources = @(
-                    [PSCustomObject]@{
-                        path = "C:\TestSource"
-                        useVss = $true
+    Context "ConvertFrom-FriendlyConfig" {
+        It "Should convert friendly config with single source profile" {
+            $rawConfig = [PSCustomObject]@{
+                version = "1.0"
+                profiles = [PSCustomObject]@{
+                    TestProfile = [PSCustomObject]@{
+                        description = "Test profile"
+                        enabled = $true
+                        source = [PSCustomObject]@{
+                            path = "C:\TestSource"
+                            useVss = $true
+                        }
+                        destination = [PSCustomObject]@{
+                            path = "D:\TestDest"
+                        }
                     }
-                )
-                destination = [PSCustomObject]@{
-                    path = "D:\TestDest"
                 }
+                global = [PSCustomObject]@{}
             }
 
-            $result = @(ConvertFrom-ProfileSources -ProfileName "TestProfile" -RawProfile $rawProfile)
+            $result = ConvertFrom-FriendlyConfig -RawConfig $rawConfig
 
-            @($result).Count | Should -Be 1
-            $result[0].Name | Should -Be "TestProfile-Source1"
-            $result[0].Source | Should -Be "C:\TestSource"
-            $result[0].Destination | Should -Be "D:\TestDest"
-            $result[0].UseVss | Should -Be $true
+            $result.SyncProfiles.Count | Should -Be 1
+            $result.SyncProfiles[0].Name | Should -Be "TestProfile"
+            $result.SyncProfiles[0].Source | Should -Be "C:\TestSource"
+            $result.SyncProfiles[0].Destination | Should -Be "D:\TestDest"
+            $result.SyncProfiles[0].UseVss | Should -Be $true
         }
 
-        It "Should expand multi-source profile into separate profiles" {
-            $rawProfile = [PSCustomObject]@{
-                enabled = $true
-                sources = @(
-                    [PSCustomObject]@{ path = "C:\Source1"; useVss = $false },
-                    [PSCustomObject]@{ path = "D:\Source2"; useVss = $true },
-                    [PSCustomObject]@{ path = "E:\Source3"; useVss = $false }
-                )
-                destination = [PSCustomObject]@{ path = "F:\Backup" }
-            }
-
-            $result = ConvertFrom-ProfileSources -ProfileName "MultiSource" -RawProfile $rawProfile
-
-            $result.Count | Should -Be 3
-            $result[0].Name | Should -Be "MultiSource-Source1"
-            $result[1].Name | Should -Be "MultiSource-Source2"
-            $result[2].Name | Should -Be "MultiSource-Source3"
-        }
-
-        It "Should set ParentProfile for expanded profiles" {
-            $rawProfile = [PSCustomObject]@{
-                enabled = $true
-                sources = @(
-                    [PSCustomObject]@{ path = "C:\Source1" },
-                    [PSCustomObject]@{ path = "D:\Source2" }
-                )
-                destination = [PSCustomObject]@{ path = "E:\Dest" }
-            }
-
-            $result = ConvertFrom-ProfileSources -ProfileName "Parent" -RawProfile $rawProfile
-
-            $result[0].ParentProfile | Should -Be "Parent"
-            $result[1].ParentProfile | Should -Be "Parent"
-        }
-
-        It "Should inherit robocopy options for all expanded profiles" {
-            $rawProfile = [PSCustomObject]@{
-                enabled = $true
-                sources = @(
-                    [PSCustomObject]@{ path = "C:\Source1" },
-                    [PSCustomObject]@{ path = "D:\Source2" }
-                )
-                destination = [PSCustomObject]@{ path = "E:\Dest" }
-                robocopy = [PSCustomObject]@{
-                    switches = @("/COPYALL")
-                    excludeFiles = @("*.tmp")
+        It "Should convert multiple profiles" {
+            $rawConfig = [PSCustomObject]@{
+                version = "1.0"
+                profiles = [PSCustomObject]@{
+                    Profile1 = [PSCustomObject]@{
+                        source = [PSCustomObject]@{ path = "C:\Source1" }
+                        destination = [PSCustomObject]@{ path = "D:\Dest1" }
+                    }
+                    Profile2 = [PSCustomObject]@{
+                        source = [PSCustomObject]@{ path = "C:\Source2" }
+                        destination = [PSCustomObject]@{ path = "D:\Dest2" }
+                    }
                 }
+                global = [PSCustomObject]@{}
             }
 
-            $result = ConvertFrom-ProfileSources -ProfileName "Shared" -RawProfile $rawProfile
+            $result = ConvertFrom-FriendlyConfig -RawConfig $rawConfig
 
-            $result[0].RobocopyOptions.Switches | Should -Contain "/COPYALL"
-            $result[1].RobocopyOptions.Switches | Should -Contain "/COPYALL"
-            $result[0].RobocopyOptions.ExcludeFiles | Should -Contain "*.tmp"
-            $result[1].RobocopyOptions.ExcludeFiles | Should -Contain "*.tmp"
+            $result.SyncProfiles.Count | Should -Be 2
+            $result.SyncProfiles.Name | Should -Contain "Profile1"
+            $result.SyncProfiles.Name | Should -Contain "Profile2"
         }
 
-        It "Should expand profile regardless of enabled flag" {
-            # Note: ConvertFrom-ProfileSources doesn't filter by enabled flag
-            # Enabled filtering happens at the orchestration level, not during expansion
-            $rawProfile = [PSCustomObject]@{
-                enabled = $false
-                sources = @(
-                    [PSCustomObject]@{ path = "C:\Source" }
-                )
-                destination = [PSCustomObject]@{ path = "D:\Dest" }
+        It "Should skip disabled profiles" {
+            $rawConfig = [PSCustomObject]@{
+                version = "1.0"
+                profiles = [PSCustomObject]@{
+                    EnabledProfile = [PSCustomObject]@{
+                        enabled = $true
+                        source = [PSCustomObject]@{ path = "C:\Source1" }
+                        destination = [PSCustomObject]@{ path = "D:\Dest1" }
+                    }
+                    DisabledProfile = [PSCustomObject]@{
+                        enabled = $false
+                        source = [PSCustomObject]@{ path = "C:\Source2" }
+                        destination = [PSCustomObject]@{ path = "D:\Dest2" }
+                    }
+                }
+                global = [PSCustomObject]@{}
             }
 
-            $result = @(ConvertFrom-ProfileSources -ProfileName "Disabled" -RawProfile $rawProfile)
+            $result = ConvertFrom-FriendlyConfig -RawConfig $rawConfig
 
-            # Profile is expanded even if marked disabled
-            @($result).Count | Should -Be 1
-            $result[0].Name | Should -Be "Disabled-Source1"
+            $result.SyncProfiles.Count | Should -Be 1
+            $result.SyncProfiles[0].Name | Should -Be "EnabledProfile"
+        }
+
+        It "Should handle string source path" {
+            $rawConfig = [PSCustomObject]@{
+                version = "1.0"
+                profiles = [PSCustomObject]@{
+                    SimpleProfile = [PSCustomObject]@{
+                        source = "C:\SimpleSource"
+                        destination = [PSCustomObject]@{ path = "D:\Dest" }
+                    }
+                }
+                global = [PSCustomObject]@{}
+            }
+
+            $result = ConvertFrom-FriendlyConfig -RawConfig $rawConfig
+
+            $result.SyncProfiles[0].Source | Should -Be "C:\SimpleSource"
+        }
+
+        It "Should throw when profiles property is missing" {
+            $rawConfig = [PSCustomObject]@{
+                version = "1.0"
+                global = [PSCustomObject]@{}
+            }
+
+            { ConvertFrom-FriendlyConfig -RawConfig $rawConfig } | Should -Throw "*missing 'profiles' property*"
         }
 
         It "Should have correct function signature" {
-            $cmd = Get-Command ConvertFrom-ProfileSources
+            $cmd = Get-Command ConvertFrom-FriendlyConfig
 
-            $cmd.Parameters.ContainsKey('ProfileName') | Should -Be $true
-            $cmd.Parameters.ContainsKey('RawProfile') | Should -Be $true
-            $cmd.Parameters['ProfileName'].ParameterType.Name | Should -Be 'String'
+            $cmd.Parameters.ContainsKey('RawConfig') | Should -Be $true
+            $cmd.Parameters['RawConfig'].ParameterType.Name | Should -Be 'PSObject'
+        }
+    }
+
+    Context "ConvertTo-FriendlyConfig" {
+        It "Should convert internal config to friendly format" {
+            $config = New-DefaultConfig
+            $config.SyncProfiles = @(
+                [PSCustomObject]@{
+                    Name = "TestProfile"
+                    Description = "Test description"
+                    Source = "C:\Source"
+                    Destination = "D:\Dest"
+                    UseVss = $true
+                    ScanMode = "Smart"
+                    ChunkMaxSizeGB = 50
+                    ChunkMaxFiles = 10000
+                    ChunkMaxDepth = 3
+                    RobocopyOptions = @{
+                        Switches = @("/MIR")
+                        ExcludeFiles = @("*.tmp")
+                        ExcludeDirs = @("Temp")
+                    }
+                    Enabled = $true
+                }
+            )
+
+            $result = ConvertTo-FriendlyConfig -Config $config
+
+            $result.profiles.TestProfile | Should -Not -BeNullOrEmpty
+            $result.profiles.TestProfile.source.path | Should -Be "C:\Source"
+            $result.profiles.TestProfile.source.useVss | Should -Be $true
+            $result.profiles.TestProfile.destination.path | Should -Be "D:\Dest"
+            $result.profiles.TestProfile.chunking.maxChunkSizeGB | Should -Be 50
+            $result.profiles.TestProfile.robocopy.switches | Should -Contain "/MIR"
+        }
+
+        It "Should convert global settings to friendly format" {
+            $config = New-DefaultConfig
+            $config.GlobalSettings.MaxConcurrentJobs = 8
+            $config.GlobalSettings.BandwidthLimitMbps = 100
+            $config.Email.Enabled = $true
+            $config.Email.SmtpServer = "smtp.test.com"
+
+            $result = ConvertTo-FriendlyConfig -Config $config
+
+            $result.global.performance.maxConcurrentJobs | Should -Be 8
+            $result.global.performance.throttleNetworkMbps | Should -Be 100
+            $result.global.email.enabled | Should -Be $true
+            $result.global.email.smtp.server | Should -Be "smtp.test.com"
+        }
+
+        It "Should round-trip config without data loss" {
+            # Create a config, convert to friendly, serialize/deserialize via JSON, convert back
+            $original = New-DefaultConfig
+            $original.SyncProfiles = @(
+                [PSCustomObject]@{
+                    Name = "RoundTrip"
+                    Description = "Round trip test"
+                    Source = "C:\Data"
+                    Destination = "D:\Backup"
+                    UseVss = $true
+                    ScanMode = "Smart"
+                    ChunkMaxSizeGB = 25
+                    ChunkMaxFiles = 5000
+                    ChunkMaxDepth = 4
+                    RobocopyOptions = @{}
+                    Enabled = $true
+                }
+            )
+
+            $friendly = ConvertTo-FriendlyConfig -Config $original
+            # Simulate JSON serialization round-trip (as would happen with config files)
+            $json = $friendly | ConvertTo-Json -Depth 10
+            $friendlyObj = $json | ConvertFrom-Json
+            $restored = ConvertFrom-FriendlyConfig -RawConfig $friendlyObj
+
+            $restored.SyncProfiles[0].Name | Should -Be "RoundTrip"
+            $restored.SyncProfiles[0].Source | Should -Be "C:\Data"
+            $restored.SyncProfiles[0].Destination | Should -Be "D:\Backup"
+            $restored.SyncProfiles[0].UseVss | Should -Be $true
+            $restored.SyncProfiles[0].ChunkMaxSizeGB | Should -Be 25
+        }
+
+        It "Should have correct function signature" {
+            $cmd = Get-Command ConvertTo-FriendlyConfig
+
+            $cmd.Parameters.ContainsKey('Config') | Should -Be $true
+            $cmd.Parameters['Config'].ParameterType.Name | Should -Be 'PSObject'
         }
     }
 
@@ -1169,28 +965,35 @@ Describe "Configuration Management" {
         }
     }
 
-    Context "ConvertFrom-ProfileSources - Null Safety" {
-        It "Should handle null sources gracefully" {
-            # This tests that the function doesn't throw when sources is null
-            $profile = [PSCustomObject]@{
-                description = "Test profile"
-                sources = $null
-                destination = "D:\Backup"
+    Context "ConvertFrom-FriendlyConfig - Null Safety" {
+        It "Should handle null source gracefully" {
+            # Profile with null source should still be converted (will have empty Source)
+            $rawConfig = [PSCustomObject]@{
+                version = "1.0"
+                profiles = [PSCustomObject]@{
+                    TestProfile = [PSCustomObject]@{
+                        description = "Test profile"
+                        source = $null
+                        destination = "D:\Backup"
+                    }
+                }
+                global = [PSCustomObject]@{}
             }
 
-            $result = ConvertFrom-ProfileSources -ProfileName "TestProfile" -RawProfile $profile
-            $result | Should -HaveCount 0
+            $result = ConvertFrom-FriendlyConfig -RawConfig $rawConfig
+            $result.SyncProfiles | Should -HaveCount 1
+            $result.SyncProfiles[0].Source | Should -BeNullOrEmpty
         }
 
-        It "Should handle empty sources array" {
-            $profile = [PSCustomObject]@{
-                description = "Test profile"
-                sources = @()
-                destination = "D:\Backup"
+        It "Should handle empty profiles gracefully" {
+            $rawConfig = [PSCustomObject]@{
+                version = "1.0"
+                profiles = [PSCustomObject]@{}
+                global = [PSCustomObject]@{}
             }
 
-            $result = ConvertFrom-ProfileSources -ProfileName "TestProfile" -RawProfile $profile
-            $result | Should -HaveCount 0
+            $result = ConvertFrom-FriendlyConfig -RawConfig $rawConfig
+            $result.SyncProfiles | Should -HaveCount 0
         }
     }
 }
