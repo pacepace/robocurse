@@ -129,6 +129,140 @@ function Test-VssPrivileges {
     return New-OperationResult -Success $true -Data "All VSS prerequisites met"
 }
 
+function Test-VssStorageQuota {
+    <#
+    .SYNOPSIS
+        Checks if there is sufficient VSS storage quota available for a new snapshot
+    .DESCRIPTION
+        Queries the VSS shadow storage settings for the specified volume to determine:
+        - Maximum allocated storage for shadow copies
+        - Currently used storage
+        - Available storage for new snapshots
+
+        This pre-flight check can prevent snapshot failures due to storage exhaustion.
+        By default, Windows uses 10% of the volume for shadow storage.
+    .PARAMETER Volume
+        Volume to check (e.g., "C:" or "D:")
+    .PARAMETER MinimumFreePercent
+        Minimum free storage percentage required (default: 10%)
+    .OUTPUTS
+        OperationResult with:
+        - Success=$true if sufficient storage available
+        - Success=$false with details if storage is low or check fails
+        - Data contains storage details (MaxSizeMB, UsedSizeMB, FreePercent)
+    .EXAMPLE
+        $check = Test-VssStorageQuota -Volume "C:"
+        if (-not $check.Success) {
+            Write-Warning "VSS storage low: $($check.ErrorMessage)"
+        }
+    .NOTES
+        Requires Administrator privileges to query VSS storage settings.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Volume,
+
+        [ValidateRange(1, 50)]
+        [int]$MinimumFreePercent = 10
+    )
+
+    # Skip if not Windows
+    if (-not (Test-IsWindowsPlatform)) {
+        return New-OperationResult -Success $false -ErrorMessage "VSS is only available on Windows platforms"
+    }
+
+    try {
+        # Query shadow storage settings using CIM (more reliable than vssadmin parsing)
+        $volumeWithSlash = "${Volume}\"
+
+        # Get shadow storage info from Win32_ShadowStorage
+        $shadowStorage = Get-CimInstance -ClassName Win32_ShadowStorage -ErrorAction SilentlyContinue |
+            Where-Object {
+                # Match by volume - ShadowStorage.Volume is a reference like "Win32_Volume.DeviceID="\\?\Volume{guid}\""
+                $_.Volume -match [regex]::Escape($Volume)
+            }
+
+        if (-not $shadowStorage) {
+            # No shadow storage configured for this volume - try to get volume info
+            $volumeInfo = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter='$Volume'" -ErrorAction SilentlyContinue
+            if ($volumeInfo) {
+                # Shadow storage will be created on demand using default settings
+                # Default is typically 10-20% of volume size
+                $defaultMaxBytes = [long]($volumeInfo.Capacity * 0.10)
+                Write-RobocurseLog -Message "No VSS shadow storage configured for $Volume. Default allocation (~10%) will be used on first snapshot." `
+                    -Level 'Debug' -Component 'VSS'
+                return New-OperationResult -Success $true -Data @{
+                    Volume = $Volume
+                    MaxSizeMB = [math]::Round($defaultMaxBytes / 1MB, 0)
+                    UsedSizeMB = 0
+                    FreePercent = 100
+                    Status = "NotConfigured"
+                    Message = "Shadow storage will be allocated on first use"
+                }
+            }
+            return New-OperationResult -Success $false -ErrorMessage "Cannot query VSS storage for volume $Volume"
+        }
+
+        # Calculate storage metrics
+        $maxSizeBytes = $shadowStorage.MaxSpace
+        $usedSizeBytes = $shadowStorage.UsedSpace
+        $allocatedBytes = $shadowStorage.AllocatedSpace
+
+        # Handle UNBOUNDED case (MaxSpace = -1 or very large)
+        $isUnbounded = ($maxSizeBytes -lt 0) -or ($maxSizeBytes -gt 10PB)
+        if ($isUnbounded) {
+            Write-RobocurseLog -Message "VSS shadow storage for $Volume is UNBOUNDED (no limit)" -Level 'Debug' -Component 'VSS'
+            return New-OperationResult -Success $true -Data @{
+                Volume = $Volume
+                MaxSizeMB = "Unbounded"
+                UsedSizeMB = [math]::Round($usedSizeBytes / 1MB, 0)
+                FreePercent = 100
+                Status = "Unbounded"
+                Message = "No storage limit configured"
+            }
+        }
+
+        # Calculate free percentage
+        $freeBytes = $maxSizeBytes - $usedSizeBytes
+        $freePercent = if ($maxSizeBytes -gt 0) {
+            [math]::Round(($freeBytes / $maxSizeBytes) * 100, 1)
+        } else { 0 }
+
+        $storageData = @{
+            Volume = $Volume
+            MaxSizeMB = [math]::Round($maxSizeBytes / 1MB, 0)
+            UsedSizeMB = [math]::Round($usedSizeBytes / 1MB, 0)
+            FreeMB = [math]::Round($freeBytes / 1MB, 0)
+            FreePercent = $freePercent
+            Status = "Configured"
+        }
+
+        # Check if storage is sufficient
+        if ($freePercent -lt $MinimumFreePercent) {
+            $errorMsg = "VSS storage for $Volume is low: $freePercent% free ($([math]::Round($freeBytes / 1MB, 0)) MB of $([math]::Round($maxSizeBytes / 1MB, 0)) MB). " +
+                        "Consider running 'vssadmin delete shadows /for=$volumeWithSlash /oldest' or increasing storage with 'vssadmin resize shadowstorage'."
+            Write-RobocurseLog -Message $errorMsg -Level 'Warning' -Component 'VSS'
+            return New-OperationResult -Success $false -ErrorMessage $errorMsg -Data $storageData
+        }
+
+        Write-RobocurseLog -Message "VSS storage check passed for $Volume`: $freePercent% free ($([math]::Round($freeBytes / 1MB, 0)) MB available)" `
+            -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data $storageData
+    }
+    catch {
+        $errorMsg = "Error checking VSS storage quota for $Volume`: $($_.Exception.Message)"
+        Write-RobocurseLog -Message $errorMsg -Level 'Warning' -Component 'VSS'
+        # Return success=true with warning - storage check failure shouldn't block snapshot attempt
+        return New-OperationResult -Success $true -ErrorMessage $errorMsg -Data @{
+            Volume = $Volume
+            Status = "CheckFailed"
+            Message = "Could not verify storage; proceeding with snapshot attempt"
+        }
+    }
+}
+
 function Clear-OrphanVssSnapshots {
     <#
     .SYNOPSIS
@@ -384,6 +518,16 @@ function New-VssSnapshot {
     if (-not $privCheck.Success) {
         Write-RobocurseLog -Message "VSS privilege check failed: $($privCheck.ErrorMessage)" -Level 'Error' -Component 'VSS'
         return New-OperationResult -Success $false -ErrorMessage "VSS privileges not available: $($privCheck.ErrorMessage)"
+    }
+
+    # Pre-flight storage quota check - warn if storage is low (but don't block)
+    $volume = Get-VolumeFromPath -Path $SourcePath
+    if ($volume) {
+        $quotaCheck = Test-VssStorageQuota -Volume $volume
+        if (-not $quotaCheck.Success) {
+            # Log warning but proceed - the snapshot may still succeed
+            Write-RobocurseLog -Message "VSS storage warning for $volume`: $($quotaCheck.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+        }
     }
 
     # Retry loop for transient VSS failures (lock contention, VSS busy, etc.)

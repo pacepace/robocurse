@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-03 18:14:27
+    Built: 2025-12-03 19:07:27
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -194,6 +194,16 @@ $script:HealthCheckStatusFile = Join-Path $script:HealthCheckTempDir "Robocurse-
 
 # Dry-run mode state (set during replication, used by Start-ChunkJob)
 $script:DryRunMode = $false
+
+# Mutex timeouts
+# Timeout in milliseconds for log file mutex acquisition.
+# 5 seconds is typically sufficient; if exceeded, logging proceeds without lock
+# (better to log without synchronization than lose the log entry).
+$script:LogMutexTimeoutMs = 5000
+
+# Timeout in milliseconds for VSS tracking file mutex acquisition.
+# VSS operations are less frequent, so 10 seconds is acceptable.
+$script:VssMutexTimeoutMs = 10000
 #endregion
 
 #region ==================== UTILITY ====================
@@ -1776,7 +1786,7 @@ function Test-PathFormat {
 
 # Script-scoped variables for current session state
 $script:CurrentSessionId = $null
-$script:LogMutexTimeoutMs = 5000  # 5 seconds timeout for mutex acquisition
+# Note: LogMutexTimeoutMs is defined in Robocurse.psm1 CONSTANTS region
 
 function Invoke-WithLogMutex {
     <#
@@ -4316,6 +4326,109 @@ function Test-RobocopyVerification {
     return $result
 }
 
+function Write-RobocopyCompletionEvent {
+    <#
+    .SYNOPSIS
+        Emits structured SIEM events for robocopy job completion
+    .DESCRIPTION
+        Parses robocopy job results and emits structured SIEM events for:
+        - ChunkComplete: Successful chunk replication with detailed stats
+        - ChunkError: Failed chunks with error details
+
+        This enables enterprise monitoring and alerting on file replication operations.
+    .PARAMETER Job
+        Job object from Start-RobocopyJob
+    .PARAMETER JobResult
+        Result from Wait-RobocopyJob containing ExitCode, ExitMeaning, Duration, Stats
+    .PARAMETER ChunkId
+        Unique identifier for the chunk
+    .PARAMETER ProfileName
+        Name of the profile this chunk belongs to
+    .EXAMPLE
+        $result = Wait-RobocopyJob -Job $job
+        Write-RobocopyCompletionEvent -Job $job -JobResult $result -ChunkId 42 -ProfileName "DailyBackup"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Job,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$JobResult,
+
+        [Parameter(Mandatory)]
+        [int]$ChunkId,
+
+        [string]$ProfileName = "Unknown"
+    )
+
+    $stats = $JobResult.Stats
+    $exitMeaning = $JobResult.ExitMeaning
+
+    # Determine event type based on exit code severity
+    $eventType = if ($exitMeaning.Severity -in @('Fatal', 'Error')) {
+        'ChunkError'
+    } else {
+        'ChunkComplete'
+    }
+
+    # Build structured event data
+    $eventData = @{
+        chunkId = $ChunkId
+        profileName = $ProfileName
+        sourcePath = $Job.Chunk.SourcePath
+        destinationPath = $Job.Chunk.DestinationPath
+        exitCode = $JobResult.ExitCode
+        exitSeverity = $exitMeaning.Severity
+        exitMessage = $exitMeaning.Message
+        durationSeconds = [math]::Round($JobResult.Duration.TotalSeconds, 2)
+        dryRun = $Job.DryRun
+
+        # File statistics
+        filesCopied = if ($stats) { $stats.FilesCopied } else { 0 }
+        filesSkipped = if ($stats) { $stats.FilesSkipped } else { 0 }
+        filesFailed = if ($stats) { $stats.FilesFailed } else { 0 }
+
+        # Directory statistics
+        dirsCopied = if ($stats) { $stats.DirsCopied } else { 0 }
+        dirsSkipped = if ($stats) { $stats.DirsSkipped } else { 0 }
+        dirsFailed = if ($stats) { $stats.DirsFailed } else { 0 }
+
+        # Byte statistics
+        bytesCopied = if ($stats) { $stats.BytesCopied } else { 0 }
+
+        # Throughput calculation
+        bytesPerSecond = if ($JobResult.Duration.TotalSeconds -gt 0 -and $stats.BytesCopied -gt 0) {
+            [math]::Round($stats.BytesCopied / $JobResult.Duration.TotalSeconds, 0)
+        } else { 0 }
+
+        # Exit code flags for detailed analysis
+        flags = @{
+            filesCopied = $exitMeaning.FilesCopied
+            extrasDetected = $exitMeaning.ExtrasDetected
+            mismatchesFound = $exitMeaning.MismatchesFound
+            copyErrors = $exitMeaning.CopyErrors
+            fatalError = $exitMeaning.FatalError
+        }
+    }
+
+    # Add error message if present
+    if ($stats -and $stats.ErrorMessage) {
+        $eventData.errorMessage = $stats.ErrorMessage
+    }
+
+    # Emit the SIEM event
+    Write-SiemEvent -EventType $eventType -Data $eventData
+
+    # Log summary
+    $logLevel = if ($eventType -eq 'ChunkError') { 'Error' } else { 'Info' }
+    $summaryMsg = "Chunk #$ChunkId completed: $($eventData.filesCopied) files, $(Format-FileSize -Bytes $eventData.bytesCopied) in $([math]::Round($JobResult.Duration.TotalSeconds, 1))s"
+    if ($eventData.filesFailed -gt 0) {
+        $summaryMsg += " ($($eventData.filesFailed) failed)"
+    }
+    Write-RobocurseLog -Message $summaryMsg -Level $logLevel -Component 'Robocopy'
+}
+
 #endregion
 
 #region ==================== CHECKPOINT ====================
@@ -5331,11 +5444,24 @@ function Start-ChunkJob {
         - Profile-specific robocopy options
         - Dynamic bandwidth throttling (IPG) based on aggregate limit and active jobs
 
-        BANDWIDTH THROTTLING NOTE:
+        BANDWIDTH THROTTLING DESIGN:
         IPG (Inter-Packet Gap) is recalculated fresh for each job start, including retries.
         This ensures new/retried jobs get the correct bandwidth share based on CURRENT active
-        job count. Running jobs keep their original IPG (robocopy limitation - /IPG is set
-        at process start). As jobs complete, new jobs automatically get more bandwidth.
+        job count.
+
+        KNOWN LIMITATION (robocopy architecture):
+        Running jobs keep their original IPG because robocopy's /IPG is set at process start
+        and cannot be modified on a running process. When jobs complete, new jobs automatically
+        get proportionally more bandwidth.
+
+        EXAMPLE: With 100 Mbps limit and 4 jobs:
+        - Initially: Each job gets ~25 Mbps
+        - After 2 jobs complete: New jobs get ~50 Mbps each
+        - Running jobs keep their original ~25 Mbps (robocopy limitation)
+        - Total utilization may be <100 Mbps until all old jobs complete
+
+        MITIGATION: Consider using smaller chunk sizes or higher MaxConcurrentJobs to ensure
+        faster job turnover and better bandwidth utilization.
     .PARAMETER Chunk
         Chunk object to replicate
     .OUTPUTS
@@ -6484,6 +6610,140 @@ function Test-VssPrivileges {
     return New-OperationResult -Success $true -Data "All VSS prerequisites met"
 }
 
+function Test-VssStorageQuota {
+    <#
+    .SYNOPSIS
+        Checks if there is sufficient VSS storage quota available for a new snapshot
+    .DESCRIPTION
+        Queries the VSS shadow storage settings for the specified volume to determine:
+        - Maximum allocated storage for shadow copies
+        - Currently used storage
+        - Available storage for new snapshots
+
+        This pre-flight check can prevent snapshot failures due to storage exhaustion.
+        By default, Windows uses 10% of the volume for shadow storage.
+    .PARAMETER Volume
+        Volume to check (e.g., "C:" or "D:")
+    .PARAMETER MinimumFreePercent
+        Minimum free storage percentage required (default: 10%)
+    .OUTPUTS
+        OperationResult with:
+        - Success=$true if sufficient storage available
+        - Success=$false with details if storage is low or check fails
+        - Data contains storage details (MaxSizeMB, UsedSizeMB, FreePercent)
+    .EXAMPLE
+        $check = Test-VssStorageQuota -Volume "C:"
+        if (-not $check.Success) {
+            Write-Warning "VSS storage low: $($check.ErrorMessage)"
+        }
+    .NOTES
+        Requires Administrator privileges to query VSS storage settings.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Volume,
+
+        [ValidateRange(1, 50)]
+        [int]$MinimumFreePercent = 10
+    )
+
+    # Skip if not Windows
+    if (-not (Test-IsWindowsPlatform)) {
+        return New-OperationResult -Success $false -ErrorMessage "VSS is only available on Windows platforms"
+    }
+
+    try {
+        # Query shadow storage settings using CIM (more reliable than vssadmin parsing)
+        $volumeWithSlash = "${Volume}\"
+
+        # Get shadow storage info from Win32_ShadowStorage
+        $shadowStorage = Get-CimInstance -ClassName Win32_ShadowStorage -ErrorAction SilentlyContinue |
+            Where-Object {
+                # Match by volume - ShadowStorage.Volume is a reference like "Win32_Volume.DeviceID="\\?\Volume{guid}\""
+                $_.Volume -match [regex]::Escape($Volume)
+            }
+
+        if (-not $shadowStorage) {
+            # No shadow storage configured for this volume - try to get volume info
+            $volumeInfo = Get-CimInstance -ClassName Win32_Volume -Filter "DriveLetter='$Volume'" -ErrorAction SilentlyContinue
+            if ($volumeInfo) {
+                # Shadow storage will be created on demand using default settings
+                # Default is typically 10-20% of volume size
+                $defaultMaxBytes = [long]($volumeInfo.Capacity * 0.10)
+                Write-RobocurseLog -Message "No VSS shadow storage configured for $Volume. Default allocation (~10%) will be used on first snapshot." `
+                    -Level 'Debug' -Component 'VSS'
+                return New-OperationResult -Success $true -Data @{
+                    Volume = $Volume
+                    MaxSizeMB = [math]::Round($defaultMaxBytes / 1MB, 0)
+                    UsedSizeMB = 0
+                    FreePercent = 100
+                    Status = "NotConfigured"
+                    Message = "Shadow storage will be allocated on first use"
+                }
+            }
+            return New-OperationResult -Success $false -ErrorMessage "Cannot query VSS storage for volume $Volume"
+        }
+
+        # Calculate storage metrics
+        $maxSizeBytes = $shadowStorage.MaxSpace
+        $usedSizeBytes = $shadowStorage.UsedSpace
+        $allocatedBytes = $shadowStorage.AllocatedSpace
+
+        # Handle UNBOUNDED case (MaxSpace = -1 or very large)
+        $isUnbounded = ($maxSizeBytes -lt 0) -or ($maxSizeBytes -gt 10PB)
+        if ($isUnbounded) {
+            Write-RobocurseLog -Message "VSS shadow storage for $Volume is UNBOUNDED (no limit)" -Level 'Debug' -Component 'VSS'
+            return New-OperationResult -Success $true -Data @{
+                Volume = $Volume
+                MaxSizeMB = "Unbounded"
+                UsedSizeMB = [math]::Round($usedSizeBytes / 1MB, 0)
+                FreePercent = 100
+                Status = "Unbounded"
+                Message = "No storage limit configured"
+            }
+        }
+
+        # Calculate free percentage
+        $freeBytes = $maxSizeBytes - $usedSizeBytes
+        $freePercent = if ($maxSizeBytes -gt 0) {
+            [math]::Round(($freeBytes / $maxSizeBytes) * 100, 1)
+        } else { 0 }
+
+        $storageData = @{
+            Volume = $Volume
+            MaxSizeMB = [math]::Round($maxSizeBytes / 1MB, 0)
+            UsedSizeMB = [math]::Round($usedSizeBytes / 1MB, 0)
+            FreeMB = [math]::Round($freeBytes / 1MB, 0)
+            FreePercent = $freePercent
+            Status = "Configured"
+        }
+
+        # Check if storage is sufficient
+        if ($freePercent -lt $MinimumFreePercent) {
+            $errorMsg = "VSS storage for $Volume is low: $freePercent% free ($([math]::Round($freeBytes / 1MB, 0)) MB of $([math]::Round($maxSizeBytes / 1MB, 0)) MB). " +
+                        "Consider running 'vssadmin delete shadows /for=$volumeWithSlash /oldest' or increasing storage with 'vssadmin resize shadowstorage'."
+            Write-RobocurseLog -Message $errorMsg -Level 'Warning' -Component 'VSS'
+            return New-OperationResult -Success $false -ErrorMessage $errorMsg -Data $storageData
+        }
+
+        Write-RobocurseLog -Message "VSS storage check passed for $Volume`: $freePercent% free ($([math]::Round($freeBytes / 1MB, 0)) MB available)" `
+            -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data $storageData
+    }
+    catch {
+        $errorMsg = "Error checking VSS storage quota for $Volume`: $($_.Exception.Message)"
+        Write-RobocurseLog -Message $errorMsg -Level 'Warning' -Component 'VSS'
+        # Return success=true with warning - storage check failure shouldn't block snapshot attempt
+        return New-OperationResult -Success $true -ErrorMessage $errorMsg -Data @{
+            Volume = $Volume
+            Status = "CheckFailed"
+            Message = "Could not verify storage; proceeding with snapshot attempt"
+        }
+    }
+}
+
 function Clear-OrphanVssSnapshots {
     <#
     .SYNOPSIS
@@ -6739,6 +6999,16 @@ function New-VssSnapshot {
     if (-not $privCheck.Success) {
         Write-RobocurseLog -Message "VSS privilege check failed: $($privCheck.ErrorMessage)" -Level 'Error' -Component 'VSS'
         return New-OperationResult -Success $false -ErrorMessage "VSS privileges not available: $($privCheck.ErrorMessage)"
+    }
+
+    # Pre-flight storage quota check - warn if storage is low (but don't block)
+    $volume = Get-VolumeFromPath -Path $SourcePath
+    if ($volume) {
+        $quotaCheck = Test-VssStorageQuota -Volume $volume
+        if (-not $quotaCheck.Success) {
+            # Log warning but proceed - the snapshot may still succeed
+            Write-RobocurseLog -Message "VSS storage warning for $volume`: $($quotaCheck.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+        }
     }
 
     # Retry loop for transient VSS failures (lock contention, VSS busy, etc.)
@@ -9646,10 +9916,17 @@ function Restore-GuiState {
         }
 
         # Restore selected profile (after profile list is populated)
+        # Handle case where saved profile no longer exists in config (deleted externally)
         if ($script:Controls -and $state.SelectedProfile -and $script:Controls.lstProfiles) {
             $profileToSelect = $script:Controls.lstProfiles.Items | Where-Object { $_.Name -eq $state.SelectedProfile }
             if ($profileToSelect) {
                 $script:Controls.lstProfiles.SelectedItem = $profileToSelect
+            } else {
+                # Profile was deleted - log warning and select first available if any
+                Write-Verbose "Saved profile '$($state.SelectedProfile)' no longer exists in config"
+                if ($script:Controls.lstProfiles.Items.Count -gt 0) {
+                    $script:Controls.lstProfiles.SelectedIndex = 0
+                }
             }
         }
 
@@ -10674,6 +10951,8 @@ function New-ReplicationRunspace {
         Array of profiles to run
     .PARAMETER MaxWorkers
         Maximum concurrent robocopy jobs
+    .PARAMETER ConfigPath
+        Path to config file (can be a snapshot for isolation from external changes)
     .OUTPUTS
         PSCustomObject with PowerShell, Handle, and Runspace properties
     #>
@@ -10683,7 +10962,9 @@ function New-ReplicationRunspace {
         [PSCustomObject[]]$Profiles,
 
         [Parameter(Mandatory)]
-        [int]$MaxWorkers
+        [int]$MaxWorkers,
+
+        [string]$ConfigPath = $script:ConfigPath
     )
 
     # Determine how to load Robocurse in the background runspace
@@ -10893,7 +11174,8 @@ function New-ReplicationRunspace {
     $profileNames = @($Profiles | ForEach-Object { $_.Name })
     $powershell.AddArgument($profileNames)
     $powershell.AddArgument($MaxWorkers)
-    $powershell.AddArgument($script:ConfigPath)
+    # Use the provided ConfigPath (may be a snapshot for isolation from external changes)
+    $powershell.AddArgument($ConfigPath)
 
     $handle = $powershell.BeginInvoke()
 
@@ -10933,6 +11215,8 @@ function Start-GuiReplication {
     $script:Controls.btnRunSelected.IsEnabled = $false
     $script:Controls.btnStop.IsEnabled = $true
     $script:Controls.txtStatus.Text = "Replication in progress..."
+    $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::Gray  # Reset error color
+    $script:GuiErrorCount = 0  # Reset error count for new run
     $script:LastGuiUpdateState = $null
     $script:Controls.dgChunks.ItemsSource = $null
 
@@ -10945,9 +11229,23 @@ function Start-GuiReplication {
     # Initialize orchestration state (must happen before runspace creation)
     Initialize-OrchestrationState
 
-    # Create and start background runspace
+    # Create a snapshot of the config to prevent external modifications during replication
+    # This ensures the running replication uses the config state at the time of start
+    $script:ConfigSnapshotPath = $null
     try {
-        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers
+        $snapshotDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+        $script:ConfigSnapshotPath = Join-Path $snapshotDir "Robocurse-ConfigSnapshot-$([Guid]::NewGuid().ToString('N')).json"
+        Copy-Item -Path $script:ConfigPath -Destination $script:ConfigSnapshotPath -Force
+        Write-GuiLog "Config snapshot created for replication run"
+    }
+    catch {
+        Write-GuiLog "Warning: Could not create config snapshot, using live config: $($_.Exception.Message)"
+        $script:ConfigSnapshotPath = $script:ConfigPath  # Fall back to original
+    }
+
+    # Create and start background runspace (using snapshot path)
+    try {
+        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigSnapshotPath
 
         $script:ReplicationHandle = $runspaceInfo.Handle
         $script:ReplicationPowerShell = $runspaceInfo.PowerShell
@@ -11215,14 +11513,34 @@ function Complete-GuiReplication {
     $script:Controls.btnRunSelected.IsEnabled = $true
     $script:Controls.btnStop.IsEnabled = $false
 
-    # Update status
-    $script:Controls.txtStatus.Text = "Replication complete"
+    # Update status with error indicator if applicable
+    if ($script:GuiErrorCount -gt 0) {
+        $script:Controls.txtStatus.Text = "Replication complete ($($script:GuiErrorCount) error(s))"
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
+    } else {
+        $script:Controls.txtStatus.Text = "Replication complete"
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::LimeGreen
+    }
 
     # Show completion message
     $status = Get-OrchestrationStatus
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
 
     Write-GuiLog "Replication completed: $($status.ChunksComplete)/$($status.ChunksTotal) chunks, $($status.ChunksFailed) failed"
+
+    # Clean up config snapshot if it was created
+    if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {
+        try {
+            if (Test-Path $script:ConfigSnapshotPath) {
+                Remove-Item $script:ConfigSnapshotPath -Force -ErrorAction SilentlyContinue
+                Write-GuiLog "Config snapshot cleaned up"
+            }
+        }
+        catch {
+            # Non-critical - temp files will be cleaned up eventually
+        }
+        $script:ConfigSnapshotPath = $null
+    }
 }
 
 # Cache for GUI progress updates - avoids unnecessary rebuilds
@@ -11468,11 +11786,18 @@ function Update-GuiProgress {
             }
         }
 
-        # Dequeue errors (thread-safe)
+        # Dequeue errors (thread-safe) and update error indicator
         if ($script:OrchestrationState) {
             $errors = $script:OrchestrationState.DequeueErrors()
             foreach ($err in $errors) {
                 Write-GuiLog "[ERROR] $err"
+                $script:GuiErrorCount++
+            }
+
+            # Update status bar with error indicator if errors occurred
+            if ($script:GuiErrorCount -gt 0) {
+                $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
+                $script:Controls.txtStatus.Text = "Replication in progress... ($($script:GuiErrorCount) error(s))"
             }
         }
 
@@ -11499,6 +11824,9 @@ function Update-GuiProgress {
 # GUI Log ring buffer (uses $script:GuiLogMaxLines from constants)
 $script:GuiLogBuffer = [System.Collections.Generic.List[string]]::new()
 $script:GuiLogDirty = $false  # Track if buffer needs to be flushed to UI
+
+# Error tracking for visual indicator
+$script:GuiErrorCount = 0  # Count of errors encountered during current run
 
 function Write-GuiLog {
     <#

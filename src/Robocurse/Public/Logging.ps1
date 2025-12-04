@@ -1,7 +1,7 @@
 ﻿# Robocurse Logging Functions
 # Script-scoped variables for current session state
 $script:CurrentSessionId = $null
-$script:LogMutexTimeoutMs = 5000  # 5 seconds timeout for mutex acquisition
+# Note: LogMutexTimeoutMs is defined in Robocurse.psm1 CONSTANTS region
 
 function Invoke-WithLogMutex {
     <#

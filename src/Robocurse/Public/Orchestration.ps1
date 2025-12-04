@@ -775,11 +775,24 @@ function Start-ChunkJob {
         - Profile-specific robocopy options
         - Dynamic bandwidth throttling (IPG) based on aggregate limit and active jobs
 
-        BANDWIDTH THROTTLING NOTE:
+        BANDWIDTH THROTTLING DESIGN:
         IPG (Inter-Packet Gap) is recalculated fresh for each job start, including retries.
         This ensures new/retried jobs get the correct bandwidth share based on CURRENT active
-        job count. Running jobs keep their original IPG (robocopy limitation - /IPG is set
-        at process start). As jobs complete, new jobs automatically get more bandwidth.
+        job count.
+
+        KNOWN LIMITATION (robocopy architecture):
+        Running jobs keep their original IPG because robocopy's /IPG is set at process start
+        and cannot be modified on a running process. When jobs complete, new jobs automatically
+        get proportionally more bandwidth.
+
+        EXAMPLE: With 100 Mbps limit and 4 jobs:
+        - Initially: Each job gets ~25 Mbps
+        - After 2 jobs complete: New jobs get ~50 Mbps each
+        - Running jobs keep their original ~25 Mbps (robocopy limitation)
+        - Total utilization may be <100 Mbps until all old jobs complete
+
+        MITIGATION: Consider using smaller chunk sizes or higher MaxConcurrentJobs to ensure
+        faster job turnover and better bandwidth utilization.
     .PARAMETER Chunk
         Chunk object to replicate
     .OUTPUTS

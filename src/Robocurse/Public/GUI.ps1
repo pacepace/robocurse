@@ -167,10 +167,17 @@ function Restore-GuiState {
         }
 
         # Restore selected profile (after profile list is populated)
+        # Handle case where saved profile no longer exists in config (deleted externally)
         if ($script:Controls -and $state.SelectedProfile -and $script:Controls.lstProfiles) {
             $profileToSelect = $script:Controls.lstProfiles.Items | Where-Object { $_.Name -eq $state.SelectedProfile }
             if ($profileToSelect) {
                 $script:Controls.lstProfiles.SelectedItem = $profileToSelect
+            } else {
+                # Profile was deleted - log warning and select first available if any
+                Write-Verbose "Saved profile '$($state.SelectedProfile)' no longer exists in config"
+                if ($script:Controls.lstProfiles.Items.Count -gt 0) {
+                    $script:Controls.lstProfiles.SelectedIndex = 0
+                }
             }
         }
 
@@ -847,6 +854,8 @@ function New-ReplicationRunspace {
         Array of profiles to run
     .PARAMETER MaxWorkers
         Maximum concurrent robocopy jobs
+    .PARAMETER ConfigPath
+        Path to config file (can be a snapshot for isolation from external changes)
     .OUTPUTS
         PSCustomObject with PowerShell, Handle, and Runspace properties
     #>
@@ -856,7 +865,9 @@ function New-ReplicationRunspace {
         [PSCustomObject[]]$Profiles,
 
         [Parameter(Mandatory)]
-        [int]$MaxWorkers
+        [int]$MaxWorkers,
+
+        [string]$ConfigPath = $script:ConfigPath
     )
 
     # Determine how to load Robocurse in the background runspace
@@ -1066,7 +1077,8 @@ function New-ReplicationRunspace {
     $profileNames = @($Profiles | ForEach-Object { $_.Name })
     $powershell.AddArgument($profileNames)
     $powershell.AddArgument($MaxWorkers)
-    $powershell.AddArgument($script:ConfigPath)
+    # Use the provided ConfigPath (may be a snapshot for isolation from external changes)
+    $powershell.AddArgument($ConfigPath)
 
     $handle = $powershell.BeginInvoke()
 
@@ -1106,6 +1118,8 @@ function Start-GuiReplication {
     $script:Controls.btnRunSelected.IsEnabled = $false
     $script:Controls.btnStop.IsEnabled = $true
     $script:Controls.txtStatus.Text = "Replication in progress..."
+    $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::Gray  # Reset error color
+    $script:GuiErrorCount = 0  # Reset error count for new run
     $script:LastGuiUpdateState = $null
     $script:Controls.dgChunks.ItemsSource = $null
 
@@ -1118,9 +1132,23 @@ function Start-GuiReplication {
     # Initialize orchestration state (must happen before runspace creation)
     Initialize-OrchestrationState
 
-    # Create and start background runspace
+    # Create a snapshot of the config to prevent external modifications during replication
+    # This ensures the running replication uses the config state at the time of start
+    $script:ConfigSnapshotPath = $null
     try {
-        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers
+        $snapshotDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+        $script:ConfigSnapshotPath = Join-Path $snapshotDir "Robocurse-ConfigSnapshot-$([Guid]::NewGuid().ToString('N')).json"
+        Copy-Item -Path $script:ConfigPath -Destination $script:ConfigSnapshotPath -Force
+        Write-GuiLog "Config snapshot created for replication run"
+    }
+    catch {
+        Write-GuiLog "Warning: Could not create config snapshot, using live config: $($_.Exception.Message)"
+        $script:ConfigSnapshotPath = $script:ConfigPath  # Fall back to original
+    }
+
+    # Create and start background runspace (using snapshot path)
+    try {
+        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigSnapshotPath
 
         $script:ReplicationHandle = $runspaceInfo.Handle
         $script:ReplicationPowerShell = $runspaceInfo.PowerShell
@@ -1289,14 +1317,34 @@ function Complete-GuiReplication {
     $script:Controls.btnRunSelected.IsEnabled = $true
     $script:Controls.btnStop.IsEnabled = $false
 
-    # Update status
-    $script:Controls.txtStatus.Text = "Replication complete"
+    # Update status with error indicator if applicable
+    if ($script:GuiErrorCount -gt 0) {
+        $script:Controls.txtStatus.Text = "Replication complete ($($script:GuiErrorCount) error(s))"
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
+    } else {
+        $script:Controls.txtStatus.Text = "Replication complete"
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::LimeGreen
+    }
 
     # Show completion message
     $status = Get-OrchestrationStatus
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
 
     Write-GuiLog "Replication completed: $($status.ChunksComplete)/$($status.ChunksTotal) chunks, $($status.ChunksFailed) failed"
+
+    # Clean up config snapshot if it was created
+    if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {
+        try {
+            if (Test-Path $script:ConfigSnapshotPath) {
+                Remove-Item $script:ConfigSnapshotPath -Force -ErrorAction SilentlyContinue
+                Write-GuiLog "Config snapshot cleaned up"
+            }
+        }
+        catch {
+            # Non-critical - temp files will be cleaned up eventually
+        }
+        $script:ConfigSnapshotPath = $null
+    }
 }
 
 # Cache for GUI progress updates - avoids unnecessary rebuilds
@@ -1542,11 +1590,18 @@ function Update-GuiProgress {
             }
         }
 
-        # Dequeue errors (thread-safe)
+        # Dequeue errors (thread-safe) and update error indicator
         if ($script:OrchestrationState) {
             $errors = $script:OrchestrationState.DequeueErrors()
             foreach ($err in $errors) {
                 Write-GuiLog "[ERROR] $err"
+                $script:GuiErrorCount++
+            }
+
+            # Update status bar with error indicator if errors occurred
+            if ($script:GuiErrorCount -gt 0) {
+                $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
+                $script:Controls.txtStatus.Text = "Replication in progress... ($($script:GuiErrorCount) error(s))"
             }
         }
 
@@ -1573,6 +1628,9 @@ function Update-GuiProgress {
 # GUI Log ring buffer (uses $script:GuiLogMaxLines from constants)
 $script:GuiLogBuffer = [System.Collections.Generic.List[string]]::new()
 $script:GuiLogDirty = $false  # Track if buffer needs to be flushed to UI
+
+# Error tracking for visual indicator
+$script:GuiErrorCount = 0  # Count of errors encountered during current run
 
 function Write-GuiLog {
     <#

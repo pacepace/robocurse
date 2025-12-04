@@ -1094,4 +1094,154 @@ Describe "Robocopy Wrapper" {
             $result.FilesFailed | Should -Be 1
         }
     }
+
+    Context "Write-RobocopyCompletionEvent - Function Structure" {
+        It "Should be defined with correct parameters" {
+            $cmd = Get-Command Write-RobocopyCompletionEvent
+            $cmd | Should -Not -BeNullOrEmpty
+            $cmd.Parameters.Keys | Should -Contain 'Job'
+            $cmd.Parameters.Keys | Should -Contain 'JobResult'
+            $cmd.Parameters.Keys | Should -Contain 'ChunkId'
+            $cmd.Parameters.Keys | Should -Contain 'ProfileName'
+        }
+
+        It "Should have mandatory Job parameter" {
+            $cmd = Get-Command Write-RobocopyCompletionEvent
+            $cmd.Parameters['Job'].Attributes.Mandatory | Should -Contain $true
+        }
+
+        It "Should have mandatory JobResult parameter" {
+            $cmd = Get-Command Write-RobocopyCompletionEvent
+            $cmd.Parameters['JobResult'].Attributes.Mandatory | Should -Contain $true
+        }
+
+        It "Should have mandatory ChunkId parameter" {
+            $cmd = Get-Command Write-RobocopyCompletionEvent
+            $cmd.Parameters['ChunkId'].Attributes.Mandatory | Should -Contain $true
+        }
+    }
+}
+
+# InModuleScope tests for Write-RobocopyCompletionEvent
+$testRoot = $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $testRoot)
+$modulePath = Join-Path $projectRoot "src\Robocurse\Robocurse.psm1"
+Import-Module $modulePath -Force -Global -DisableNameChecking
+
+InModuleScope 'Robocurse' {
+    Describe "Write-RobocopyCompletionEvent - SIEM Event Tests" {
+        BeforeEach {
+            Mock Write-SiemEvent { }
+            Mock Write-RobocurseLog { }
+            Mock Format-FileSize { param($Bytes) "$Bytes bytes" }
+        }
+
+        It "Should emit ChunkComplete event for successful job" {
+            $job = [PSCustomObject]@{
+                Chunk = [PSCustomObject]@{
+                    SourcePath = "C:\Source"
+                    DestinationPath = "D:\Dest"
+                }
+                DryRun = $false
+            }
+            $jobResult = [PSCustomObject]@{
+                ExitCode = 1
+                ExitMeaning = [PSCustomObject]@{
+                    Severity = "Success"
+                    Message = "Files copied successfully"
+                    FilesCopied = $true
+                    ExtrasDetected = $false
+                    MismatchesFound = $false
+                    CopyErrors = $false
+                    FatalError = $false
+                }
+                Duration = [timespan]::FromSeconds(30)
+                Stats = [PSCustomObject]@{
+                    FilesCopied = 10
+                    FilesSkipped = 5
+                    FilesFailed = 0
+                    DirsCopied = 2
+                    DirsSkipped = 1
+                    DirsFailed = 0
+                    BytesCopied = 1024000
+                }
+            }
+
+            Write-RobocopyCompletionEvent -Job $job -JobResult $jobResult -ChunkId 42 -ProfileName "TestProfile"
+
+            Should -Invoke Write-SiemEvent -Times 1 -ParameterFilter { $EventType -eq 'ChunkComplete' }
+        }
+
+        It "Should emit ChunkError event for failed job" {
+            $job = [PSCustomObject]@{
+                Chunk = [PSCustomObject]@{
+                    SourcePath = "C:\Source"
+                    DestinationPath = "D:\Dest"
+                }
+                DryRun = $false
+            }
+            $jobResult = [PSCustomObject]@{
+                ExitCode = 16
+                ExitMeaning = [PSCustomObject]@{
+                    Severity = "Fatal"
+                    Message = "Fatal error"
+                    FilesCopied = $false
+                    ExtrasDetected = $false
+                    MismatchesFound = $false
+                    CopyErrors = $false
+                    FatalError = $true
+                }
+                Duration = [timespan]::FromSeconds(5)
+                Stats = [PSCustomObject]@{
+                    FilesCopied = 0
+                    FilesSkipped = 0
+                    FilesFailed = 10
+                    DirsCopied = 0
+                    DirsSkipped = 0
+                    DirsFailed = 0
+                    BytesCopied = 0
+                }
+            }
+
+            Write-RobocopyCompletionEvent -Job $job -JobResult $jobResult -ChunkId 99 -ProfileName "FailProfile"
+
+            Should -Invoke Write-SiemEvent -Times 1 -ParameterFilter { $EventType -eq 'ChunkError' }
+        }
+
+        It "Should log summary message" {
+            $job = [PSCustomObject]@{
+                Chunk = [PSCustomObject]@{
+                    SourcePath = "C:\Source"
+                    DestinationPath = "D:\Dest"
+                }
+                DryRun = $false
+            }
+            $jobResult = [PSCustomObject]@{
+                ExitCode = 0
+                ExitMeaning = [PSCustomObject]@{
+                    Severity = "Success"
+                    Message = "No changes needed"
+                    FilesCopied = $false
+                    ExtrasDetected = $false
+                    MismatchesFound = $false
+                    CopyErrors = $false
+                    FatalError = $false
+                }
+                Duration = [timespan]::FromSeconds(10)
+                Stats = [PSCustomObject]@{
+                    FilesCopied = 0
+                    FilesSkipped = 100
+                    FilesFailed = 0
+                    DirsCopied = 0
+                    DirsSkipped = 10
+                    DirsFailed = 0
+                    BytesCopied = 0
+                }
+            }
+
+            Write-RobocopyCompletionEvent -Job $job -JobResult $jobResult -ChunkId 1 -ProfileName "TestProfile"
+
+            Should -Invoke Write-RobocurseLog -Times 1
+        }
+    }
 }

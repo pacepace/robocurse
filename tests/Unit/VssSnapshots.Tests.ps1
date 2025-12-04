@@ -1056,4 +1056,73 @@ InModuleScope 'Robocurse' {
             }
         }
     }
+
+    Describe "VSS Storage Quota Functions" {
+        Context "Test-VssStorageQuota - Function Structure" {
+            It "Should be defined with Volume parameter" {
+                $cmd = Get-Command Test-VssStorageQuota
+                $cmd | Should -Not -BeNullOrEmpty
+                $cmd.Parameters.Keys | Should -Contain 'Volume'
+            }
+
+            It "Should have mandatory Volume parameter" {
+                $cmd = Get-Command Test-VssStorageQuota
+                $cmd.Parameters['Volume'].Attributes.Mandatory | Should -Contain $true
+            }
+
+            It "Should have optional MinimumFreePercent parameter" {
+                $cmd = Get-Command Test-VssStorageQuota
+                $cmd.Parameters.Keys | Should -Contain 'MinimumFreePercent'
+                $cmd.Parameters['MinimumFreePercent'].Attributes.Mandatory | Should -Not -Contain $true
+            }
+
+            It "Should validate Volume pattern (drive letter with colon)" {
+                $cmd = Get-Command Test-VssStorageQuota
+                $validatePattern = $cmd.Parameters['Volume'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidatePatternAttribute] }
+                $validatePattern | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should return false on non-Windows platforms" {
+                if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+                    $result = Test-VssStorageQuota -Volume "C:"
+                    $result.Success | Should -Be $false
+                    $result.ErrorMessage | Should -Match "Windows"
+                }
+            }
+        }
+
+        Context "Test-VssStorageQuota - Parameter Validation" {
+            It "Should reject invalid volume format (missing colon)" {
+                { Test-VssStorageQuota -Volume "C" } | Should -Throw
+            }
+
+            It "Should reject invalid volume format (with path)" {
+                { Test-VssStorageQuota -Volume "C:\Users" } | Should -Throw
+            }
+
+            It "Should reject invalid volume format (lowercase)" {
+                # Pattern should allow both upper and lower case
+                { Test-VssStorageQuota -Volume "c:" } | Should -Not -Throw
+            }
+
+            It "Should validate MinimumFreePercent range" {
+                $cmd = Get-Command Test-VssStorageQuota
+                $validateRange = $cmd.Parameters['MinimumFreePercent'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateRangeAttribute] }
+                $validateRange | Should -Not -BeNullOrEmpty
+                $validateRange.MinRange | Should -Be 1
+                $validateRange.MaxRange | Should -Be 50
+            }
+        }
+
+        Context "Test-VssStorageQuota - Return Values" {
+            It "Should return OperationResult object" {
+                Mock Get-CimInstance { $null }
+
+                $result = Test-VssStorageQuota -Volume "C:"
+                $result.PSObject.Properties.Name | Should -Contain 'Success'
+                $result.PSObject.Properties.Name | Should -Contain 'Data'
+                $result.PSObject.Properties.Name | Should -Contain 'ErrorMessage'
+            }
+        }
+    }
 }

@@ -963,3 +963,106 @@ function Test-RobocopyVerification {
 
     return $result
 }
+
+function Write-RobocopyCompletionEvent {
+    <#
+    .SYNOPSIS
+        Emits structured SIEM events for robocopy job completion
+    .DESCRIPTION
+        Parses robocopy job results and emits structured SIEM events for:
+        - ChunkComplete: Successful chunk replication with detailed stats
+        - ChunkError: Failed chunks with error details
+
+        This enables enterprise monitoring and alerting on file replication operations.
+    .PARAMETER Job
+        Job object from Start-RobocopyJob
+    .PARAMETER JobResult
+        Result from Wait-RobocopyJob containing ExitCode, ExitMeaning, Duration, Stats
+    .PARAMETER ChunkId
+        Unique identifier for the chunk
+    .PARAMETER ProfileName
+        Name of the profile this chunk belongs to
+    .EXAMPLE
+        $result = Wait-RobocopyJob -Job $job
+        Write-RobocopyCompletionEvent -Job $job -JobResult $result -ChunkId 42 -ProfileName "DailyBackup"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Job,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$JobResult,
+
+        [Parameter(Mandatory)]
+        [int]$ChunkId,
+
+        [string]$ProfileName = "Unknown"
+    )
+
+    $stats = $JobResult.Stats
+    $exitMeaning = $JobResult.ExitMeaning
+
+    # Determine event type based on exit code severity
+    $eventType = if ($exitMeaning.Severity -in @('Fatal', 'Error')) {
+        'ChunkError'
+    } else {
+        'ChunkComplete'
+    }
+
+    # Build structured event data
+    $eventData = @{
+        chunkId = $ChunkId
+        profileName = $ProfileName
+        sourcePath = $Job.Chunk.SourcePath
+        destinationPath = $Job.Chunk.DestinationPath
+        exitCode = $JobResult.ExitCode
+        exitSeverity = $exitMeaning.Severity
+        exitMessage = $exitMeaning.Message
+        durationSeconds = [math]::Round($JobResult.Duration.TotalSeconds, 2)
+        dryRun = $Job.DryRun
+
+        # File statistics
+        filesCopied = if ($stats) { $stats.FilesCopied } else { 0 }
+        filesSkipped = if ($stats) { $stats.FilesSkipped } else { 0 }
+        filesFailed = if ($stats) { $stats.FilesFailed } else { 0 }
+
+        # Directory statistics
+        dirsCopied = if ($stats) { $stats.DirsCopied } else { 0 }
+        dirsSkipped = if ($stats) { $stats.DirsSkipped } else { 0 }
+        dirsFailed = if ($stats) { $stats.DirsFailed } else { 0 }
+
+        # Byte statistics
+        bytesCopied = if ($stats) { $stats.BytesCopied } else { 0 }
+
+        # Throughput calculation
+        bytesPerSecond = if ($JobResult.Duration.TotalSeconds -gt 0 -and $stats.BytesCopied -gt 0) {
+            [math]::Round($stats.BytesCopied / $JobResult.Duration.TotalSeconds, 0)
+        } else { 0 }
+
+        # Exit code flags for detailed analysis
+        flags = @{
+            filesCopied = $exitMeaning.FilesCopied
+            extrasDetected = $exitMeaning.ExtrasDetected
+            mismatchesFound = $exitMeaning.MismatchesFound
+            copyErrors = $exitMeaning.CopyErrors
+            fatalError = $exitMeaning.FatalError
+        }
+    }
+
+    # Add error message if present
+    if ($stats -and $stats.ErrorMessage) {
+        $eventData.errorMessage = $stats.ErrorMessage
+    }
+
+    # Emit the SIEM event
+    Write-SiemEvent -EventType $eventType -Data $eventData
+
+    # Log summary
+    $logLevel = if ($eventType -eq 'ChunkError') { 'Error' } else { 'Info' }
+    $summaryMsg = "Chunk #$ChunkId completed: $($eventData.filesCopied) files, $(Format-FileSize -Bytes $eventData.bytesCopied) in $([math]::Round($JobResult.Duration.TotalSeconds, 1))s"
+    if ($eventData.filesFailed -gt 0) {
+        $summaryMsg += " ($($eventData.filesFailed) failed)"
+    }
+    Write-RobocurseLog -Message $summaryMsg -Level $logLevel -Component 'Robocopy'
+}
