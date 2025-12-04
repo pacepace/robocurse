@@ -257,11 +257,44 @@
                     <DataGridTextColumn Header="ID" Binding="{Binding ChunkId}" Width="50"/>
                     <DataGridTextColumn Header="Path" Binding="{Binding SourcePath}" Width="400"/>
                     <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
+                    <!--
+                        CUSTOM PROGRESS BAR - ScaleTransform Workaround
+
+                        WPF ProgressBar doesn't reliably render in PowerShell - the Value property
+                        updates but the visual fill doesn't repaint. Neither Dispatcher.Invoke,
+                        UpdateLayout(), nor Items.Refresh() fixes this.
+
+                        SOLUTION: Custom progress bar using Border + ScaleTransform:
+                        - Gray Border = background track
+                        - Green Border = fill, scaled horizontally via ScaleTransform.ScaleX
+                        - ProgressScale (0.0-1.0) binds directly to ScaleX
+                        - RenderTransformOrigin at X=0 makes it scale from left edge
+
+                        This bypasses ProgressBar entirely and works reliably.
+                    -->
                     <DataGridTemplateColumn Header="Progress" Width="150">
                         <DataGridTemplateColumn.CellTemplate>
                             <DataTemplate>
-                                <ProgressBar Value="{Binding Progress}" Maximum="100" Height="18"
-                                             Background="#3E3E3E" Foreground="#4CAF50"/>
+                                <Grid Height="18">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <!-- Background track -->
+                                    <Border Background="#3E3E3E" CornerRadius="2"/>
+                                    <!-- Progress fill - ScaleX bound to ProgressScale (0.0-1.0) -->
+                                    <Border Background="#4CAF50" CornerRadius="2" HorizontalAlignment="Stretch">
+                                        <Border.RenderTransform>
+                                            <ScaleTransform ScaleX="{Binding ProgressScale}" ScaleY="1"/>
+                                        </Border.RenderTransform>
+                                        <Border.RenderTransformOrigin>
+                                            <Point X="0" Y="0.5"/>
+                                        </Border.RenderTransformOrigin>
+                                    </Border>
+                                    <!-- Percentage text overlay -->
+                                    <TextBlock Text="{Binding Progress, StringFormat={}{0}%}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                                               Foreground="White" FontWeight="Bold"/>
+                                </Grid>
                             </DataTemplate>
                         </DataGridTemplateColumn.CellTemplate>
                     </DataGridTemplateColumn>

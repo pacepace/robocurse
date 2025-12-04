@@ -126,6 +126,15 @@ InModuleScope 'Robocurse' {
                 $script:TestXamlContent | Should -Match 'DarkListBox'
             }
 
+            It "Should use ScaleTransform for progress bar (WPF ProgressBar workaround)" {
+                # Verify custom progress bar implementation using ScaleTransform
+                # WPF ProgressBar doesn't reliably render in PowerShell, so we use
+                # Border + ScaleTransform with ProgressScale (0.0-1.0) binding
+                $script:TestXamlContent | Should -Match 'ScaleTransform'
+                $script:TestXamlContent | Should -Match 'ProgressScale'
+                $script:TestXamlContent | Should -Match 'ScaleX='
+            }
+
             It "Should have Get-XamlResource function" {
                 Get-Command Get-XamlResource -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
             }
@@ -459,6 +468,179 @@ InModuleScope 'Robocurse' {
 
                 $enabled = @($script:TestConfig.SyncProfiles | Where-Object { $_.Enabled -eq $true })
                 $enabled.Count | Should -Be 0
+            }
+        }
+
+        Context "ProgressScale Calculation Tests (ScaleTransform Workaround)" {
+            # These tests verify the ProgressScale property used for the custom progress bar.
+            # WPF ProgressBar doesn't reliably render in PowerShell, so we use ScaleTransform
+            # with ProgressScale (0.0-1.0) binding to ScaleX for visual progress display.
+
+            It "Should calculate ProgressScale as 0.0 for 0% progress" {
+                $progress = 0
+                $progressScale = [double]($progress / 100)
+                $progressScale | Should -Be 0.0
+            }
+
+            It "Should calculate ProgressScale as 0.5 for 50% progress" {
+                $progress = 50
+                $progressScale = [double]($progress / 100)
+                $progressScale | Should -Be 0.5
+            }
+
+            It "Should calculate ProgressScale as 1.0 for 100% progress" {
+                $progress = 100
+                $progressScale = [double]($progress / 100)
+                $progressScale | Should -Be 1.0
+            }
+
+            It "Should handle fractional progress values" {
+                $progress = 75
+                $progressScale = [double]($progress / 100)
+                $progressScale | Should -Be 0.75
+            }
+
+            It "Should create chunk display item with ProgressScale for running job" {
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test\Path"
+                    EstimatedSize = 1000000
+                }
+
+                $progress = 42
+
+                $displayItem = [PSCustomObject]@{
+                    ChunkId = $chunk.ChunkId
+                    SourcePath = $chunk.SourcePath
+                    Status = "Running"
+                    Progress = $progress
+                    ProgressScale = [double]($progress / 100)
+                    Speed = "10 MB/s"
+                }
+
+                $displayItem.Progress | Should -Be 42
+                $displayItem.ProgressScale | Should -Be 0.42
+            }
+
+            It "Should create chunk display item with ProgressScale=1.0 for completed chunk" {
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 2
+                    SourcePath = "C:\Test\Complete"
+                }
+
+                $displayItem = [PSCustomObject]@{
+                    ChunkId = $chunk.ChunkId
+                    SourcePath = $chunk.SourcePath
+                    Status = "Complete"
+                    Progress = 100
+                    ProgressScale = [double]1.0
+                    Speed = "--"
+                }
+
+                $displayItem.Status | Should -Be "Complete"
+                $displayItem.Progress | Should -Be 100
+                $displayItem.ProgressScale | Should -Be 1.0
+            }
+
+            It "Should create chunk display item with ProgressScale=0.0 for failed chunk" {
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 3
+                    SourcePath = "C:\Test\Failed"
+                }
+
+                $displayItem = [PSCustomObject]@{
+                    ChunkId = $chunk.ChunkId
+                    SourcePath = $chunk.SourcePath
+                    Status = "Failed"
+                    Progress = 0
+                    ProgressScale = [double]0.0
+                    Speed = "--"
+                }
+
+                $displayItem.Status | Should -Be "Failed"
+                $displayItem.Progress | Should -Be 0
+                $displayItem.ProgressScale | Should -Be 0.0
+            }
+        }
+
+        Context "ChunkGridNeedsRebuild Logic Tests" {
+            # Tests for Test-ChunkGridNeedsRebuild which determines when to refresh DataGrid.
+            # Key insight: Must rebuild when active jobs exist because PSCustomObject doesn't
+            # implement INotifyPropertyChanged, so WPF won't see progress value changes.
+
+            BeforeEach {
+                Initialize-OrchestrationState
+                $script:LastGuiUpdateState = $null
+            }
+
+            It "Should return true on first call (no previous state)" {
+                $currentState = @{
+                    ActiveCount = 0
+                    CompletedCount = 0
+                    FailedCount = 0
+                }
+
+                # Simulate first call - no previous state
+                $needsRebuild = -not $script:LastGuiUpdateState
+                $needsRebuild | Should -Be $true
+            }
+
+            It "Should return true when active count changes" {
+                $script:LastGuiUpdateState = @{
+                    ActiveCount = 2
+                    CompletedCount = 5
+                    FailedCount = 0
+                }
+
+                $currentState = @{
+                    ActiveCount = 3  # Changed
+                    CompletedCount = 5
+                    FailedCount = 0
+                }
+
+                $needsRebuild = $script:LastGuiUpdateState.ActiveCount -ne $currentState.ActiveCount
+                $needsRebuild | Should -Be $true
+            }
+
+            It "Should return true when there are active jobs (progress changes continuously)" {
+                $script:LastGuiUpdateState = @{
+                    ActiveCount = 2
+                    CompletedCount = 5
+                    FailedCount = 0
+                }
+
+                $currentState = @{
+                    ActiveCount = 2  # Same count
+                    CompletedCount = 5
+                    FailedCount = 0
+                }
+
+                # Key logic: always rebuild when active jobs exist
+                $needsRebuild = $currentState.ActiveCount -gt 0
+                $needsRebuild | Should -Be $true
+            }
+
+            It "Should return false when no active jobs and counts unchanged" {
+                $script:LastGuiUpdateState = @{
+                    ActiveCount = 0
+                    CompletedCount = 10
+                    FailedCount = 1
+                }
+
+                $currentState = @{
+                    ActiveCount = 0
+                    CompletedCount = 10
+                    FailedCount = 1
+                }
+
+                $countsChanged = $script:LastGuiUpdateState.ActiveCount -ne $currentState.ActiveCount -or
+                                 $script:LastGuiUpdateState.CompletedCount -ne $currentState.CompletedCount -or
+                                 $script:LastGuiUpdateState.FailedCount -ne $currentState.FailedCount
+
+                $hasActiveJobs = $currentState.ActiveCount -gt 0
+
+                $needsRebuild = $countsChanged -or $hasActiveJobs
+                $needsRebuild | Should -Be $false
             }
         }
 

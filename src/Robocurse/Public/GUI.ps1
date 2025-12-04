@@ -1309,9 +1309,11 @@ function Update-GuiProgressText {
     .PARAMETER Status
         Orchestration status object from Get-OrchestrationStatus
     .NOTES
-        Uses Dispatcher.Invoke with Render priority per WPF best practices.
-        This ensures visual updates actually render - direct property assignment
-        doesn't reliably trigger WPF's visual refresh.
+        WPF RENDERING QUIRK: In PowerShell, WPF controls don't reliably repaint when
+        properties change via data binding or Dispatcher.BeginInvoke. The solution is:
+        1. Direct property assignment (not Dispatcher calls)
+        2. Call Window.UpdateLayout() to force a complete layout pass
+        This forces WPF to recalculate and repaint all controls.
     #>
     [CmdletBinding()]
     param(
@@ -1353,10 +1355,26 @@ function Get-ChunkDisplayItems {
     .DESCRIPTION
         Creates display objects from active, failed, and completed chunks.
         Limits completed chunks to last 20 to prevent UI lag.
+
+        Each display item includes:
+        - ChunkId, SourcePath, Status, Speed: Standard display properties
+        - Progress: 0-100 percentage for text display
+        - ProgressScale: 0.0-1.0 for ScaleTransform binding (see NOTES)
     .PARAMETER MaxCompletedItems
         Maximum number of completed chunks to display (default 20)
     .OUTPUTS
         Array of display objects for DataGrid binding
+    .NOTES
+        WPF PROGRESSBAR QUIRK: The standard WPF ProgressBar control doesn't reliably
+        render in PowerShell even when Value property is correctly set. Neither
+        Dispatcher.Invoke nor direct property assignment fixes this.
+
+        SOLUTION: Use a custom progress bar built from Border elements with ScaleTransform.
+        - Background Border (gray) provides the track
+        - Fill Border (green) scales horizontally via ScaleTransform.ScaleX binding
+        - ProgressScale (0.0-1.0) maps directly to ScaleX for smooth scaling
+
+        This approach bypasses ProgressBar entirely and works reliably in PowerShell WPF.
     #>
     [CmdletBinding()]
     param(
@@ -1394,6 +1412,7 @@ function Get-ChunkDisplayItems {
             SourcePath = $job.Chunk.SourcePath
             Status = "Running"
             Progress = $progress
+            ProgressScale = [double]($progress / 100)  # 0.0 to 1.0 for ScaleTransform
             Speed = $speed
         })
     }
@@ -1405,6 +1424,7 @@ function Get-ChunkDisplayItems {
             SourcePath = $chunk.SourcePath
             Status = "Failed"
             Progress = 0
+            ProgressScale = [double]0.0
             Speed = "--"
         })
     }
@@ -1419,6 +1439,7 @@ function Get-ChunkDisplayItems {
             SourcePath = $chunk.SourcePath
             Status = "Complete"
             Progress = 100
+            ProgressScale = [double]1.0  # Full scale for completed
             Speed = "--"
         })
     }
@@ -1430,6 +1451,15 @@ function Test-ChunkGridNeedsRebuild {
     <#
     .SYNOPSIS
         Determines if the chunk grid needs to be rebuilt
+    .DESCRIPTION
+        Returns true when:
+        - First call (no previous state)
+        - Active/completed/failed counts changed
+        - There are active jobs (progress values change continuously)
+
+        The last condition is important because PSCustomObject doesn't implement
+        INotifyPropertyChanged, so WPF won't see property changes. We must rebuild
+        the entire ItemsSource to show updated progress values.
     .OUTPUTS
         $true if grid needs rebuild, $false otherwise
     #>
@@ -1523,7 +1553,9 @@ function Update-GuiProgress {
         # Update chunk grid - when state changes or jobs have progress updates
         if ($script:OrchestrationState -and (Test-ChunkGridNeedsRebuild)) {
             $script:Controls.dgChunks.ItemsSource = @(Get-ChunkDisplayItems)
-            # Force visual refresh for DataGrid
+            # Force DataGrid to re-read all bindings (needed for non-INotifyPropertyChanged objects)
+            $script:Controls.dgChunks.Items.Refresh()
+            # Force visual refresh
             $script:Window.UpdateLayout()
         }
 
@@ -1553,6 +1585,13 @@ function Write-GuiLog {
         Also writes to console for debugging visibility with caller info.
     .PARAMETER Message
         Message to log
+    .NOTES
+        WPF RENDERING QUIRK: Originally used Dispatcher.BeginInvoke for thread safety,
+        but this didn't reliably update the TextBox visual in PowerShell WPF.
+
+        SOLUTION: Use direct property assignment + Window.UpdateLayout().
+        All Write-GuiLog calls originate from the GUI thread (event handlers and
+        Forms.Timer tick which uses WM_TIMER), so Dispatcher isn't needed anyway.
     #>
     [CmdletBinding()]
     param([string]$Message)
