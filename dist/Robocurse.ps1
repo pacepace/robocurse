@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-03 15:37:35
+    Built: 2025-12-03 17:41:10
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -11226,20 +11226,17 @@ function Update-GuiProgressText {
     }
     $chunksText = "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
 
-    # Use Dispatcher.Invoke with Render priority - this is the key for WPF visual updates
-    # Direct property assignment doesn't reliably trigger visual refresh in PowerShell
-    $script:Controls.pbProfile.Dispatcher.Invoke(
-        [action]{
-            $script:Controls.pbProfile.Value = $profileProgress
-            $script:Controls.pbOverall.Value = $overallProgress
-            $script:Controls.txtProfileProgress.Text = "Profile: $profileName - $profileProgress%"
-            $script:Controls.txtOverallProgress.Text = "Overall: $overallProgress%"
-            $script:Controls.txtEta.Text = $etaText
-            $script:Controls.txtSpeed.Text = $speedText
-            $script:Controls.txtChunks.Text = $chunksText
-        },
-        [System.Windows.Threading.DispatcherPriority]::Render
-    )
+    # Direct assignment
+    $script:Controls.pbProfile.Value = $profileProgress
+    $script:Controls.pbOverall.Value = $overallProgress
+    $script:Controls.txtProfileProgress.Text = "Profile: $profileName - $profileProgress%"
+    $script:Controls.txtOverallProgress.Text = "Overall: $overallProgress%"
+    $script:Controls.txtEta.Text = $etaText
+    $script:Controls.txtSpeed.Text = $speedText
+    $script:Controls.txtChunks.Text = $chunksText
+
+    # Force complete window layout update
+    $script:Window.UpdateLayout()
 }
 
 function Get-ChunkDisplayItems {
@@ -11264,12 +11261,33 @@ function Get-ChunkDisplayItems {
     # Add active jobs (typically small - MaxConcurrentJobs)
     foreach ($kvp in $script:OrchestrationState.ActiveJobs.ToArray()) {
         $job = $kvp.Value
+
+        # Get actual progress from robocopy log parsing
+        $progress = 0
+        $speed = "--"
+        try {
+            $progressData = Get-RobocopyProgress -Job $job
+            if ($progressData) {
+                # Calculate percentage from bytes copied vs estimated chunk size
+                if ($job.Chunk.EstimatedSize -gt 0 -and $progressData.BytesCopied -gt 0) {
+                    $progress = [math]::Min(100, [math]::Round(($progressData.BytesCopied / $job.Chunk.EstimatedSize) * 100, 0))
+                }
+                # Use parsed speed if available
+                if ($progressData.Speed) {
+                    $speed = $progressData.Speed
+                }
+            }
+        }
+        catch {
+            # Progress parsing failure - use defaults
+        }
+
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = $job.Chunk.ChunkId
             SourcePath = $job.Chunk.SourcePath
             Status = "Running"
-            Progress = if ($job.Progress) { $job.Progress } else { 0 }
-            Speed = "--"
+            Progress = $progress
+            Speed = $speed
         })
     }
 
@@ -11326,6 +11344,10 @@ function Test-ChunkGridNeedsRebuild {
             $script:LastGuiUpdateState.FailedCount -ne $currentState.FailedCount) {
         $needsRebuild = $true
     }
+    elseif ($currentState.ActiveCount -gt 0) {
+        # Always refresh when there are active jobs since their progress/speed is constantly changing
+        $needsRebuild = $true
+    }
 
     if ($needsRebuild) {
         $script:LastGuiUpdateState = $currentState
@@ -11350,6 +11372,14 @@ function Update-GuiProgress {
 
     try {
         $status = Get-OrchestrationStatus
+
+        # Debug: Log phase and state every tick (throttled to every 10th tick to reduce noise)
+        # Using Write-Host because GUI thread doesn't have log session initialized
+        if (-not $script:GuiTickCount) { $script:GuiTickCount = 0 }
+        $script:GuiTickCount++
+        if ($script:GuiTickCount % 10 -eq 0) {
+            Write-Host "[GUI TICK #$($script:GuiTickCount)] Phase=$($status.Phase), Chunks=$($status.ChunksComplete)/$($status.ChunksTotal), ProfilePct=$($status.ProfileProgress)%, OverallPct=$($status.OverallProgress)%, Bytes=$($status.BytesComplete)"
+        }
 
         # Update progress text (always - lightweight)
         Update-GuiProgressText -Status $status
@@ -11383,9 +11413,11 @@ function Update-GuiProgress {
             }
         }
 
-        # Update chunk grid - only when state changes
+        # Update chunk grid - when state changes or jobs have progress updates
         if ($script:OrchestrationState -and (Test-ChunkGridNeedsRebuild)) {
             $script:Controls.dgChunks.ItemsSource = @(Get-ChunkDisplayItems)
+            # Force visual refresh for DataGrid
+            $script:Window.UpdateLayout()
         }
 
         # Check if complete
@@ -11464,13 +11496,13 @@ function Write-GuiLog {
         [System.Threading.Monitor]::Exit($script:GuiLogBuffer)
     }
 
-    # Use Dispatcher.BeginInvoke for thread safety - non-blocking async update
-    # Using Invoke (synchronous) could cause deadlocks if called from background thread
-    # while UI thread is busy
-    [void]$script:Window.Dispatcher.BeginInvoke([Action]{
-        $script:Controls.txtLog.Text = $logText
-        $script:Controls.svLog.ScrollToEnd()
-    })
+    # Direct assignment - all Write-GuiLog calls are from GUI thread
+    # (event handlers and timer tick which uses WM_TIMER on UI thread)
+    $script:Controls.txtLog.Text = $logText
+    $script:Controls.svLog.ScrollToEnd()
+
+    # Force complete window layout update for immediate visual refresh
+    $script:Window.UpdateLayout()
 }
 
 function Show-GuiError {
