@@ -23,7 +23,9 @@
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode''; & ''.\\robocurse\\dist\\Robocurse.ps1'' -Headless -Profile Test 2>&1 | Select-Object -First 80\")",
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; .\\build\\Build-Robocurse.ps1\")",
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; .\\build\\Build-Robocurse.ps1 && Invoke-Pester -Path tests\\Unit\\GUI.Tests.ps1 -Output Detailed\")",
-      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; Invoke-Pester -Path tests\\Unit\\GUI.Tests.ps1 -Output Detailed\")"
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; Invoke-Pester -Path tests\\Unit\\GUI.Tests.ps1 -Output Detailed\")",
+      "Bash(ls:*)",
+      "Bash(xargs:*)"
     ],
     "deny": [],
     "ask": []
