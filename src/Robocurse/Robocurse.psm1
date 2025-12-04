@@ -127,6 +127,19 @@ $script:MaxEtaDays = 365
 # 30 seconds provides good monitoring granularity without excessive I/O.
 $script:HealthCheckIntervalSeconds = 30
 
+# Remote operation timeout in milliseconds for Invoke-Command calls.
+# 30 seconds is sufficient for most remote operations while preventing indefinite hangs
+# on slow or unreachable servers.
+$script:RemoteOperationTimeoutMs = 30000
+
+# Log mutex timeout in milliseconds for thread-safe log writes.
+# 5 seconds is sufficient for mutex acquisition without excessive blocking.
+$script:LogMutexTimeoutMs = 5000
+
+# Minimum log level for filtering (Debug, Info, Warning, Error)
+# Set to 'Debug' to capture all messages, 'Info' to skip debug messages, etc.
+$script:MinLogLevel = 'Debug'
+
 # Path to health check status file. Uses temp directory for cross-platform compatibility.
 $script:HealthCheckTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
 $script:HealthCheckStatusFile = Join-Path $script:HealthCheckTempDir "Robocurse-Health.json"

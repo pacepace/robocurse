@@ -42,11 +42,16 @@ Invoke-Pester -Path tests\Unit -Output Detailed
 # Run with code coverage
 Invoke-Pester -Path tests -CodeCoverage src\Robocurse\Public\*.ps1
 
+# List skipped tests only
+$r = Invoke-Pester -Path tests -PassThru -Output None; $r.Skipped.ExpandedPath
+
 # Build monolith
 .\build\Build-Robocurse.ps1
 ```
 
-**Note:** Some integration tests require Windows-specific features (VSS, Task Scheduler) and will skip on non-Windows platforms.
+**Note:** Some tests skip based on environment:
+- Remote VSS tests require `$env:ROBOCURSE_TEST_REMOTE_SHARE` set to a UNC path
+- Platform-specific tests skip on non-Windows (scheduling, VSS, robocopy)
 
 ## Logging Security Considerations
 

@@ -377,13 +377,25 @@ function Add-VssToTracking {
                 CreatedAt = $SnapshotInfo.CreatedAt.ToString('o')
             }
 
-            # Atomic write: temp file then rename to prevent corruption on crash
+            # Atomic write with backup pattern to prevent corruption on crash
+            # This prevents race condition between Remove-Item and Move
             $tempPath = "$($script:VssTrackingFile).tmp"
+            $backupPath = "$($script:VssTrackingFile).bak"
             ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
+
+            # Move existing to backup first (atomic on same volume)
             if (Test-Path $script:VssTrackingFile) {
-                Remove-Item -Path $script:VssTrackingFile -Force
+                if (Test-Path $backupPath) {
+                    Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                }
+                [System.IO.File]::Move($script:VssTrackingFile, $backupPath)
             }
+            # Now move temp to final (if this fails, we still have the backup)
             [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
+            # Clean up backup after successful replacement
+            if (Test-Path $backupPath) {
+                Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+            }
             return $true  # Explicit success marker
         }
 
@@ -436,13 +448,25 @@ function Remove-VssFromTracking {
             if ($tracked.Count -eq 0) {
                 Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
             } else {
-                # Atomic write: temp file then rename to prevent corruption on crash
+                # Atomic write with backup pattern to prevent corruption on crash
+                # This prevents race condition between Remove-Item and Move
                 $tempPath = "$($script:VssTrackingFile).tmp"
+                $backupPath = "$($script:VssTrackingFile).bak"
                 ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
+
+                # Move existing to backup first (atomic on same volume)
                 if (Test-Path $script:VssTrackingFile) {
-                    Remove-Item -Path $script:VssTrackingFile -Force
+                    if (Test-Path $backupPath) {
+                        Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                    }
+                    [System.IO.File]::Move($script:VssTrackingFile, $backupPath)
                 }
+                # Now move temp to final (if this fails, we still have the backup)
                 [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
+                # Clean up backup after successful replacement
+                if (Test-Path $backupPath) {
+                    Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                }
             }
             return $true  # Explicit success marker
         }

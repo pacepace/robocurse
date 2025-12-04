@@ -661,10 +661,16 @@ function Test-RobocurseConfig {
         }
 
         # Validate BandwidthLimitMbps (0 = unlimited, positive = limit in Mbps)
+        # Upper bound of 100,000 Mbps (100 Gbps) covers even the fastest enterprise networks
         if ($gsPropertyNames -contains 'BandwidthLimitMbps') {
             $bandwidthLimit = $gs.BandwidthLimitMbps
-            if ($null -ne $bandwidthLimit -and $bandwidthLimit -lt 0) {
-                $errors += "GlobalSettings.BandwidthLimitMbps must be non-negative (current: $bandwidthLimit)"
+            if ($null -ne $bandwidthLimit) {
+                if ($bandwidthLimit -lt 0) {
+                    $errors += "GlobalSettings.BandwidthLimitMbps must be non-negative (current: $bandwidthLimit)"
+                }
+                elseif ($bandwidthLimit -gt 100000) {
+                    $errors += "GlobalSettings.BandwidthLimitMbps must be at most 100000 (100 Gbps) (current: $bandwidthLimit)"
+                }
             }
         }
     }

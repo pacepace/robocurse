@@ -44,7 +44,11 @@
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"(Invoke-Pester -Path ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\tests'' -PassThru -Output Detailed *>&1) | Select-Object -Last 100\")",
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"Invoke-Pester -Path ''''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\tests\\Integration\\Orchestration.Stress.Tests.ps1'''' -Output Detailed\")",
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"Invoke-Pester -Path ''''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\tests\\Integration\\Robocopy.RealExecution.Tests.ps1'''' -Output Detailed\")",
-      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"Invoke-Pester -Path ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\tests'' -PassThru -Output None | ForEach-Object { $_.Skipped } | ForEach-Object { $_.ExpandedPath }\")"
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"Invoke-Pester -Path ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\tests'' -PassThru -Output None | ForEach-Object { $_.Skipped } | ForEach-Object { $_.ExpandedPath }\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; $r = Invoke-Pester -Path tests -PassThru -Output None; $r.Skipped.ExpandedPath\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; Invoke-Pester -Path tests -PassThru -Output None | ForEach-Object { Write-Output ''Skipped tests:''; Write-Output ''''; foreach ($t in $_.Skipped) { Write-Output $t.ExpandedPath } }\")",
+      "Bash(cat:*)",
+      "Bash(wc:*)"
     ],
     "deny": [],
     "ask": []

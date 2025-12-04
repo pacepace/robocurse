@@ -529,12 +529,17 @@ function Start-ReplicationRun {
 
     # Load checkpoint if resuming
     $script:CurrentCheckpoint = $null
+    $script:CompletedPathsHashSet = $null  # HashSet for O(1) lookups during resume
     if (-not $IgnoreCheckpoint) {
         $script:CurrentCheckpoint = Get-ReplicationCheckpoint
         if ($script:CurrentCheckpoint) {
             $skippedCount = $script:CurrentCheckpoint.CompletedChunkPaths.Count
             Write-RobocurseLog -Message "Resuming from checkpoint: $skippedCount chunks will be skipped" `
                 -Level 'Info' -Component 'Checkpoint'
+
+            # Create HashSet for O(1) lookups instead of O(N) linear search per chunk
+            # This significantly improves resume performance with thousands of completed chunks
+            $script:CompletedPathsHashSet = New-CompletedPathsHashSet -Checkpoint $script:CurrentCheckpoint
         }
     }
 
@@ -914,16 +919,29 @@ function Invoke-ReplicationTick {
                     $state.AddCompletedChunkFiles($result.Stats.FilesCopied)
                 }
             }
-            $state.IncrementCompletedCount()
+            $newCompletedCount = $state.IncrementCompletedCount()
 
             # Invoke callback
             if ($script:OnChunkComplete) {
                 & $script:OnChunkComplete $removedJob $result
             }
 
-            # Save checkpoint periodically (every N chunks or on failure)
-            # This enables resume after crash without excessive disk I/O
-            if (($state.CompletedCount % $script:CheckpointSaveFrequency -eq 0) -or ($result.ExitMeaning.Severity -in @('Error', 'Fatal'))) {
+            # Save checkpoint strategically to minimize race window while controlling I/O
+            # Checkpoints are saved:
+            # 1. First chunk completion (to establish checkpoint file early)
+            # 2. Every N chunks (controlled by CheckpointSaveFrequency)
+            # 3. On any failure (to preserve progress before potential crash)
+            # 4. Profile completion (handled separately in Complete-Profile)
+            #
+            # NOTE: There is still a small race window between chunk completion and checkpoint save.
+            # If process crashes in this window, the chunk will be re-processed on resume.
+            # This is acceptable as robocopy /MIR is idempotent.
+            $shouldSaveCheckpoint = (
+                ($newCompletedCount -eq 1) -or                                            # First chunk - establish checkpoint early
+                ($newCompletedCount % $script:CheckpointSaveFrequency -eq 0) -or          # Periodic save
+                ($result.ExitMeaning.Severity -in @('Error', 'Fatal'))                    # Save on failure
+            )
+            if ($shouldSaveCheckpoint) {
                 Save-ReplicationCheckpoint | Out-Null
             }
         }
@@ -938,7 +956,8 @@ function Invoke-ReplicationTick {
         $chunk = $null
         if ($state.ChunkQueue.TryDequeue([ref]$chunk)) {
             # Check if chunk was completed in previous run (resume from checkpoint)
-            if ($script:CurrentCheckpoint -and (Test-ChunkAlreadyCompleted -Chunk $chunk -Checkpoint $script:CurrentCheckpoint)) {
+            # Use pre-built HashSet for O(1) lookup instead of O(N) linear search
+            if ($script:CurrentCheckpoint -and (Test-ChunkAlreadyCompleted -Chunk $chunk -Checkpoint $script:CurrentCheckpoint -CompletedPathsHashSet $script:CompletedPathsHashSet)) {
                 # Skip this chunk - DON'T enqueue to CompletedChunks to prevent memory leak
                 # The chunk is already tracked in the checkpoint file, no need to hold in memory
                 # Track separately for accurate reporting (skipped vs actually completed this run)

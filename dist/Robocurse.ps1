@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-04 11:58:50
+    Built: 2025-12-04 13:11:07
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -187,6 +187,19 @@ $script:MaxEtaDays = 365
 # Interval in seconds between health status file updates during replication.
 # 30 seconds provides good monitoring granularity without excessive I/O.
 $script:HealthCheckIntervalSeconds = 30
+
+# Remote operation timeout in milliseconds for Invoke-Command calls.
+# 30 seconds is sufficient for most remote operations while preventing indefinite hangs
+# on slow or unreachable servers.
+$script:RemoteOperationTimeoutMs = 30000
+
+# Log mutex timeout in milliseconds for thread-safe log writes.
+# 5 seconds is sufficient for mutex acquisition without excessive blocking.
+$script:LogMutexTimeoutMs = 5000
+
+# Minimum log level for filtering (Debug, Info, Warning, Error)
+# Set to 'Debug' to capture all messages, 'Info' to skip debug messages, etc.
+$script:MinLogLevel = 'Debug'
 
 # Path to health check status file. Uses temp directory for cross-platform compatibility.
 $script:HealthCheckTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
@@ -1617,10 +1630,16 @@ function Test-RobocurseConfig {
         }
 
         # Validate BandwidthLimitMbps (0 = unlimited, positive = limit in Mbps)
+        # Upper bound of 100,000 Mbps (100 Gbps) covers even the fastest enterprise networks
         if ($gsPropertyNames -contains 'BandwidthLimitMbps') {
             $bandwidthLimit = $gs.BandwidthLimitMbps
-            if ($null -ne $bandwidthLimit -and $bandwidthLimit -lt 0) {
-                $errors += "GlobalSettings.BandwidthLimitMbps must be non-negative (current: $bandwidthLimit)"
+            if ($null -ne $bandwidthLimit) {
+                if ($bandwidthLimit -lt 0) {
+                    $errors += "GlobalSettings.BandwidthLimitMbps must be non-negative (current: $bandwidthLimit)"
+                }
+                elseif ($bandwidthLimit -gt 100000) {
+                    $errors += "GlobalSettings.BandwidthLimitMbps must be at most 100000 (100 Gbps) (current: $bandwidthLimit)"
+                }
             }
         }
     }
@@ -1796,7 +1815,72 @@ function Test-PathFormat {
 
 # Script-scoped variables for current session state
 $script:CurrentSessionId = $null
-# Note: LogMutexTimeoutMs is defined in Robocurse.psm1 CONSTANTS region
+# Note: LogMutexTimeoutMs and MinLogLevel are defined in Robocurse.psm1 CONSTANTS region
+
+# Log level priority mapping for filtering
+$script:LogLevelPriority = @{
+    'Debug'   = 0
+    'Info'    = 1
+    'Warning' = 2
+    'Error'   = 3
+}
+
+function Test-ShouldLog {
+    <#
+    .SYNOPSIS
+        Determines if a message should be logged based on minimum log level
+    .PARAMETER Level
+        The log level of the message (Debug, Info, Warning, Error)
+    .OUTPUTS
+        Boolean indicating if the message should be logged
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Debug', 'Info', 'Warning', 'Error')]
+        [string]$Level
+    )
+
+    # Get minimum level from module constant (defaults to Debug if not set)
+    $minLevel = if ($script:MinLogLevel) { $script:MinLogLevel } else { 'Debug' }
+
+    # Get priorities (default to 0 for unknown levels)
+    $messagePriority = $script:LogLevelPriority[$Level]
+    $minPriority = $script:LogLevelPriority[$minLevel]
+
+    if ($null -eq $messagePriority) { $messagePriority = 0 }
+    if ($null -eq $minPriority) { $minPriority = 0 }
+
+    return $messagePriority -ge $minPriority
+}
+
+function Set-RobocurseLogLevel {
+    <#
+    .SYNOPSIS
+        Sets the minimum log level for filtering
+    .DESCRIPTION
+        Sets the minimum log level. Messages below this level will not be written to logs.
+        This is useful for reducing log verbosity in production environments.
+    .PARAMETER Level
+        Minimum log level: Debug, Info, Warning, Error
+    .EXAMPLE
+        Set-RobocurseLogLevel -Level 'Info'
+        # Now Debug messages will be filtered out
+    .EXAMPLE
+        Set-RobocurseLogLevel -Level 'Warning'
+        # Only Warning and Error messages will be logged
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Debug', 'Info', 'Warning', 'Error')]
+        [string]$Level
+    )
+
+    $script:MinLogLevel = $Level
+    Write-Verbose "Log level set to: $Level"
+}
 
 function Invoke-WithLogMutex {
     <#
@@ -1968,6 +2052,12 @@ function Write-RobocurseLog {
         [bool]$WriteSiem = ($Level -in @('Warning', 'Error'))
     )
 
+    # Check if message should be logged based on minimum log level
+    # This filters out Debug messages when MinLogLevel is set to Info or higher
+    if (-not (Test-ShouldLog -Level $Level)) {
+        return
+    }
+
     # Get caller information from call stack
     # Index 1 is the immediate caller (index 0 is this function)
     $callStack = Get-PSCallStack
@@ -2022,30 +2112,34 @@ function Write-RobocurseLog {
     # Write to SIEM if requested
     if ($WriteSiem) {
         # Map log level and component to appropriate SIEM event type
-        # Use component context to determine the most accurate event type
+        # Use component context and level to determine the most accurate event type
+        # Separate event types allow SIEM to distinguish between different failure modes
         $eventType = switch ($Level) {
             'Error' {
                 switch -Wildcard ($Component) {
                     'Chunk*'      { 'ChunkError' }
-                    'Robocopy'    { 'ChunkError' }
-                    'Config*'     { 'ConfigChange' }
-                    'Email'       { 'EmailSent' }
-                    'VSS'         { 'VssSnapshotRemoved' }
+                    'Robocopy'    { 'RobocopyError' }      # Separate from ChunkError for SIEM filtering
+                    'Config*'     { 'ConfigError' }        # Errors during config, not ConfigChange
+                    'Email'       { 'EmailError' }         # Failed to send, not EmailSent
+                    'VSS'         { 'VssError' }           # VSS operation failed
                     'Session'     { 'SessionEnd' }
-                    'Profile'     { 'ProfileComplete' }
-                    default       { 'ChunkError' }
+                    'Profile'     { 'ProfileError' }       # Profile failed, not ProfileComplete
+                    'Checkpoint'  { 'CheckpointError' }    # Checkpoint operation failed
+                    default       { 'GeneralError' }       # Catch-all for other errors
                 }
             }
             'Warning' {
                 switch -Wildcard ($Component) {
-                    'Chunk*'      { 'ChunkError' }
-                    'Robocopy'    { 'ChunkError' }
-                    'Config*'     { 'ConfigChange' }
-                    'VSS'         { 'VssSnapshotRemoved' }
-                    default       { 'ChunkError' }
+                    'Chunk*'      { 'ChunkWarning' }
+                    'Robocopy'    { 'RobocopyWarning' }
+                    'Config*'     { 'ConfigWarning' }
+                    'VSS'         { 'VssWarning' }
+                    'Email'       { 'EmailWarning' }
+                    'Checkpoint'  { 'CheckpointWarning' }
+                    default       { 'GeneralWarning' }
                 }
             }
-            default { 'ChunkError' }  # Fallback for unexpected levels routed to SIEM
+            default { 'GeneralError' }  # Fallback for unexpected levels routed to SIEM
         }
         Write-SiemEvent -EventType $eventType -Data @{
             Level = $Level
@@ -2061,7 +2155,16 @@ function Write-SiemEvent {
     .SYNOPSIS
         Writes a SIEM-compatible JSON event
     .PARAMETER EventType
-        Event type: SessionStart, SessionEnd, ChunkStart, ChunkComplete, ChunkError, etc.
+        Event type for SIEM categorization. Types are organized by severity and component:
+        - Session: SessionStart, SessionEnd
+        - Profile: ProfileStart, ProfileComplete, ProfileError
+        - Chunk: ChunkStart, ChunkComplete, ChunkError, ChunkWarning
+        - Robocopy: RobocopyError, RobocopyWarning
+        - Config: ConfigChange, ConfigError, ConfigWarning
+        - Email: EmailSent, EmailError, EmailWarning
+        - VSS: VssSnapshotCreated, VssSnapshotRemoved, VssError, VssWarning
+        - Checkpoint: CheckpointError, CheckpointWarning
+        - General: GeneralError, GeneralWarning
     .PARAMETER Data
         Hashtable of event-specific data
     .PARAMETER SessionId
@@ -2070,9 +2173,26 @@ function Write-SiemEvent {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('SessionStart', 'SessionEnd', 'ProfileStart', 'ProfileComplete',
-                     'ChunkStart', 'ChunkComplete', 'ChunkError', 'ConfigChange', 'EmailSent',
-                     'VssSnapshotCreated', 'VssSnapshotRemoved')]
+        [ValidateSet(
+            # Session events
+            'SessionStart', 'SessionEnd',
+            # Profile events
+            'ProfileStart', 'ProfileComplete', 'ProfileError',
+            # Chunk events
+            'ChunkStart', 'ChunkComplete', 'ChunkError', 'ChunkWarning',
+            # Robocopy events (separated for SIEM filtering)
+            'RobocopyError', 'RobocopyWarning',
+            # Config events
+            'ConfigChange', 'ConfigError', 'ConfigWarning',
+            # Email events
+            'EmailSent', 'EmailError', 'EmailWarning',
+            # VSS events
+            'VssSnapshotCreated', 'VssSnapshotRemoved', 'VssError', 'VssWarning',
+            # Checkpoint events
+            'CheckpointError', 'CheckpointWarning',
+            # General catch-all events
+            'GeneralError', 'GeneralWarning'
+        )]
         [string]$EventType,
 
         [hashtable]$Data = @{},
@@ -4660,6 +4780,49 @@ function Remove-ReplicationCheckpoint {
     return $false
 }
 
+function New-CompletedPathsHashSet {
+    <#
+    .SYNOPSIS
+        Creates a HashSet from checkpoint completed paths for O(1) lookups
+    .DESCRIPTION
+        Converts the CompletedChunkPaths array from a checkpoint into a case-insensitive
+        HashSet for efficient lookups. This improves resume performance from O(N) to O(1)
+        per chunk lookup, which is critical when resuming with thousands of completed chunks.
+    .PARAMETER Checkpoint
+        Checkpoint object from Get-ReplicationCheckpoint
+    .OUTPUTS
+        HashSet[string] with case-insensitive comparison, or $null if no checkpoint
+    .EXAMPLE
+        $hashSet = New-CompletedPathsHashSet -Checkpoint $checkpoint
+        if ($hashSet -and $hashSet.Contains($path)) { "Already done" }
+    #>
+    [CmdletBinding()]
+    param(
+        [PSCustomObject]$Checkpoint
+    )
+
+    if (-not $Checkpoint -or -not $Checkpoint.CompletedChunkPaths) {
+        return $null
+    }
+
+    # Create case-insensitive HashSet for O(1) lookups
+    # OrdinalIgnoreCase handles international characters correctly (including Turkish 'I')
+    $hashSet = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+
+    foreach ($path in $Checkpoint.CompletedChunkPaths) {
+        if ($path) {
+            $hashSet.Add($path) | Out-Null
+        }
+    }
+
+    Write-RobocurseLog -Message "Created HashSet with $($hashSet.Count) completed chunk paths for O(1) resume lookups" `
+        -Level 'Debug' -Component 'Checkpoint'
+
+    return $hashSet
+}
+
 function Test-ChunkAlreadyCompleted {
     <#
     .SYNOPSIS
@@ -4668,15 +4831,23 @@ function Test-ChunkAlreadyCompleted {
         Chunk object to check
     .PARAMETER Checkpoint
         Checkpoint object from previous run
+    .PARAMETER CompletedPathsHashSet
+        Optional pre-built HashSet for O(1) lookups. If not provided, falls back to
+        O(N) linear search (for backwards compatibility).
     .OUTPUTS
         $true if chunk should be skipped, $false otherwise
+    .NOTES
+        For best performance when checking many chunks, use New-CompletedPathsHashSet
+        to create the HashSet once, then pass it to each call.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Chunk,
 
-        [PSCustomObject]$Checkpoint
+        [PSCustomObject]$Checkpoint,
+
+        [System.Collections.Generic.HashSet[string]]$CompletedPathsHashSet
     )
 
     if (-not $Checkpoint -or -not $Checkpoint.CompletedChunkPaths) {
@@ -4688,12 +4859,15 @@ function Test-ChunkAlreadyCompleted {
         return $false
     }
 
-    # Normalize the chunk path for comparison
-    # Use OrdinalIgnoreCase for Windows-style case-insensitivity
-    # This is more reliable than ToLowerInvariant() for international characters
-    # and handles edge cases like Turkish 'I' correctly
     $chunkPath = $Chunk.SourcePath
 
+    # Use HashSet if provided for O(1) lookup
+    if ($CompletedPathsHashSet) {
+        return $CompletedPathsHashSet.Contains($chunkPath)
+    }
+
+    # Fallback to O(N) linear search for backwards compatibility
+    # This path is used when CompletedPathsHashSet is not provided
     foreach ($completedPath in $Checkpoint.CompletedChunkPaths) {
         # Skip null entries in the completed paths array
         if (-not $completedPath) {
@@ -5241,12 +5415,17 @@ function Start-ReplicationRun {
 
     # Load checkpoint if resuming
     $script:CurrentCheckpoint = $null
+    $script:CompletedPathsHashSet = $null  # HashSet for O(1) lookups during resume
     if (-not $IgnoreCheckpoint) {
         $script:CurrentCheckpoint = Get-ReplicationCheckpoint
         if ($script:CurrentCheckpoint) {
             $skippedCount = $script:CurrentCheckpoint.CompletedChunkPaths.Count
             Write-RobocurseLog -Message "Resuming from checkpoint: $skippedCount chunks will be skipped" `
                 -Level 'Info' -Component 'Checkpoint'
+
+            # Create HashSet for O(1) lookups instead of O(N) linear search per chunk
+            # This significantly improves resume performance with thousands of completed chunks
+            $script:CompletedPathsHashSet = New-CompletedPathsHashSet -Checkpoint $script:CurrentCheckpoint
         }
     }
 
@@ -5626,16 +5805,29 @@ function Invoke-ReplicationTick {
                     $state.AddCompletedChunkFiles($result.Stats.FilesCopied)
                 }
             }
-            $state.IncrementCompletedCount()
+            $newCompletedCount = $state.IncrementCompletedCount()
 
             # Invoke callback
             if ($script:OnChunkComplete) {
                 & $script:OnChunkComplete $removedJob $result
             }
 
-            # Save checkpoint periodically (every N chunks or on failure)
-            # This enables resume after crash without excessive disk I/O
-            if (($state.CompletedCount % $script:CheckpointSaveFrequency -eq 0) -or ($result.ExitMeaning.Severity -in @('Error', 'Fatal'))) {
+            # Save checkpoint strategically to minimize race window while controlling I/O
+            # Checkpoints are saved:
+            # 1. First chunk completion (to establish checkpoint file early)
+            # 2. Every N chunks (controlled by CheckpointSaveFrequency)
+            # 3. On any failure (to preserve progress before potential crash)
+            # 4. Profile completion (handled separately in Complete-Profile)
+            #
+            # NOTE: There is still a small race window between chunk completion and checkpoint save.
+            # If process crashes in this window, the chunk will be re-processed on resume.
+            # This is acceptable as robocopy /MIR is idempotent.
+            $shouldSaveCheckpoint = (
+                ($newCompletedCount -eq 1) -or                                            # First chunk - establish checkpoint early
+                ($newCompletedCount % $script:CheckpointSaveFrequency -eq 0) -or          # Periodic save
+                ($result.ExitMeaning.Severity -in @('Error', 'Fatal'))                    # Save on failure
+            )
+            if ($shouldSaveCheckpoint) {
                 Save-ReplicationCheckpoint | Out-Null
             }
         }
@@ -5650,7 +5842,8 @@ function Invoke-ReplicationTick {
         $chunk = $null
         if ($state.ChunkQueue.TryDequeue([ref]$chunk)) {
             # Check if chunk was completed in previous run (resume from checkpoint)
-            if ($script:CurrentCheckpoint -and (Test-ChunkAlreadyCompleted -Chunk $chunk -Checkpoint $script:CurrentCheckpoint)) {
+            # Use pre-built HashSet for O(1) lookup instead of O(N) linear search
+            if ($script:CurrentCheckpoint -and (Test-ChunkAlreadyCompleted -Chunk $chunk -Checkpoint $script:CurrentCheckpoint -CompletedPathsHashSet $script:CompletedPathsHashSet)) {
                 # Skip this chunk - DON'T enqueue to CompletedChunks to prevent memory leak
                 # The chunk is already tracked in the checkpoint file, no need to hold in memory
                 # Track separately for accurate reporting (skipped vs actually completed this run)
@@ -6901,13 +7094,25 @@ function Add-VssToTracking {
                 CreatedAt = $SnapshotInfo.CreatedAt.ToString('o')
             }
 
-            # Atomic write: temp file then rename to prevent corruption on crash
+            # Atomic write with backup pattern to prevent corruption on crash
+            # This prevents race condition between Remove-Item and Move
             $tempPath = "$($script:VssTrackingFile).tmp"
+            $backupPath = "$($script:VssTrackingFile).bak"
             ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
+
+            # Move existing to backup first (atomic on same volume)
             if (Test-Path $script:VssTrackingFile) {
-                Remove-Item -Path $script:VssTrackingFile -Force
+                if (Test-Path $backupPath) {
+                    Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                }
+                [System.IO.File]::Move($script:VssTrackingFile, $backupPath)
             }
+            # Now move temp to final (if this fails, we still have the backup)
             [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
+            # Clean up backup after successful replacement
+            if (Test-Path $backupPath) {
+                Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+            }
             return $true  # Explicit success marker
         }
 
@@ -6960,13 +7165,25 @@ function Remove-VssFromTracking {
             if ($tracked.Count -eq 0) {
                 Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
             } else {
-                # Atomic write: temp file then rename to prevent corruption on crash
+                # Atomic write with backup pattern to prevent corruption on crash
+                # This prevents race condition between Remove-Item and Move
                 $tempPath = "$($script:VssTrackingFile).tmp"
+                $backupPath = "$($script:VssTrackingFile).bak"
                 ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
+
+                # Move existing to backup first (atomic on same volume)
                 if (Test-Path $script:VssTrackingFile) {
-                    Remove-Item -Path $script:VssTrackingFile -Force
+                    if (Test-Path $backupPath) {
+                        Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                    }
+                    [System.IO.File]::Move($script:VssTrackingFile, $backupPath)
                 }
+                # Now move temp to final (if this fails, we still have the backup)
                 [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
+                # Clean up backup after successful replacement
+                if (Test-Path $backupPath) {
+                    Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                }
             }
             return $true  # Explicit success marker
         }
@@ -7117,6 +7334,9 @@ function Clear-OrphanVssSnapshots {
     .DESCRIPTION
         Reads the VSS tracking file and removes any snapshots that are still present.
         This should be called at startup to clean up after unexpected terminations.
+
+        Only successfully deleted snapshots are removed from the tracking file.
+        Failed deletions are retained for retry on the next cleanup attempt.
     .OUTPUTS
         Number of snapshots cleaned up
     .EXAMPLE
@@ -7139,8 +7359,12 @@ function Clear-OrphanVssSnapshots {
     }
 
     $cleaned = 0
+    $failedSnapshots = @()
+
     try {
         $trackedSnapshots = Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json
+        # Ensure we have an array even for single items
+        $trackedSnapshots = @($trackedSnapshots)
 
         foreach ($snapshot in $trackedSnapshots) {
             if ($snapshot.ShadowId) {
@@ -7150,13 +7374,44 @@ function Clear-OrphanVssSnapshots {
                         Write-RobocurseLog -Message "Cleaned up orphan VSS snapshot: $($snapshot.ShadowId)" -Level 'Info' -Component 'VSS'
                         $cleaned++
                     }
+                    else {
+                        # Keep track of failed deletions for retry on next cleanup
+                        Write-RobocurseLog -Message "Failed to clean up orphan VSS snapshot: $($snapshot.ShadowId) - $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+                        $failedSnapshots += $snapshot
+                    }
+                }
+                else {
+                    # WhatIf mode - don't count as cleaned, but don't add to failed either
                 }
             }
         }
 
-        # Clear the tracking file after cleanup
-        if ($PSCmdlet.ShouldProcess($script:VssTrackingFile, "Remove VSS tracking file")) {
-            Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+        # Update tracking file: only clear if all succeeded, otherwise keep failed entries
+        if ($PSCmdlet.ShouldProcess($script:VssTrackingFile, "Update VSS tracking file")) {
+            if ($failedSnapshots.Count -eq 0) {
+                # All snapshots cleaned successfully - remove tracking file
+                Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+                Write-RobocurseLog -Message "All orphan VSS snapshots cleaned - removed tracking file" -Level 'Debug' -Component 'VSS'
+            }
+            elseif ($cleaned -gt 0) {
+                # Some succeeded, some failed - update tracking file with failed entries only
+                $tempPath = "$($script:VssTrackingFile).tmp"
+                $backupPath = "$($script:VssTrackingFile).bak"
+                ConvertTo-Json -InputObject $failedSnapshots -Depth 5 | Set-Content $tempPath -Encoding UTF8
+
+                # Atomic replace with backup
+                if (Test-Path $backupPath) {
+                    Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                }
+                [System.IO.File]::Move($script:VssTrackingFile, $backupPath)
+                [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
+                if (Test-Path $backupPath) {
+                    Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                }
+
+                Write-RobocurseLog -Message "Updated tracking file: $($failedSnapshots.Count) snapshots remain for retry" -Level 'Warning' -Component 'VSS'
+            }
+            # If cleaned=0 and failedSnapshots.Count > 0, tracking file unchanged
         }
     }
     catch {
@@ -8230,8 +8485,10 @@ function New-RemoteVssJunction {
     Write-RobocurseLog -Message "Creating remote junction on '$serverName': '$junctionLocalPath' -> '$vssTargetPath'" -Level 'Debug' -Component 'VSS'
 
     try {
-        # Use Invoke-Command to create the junction on the remote server
-        $result = Invoke-Command -ComputerName $serverName -ScriptBlock {
+        # Use Invoke-Command with timeout to create the junction on the remote server
+        # Timeout prevents indefinite hangs on slow or unreachable servers
+        $sessionOption = New-PSSessionOption -OperationTimeout $script:RemoteOperationTimeoutMs -OpenTimeout $script:RemoteOperationTimeoutMs
+        $result = Invoke-Command -ComputerName $serverName -SessionOption $sessionOption -ScriptBlock {
             param($JunctionPath, $TargetPath)
 
             # Check if junction already exists
@@ -8306,7 +8563,9 @@ function Remove-RemoteVssJunction {
     Write-RobocurseLog -Message "Removing remote junction '$JunctionLocalPath' from '$ServerName'" -Level 'Debug' -Component 'VSS'
 
     try {
-        $result = Invoke-Command -ComputerName $ServerName -ScriptBlock {
+        # Use timeout to prevent indefinite hangs on slow or unreachable servers
+        $sessionOption = New-PSSessionOption -OperationTimeout $script:RemoteOperationTimeoutMs -OpenTimeout $script:RemoteOperationTimeoutMs
+        $result = Invoke-Command -ComputerName $ServerName -SessionOption $sessionOption -ScriptBlock {
             param($JunctionPath)
 
             if (-not (Test-Path $JunctionPath)) {

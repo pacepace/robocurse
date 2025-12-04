@@ -464,8 +464,10 @@ function New-RemoteVssJunction {
     Write-RobocurseLog -Message "Creating remote junction on '$serverName': '$junctionLocalPath' -> '$vssTargetPath'" -Level 'Debug' -Component 'VSS'
 
     try {
-        # Use Invoke-Command to create the junction on the remote server
-        $result = Invoke-Command -ComputerName $serverName -ScriptBlock {
+        # Use Invoke-Command with timeout to create the junction on the remote server
+        # Timeout prevents indefinite hangs on slow or unreachable servers
+        $sessionOption = New-PSSessionOption -OperationTimeout $script:RemoteOperationTimeoutMs -OpenTimeout $script:RemoteOperationTimeoutMs
+        $result = Invoke-Command -ComputerName $serverName -SessionOption $sessionOption -ScriptBlock {
             param($JunctionPath, $TargetPath)
 
             # Check if junction already exists
@@ -540,7 +542,9 @@ function Remove-RemoteVssJunction {
     Write-RobocurseLog -Message "Removing remote junction '$JunctionLocalPath' from '$ServerName'" -Level 'Debug' -Component 'VSS'
 
     try {
-        $result = Invoke-Command -ComputerName $ServerName -ScriptBlock {
+        # Use timeout to prevent indefinite hangs on slow or unreachable servers
+        $sessionOption = New-PSSessionOption -OperationTimeout $script:RemoteOperationTimeoutMs -OpenTimeout $script:RemoteOperationTimeoutMs
+        $result = Invoke-Command -ComputerName $ServerName -SessionOption $sessionOption -ScriptBlock {
             param($JunctionPath)
 
             if (-not (Test-Path $JunctionPath)) {

@@ -1,7 +1,72 @@
 ﻿# Robocurse Logging Functions
 # Script-scoped variables for current session state
 $script:CurrentSessionId = $null
-# Note: LogMutexTimeoutMs is defined in Robocurse.psm1 CONSTANTS region
+# Note: LogMutexTimeoutMs and MinLogLevel are defined in Robocurse.psm1 CONSTANTS region
+
+# Log level priority mapping for filtering
+$script:LogLevelPriority = @{
+    'Debug'   = 0
+    'Info'    = 1
+    'Warning' = 2
+    'Error'   = 3
+}
+
+function Test-ShouldLog {
+    <#
+    .SYNOPSIS
+        Determines if a message should be logged based on minimum log level
+    .PARAMETER Level
+        The log level of the message (Debug, Info, Warning, Error)
+    .OUTPUTS
+        Boolean indicating if the message should be logged
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Debug', 'Info', 'Warning', 'Error')]
+        [string]$Level
+    )
+
+    # Get minimum level from module constant (defaults to Debug if not set)
+    $minLevel = if ($script:MinLogLevel) { $script:MinLogLevel } else { 'Debug' }
+
+    # Get priorities (default to 0 for unknown levels)
+    $messagePriority = $script:LogLevelPriority[$Level]
+    $minPriority = $script:LogLevelPriority[$minLevel]
+
+    if ($null -eq $messagePriority) { $messagePriority = 0 }
+    if ($null -eq $minPriority) { $minPriority = 0 }
+
+    return $messagePriority -ge $minPriority
+}
+
+function Set-RobocurseLogLevel {
+    <#
+    .SYNOPSIS
+        Sets the minimum log level for filtering
+    .DESCRIPTION
+        Sets the minimum log level. Messages below this level will not be written to logs.
+        This is useful for reducing log verbosity in production environments.
+    .PARAMETER Level
+        Minimum log level: Debug, Info, Warning, Error
+    .EXAMPLE
+        Set-RobocurseLogLevel -Level 'Info'
+        # Now Debug messages will be filtered out
+    .EXAMPLE
+        Set-RobocurseLogLevel -Level 'Warning'
+        # Only Warning and Error messages will be logged
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Debug', 'Info', 'Warning', 'Error')]
+        [string]$Level
+    )
+
+    $script:MinLogLevel = $Level
+    Write-Verbose "Log level set to: $Level"
+}
 
 function Invoke-WithLogMutex {
     <#
@@ -173,6 +238,12 @@ function Write-RobocurseLog {
         [bool]$WriteSiem = ($Level -in @('Warning', 'Error'))
     )
 
+    # Check if message should be logged based on minimum log level
+    # This filters out Debug messages when MinLogLevel is set to Info or higher
+    if (-not (Test-ShouldLog -Level $Level)) {
+        return
+    }
+
     # Get caller information from call stack
     # Index 1 is the immediate caller (index 0 is this function)
     $callStack = Get-PSCallStack
@@ -227,30 +298,34 @@ function Write-RobocurseLog {
     # Write to SIEM if requested
     if ($WriteSiem) {
         # Map log level and component to appropriate SIEM event type
-        # Use component context to determine the most accurate event type
+        # Use component context and level to determine the most accurate event type
+        # Separate event types allow SIEM to distinguish between different failure modes
         $eventType = switch ($Level) {
             'Error' {
                 switch -Wildcard ($Component) {
                     'Chunk*'      { 'ChunkError' }
-                    'Robocopy'    { 'ChunkError' }
-                    'Config*'     { 'ConfigChange' }
-                    'Email'       { 'EmailSent' }
-                    'VSS'         { 'VssSnapshotRemoved' }
+                    'Robocopy'    { 'RobocopyError' }      # Separate from ChunkError for SIEM filtering
+                    'Config*'     { 'ConfigError' }        # Errors during config, not ConfigChange
+                    'Email'       { 'EmailError' }         # Failed to send, not EmailSent
+                    'VSS'         { 'VssError' }           # VSS operation failed
                     'Session'     { 'SessionEnd' }
-                    'Profile'     { 'ProfileComplete' }
-                    default       { 'ChunkError' }
+                    'Profile'     { 'ProfileError' }       # Profile failed, not ProfileComplete
+                    'Checkpoint'  { 'CheckpointError' }    # Checkpoint operation failed
+                    default       { 'GeneralError' }       # Catch-all for other errors
                 }
             }
             'Warning' {
                 switch -Wildcard ($Component) {
-                    'Chunk*'      { 'ChunkError' }
-                    'Robocopy'    { 'ChunkError' }
-                    'Config*'     { 'ConfigChange' }
-                    'VSS'         { 'VssSnapshotRemoved' }
-                    default       { 'ChunkError' }
+                    'Chunk*'      { 'ChunkWarning' }
+                    'Robocopy'    { 'RobocopyWarning' }
+                    'Config*'     { 'ConfigWarning' }
+                    'VSS'         { 'VssWarning' }
+                    'Email'       { 'EmailWarning' }
+                    'Checkpoint'  { 'CheckpointWarning' }
+                    default       { 'GeneralWarning' }
                 }
             }
-            default { 'ChunkError' }  # Fallback for unexpected levels routed to SIEM
+            default { 'GeneralError' }  # Fallback for unexpected levels routed to SIEM
         }
         Write-SiemEvent -EventType $eventType -Data @{
             Level = $Level
@@ -266,7 +341,16 @@ function Write-SiemEvent {
     .SYNOPSIS
         Writes a SIEM-compatible JSON event
     .PARAMETER EventType
-        Event type: SessionStart, SessionEnd, ChunkStart, ChunkComplete, ChunkError, etc.
+        Event type for SIEM categorization. Types are organized by severity and component:
+        - Session: SessionStart, SessionEnd
+        - Profile: ProfileStart, ProfileComplete, ProfileError
+        - Chunk: ChunkStart, ChunkComplete, ChunkError, ChunkWarning
+        - Robocopy: RobocopyError, RobocopyWarning
+        - Config: ConfigChange, ConfigError, ConfigWarning
+        - Email: EmailSent, EmailError, EmailWarning
+        - VSS: VssSnapshotCreated, VssSnapshotRemoved, VssError, VssWarning
+        - Checkpoint: CheckpointError, CheckpointWarning
+        - General: GeneralError, GeneralWarning
     .PARAMETER Data
         Hashtable of event-specific data
     .PARAMETER SessionId
@@ -275,9 +359,26 @@ function Write-SiemEvent {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('SessionStart', 'SessionEnd', 'ProfileStart', 'ProfileComplete',
-                     'ChunkStart', 'ChunkComplete', 'ChunkError', 'ConfigChange', 'EmailSent',
-                     'VssSnapshotCreated', 'VssSnapshotRemoved')]
+        [ValidateSet(
+            # Session events
+            'SessionStart', 'SessionEnd',
+            # Profile events
+            'ProfileStart', 'ProfileComplete', 'ProfileError',
+            # Chunk events
+            'ChunkStart', 'ChunkComplete', 'ChunkError', 'ChunkWarning',
+            # Robocopy events (separated for SIEM filtering)
+            'RobocopyError', 'RobocopyWarning',
+            # Config events
+            'ConfigChange', 'ConfigError', 'ConfigWarning',
+            # Email events
+            'EmailSent', 'EmailError', 'EmailWarning',
+            # VSS events
+            'VssSnapshotCreated', 'VssSnapshotRemoved', 'VssError', 'VssWarning',
+            # Checkpoint events
+            'CheckpointError', 'CheckpointWarning',
+            # General catch-all events
+            'GeneralError', 'GeneralWarning'
+        )]
         [string]$EventType,
 
         [hashtable]$Data = @{},

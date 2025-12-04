@@ -9,6 +9,9 @@ function Clear-OrphanVssSnapshots {
     .DESCRIPTION
         Reads the VSS tracking file and removes any snapshots that are still present.
         This should be called at startup to clean up after unexpected terminations.
+
+        Only successfully deleted snapshots are removed from the tracking file.
+        Failed deletions are retained for retry on the next cleanup attempt.
     .OUTPUTS
         Number of snapshots cleaned up
     .EXAMPLE
@@ -31,8 +34,12 @@ function Clear-OrphanVssSnapshots {
     }
 
     $cleaned = 0
+    $failedSnapshots = @()
+
     try {
         $trackedSnapshots = Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json
+        # Ensure we have an array even for single items
+        $trackedSnapshots = @($trackedSnapshots)
 
         foreach ($snapshot in $trackedSnapshots) {
             if ($snapshot.ShadowId) {
@@ -42,13 +49,44 @@ function Clear-OrphanVssSnapshots {
                         Write-RobocurseLog -Message "Cleaned up orphan VSS snapshot: $($snapshot.ShadowId)" -Level 'Info' -Component 'VSS'
                         $cleaned++
                     }
+                    else {
+                        # Keep track of failed deletions for retry on next cleanup
+                        Write-RobocurseLog -Message "Failed to clean up orphan VSS snapshot: $($snapshot.ShadowId) - $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+                        $failedSnapshots += $snapshot
+                    }
+                }
+                else {
+                    # WhatIf mode - don't count as cleaned, but don't add to failed either
                 }
             }
         }
 
-        # Clear the tracking file after cleanup
-        if ($PSCmdlet.ShouldProcess($script:VssTrackingFile, "Remove VSS tracking file")) {
-            Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+        # Update tracking file: only clear if all succeeded, otherwise keep failed entries
+        if ($PSCmdlet.ShouldProcess($script:VssTrackingFile, "Update VSS tracking file")) {
+            if ($failedSnapshots.Count -eq 0) {
+                # All snapshots cleaned successfully - remove tracking file
+                Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+                Write-RobocurseLog -Message "All orphan VSS snapshots cleaned - removed tracking file" -Level 'Debug' -Component 'VSS'
+            }
+            elseif ($cleaned -gt 0) {
+                # Some succeeded, some failed - update tracking file with failed entries only
+                $tempPath = "$($script:VssTrackingFile).tmp"
+                $backupPath = "$($script:VssTrackingFile).bak"
+                ConvertTo-Json -InputObject $failedSnapshots -Depth 5 | Set-Content $tempPath -Encoding UTF8
+
+                # Atomic replace with backup
+                if (Test-Path $backupPath) {
+                    Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                }
+                [System.IO.File]::Move($script:VssTrackingFile, $backupPath)
+                [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
+                if (Test-Path $backupPath) {
+                    Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                }
+
+                Write-RobocurseLog -Message "Updated tracking file: $($failedSnapshots.Count) snapshots remain for retry" -Level 'Warning' -Component 'VSS'
+            }
+            # If cleaned=0 and failedSnapshots.Count > 0, tracking file unchanged
         }
     }
     catch {
