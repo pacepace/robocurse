@@ -1257,5 +1257,259 @@ InModuleScope 'Robocurse' {
                 $status | Should -BeNullOrEmpty
             }
         }
+
+        Context "Error Scenario: Fatal Robocopy Errors" {
+            It "Should handle fatal error (exit code 16) with proper severity" {
+                $mockProcess = [PSCustomObject]@{ ExitCode = 16 }
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test"
+                    DestinationPath = "D:\Test"
+                    Status = 'Pending'
+                    RetryCount = 0
+                }
+                $job = [PSCustomObject]@{
+                    Process = $mockProcess
+                    Chunk = $chunk
+                    StartTime = [datetime]::Now.AddSeconds(-10)
+                    LogPath = "C:\Logs\chunk.log"
+                }
+
+                Mock Get-RobocopyExitMeaning {
+                    [PSCustomObject]@{
+                        Severity = 'Fatal'
+                        Message = 'Fatal error - no files were copied'
+                        ShouldRetry = $true
+                    }
+                }
+
+                Mock ConvertFrom-RobocopyLog {
+                    [PSCustomObject]@{
+                        FilesCopied = 0
+                        BytesCopied = 0
+                    }
+                }
+
+                $result = Complete-RobocopyJob -Job $job
+
+                $result.ExitCode | Should -Be 16
+                $result.ExitMeaning.Severity | Should -Be 'Fatal'
+                $chunk.Status | Should -Be 'Failed'
+            }
+
+            It "Should handle combined error codes (exit 24 = copy errors + fatal)" {
+                $mockProcess = [PSCustomObject]@{ ExitCode = 24 }
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test"
+                    DestinationPath = "D:\Test"
+                    Status = 'Pending'
+                }
+                $job = [PSCustomObject]@{
+                    Process = $mockProcess
+                    Chunk = $chunk
+                    StartTime = [datetime]::Now.AddSeconds(-10)
+                    LogPath = "C:\Logs\chunk.log"
+                }
+
+                Mock Get-RobocopyExitMeaning {
+                    [PSCustomObject]@{
+                        Severity = 'Fatal'
+                        Message = 'Fatal error with copy errors'
+                        ShouldRetry = $true
+                    }
+                }
+
+                Mock ConvertFrom-RobocopyLog {
+                    [PSCustomObject]@{
+                        FilesCopied = 0
+                        BytesCopied = 0
+                    }
+                }
+
+                $result = Complete-RobocopyJob -Job $job
+
+                $result.ExitMeaning.Severity | Should -Be 'Fatal'
+            }
+        }
+
+        Context "Error Scenario: Consecutive Failures" {
+            It "Should handle multiple chunks failing in sequence" {
+                # Simulate 3 chunks all failing
+                for ($i = 1; $i -le 3; $i++) {
+                    $chunk = [PSCustomObject]@{
+                        ChunkId = $i
+                        SourcePath = "C:\Test$i"
+                        DestinationPath = "D:\Test$i"
+                        RetryCount = $script:MaxChunkRetries - 1  # Last retry
+                        Status = 'Pending'
+                    }
+                    $job = [PSCustomObject]@{ Chunk = $chunk }
+                    $result = [PSCustomObject]@{
+                        ExitCode = 8
+                        ExitMeaning = [PSCustomObject]@{
+                            Severity = 'Error'
+                            ShouldRetry = $true
+                        }
+                    }
+
+                    Invoke-FailedChunkHandler -Job $job -Result $result
+                }
+
+                # All 3 should be in FailedChunks
+                $script:OrchestrationState.FailedChunks.Count | Should -Be 3
+                $script:OrchestrationState.ChunkQueue.Count | Should -Be 0
+            }
+
+            It "Should track errors in ErrorMessages queue for GUI" {
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test"
+                    DestinationPath = "D:\Test"
+                    RetryCount = $script:MaxChunkRetries - 1  # Last retry - will fail permanently
+                    Status = 'Pending'
+                }
+                $job = [PSCustomObject]@{ Chunk = $chunk }
+                $result = [PSCustomObject]@{
+                    ExitCode = 8
+                    ExitMeaning = [PSCustomObject]@{
+                        Severity = 'Error'
+                        Message = 'Some files could not be copied'
+                        ShouldRetry = $true
+                    }
+                }
+
+                Invoke-FailedChunkHandler -Job $job -Result $result
+
+                # Error should be enqueued for GUI display
+                $errors = $script:OrchestrationState.DequeueErrors()
+                $errors | Should -Not -BeNullOrEmpty
+            }
+        }
+
+        Context "Error Scenario: Process Start Failure" {
+            It "Should handle null job return and increment retry count" {
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test"
+                    DestinationPath = "D:\Test"
+                    RetryCount = 0
+                    RetryAfter = $null
+                }
+                $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
+                $script:OrchestrationState.TotalChunks = 1
+
+                # Mock Start-ChunkJob to return null (process start failure)
+                Mock Start-ChunkJob { return $null }
+                Mock Update-ProgressStats { }
+
+                Invoke-ReplicationTick -MaxConcurrentJobs 4
+
+                # Chunk should be requeued
+                $script:OrchestrationState.ChunkQueue.Count | Should -Be 1
+                $script:OrchestrationState.ActiveJobs.Count | Should -Be 0
+
+                # Get the requeued chunk and verify retry count increased
+                $requeuedChunk = $null
+                $script:OrchestrationState.ChunkQueue.TryDequeue([ref]$requeuedChunk)
+                $requeuedChunk.RetryCount | Should -Be 1
+            }
+
+            It "Should mark chunk as failed after max process start failures" {
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test"
+                    DestinationPath = "D:\Test"
+                    RetryCount = $script:MaxChunkRetries - 1  # One retry left
+                    RetryAfter = $null
+                    Status = 'Pending'
+                }
+                $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
+                $script:OrchestrationState.TotalChunks = 1
+
+                Mock Start-ChunkJob { return $null }
+                Mock Update-ProgressStats { }
+
+                Invoke-ReplicationTick -MaxConcurrentJobs 4
+
+                # Check final state - should be failed after max retries
+                $script:OrchestrationState.ChunkQueue.Count | Should -Be 0
+                $script:OrchestrationState.FailedChunks.Count | Should -Be 1
+            }
+        }
+
+        Context "Error Scenario: Log File Parse Failure" {
+            It "Should handle missing log file gracefully" {
+                $mockProcess = [PSCustomObject]@{ ExitCode = 1 }
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test"
+                    DestinationPath = "D:\Test"
+                    Status = 'Pending'
+                }
+                $job = [PSCustomObject]@{
+                    Process = $mockProcess
+                    Chunk = $chunk
+                    StartTime = [datetime]::Now.AddSeconds(-10)
+                    LogPath = "C:\NonExistent\Log\Path\chunk.log"
+                }
+
+                Mock Get-RobocopyExitMeaning {
+                    [PSCustomObject]@{
+                        Severity = 'Success'
+                        Message = 'Files copied'
+                        ShouldRetry = $false
+                    }
+                }
+
+                # Simulate log file not found
+                Mock ConvertFrom-RobocopyLog {
+                    [PSCustomObject]@{
+                        FilesCopied = 0
+                        BytesCopied = 0
+                        ParseSuccess = $false
+                        ParseError = "Log file not found"
+                    }
+                }
+
+                # Should not throw
+                { Complete-RobocopyJob -Job $job } | Should -Not -Throw
+
+                $result = Complete-RobocopyJob -Job $job
+                $result | Should -Not -BeNullOrEmpty
+            }
+        }
+
+        Context "Error Scenario: Validation Errors" {
+            It "Should reject profile with empty Source" {
+                $badProfile = [PSCustomObject]@{
+                    Name = "TestProfile"
+                    Source = ""
+                    Destination = "D:\Test"
+                }
+
+                { Start-ReplicationRun -Profiles @($badProfile) } | Should -Throw "*Source*"
+            }
+
+            It "Should reject profile with empty Destination" {
+                $badProfile = [PSCustomObject]@{
+                    Name = "TestProfile"
+                    Source = "C:\Test"
+                    Destination = ""
+                }
+
+                { Start-ReplicationRun -Profiles @($badProfile) } | Should -Throw "*Destination*"
+            }
+
+            It "Should reject profile with null Name" {
+                $badProfile = [PSCustomObject]@{
+                    Name = $null
+                    Source = "C:\Test"
+                    Destination = "D:\Test"
+                }
+
+                { Start-ReplicationRun -Profiles @($badProfile) } | Should -Throw "*Name*"
+            }
+        }
     }
 }

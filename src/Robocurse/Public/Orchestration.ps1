@@ -1321,7 +1321,7 @@ function Stop-AllJobs {
             if (-not $job.Process.HasExited) {
                 $job.Process.Kill()
                 # Wait briefly for process to exit before disposing
-                $job.Process.WaitForExit(5000)
+                $job.Process.WaitForExit($script:ProcessStopTimeoutMs)
                 Write-RobocurseLog -Message "Killed chunk $($job.Chunk.ChunkId)" -Level 'Warning' -Component 'Orchestrator'
             }
         }

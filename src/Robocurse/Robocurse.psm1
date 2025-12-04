@@ -143,6 +143,16 @@ $script:LogMutexTimeoutMs = 5000
 # Timeout in milliseconds for VSS tracking file mutex acquisition.
 # VSS operations are less frequent, so 10 seconds is acceptable.
 $script:VssMutexTimeoutMs = 10000
+
+# GUI update intervals
+# Timer interval in milliseconds for GUI progress updates.
+# 250ms provides smooth visual updates without excessive CPU usage.
+$script:GuiProgressUpdateIntervalMs = 250
+
+# Process termination
+# Timeout in milliseconds when waiting for robocopy processes to exit during stop.
+# 5 seconds allows graceful shutdown before force-killing.
+$script:ProcessStopTimeoutMs = 5000
 #endregion
 
 #region ==================== MODULE LOADING ====================

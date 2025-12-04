@@ -319,9 +319,9 @@ function ConvertFrom-FriendlyConfig {
                 Destination = ""
                 UseVss = $false
                 ScanMode = "Smart"
-                ChunkMaxSizeGB = 10
-                ChunkMaxFiles = 50000
-                ChunkMaxDepth = 5
+                ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
+                ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
+                ChunkMaxDepth = $script:DefaultMaxChunkDepth
                 RobocopyOptions = @{}
                 Enabled = $true
             }

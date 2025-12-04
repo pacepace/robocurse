@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-03 19:07:27
+    Built: 2025-12-04 09:27:51
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -204,6 +204,16 @@ $script:LogMutexTimeoutMs = 5000
 # Timeout in milliseconds for VSS tracking file mutex acquisition.
 # VSS operations are less frequent, so 10 seconds is acceptable.
 $script:VssMutexTimeoutMs = 10000
+
+# GUI update intervals
+# Timer interval in milliseconds for GUI progress updates.
+# 250ms provides smooth visual updates without excessive CPU usage.
+$script:GuiProgressUpdateIntervalMs = 250
+
+# Process termination
+# Timeout in milliseconds when waiting for robocopy processes to exit during stop.
+# 5 seconds allows graceful shutdown before force-killing.
+$script:ProcessStopTimeoutMs = 5000
 #endregion
 
 #region ==================== UTILITY ====================
@@ -1265,9 +1275,9 @@ function ConvertFrom-FriendlyConfig {
                 Destination = ""
                 UseVss = $false
                 ScanMode = "Smart"
-                ChunkMaxSizeGB = 10
-                ChunkMaxFiles = 50000
-                ChunkMaxDepth = 5
+                ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
+                ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
+                ChunkMaxDepth = $script:DefaultMaxChunkDepth
                 RobocopyOptions = @{}
                 Enabled = $true
             }
@@ -5990,7 +6000,7 @@ function Stop-AllJobs {
             if (-not $job.Process.HasExited) {
                 $job.Process.Kill()
                 # Wait briefly for process to exit before disposing
-                $job.Process.WaitForExit(5000)
+                $job.Process.WaitForExit($script:ProcessStopTimeoutMs)
                 Write-RobocurseLog -Message "Killed chunk $($job.Chunk.ChunkId)" -Level 'Warning' -Component 'Orchestrator'
             }
         }
@@ -10377,7 +10387,7 @@ function Initialize-RobocurseGui {
     # Forms.Timer uses Windows message queue (WM_TIMER) which is more reliable in PowerShell
     # than WPF's DispatcherTimer which gets starved during background runspace operations
     $script:ProgressTimer = New-Object System.Windows.Forms.Timer
-    $script:ProgressTimer.Interval = 250  # Forms.Timer uses int milliseconds
+    $script:ProgressTimer.Interval = $script:GuiProgressUpdateIntervalMs
     $script:ProgressTimer.Add_Tick({ Update-GuiProgress })
 
     Write-GuiLog "Robocurse GUI initialized"
@@ -10697,10 +10707,10 @@ function Import-ProfileToForm {
     $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
     $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Quick") { 1 } else { 0 }
 
-    # Load chunk settings with defaults for missing properties
-    $maxSize = if ($null -ne $Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB } else { 10 }
-    $maxFiles = if ($null -ne $Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { 50000 }
-    $maxDepth = if ($null -ne $Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { 5 }
+    # Load chunk settings with defaults from module constants
+    $maxSize = if ($null -ne $Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB } else { $script:DefaultMaxChunkSizeBytes / 1GB }
+    $maxFiles = if ($null -ne $Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
+    $maxDepth = if ($null -ne $Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
     $script:Controls.txtMaxSize.Text = $maxSize.ToString()
     $script:Controls.txtMaxFiles.Text = $maxFiles.ToString()
@@ -10768,8 +10778,8 @@ function Save-ProfileFromForm {
         }
     } catch {
         $originalText = $script:Controls.txtMaxFiles.Text
-        $selected.ChunkMaxFiles = 50000
-        & $showInputCorrected $script:Controls.txtMaxFiles $originalText 50000 "Max Files"
+        $selected.ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
+        & $showInputCorrected $script:Controls.txtMaxFiles $originalText $script:DefaultMaxFilesPerChunk "Max Files"
     }
 
     # ChunkMaxDepth: valid range 1-20
@@ -10781,8 +10791,8 @@ function Save-ProfileFromForm {
         }
     } catch {
         $originalText = $script:Controls.txtMaxDepth.Text
-        $selected.ChunkMaxDepth = 5
-        & $showInputCorrected $script:Controls.txtMaxDepth $originalText 5 "Max Depth"
+        $selected.ChunkMaxDepth = $script:DefaultMaxChunkDepth
+        & $showInputCorrected $script:Controls.txtMaxDepth $originalText $script:DefaultMaxChunkDepth "Max Depth"
     }
 
     # Refresh list display
@@ -10810,9 +10820,9 @@ function Add-NewProfile {
         Enabled = $true
         UseVSS = $false
         ScanMode = "Smart"
-        ChunkMaxSizeGB = 10
-        ChunkMaxFiles = 50000
-        ChunkMaxDepth = 5
+        ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
+        ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
+        ChunkMaxDepth = $script:DefaultMaxChunkDepth
     }
 
     # Add to config
@@ -11076,6 +11086,7 @@ function New-ReplicationRunspace {
                 Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
                 # Run the orchestration loop until complete
+                # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
                 while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
                     Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
                     Start-Sleep -Milliseconds 250
@@ -11153,6 +11164,7 @@ function New-ReplicationRunspace {
                 Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
                 # Run the orchestration loop until complete
+                # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
                 while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
                     Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
                     Start-Sleep -Milliseconds 250

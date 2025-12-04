@@ -25,7 +25,11 @@
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; .\\build\\Build-Robocurse.ps1 && Invoke-Pester -Path tests\\Unit\\GUI.Tests.ps1 -Output Detailed\")",
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; Invoke-Pester -Path tests\\Unit\\GUI.Tests.ps1 -Output Detailed\")",
       "Bash(ls:*)",
-      "Bash(xargs:*)"
+      "Bash(xargs:*)",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; Invoke-Pester -Path tests\\Unit\\Orchestration.Tests.ps1 -Output Detailed\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''''; Invoke-Pester -Path tests\\Unit\\Orchestration.Tests.ps1 -Output Detailed\")",
+      "Bash(Select-Object -Last 30)",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; (Invoke-Pester -Path tests\\Unit\\Orchestration.Tests.ps1 -Output Detailed *>&1) | Select-Object -Last 15\")"
     ],
     "deny": [],
     "ask": []
