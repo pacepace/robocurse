@@ -358,6 +358,9 @@ function Invoke-LogRotation {
         Compress logs older than this (default: 7)
     .PARAMETER DeleteAfterDays
         Delete logs older than this (default: 30)
+    .PARAMETER TimeoutSeconds
+        Max time to spend on each compression operation (default: 60)
+        Prevents hanging on locked files or unresponsive network shares
     #>
     [CmdletBinding()]
     param(
@@ -365,7 +368,9 @@ function Invoke-LogRotation {
         [ValidateRange(1, 365)]
         [int]$CompressAfterDays = $script:LogCompressAfterDays,
         [ValidateRange(1, 3650)]
-        [int]$DeleteAfterDays = $script:LogDeleteAfterDays
+        [int]$DeleteAfterDays = $script:LogDeleteAfterDays,
+        [ValidateRange(5, 300)]
+        [int]$TimeoutSeconds = 60
     )
 
     if (-not (Test-Path $LogRoot)) {
@@ -413,8 +418,29 @@ function Invoke-LogRotation {
                         continue
                     }
 
-                    # Compress the directory
-                    Compress-Archive -Path $dir.FullName -DestinationPath $zipPath -Force -ErrorAction Stop
+                    # Compress the directory with timeout to prevent hanging on locked files
+                    $compressionJob = Start-Job -ScriptBlock {
+                        param($SourcePath, $DestPath)
+                        Compress-Archive -Path $SourcePath -DestinationPath $DestPath -Force -ErrorAction Stop
+                    } -ArgumentList $dir.FullName, $zipPath
+
+                    $completed = $compressionJob | Wait-Job -Timeout $TimeoutSeconds
+                    if (-not $completed) {
+                        Write-Warning "Compression timeout for $($dir.Name) after $TimeoutSeconds seconds - skipping (file may be locked)"
+                        $compressionJob | Stop-Job -PassThru | Remove-Job -Force
+                        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+                        continue
+                    }
+
+                    # Check for job errors
+                    if ($compressionJob.State -eq 'Failed') {
+                        $jobError = $compressionJob | Receive-Job -ErrorAction SilentlyContinue 2>&1
+                        Write-Warning "Compression failed for $($dir.Name): $jobError"
+                        $compressionJob | Remove-Job -Force
+                        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+                        continue
+                    }
+                    $compressionJob | Remove-Job -Force
 
                     # Verify the archive was created successfully and has content
                     if (-not (Test-Path $zipPath)) {

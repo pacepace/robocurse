@@ -358,38 +358,48 @@ Initialize-RobocurseForTesting -UseBuiltMonolith
 ```
 robocurse/
 ├── src/Robocurse/             # SOURCE OF TRUTH - Module files
-│   ├── Robocurse.psd1         # Module manifest
+│   ├── Robocurse.psd1         # Module manifest (141 exported functions)
 │   ├── Robocurse.psm1         # Module loader + constants
-│   ├── Public/                # Exported functions
+│   ├── Public/                # Exported functions (24 .ps1 files)
 │   │   ├── Utility.ps1        # Platform detection, validation, pre-flight checks
 │   │   ├── Configuration.ps1  # Config loading/validation
-│   │   ├── Logging.ps1        # Operational & SIEM logging
+│   │   ├── Logging.ps1        # Operational & SIEM logging (with timeout-protected rotation)
 │   │   ├── DirectoryProfiling.ps1
 │   │   ├── Chunking.ps1       # Directory chunking algorithms
-│   │   ├── Robocopy.ps1       # Robocopy wrapper
+│   │   ├── Robocopy.ps1       # Robocopy wrapper (process handle cleanup)
 │   │   ├── Checkpoint.ps1     # Crash recovery
-│   │   ├── Orchestration.ps1  # Job orchestration (C# interop)
+│   │   ├── Orchestration.ps1  # Job orchestration (C# interop for thread safety)
 │   │   ├── Progress.ps1       # Progress tracking
-│   │   ├── VSS.ps1            # Volume Shadow Copy
+│   │   ├── VssCore.ps1        # VSS core infrastructure (shared retry logic)
+│   │   ├── VssLocal.ps1       # Local VSS snapshot operations
+│   │   ├── VssRemote.ps1      # Remote VSS via PowerShell remoting
 │   │   ├── Email.ps1          # SMTP notifications
 │   │   ├── Scheduling.ps1     # Task Scheduler integration
-│   │   ├── GUI.ps1            # WPF interface
-│   │   └── Main.ps1           # Entry point
+│   │   ├── GuiMain.ps1        # WPF window initialization
+│   │   ├── GuiProgress.ps1    # Progress display and updates
+│   │   ├── GuiReplication.ps1 # Background runspace management
+│   │   ├── GuiProfiles.ps1    # Profile management UI
+│   │   ├── GuiDialogs.ps1     # Dialog helpers
+│   │   ├── GuiSettings.ps1    # Window state persistence
+│   │   ├── GuiResources.ps1   # XAML resource loading
+│   │   └── Main.ps1           # Entry point dispatcher
 │   └── Resources/             # XAML resources
 │       ├── MainWindow.xaml
-│       └── ScheduleDialog.xaml
+│       ├── ScheduleDialog.xaml
+│       └── CompletionDialog.xaml
 ├── build/                     # Build tools
 │   ├── Build-Robocurse.ps1    # Assembles modules into monolith
 │   └── README.md              # Build documentation
 ├── dist/                      # Built artifacts
-│   ├── Robocurse.ps1          # DEPLOYABLE MONOLITH
+│   ├── Robocurse.ps1          # DEPLOYABLE MONOLITH (~12,600 lines)
 │   └── Robocurse.ps1.sha256   # Integrity hash
-├── tests/                     # Test directory
+├── tests/                     # Test directory (900+ test cases)
 │   ├── TestHelper.ps1         # Test loader (uses modules)
 │   ├── Robocurse.Tests.ps1    # Main test suite
-│   ├── Unit/                  # Unit tests (11 files)
-│   └── Integration/           # Integration tests
+│   ├── Unit/                  # Unit tests (14 files)
+│   └── Integration/           # Integration tests (7 files)
 ├── Robocurse.config.json      # Configuration file
+├── CLAUDE.md                  # Development notes
 ├── docs/                      # Documentation
 └── README.md                  # This file
 ```
@@ -498,6 +508,21 @@ Clear-RobocopyPath
 Robocopy uses bit-flag exit codes. Consult the `Get-RobocopyExitMeaning` function for interpretation.
 
 ## Security Considerations
+
+### DEBUG Log Confidentiality
+
+**DEBUG-level logs contain sensitive path information** and should be treated as confidential:
+
+- Full file paths including project/directory names are logged
+- Robocopy command lines with source/destination paths are logged
+- VSS junction paths and shadow copy IDs are logged
+- SIEM logs (JSON Lines format) contain structured path data
+
+**Recommendations:**
+- Restrict access to log files and directories
+- Consider redacting paths if logs are shared externally
+- Use log rotation (built-in) to limit log retention
+- Review logs before sharing for troubleshooting
 
 ### SMTP Credentials
 

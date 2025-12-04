@@ -30,6 +30,49 @@ Output format is `New File [size] [name]` and `New Dir [count] [path]` - parse a
 ## Build Commands
 
 ```powershell
+# Run all tests
 Invoke-Pester -Path tests -PassThru -Output Detailed
+
+# Run specific test file
+Invoke-Pester -Path tests\Unit\Configuration.Tests.ps1 -Output Detailed
+
+# Run only unit tests (faster)
+Invoke-Pester -Path tests\Unit -Output Detailed
+
+# Run with code coverage
+Invoke-Pester -Path tests -CodeCoverage src\Robocurse\Public\*.ps1
+
+# Build monolith
 .\build\Build-Robocurse.ps1
 ```
+
+**Note:** Some integration tests require Windows-specific features (VSS, Task Scheduler) and will skip on non-Windows platforms.
+
+## Logging Security Considerations
+
+**DEBUG logs contain sensitive path information** and should be treated as confidential:
+- Full file paths including project/directory names are logged at DEBUG level
+- Robocopy command lines with source/destination paths are logged
+- VSS junction paths and shadow copy IDs are logged
+
+**Recommendations:**
+- Keep DEBUG-level logs secure and restrict access
+- Consider redacting paths in production environments if logs are shared
+- SIEM logs (JSON Lines format) contain structured path data for auditing
+
+## VSS Retry Logic
+
+Both local and remote VSS operations use the same retry pattern for transient errors:
+
+**Retryable HRESULT codes:**
+- `0x8004230F` - VSS_E_INSUFFICIENT_STORAGE (might clear up)
+- `0x80042316` - VSS_E_SNAPSHOT_SET_IN_PROGRESS (another snapshot in progress)
+- `0x80042302` - VSS_E_OBJECT_NOT_FOUND (transient state)
+- `0x80042317` - VSS_E_MAXIMUM_NUMBER_OF_VOLUMES_REACHED (might clear after cleanup)
+- `0x8004231F` - VSS_E_WRITERERROR_TIMEOUT (writer timeout)
+- `0x80042325` - VSS_E_FLUSH_WRITES_TIMEOUT (flush timeout)
+
+**English fallback patterns** (for errors without HRESULT):
+- `busy`, `timeout`, `lock`, `in use`, `try again`
+
+See `Test-VssErrorRetryable` in VssCore.ps1 for the shared implementation.

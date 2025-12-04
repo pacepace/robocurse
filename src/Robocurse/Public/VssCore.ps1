@@ -6,6 +6,80 @@
 $script:VssTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
 $script:VssTrackingFile = Join-Path $script:VssTempDir "Robocurse-VSS-Tracking.json"
 
+# Shared retryable HRESULT codes for VSS operations (language-independent)
+$script:VssRetryableHResults = @(
+    0x8004230F,  # VSS_E_INSUFFICIENT_STORAGE - Insufficient storage (might clear up)
+    0x80042316,  # VSS_E_SNAPSHOT_SET_IN_PROGRESS - Another snapshot operation in progress
+    0x80042302,  # VSS_E_OBJECT_NOT_FOUND - Object not found (transient state)
+    0x80042317,  # VSS_E_MAXIMUM_NUMBER_OF_VOLUMES_REACHED - Might clear after cleanup
+    0x8004231F,  # VSS_E_WRITERERROR_TIMEOUT - Writer timeout
+    0x80042325   # VSS_E_FLUSH_WRITES_TIMEOUT - Flush timeout
+)
+
+# Shared retryable patterns for VSS errors (English fallback for errors without HRESULT)
+$script:VssRetryablePatterns = @(
+    'busy',
+    'timeout',
+    'lock',
+    'in use',
+    'try again'
+)
+
+function Test-VssErrorRetryable {
+    <#
+    .SYNOPSIS
+        Determines if a VSS error is retryable (transient failure)
+    .DESCRIPTION
+        Checks error messages and HRESULT codes to determine if a VSS operation
+        failure is transient and should be retried. Uses language-independent
+        HRESULT codes where possible, with English pattern fallback.
+
+        Non-retryable errors include: invalid path, permissions, VSS not supported
+        Retryable errors include: VSS busy, lock contention, timeout, storage issues
+    .PARAMETER ErrorMessage
+        The error message string to check
+    .PARAMETER HResult
+        Optional HRESULT code (as integer) to check
+    .OUTPUTS
+        Boolean - $true if the error is retryable, $false otherwise
+    .EXAMPLE
+        if (Test-VssErrorRetryable -ErrorMessage $result.ErrorMessage) {
+            # Retry the operation
+        }
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$ErrorMessage,
+
+        [int]$HResult = 0
+    )
+
+    # Check HRESULT code first (language-independent)
+    if ($HResult -ne 0 -and $HResult -in $script:VssRetryableHResults) {
+        return $true
+    }
+
+    # Check for HRESULT patterns in error message (e.g., "0x8004230F")
+    foreach ($code in $script:VssRetryableHResults) {
+        $hexPattern = "0x{0:X8}" -f $code
+        if ($ErrorMessage -match $hexPattern) {
+            return $true
+        }
+    }
+
+    # Check English fallback patterns
+    foreach ($pattern in $script:VssRetryablePatterns) {
+        if ($ErrorMessage -match $pattern) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Invoke-WithVssTrackingMutex {
     <#
     .SYNOPSIS
@@ -282,7 +356,7 @@ function Add-VssToTracking {
     )
 
     try {
-        Invoke-WithVssTrackingMutex -ScriptBlock {
+        $mutexResult = Invoke-WithVssTrackingMutex -ScriptBlock {
             $tracked = @()
             if (Test-Path $script:VssTrackingFile) {
                 try {
@@ -310,6 +384,12 @@ function Add-VssToTracking {
                 Remove-Item -Path $script:VssTrackingFile -Force
             }
             [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
+            return $true  # Explicit success marker
+        }
+
+        # Handle mutex timeout - null means timeout, snapshot may become orphan
+        if ($null -eq $mutexResult) {
+            Write-RobocurseLog -Message "VSS tracking mutex timeout - snapshot $($SnapshotInfo.ShadowId) may not be tracked (will be cleaned on next startup)" -Level 'Warning' -Component 'VSS'
         }
     }
     catch {
@@ -334,9 +414,9 @@ function Remove-VssFromTracking {
     )
 
     try {
-        Invoke-WithVssTrackingMutex -ScriptBlock {
+        $mutexResult = Invoke-WithVssTrackingMutex -ScriptBlock {
             if (-not (Test-Path $script:VssTrackingFile)) {
-                return
+                return $true  # No file means nothing to remove - success
             }
 
             try {
@@ -348,7 +428,7 @@ function Remove-VssFromTracking {
             catch {
                 # File might be corrupted - just remove it
                 Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
-                return
+                return $true
             }
 
             $tracked = @($tracked | Where-Object { $_.ShadowId -ne $ShadowId })
@@ -364,6 +444,12 @@ function Remove-VssFromTracking {
                 }
                 [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
             }
+            return $true  # Explicit success marker
+        }
+
+        # Handle mutex timeout - null means timeout, tracking file may have stale entry
+        if ($null -eq $mutexResult) {
+            Write-RobocurseLog -Message "VSS tracking mutex timeout - snapshot $ShadowId may remain in tracking file (will be cleaned on next startup)" -Level 'Warning' -Component 'VSS'
         }
     }
     catch {

@@ -746,33 +746,40 @@ function Wait-RobocopyJob {
         [int]$TimeoutSeconds = 0
     )
 
-    # Wait for process to complete
-    if ($TimeoutSeconds -gt 0) {
-        $completed = $Job.Process.WaitForExit($TimeoutSeconds * 1000)
-        if (-not $completed) {
-            $Job.Process.Kill()
-            throw "Robocopy job timed out after $TimeoutSeconds seconds"
+    # Wait for process to complete with proper resource cleanup
+    try {
+        if ($TimeoutSeconds -gt 0) {
+            $completed = $Job.Process.WaitForExit($TimeoutSeconds * 1000)
+            if (-not $completed) {
+                try { $Job.Process.Kill() } catch { }
+                throw "Robocopy job timed out after $TimeoutSeconds seconds"
+            }
+        }
+        else {
+            $Job.Process.WaitForExit()
+        }
+
+        # Calculate duration
+        $duration = [datetime]::Now - $Job.StartTime
+
+        # Get exit code and interpret it
+        $exitCode = $Job.Process.ExitCode
+        $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
+
+        # Parse final statistics from log
+        $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
+
+        return [PSCustomObject]@{
+            ExitCode = $exitCode
+            ExitMeaning = $exitMeaning
+            Duration = $duration
+            Stats = $finalStats
         }
     }
-    else {
-        $Job.Process.WaitForExit()
-    }
-
-    # Calculate duration
-    $duration = [datetime]::Now - $Job.StartTime
-
-    # Get exit code and interpret it
-    $exitCode = $Job.Process.ExitCode
-    $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
-
-    # Parse final statistics from log
-    $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
-
-    return [PSCustomObject]@{
-        ExitCode = $exitCode
-        ExitMeaning = $exitMeaning
-        Duration = $duration
-        Stats = $finalStats
+    finally {
+        # Always dispose process handle to prevent handle leaks
+        # Critical for long-running operations with many jobs
+        try { $Job.Process.Dispose() } catch { }
     }
 }
 

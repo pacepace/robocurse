@@ -274,8 +274,8 @@ function New-RemoteVssSnapshot {
                     $errorCode = "0x{0:X8}" -f $result.ReturnValue
                     $lastError = "Failed to create remote shadow copy: Error $errorCode"
 
-                    # Check if retryable
-                    if ($result.ReturnValue -in @(0x8004230F, 0x80042316)) {
+                    # Check if retryable using shared function (VssCore.ps1)
+                    if (Test-VssErrorRetryable -ErrorMessage $lastError -HResult $result.ReturnValue) {
                         continue  # Retry
                     }
                     return New-OperationResult -Success $false -ErrorMessage $lastError
@@ -439,8 +439,9 @@ function New-RemoteVssJunction {
     $shadowPath = $VssSnapshot.ShadowPath
 
     # Generate junction name if not provided
+    # Use 16-char GUID prefix for better collision resistance in high-concurrency scenarios
     if (-not $JunctionName) {
-        $JunctionName = ".robocurse-vss-$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+        $JunctionName = ".robocurse-vss-$([Guid]::NewGuid().ToString('N').Substring(0,16))"
     }
 
     # Junction will be created inside the share directory

@@ -149,35 +149,10 @@ function New-VssSnapshot {
 
         $lastError = $result.ErrorMessage
 
-        # Check if error is retryable (transient failures)
+        # Check if error is retryable using shared function (VssCore.ps1)
         # Non-retryable: invalid path, permissions, VSS not supported
         # Retryable: VSS busy, lock contention, timeout
-        # Use HRESULT codes for language-independent detection where possible
-        $retryablePatterns = @(
-            # HRESULT codes (language-independent)
-            '0x8004230F',  # VSS_E_INSUFFICIENT_STORAGE - Insufficient storage (might clear up)
-            '0x80042316',  # VSS_E_SNAPSHOT_SET_IN_PROGRESS - Another snapshot operation in progress
-            '0x80042302',  # VSS_E_OBJECT_NOT_FOUND - Object not found (transient state)
-            '0x80042317',  # VSS_E_MAXIMUM_NUMBER_OF_VOLUMES_REACHED - Might clear after cleanup
-            '0x8004231F',  # VSS_E_WRITERERROR_TIMEOUT - Writer timeout
-            '0x80042325',  # VSS_E_FLUSH_WRITES_TIMEOUT - Flush timeout
-            # English fallback patterns (for error messages without HRESULT)
-            'busy',
-            'timeout',
-            'lock',
-            'in use',
-            'try again'
-        )
-
-        $isRetryable = $false
-        foreach ($pattern in $retryablePatterns) {
-            if ($lastError -match $pattern) {
-                $isRetryable = $true
-                break
-            }
-        }
-
-        if (-not $isRetryable) {
+        if (-not (Test-VssErrorRetryable -ErrorMessage $lastError)) {
             Write-RobocurseLog -Message "VSS snapshot failed with non-retryable error: $lastError" -Level 'Error' -Component 'VSS'
             return $result
         }
@@ -463,7 +438,8 @@ function New-VssJunction {
 
     # Generate junction path if not provided
     if (-not $JunctionPath) {
-        $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+        # Use 16-char GUID prefix for better collision resistance in high-concurrency scenarios
+        $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,16))"
         $JunctionPath = Join-Path $env:TEMP $junctionName
     }
 
@@ -629,7 +605,8 @@ function Invoke-WithVssJunction {
         # Step 3: Create junction to VSS path
         $junctionParams = @{ VssPath = $vssPath }
         if ($JunctionRoot) {
-            $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+            # Use 16-char GUID prefix for better collision resistance in high-concurrency scenarios
+        $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,16))"
             $junctionParams.JunctionPath = Join-Path $JunctionRoot $junctionName
         }
 

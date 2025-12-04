@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-04 10:36:23
+    Built: 2025-12-04 11:58:50
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -2153,6 +2153,9 @@ function Invoke-LogRotation {
         Compress logs older than this (default: 7)
     .PARAMETER DeleteAfterDays
         Delete logs older than this (default: 30)
+    .PARAMETER TimeoutSeconds
+        Max time to spend on each compression operation (default: 60)
+        Prevents hanging on locked files or unresponsive network shares
     #>
     [CmdletBinding()]
     param(
@@ -2160,7 +2163,9 @@ function Invoke-LogRotation {
         [ValidateRange(1, 365)]
         [int]$CompressAfterDays = $script:LogCompressAfterDays,
         [ValidateRange(1, 3650)]
-        [int]$DeleteAfterDays = $script:LogDeleteAfterDays
+        [int]$DeleteAfterDays = $script:LogDeleteAfterDays,
+        [ValidateRange(5, 300)]
+        [int]$TimeoutSeconds = 60
     )
 
     if (-not (Test-Path $LogRoot)) {
@@ -2208,8 +2213,29 @@ function Invoke-LogRotation {
                         continue
                     }
 
-                    # Compress the directory
-                    Compress-Archive -Path $dir.FullName -DestinationPath $zipPath -Force -ErrorAction Stop
+                    # Compress the directory with timeout to prevent hanging on locked files
+                    $compressionJob = Start-Job -ScriptBlock {
+                        param($SourcePath, $DestPath)
+                        Compress-Archive -Path $SourcePath -DestinationPath $DestPath -Force -ErrorAction Stop
+                    } -ArgumentList $dir.FullName, $zipPath
+
+                    $completed = $compressionJob | Wait-Job -Timeout $TimeoutSeconds
+                    if (-not $completed) {
+                        Write-Warning "Compression timeout for $($dir.Name) after $TimeoutSeconds seconds - skipping (file may be locked)"
+                        $compressionJob | Stop-Job -PassThru | Remove-Job -Force
+                        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+                        continue
+                    }
+
+                    # Check for job errors
+                    if ($compressionJob.State -eq 'Failed') {
+                        $jobError = $compressionJob | Receive-Job -ErrorAction SilentlyContinue 2>&1
+                        Write-Warning "Compression failed for $($dir.Name): $jobError"
+                        $compressionJob | Remove-Job -Force
+                        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+                        continue
+                    }
+                    $compressionJob | Remove-Job -Force
 
                     # Verify the archive was created successfully and has content
                     if (-not (Test-Path $zipPath)) {
@@ -4118,33 +4144,40 @@ function Wait-RobocopyJob {
         [int]$TimeoutSeconds = 0
     )
 
-    # Wait for process to complete
-    if ($TimeoutSeconds -gt 0) {
-        $completed = $Job.Process.WaitForExit($TimeoutSeconds * 1000)
-        if (-not $completed) {
-            $Job.Process.Kill()
-            throw "Robocopy job timed out after $TimeoutSeconds seconds"
+    # Wait for process to complete with proper resource cleanup
+    try {
+        if ($TimeoutSeconds -gt 0) {
+            $completed = $Job.Process.WaitForExit($TimeoutSeconds * 1000)
+            if (-not $completed) {
+                try { $Job.Process.Kill() } catch { }
+                throw "Robocopy job timed out after $TimeoutSeconds seconds"
+            }
+        }
+        else {
+            $Job.Process.WaitForExit()
+        }
+
+        # Calculate duration
+        $duration = [datetime]::Now - $Job.StartTime
+
+        # Get exit code and interpret it
+        $exitCode = $Job.Process.ExitCode
+        $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
+
+        # Parse final statistics from log
+        $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
+
+        return [PSCustomObject]@{
+            ExitCode = $exitCode
+            ExitMeaning = $exitMeaning
+            Duration = $duration
+            Stats = $finalStats
         }
     }
-    else {
-        $Job.Process.WaitForExit()
-    }
-
-    # Calculate duration
-    $duration = [datetime]::Now - $Job.StartTime
-
-    # Get exit code and interpret it
-    $exitCode = $Job.Process.ExitCode
-    $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
-
-    # Parse final statistics from log
-    $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
-
-    return [PSCustomObject]@{
-        ExitCode = $exitCode
-        ExitMeaning = $exitMeaning
-        Duration = $duration
-        Stats = $finalStats
+    finally {
+        # Always dispose process handle to prevent handle leaks
+        # Critical for long-running operations with many jobs
+        try { $Job.Process.Dispose() } catch { }
     }
 }
 
@@ -6488,12 +6521,88 @@ function Get-ETAEstimate {
 
 #endregion
 
-#region ==================== VSS ====================
+#region ==================== VSSCORE ====================
+
+# Shared infrastructure for both local and remote VSS operations
 
 # Path to track active VSS snapshots (for orphan cleanup)
 # Handle cross-platform: TEMP on Windows, TMPDIR on macOS, /tmp fallback
 $script:VssTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
 $script:VssTrackingFile = Join-Path $script:VssTempDir "Robocurse-VSS-Tracking.json"
+
+# Shared retryable HRESULT codes for VSS operations (language-independent)
+$script:VssRetryableHResults = @(
+    0x8004230F,  # VSS_E_INSUFFICIENT_STORAGE - Insufficient storage (might clear up)
+    0x80042316,  # VSS_E_SNAPSHOT_SET_IN_PROGRESS - Another snapshot operation in progress
+    0x80042302,  # VSS_E_OBJECT_NOT_FOUND - Object not found (transient state)
+    0x80042317,  # VSS_E_MAXIMUM_NUMBER_OF_VOLUMES_REACHED - Might clear after cleanup
+    0x8004231F,  # VSS_E_WRITERERROR_TIMEOUT - Writer timeout
+    0x80042325   # VSS_E_FLUSH_WRITES_TIMEOUT - Flush timeout
+)
+
+# Shared retryable patterns for VSS errors (English fallback for errors without HRESULT)
+$script:VssRetryablePatterns = @(
+    'busy',
+    'timeout',
+    'lock',
+    'in use',
+    'try again'
+)
+
+function Test-VssErrorRetryable {
+    <#
+    .SYNOPSIS
+        Determines if a VSS error is retryable (transient failure)
+    .DESCRIPTION
+        Checks error messages and HRESULT codes to determine if a VSS operation
+        failure is transient and should be retried. Uses language-independent
+        HRESULT codes where possible, with English pattern fallback.
+
+        Non-retryable errors include: invalid path, permissions, VSS not supported
+        Retryable errors include: VSS busy, lock contention, timeout, storage issues
+    .PARAMETER ErrorMessage
+        The error message string to check
+    .PARAMETER HResult
+        Optional HRESULT code (as integer) to check
+    .OUTPUTS
+        Boolean - $true if the error is retryable, $false otherwise
+    .EXAMPLE
+        if (Test-VssErrorRetryable -ErrorMessage $result.ErrorMessage) {
+            # Retry the operation
+        }
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$ErrorMessage,
+
+        [int]$HResult = 0
+    )
+
+    # Check HRESULT code first (language-independent)
+    if ($HResult -ne 0 -and $HResult -in $script:VssRetryableHResults) {
+        return $true
+    }
+
+    # Check for HRESULT patterns in error message (e.g., "0x8004230F")
+    foreach ($code in $script:VssRetryableHResults) {
+        $hexPattern = "0x{0:X8}" -f $code
+        if ($ErrorMessage -match $hexPattern) {
+            return $true
+        }
+    }
+
+    # Check English fallback patterns
+    foreach ($pattern in $script:VssRetryablePatterns) {
+        if ($ErrorMessage -match $pattern) {
+            return $true
+        }
+    }
+
+    return $false
+}
 
 function Invoke-WithVssTrackingMutex {
     <#
@@ -6754,6 +6863,253 @@ function Test-VssStorageQuota {
     }
 }
 
+function Add-VssToTracking {
+    <#
+    .SYNOPSIS
+        Adds a VSS snapshot to the tracking file
+    .DESCRIPTION
+        Uses a mutex to prevent race conditions when multiple processes
+        access the tracking file concurrently.
+    .PARAMETER SnapshotInfo
+        Snapshot info object with ShadowId
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$SnapshotInfo
+    )
+
+    try {
+        $mutexResult = Invoke-WithVssTrackingMutex -ScriptBlock {
+            $tracked = @()
+            if (Test-Path $script:VssTrackingFile) {
+                try {
+                    # Note: Don't wrap ConvertFrom-Json in @() with pipeline - PS 5.1 unwraps arrays
+                    # Assign first, then wrap to preserve array structure
+                    $parsedJson = Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json
+                    $tracked = @($parsedJson)
+                }
+                catch {
+                    # File might be corrupted or empty - start fresh
+                    $tracked = @()
+                }
+            }
+
+            $tracked += [PSCustomObject]@{
+                ShadowId = $SnapshotInfo.ShadowId
+                SourceVolume = $SnapshotInfo.SourceVolume
+                CreatedAt = $SnapshotInfo.CreatedAt.ToString('o')
+            }
+
+            # Atomic write: temp file then rename to prevent corruption on crash
+            $tempPath = "$($script:VssTrackingFile).tmp"
+            ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
+            if (Test-Path $script:VssTrackingFile) {
+                Remove-Item -Path $script:VssTrackingFile -Force
+            }
+            [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
+            return $true  # Explicit success marker
+        }
+
+        # Handle mutex timeout - null means timeout, snapshot may become orphan
+        if ($null -eq $mutexResult) {
+            Write-RobocurseLog -Message "VSS tracking mutex timeout - snapshot $($SnapshotInfo.ShadowId) may not be tracked (will be cleaned on next startup)" -Level 'Warning' -Component 'VSS'
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to add VSS to tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+    }
+}
+
+function Remove-VssFromTracking {
+    <#
+    .SYNOPSIS
+        Removes a VSS snapshot from the tracking file
+    .DESCRIPTION
+        Uses a mutex to prevent race conditions when multiple processes
+        access the tracking file concurrently.
+    .PARAMETER ShadowId
+        Shadow ID to remove
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ShadowId
+    )
+
+    try {
+        $mutexResult = Invoke-WithVssTrackingMutex -ScriptBlock {
+            if (-not (Test-Path $script:VssTrackingFile)) {
+                return $true  # No file means nothing to remove - success
+            }
+
+            try {
+                # Note: Don't wrap ConvertFrom-Json in @() with pipeline - PS 5.1 unwraps arrays
+                # Assign first, then wrap to preserve array structure
+                $parsedJson = Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json
+                $tracked = @($parsedJson)
+            }
+            catch {
+                # File might be corrupted - just remove it
+                Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+                return $true
+            }
+
+            $tracked = @($tracked | Where-Object { $_.ShadowId -ne $ShadowId })
+
+            if ($tracked.Count -eq 0) {
+                Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+            } else {
+                # Atomic write: temp file then rename to prevent corruption on crash
+                $tempPath = "$($script:VssTrackingFile).tmp"
+                ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
+                if (Test-Path $script:VssTrackingFile) {
+                    Remove-Item -Path $script:VssTrackingFile -Force
+                }
+                [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
+            }
+            return $true  # Explicit success marker
+        }
+
+        # Handle mutex timeout - null means timeout, tracking file may have stale entry
+        if ($null -eq $mutexResult) {
+            Write-RobocurseLog -Message "VSS tracking mutex timeout - snapshot $ShadowId may remain in tracking file (will be cleaned on next startup)" -Level 'Warning' -Component 'VSS'
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to remove VSS from tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
+    }
+}
+
+function Get-VolumeFromPath {
+    <#
+    .SYNOPSIS
+        Extracts the volume from a path
+    .DESCRIPTION
+        Parses a path and returns the volume (e.g., "C:", "D:").
+        Returns $null for UNC paths as VSS must be created on the file server.
+    .PARAMETER Path
+        Local path (C:\...) or UNC path (\\server\share\...)
+    .OUTPUTS
+        Volume string (C:, D:, etc.) or $null for UNC paths
+    .EXAMPLE
+        Get-VolumeFromPath -Path "C:\Users\John"
+        Returns: "C:"
+    .EXAMPLE
+        Get-VolumeFromPath -Path "\\server\share\folder"
+        Returns: $null
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    # Match drive letter (case-insensitive)
+    if ($Path -match '^([A-Za-z]:)') {
+        return $Matches[1].ToUpper()
+    }
+    elseif ($Path -match '^\\\\') {
+        # UNC path - VSS must be created on the server
+        Write-RobocurseLog -Message "UNC path detected: $Path. VSS not supported for remote paths." -Level 'Debug' -Component 'VSS'
+        return $null
+    }
+
+    Write-RobocurseLog -Message "Unable to determine volume from path: $Path" -Level 'Warning' -Component 'VSS'
+    return $null
+}
+
+function Get-VssPath {
+    <#
+    .SYNOPSIS
+        Converts a regular path to its VSS shadow copy equivalent
+    .DESCRIPTION
+        Translates a path from the original volume to the shadow copy volume.
+        Example: C:\Users\John\Documents -> \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
+
+        Supports two calling conventions:
+        1. With VssSnapshot object (preferred):
+           Get-VssPath -OriginalPath "C:\Users" -VssSnapshot $snapshot
+        2. With individual parameters (legacy/testing):
+           Get-VssPath -OriginalPath "C:\Users" -ShadowPath "\\?\..." -SourceVolume "C:"
+    .PARAMETER OriginalPath
+        Original path (e.g., C:\Users\John\Documents)
+    .PARAMETER VssSnapshot
+        VSS snapshot object from New-VssSnapshot (contains ShadowPath and SourceVolume)
+    .PARAMETER ShadowPath
+        VSS shadow path (e.g., \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1)
+        Only required if VssSnapshot is not provided.
+    .PARAMETER SourceVolume
+        Source volume (e.g., C:)
+        Only required if VssSnapshot is not provided.
+    .OUTPUTS
+        Converted path pointing to shadow copy
+    .EXAMPLE
+        Get-VssPath -OriginalPath "C:\Users\John\Documents" -VssSnapshot $snapshot
+        Returns: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
+    .EXAMPLE
+        Get-VssPath -OriginalPath "C:\Users\John\Documents" `
+                    -ShadowPath "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1" `
+                    -SourceVolume "C:"
+        Returns: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$OriginalPath,
+
+        [Parameter(Mandatory, ParameterSetName = 'VssSnapshot')]
+        [PSCustomObject]$VssSnapshot,
+
+        [Parameter(Mandatory, ParameterSetName = 'Individual')]
+        [string]$ShadowPath,
+
+        [Parameter(Mandatory, ParameterSetName = 'Individual')]
+        [string]$SourceVolume
+    )
+
+    # Extract values from VssSnapshot if provided
+    if ($PSCmdlet.ParameterSetName -eq 'VssSnapshot') {
+        $ShadowPath = $VssSnapshot.ShadowPath
+        $SourceVolume = $VssSnapshot.SourceVolume
+    }
+
+    # Ensure SourceVolume ends with colon (C:)
+    $volumePrefix = $SourceVolume.TrimEnd('\', '/')
+    if (-not $volumePrefix.EndsWith(':')) {
+        $volumePrefix += ':'
+    }
+
+    # Extract the relative path after the volume
+    # C:\Users\John\Documents -> \Users\John\Documents
+    $relativePath = $OriginalPath.Substring($volumePrefix.Length)
+
+    # Remove leading backslash if present
+    $relativePath = $relativePath.TrimStart('\', '/')
+
+    # Combine shadow path with relative path
+    # Use string concatenation instead of Join-Path for compatibility with \\?\ style paths
+    $shadowPathNormalized = $ShadowPath.TrimEnd('\', '/')
+    if ($relativePath) {
+        $vssPath = "$shadowPathNormalized\$relativePath"
+    }
+    else {
+        # Root directory case (e.g., C:\)
+        $vssPath = $shadowPathNormalized
+    }
+
+    Write-RobocurseLog -Message "Translated path: $OriginalPath -> $vssPath" -Level 'Debug' -Component 'VSS'
+
+    return $vssPath
+}
+
+#endregion
+
+#region ==================== VSSLOCAL ====================
+
+# Local VSS snapshot and junction operations
+# Requires VssCore.ps1 to be loaded first (handled by Robocurse.psm1)
+
 function Clear-OrphanVssSnapshots {
     <#
     .SYNOPSIS
@@ -6808,150 +7164,6 @@ function Clear-OrphanVssSnapshots {
     }
 
     return $cleaned
-}
-
-function Add-VssToTracking {
-    <#
-    .SYNOPSIS
-        Adds a VSS snapshot to the tracking file
-    .DESCRIPTION
-        Uses a mutex to prevent race conditions when multiple processes
-        access the tracking file concurrently.
-    .PARAMETER SnapshotInfo
-        Snapshot info object with ShadowId
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject]$SnapshotInfo
-    )
-
-    try {
-        Invoke-WithVssTrackingMutex -ScriptBlock {
-            $tracked = @()
-            if (Test-Path $script:VssTrackingFile) {
-                try {
-                    # Note: Don't wrap ConvertFrom-Json in @() with pipeline - PS 5.1 unwraps arrays
-                    # Assign first, then wrap to preserve array structure
-                    $parsedJson = Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json
-                    $tracked = @($parsedJson)
-                }
-                catch {
-                    # File might be corrupted or empty - start fresh
-                    $tracked = @()
-                }
-            }
-
-            $tracked += [PSCustomObject]@{
-                ShadowId = $SnapshotInfo.ShadowId
-                SourceVolume = $SnapshotInfo.SourceVolume
-                CreatedAt = $SnapshotInfo.CreatedAt.ToString('o')
-            }
-
-            # Atomic write: temp file then rename to prevent corruption on crash
-            $tempPath = "$($script:VssTrackingFile).tmp"
-            ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
-            if (Test-Path $script:VssTrackingFile) {
-                Remove-Item -Path $script:VssTrackingFile -Force
-            }
-            [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
-        }
-    }
-    catch {
-        Write-RobocurseLog -Message "Failed to add VSS to tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
-    }
-}
-
-function Remove-VssFromTracking {
-    <#
-    .SYNOPSIS
-        Removes a VSS snapshot from the tracking file
-    .DESCRIPTION
-        Uses a mutex to prevent race conditions when multiple processes
-        access the tracking file concurrently.
-    .PARAMETER ShadowId
-        Shadow ID to remove
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$ShadowId
-    )
-
-    try {
-        Invoke-WithVssTrackingMutex -ScriptBlock {
-            if (-not (Test-Path $script:VssTrackingFile)) {
-                return
-            }
-
-            try {
-                # Note: Don't wrap ConvertFrom-Json in @() with pipeline - PS 5.1 unwraps arrays
-                # Assign first, then wrap to preserve array structure
-                $parsedJson = Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json
-                $tracked = @($parsedJson)
-            }
-            catch {
-                # File might be corrupted - just remove it
-                Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
-                return
-            }
-
-            $tracked = @($tracked | Where-Object { $_.ShadowId -ne $ShadowId })
-
-            if ($tracked.Count -eq 0) {
-                Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
-            } else {
-                # Atomic write: temp file then rename to prevent corruption on crash
-                $tempPath = "$($script:VssTrackingFile).tmp"
-                ConvertTo-Json -InputObject $tracked -Depth 5 | Set-Content $tempPath -Encoding UTF8
-                if (Test-Path $script:VssTrackingFile) {
-                    Remove-Item -Path $script:VssTrackingFile -Force
-                }
-                [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
-            }
-        }
-    }
-    catch {
-        Write-RobocurseLog -Message "Failed to remove VSS from tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
-    }
-}
-
-function Get-VolumeFromPath {
-    <#
-    .SYNOPSIS
-        Extracts the volume from a path
-    .DESCRIPTION
-        Parses a path and returns the volume (e.g., "C:", "D:").
-        Returns $null for UNC paths as VSS must be created on the file server.
-    .PARAMETER Path
-        Local path (C:\...) or UNC path (\\server\share\...)
-    .OUTPUTS
-        Volume string (C:, D:, etc.) or $null for UNC paths
-    .EXAMPLE
-        Get-VolumeFromPath -Path "C:\Users\John"
-        Returns: "C:"
-    .EXAMPLE
-        Get-VolumeFromPath -Path "\\server\share\folder"
-        Returns: $null
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path
-    )
-
-    # Match drive letter (case-insensitive)
-    if ($Path -match '^([A-Za-z]:)') {
-        return $Matches[1].ToUpper()
-    }
-    elseif ($Path -match '^\\\\') {
-        # UNC path - VSS must be created on the server
-        Write-RobocurseLog -Message "UNC path detected: $Path. VSS not supported for remote paths." -Level 'Debug' -Component 'VSS'
-        return $null
-    }
-
-    Write-RobocurseLog -Message "Unable to determine volume from path: $Path" -Level 'Warning' -Component 'VSS'
-    return $null
 }
 
 function New-VssSnapshot {
@@ -7045,35 +7257,10 @@ function New-VssSnapshot {
 
         $lastError = $result.ErrorMessage
 
-        # Check if error is retryable (transient failures)
+        # Check if error is retryable using shared function (VssCore.ps1)
         # Non-retryable: invalid path, permissions, VSS not supported
         # Retryable: VSS busy, lock contention, timeout
-        # Use HRESULT codes for language-independent detection where possible
-        $retryablePatterns = @(
-            # HRESULT codes (language-independent)
-            '0x8004230F',  # VSS_E_INSUFFICIENT_STORAGE - Insufficient storage (might clear up)
-            '0x80042316',  # VSS_E_SNAPSHOT_SET_IN_PROGRESS - Another snapshot operation in progress
-            '0x80042302',  # VSS_E_OBJECT_NOT_FOUND - Object not found (transient state)
-            '0x80042317',  # VSS_E_MAXIMUM_NUMBER_OF_VOLUMES_REACHED - Might clear after cleanup
-            '0x8004231F',  # VSS_E_WRITERERROR_TIMEOUT - Writer timeout
-            '0x80042325',  # VSS_E_FLUSH_WRITES_TIMEOUT - Flush timeout
-            # English fallback patterns (for error messages without HRESULT)
-            'busy',
-            'timeout',
-            'lock',
-            'in use',
-            'try again'
-        )
-
-        $isRetryable = $false
-        foreach ($pattern in $retryablePatterns) {
-            if ($lastError -match $pattern) {
-                $isRetryable = $true
-                break
-            }
-        }
-
-        if (-not $isRetryable) {
+        if (-not (Test-VssErrorRetryable -ErrorMessage $lastError)) {
             Write-RobocurseLog -Message "VSS snapshot failed with non-retryable error: $lastError" -Level 'Error' -Component 'VSS'
             return $result
         }
@@ -7206,90 +7393,6 @@ function Remove-VssSnapshot {
         Write-RobocurseLog -Message "Error deleting VSS snapshot $ShadowId : $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
         return New-OperationResult -Success $false -ErrorMessage "Failed to delete VSS snapshot '$ShadowId': $($_.Exception.Message)" -ErrorRecord $_
     }
-}
-
-function Get-VssPath {
-    <#
-    .SYNOPSIS
-        Converts a regular path to its VSS shadow copy equivalent
-    .DESCRIPTION
-        Translates a path from the original volume to the shadow copy volume.
-        Example: C:\Users\John\Documents -> \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
-
-        Supports two calling conventions:
-        1. With VssSnapshot object (preferred):
-           Get-VssPath -OriginalPath "C:\Users" -VssSnapshot $snapshot
-        2. With individual parameters (legacy/testing):
-           Get-VssPath -OriginalPath "C:\Users" -ShadowPath "\\?\..." -SourceVolume "C:"
-    .PARAMETER OriginalPath
-        Original path (e.g., C:\Users\John\Documents)
-    .PARAMETER VssSnapshot
-        VSS snapshot object from New-VssSnapshot (contains ShadowPath and SourceVolume)
-    .PARAMETER ShadowPath
-        VSS shadow path (e.g., \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1)
-        Only required if VssSnapshot is not provided.
-    .PARAMETER SourceVolume
-        Source volume (e.g., C:)
-        Only required if VssSnapshot is not provided.
-    .OUTPUTS
-        Converted path pointing to shadow copy
-    .EXAMPLE
-        Get-VssPath -OriginalPath "C:\Users\John\Documents" -VssSnapshot $snapshot
-        Returns: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
-    .EXAMPLE
-        Get-VssPath -OriginalPath "C:\Users\John\Documents" `
-                    -ShadowPath "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1" `
-                    -SourceVolume "C:"
-        Returns: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$OriginalPath,
-
-        [Parameter(Mandatory, ParameterSetName = 'VssSnapshot')]
-        [PSCustomObject]$VssSnapshot,
-
-        [Parameter(Mandatory, ParameterSetName = 'Individual')]
-        [string]$ShadowPath,
-
-        [Parameter(Mandatory, ParameterSetName = 'Individual')]
-        [string]$SourceVolume
-    )
-
-    # Extract values from VssSnapshot if provided
-    if ($PSCmdlet.ParameterSetName -eq 'VssSnapshot') {
-        $ShadowPath = $VssSnapshot.ShadowPath
-        $SourceVolume = $VssSnapshot.SourceVolume
-    }
-
-    # Ensure SourceVolume ends with colon (C:)
-    $volumePrefix = $SourceVolume.TrimEnd('\', '/')
-    if (-not $volumePrefix.EndsWith(':')) {
-        $volumePrefix += ':'
-    }
-
-    # Extract the relative path after the volume
-    # C:\Users\John\Documents -> \Users\John\Documents
-    $relativePath = $OriginalPath.Substring($volumePrefix.Length)
-
-    # Remove leading backslash if present
-    $relativePath = $relativePath.TrimStart('\', '/')
-
-    # Combine shadow path with relative path
-    # Use string concatenation instead of Join-Path for compatibility with \\?\ style paths
-    $shadowPathNormalized = $ShadowPath.TrimEnd('\', '/')
-    if ($relativePath) {
-        $vssPath = "$shadowPathNormalized\$relativePath"
-    }
-    else {
-        # Root directory case (e.g., C:\)
-        $vssPath = $shadowPathNormalized
-    }
-
-    Write-RobocurseLog -Message "Translated path: $OriginalPath -> $vssPath" -Level 'Debug' -Component 'VSS'
-
-    return $vssPath
 }
 
 function Test-VssSupported {
@@ -7443,7 +7546,8 @@ function New-VssJunction {
 
     # Generate junction path if not provided
     if (-not $JunctionPath) {
-        $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+        # Use 16-char GUID prefix for better collision resistance in high-concurrency scenarios
+        $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,16))"
         $JunctionPath = Join-Path $env:TEMP $junctionName
     }
 
@@ -7609,7 +7713,8 @@ function Invoke-WithVssJunction {
         # Step 3: Create junction to VSS path
         $junctionParams = @{ VssPath = $vssPath }
         if ($JunctionRoot) {
-            $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+            # Use 16-char GUID prefix for better collision resistance in high-concurrency scenarios
+        $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,16))"
             $junctionParams.JunctionPath = Join-Path $JunctionRoot $junctionName
         }
 
@@ -7656,8 +7761,12 @@ function Invoke-WithVssJunction {
     }
 }
 
+#endregion
 
-#region Remote VSS Functions
+#region ==================== VSSREMOTE ====================
+
+# Remote VSS operations via UNC paths and CIM sessions
+# Requires VssCore.ps1 to be loaded first (handled by Robocurse.psm1)
 
 function Get-UncPathComponents {
     <#
@@ -7931,8 +8040,8 @@ function New-RemoteVssSnapshot {
                     $errorCode = "0x{0:X8}" -f $result.ReturnValue
                     $lastError = "Failed to create remote shadow copy: Error $errorCode"
 
-                    # Check if retryable
-                    if ($result.ReturnValue -in @(0x8004230F, 0x80042316)) {
+                    # Check if retryable using shared function (VssCore.ps1)
+                    if (Test-VssErrorRetryable -ErrorMessage $lastError -HResult $result.ReturnValue) {
                         continue  # Retry
                     }
                     return New-OperationResult -Success $false -ErrorMessage $lastError
@@ -8096,8 +8205,9 @@ function New-RemoteVssJunction {
     $shadowPath = $VssSnapshot.ShadowPath
 
     # Generate junction name if not provided
+    # Use 16-char GUID prefix for better collision resistance in high-concurrency scenarios
     if (-not $JunctionName) {
-        $JunctionName = ".robocurse-vss-$([Guid]::NewGuid().ToString('N').Substring(0,8))"
+        $JunctionName = ".robocurse-vss-$([Guid]::NewGuid().ToString('N').Substring(0,16))"
     }
 
     # Junction will be created inside the share directory
@@ -8397,8 +8507,6 @@ function Invoke-WithRemoteVssJunction {
         }
     }
 }
-
-#endregion Remote VSS Functions
 
 #endregion
 
