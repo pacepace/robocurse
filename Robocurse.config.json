@@ -1,145 +1,146 @@
 ﻿{
-    "version":  "1.0",
-    "profiles":  {
-                     "DailyBackup-Server1":  {
-                                                 "description":  "Daily incremental backup of file server 1",
-                                                 "enabled":  true,
-                                                 "source":  {
-                                                                "path":  "\\\\FILESERVER01\\Share1",
-                                                                "useVss":  true
-                                                            },
-                                                 "destination":  {
-                                                                     "path":  "\\\\BACKUPSERVER\\Backups\\Server1"
-                                                                 },
-                                                 "chunking":  {
-                                                                  "maxChunkSizeGB":  10,
-                                                                  "maxFiles":  50000,
-                                                                  "maxDepthToScan":  5,
-                                                                  "strategy":  "auto"
-                                                              },
-                                                 "robocopy":  {
-                                                                  "switches":  [
-                                                                                   "/MIR",
-                                                                                   "/COPYALL",
-                                                                                   "/DCOPY:DAT",
-                                                                                   "/R:3",
-                                                                                   "/W:10",
-                                                                                   "/MT:8",
-                                                                                   "/XO",
-                                                                                   "/NP",
-                                                                                   "/NFL",
-                                                                                   "/NDL"
-                                                                               ],
-                                                                  "excludeFiles":  [
-                                                                                       "*.tmp",
-                                                                                       "*.temp",
-                                                                                       "~*"
-                                                                                   ],
-                                                                  "excludeDirs":  [
-                                                                                      "System Volume Information",
-                                                                                      "$RECYCLE.BIN",
-                                                                                      "Temporary Internet Files"
-                                                                                  ]
-                                                              }
-                                             },
-                     "DailyBackup-Server2":  {
-                                                 "description":  "Daily incremental backup of file server 2",
-                                                 "enabled":  true,
-                                                 "source":  {
-                                                                "path":  "\\\\FILESERVER02\\Share2",
-                                                                "useVss":  true
-                                                            },
-                                                 "destination":  {
-                                                                     "path":  "\\\\BACKUPSERVER\\Backups\\Server2"
-                                                                 },
-                                                 "chunking":  {
-                                                                  "maxChunkSizeGB":  100,
-                                                                  "maxFiles":  50000,
-                                                                  "maxDepthToScan":  3,
-                                                                  "strategy":  "auto"
-                                                              },
-                                                 "robocopy":  {
-                                                                  "switches":  [
-                                                                                   "/MIR",
-                                                                                   "/COPYALL",
-                                                                                   "/DCOPY:DAT",
-                                                                                   "/R:3",
-                                                                                   "/W:10",
-                                                                                   "/MT:8",
-                                                                                   "/XO",
-                                                                                   "/NP",
-                                                                                   "/NFL",
-                                                                                   "/NDL"
-                                                                               ],
-                                                                  "excludeFiles":  [
-                                                                                       "*.tmp",
-                                                                                       "*.temp",
-                                                                                       "~*"
-                                                                                   ],
-                                                                  "excludeDirs":  [
-                                                                                      "System Volume Information",
-                                                                                      "$RECYCLE.BIN",
-                                                                                      "Temporary Internet Files"
-                                                                                  ]
-                                                              }
-                                             },
-                     "WeeklyFull":  {
-                                        "description":  "Weekly full backup with verification",
-                                        "enabled":  true,
-                                        "source":  {
-                                                       "path":  "\\\\FILESERVER01\\Share1",
-                                                       "useVss":  true
-                                                   },
-                                        "destination":  {
-                                                            "path":  "E:\\WeeklyBackups"
-                                                        },
-                                        "chunking":  {
-                                                         "maxChunkSizeGB":  200,
-                                                         "maxFiles":  50000,
-                                                         "maxDepthToScan":  4,
-                                                         "strategy":  "auto"
-                                                     },
-                                        "robocopy":  {
-                                                         "switches":  [
-                                                                          "/MIR",
-                                                                          "/COPYALL",
-                                                                          "/DCOPY:DAT",
-                                                                          "/R:5",
-                                                                          "/W:30",
-                                                                          "/MT:16",
-                                                                          "/V",
-                                                                          "/ETA",
-                                                                          "/BYTES"
-                                                                      ]
-                                                     }
-                                    }
-                 },
-    "global":  {
-                   "performance":  {
-                                       "maxConcurrentJobs":  4,
-                                       "throttleNetworkMbps":  0
-                                   },
-                   "logging":  {
-                                   "operationalLog":  {
-                                                          "path":  "C:\\Logs",
-                                                          "rotation":  {
-                                                                           "maxAgeDays":  30
-                                                                       }
-                                                      }
-                               },
-                   "email":  {
-                                 "enabled":  true,
-                                 "smtp":  {
-                                              "server":  "smtp.company.com",
-                                              "port":  587,
-                                              "useSsl":  true,
-                                              "credentialName":  "SMTP-Robocurse"
-                                          },
-                                 "from":  "robocurse@company.com",
-                                 "to":  [
-                                            "backupteam@company.com",
-                                            "admin@company.com"
-                                        ]
-                             }
-               }
+  "version": "1.0",
+  "profiles": {
+    "DailyBackup-Server1": {
+      "description": "Daily incremental backup of file server 1",
+      "enabled": true,
+      "source": {
+        "path": "\\\\FILESERVER01\\Share1",
+        "useVss": true
+      },
+      "destination": {
+        "path": "\\\\BACKUPSERVER\\Backups\\Server1"
+      },
+      "chunking": {
+        "maxChunkSizeGB": 10,
+        "maxFiles": 50000,
+        "maxDepthToScan": 5,
+        "strategy": "auto"
+      },
+      "robocopy": {
+        "switches": [
+          "/MIR",
+          "/COPYALL",
+          "/DCOPY:DAT",
+          "/R:3",
+          "/W:10",
+          "/MT:8",
+          "/XO",
+          "/NP",
+          "/NFL",
+          "/NDL"
+        ],
+        "excludeFiles": [
+          "*.tmp",
+          "*.temp",
+          "~*"
+        ],
+        "excludeDirs": [
+          "System Volume Information",
+          "$RECYCLE.BIN",
+          "Temporary Internet Files"
+        ]
+      }
+    },
+    "DailyBackup-Server2": {
+      "description": "Daily incremental backup of file server 2",
+      "enabled": true,
+      "source": {
+        "path": "\\\\FILESERVER02\\Share2",
+        "useVss": true
+      },
+      "destination": {
+        "path": "\\\\BACKUPSERVER\\Backups\\Server2"
+      },
+      "chunking": {
+        "maxChunkSizeGB": 100,
+        "maxFiles": 50000,
+        "maxDepthToScan": 3,
+        "strategy": "auto"
+      },
+      "robocopy": {
+        "switches": [
+          "/MIR",
+          "/COPYALL",
+          "/DCOPY:DAT",
+          "/R:3",
+          "/W:10",
+          "/MT:8",
+          "/XO",
+          "/NP",
+          "/NFL",
+          "/NDL"
+        ],
+        "excludeFiles": [
+          "*.tmp",
+          "*.temp",
+          "~*"
+        ],
+        "excludeDirs": [
+          "System Volume Information",
+          "$RECYCLE.BIN",
+          "Temporary Internet Files"
+        ]
+      }
+    },
+    "WeeklyFull": {
+      "description": "Weekly full backup with verification",
+      "enabled": true,
+      "source": {
+        "path": "\\\\FILESERVER01\\Share1",
+        "useVss": true
+      },
+      "destination": {
+        "path": "E:\\WeeklyBackups"
+      },
+      "chunking": {
+        "maxChunkSizeGB": 200,
+        "maxFiles": 50000,
+        "maxDepthToScan": 4,
+        "strategy": "auto"
+      },
+      "robocopy": {
+        "switches": [
+          "/MIR",
+          "/COPYALL",
+          "/DCOPY:DAT",
+          "/R:5",
+          "/W:30",
+          "/MT:16",
+          "/V",
+          "/ETA",
+          "/BYTES"
+        ]
+      }
+    }
+  },
+  "global": {
+    "performance": {
+      "maxConcurrentJobs": 4,
+      "throttleNetworkMbps": 0
+    },
+    "logging": {
+      "operationalLog": {
+        "path": "C:\\Logs",
+        "rotation": {
+          "maxAgeDays": 30
+        }
+      },
+      "verboseFileLogging": false
+    },
+    "email": {
+      "enabled": true,
+      "smtp": {
+        "server": "smtp.company.com",
+        "port": 587,
+        "useSsl": true,
+        "credentialName": "SMTP-Robocurse"
+      },
+      "from": "robocurse@company.com",
+      "to": [
+        "backupteam@company.com",
+        "admin@company.com"
+      ]
+    }
+  }
 }

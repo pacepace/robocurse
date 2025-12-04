@@ -56,6 +56,57 @@
             <Setter Property="Foreground" Value="#E0E0E0"/>
             <Setter Property="BorderBrush" Value="#3E3E3E"/>
         </Style>
+
+        <!-- Dark DataGrid Styles -->
+        <Style x:Key="DarkDataGrid" TargetType="DataGrid">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="#3E3E3E"/>
+            <Setter Property="RowHeaderWidth" Value="0"/>
+            <Setter Property="AlternatingRowBackground" Value="#252525"/>
+            <Setter Property="RowBackground" Value="#2D2D2D"/>
+        </Style>
+
+        <Style x:Key="DarkDataGridCell" TargetType="DataGridCell">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="Padding" Value="5,2"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#0078D4"/>
+                    <Setter Property="Foreground" Value="White"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="DarkDataGridRow" TargetType="DataGridRow">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Style.Triggers>
+                <Trigger Property="AlternationIndex" Value="1">
+                    <Setter Property="Background" Value="#252525"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#0078D4"/>
+                    <Setter Property="Foreground" Value="White"/>
+                </Trigger>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#3A3A3A"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="DarkDataGridColumnHeader" TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="#1E1E1E"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            <Setter Property="Padding" Value="8,5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
     </Window.Resources>
 
     <!-- ==================== LAYOUT: Main Grid ==================== -->
@@ -196,9 +247,12 @@
 
             <!-- Chunk DataGrid -->
             <DataGrid Grid.Row="1" x:Name="dgChunks" AutoGenerateColumns="False"
-                      Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
-                      GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#3E3E3E"
-                      RowHeaderWidth="0" IsReadOnly="True" SelectionMode="Single">
+                      Style="{StaticResource DarkDataGrid}"
+                      CellStyle="{StaticResource DarkDataGridCell}"
+                      RowStyle="{StaticResource DarkDataGridRow}"
+                      ColumnHeaderStyle="{StaticResource DarkDataGridColumnHeader}"
+                      AlternationCount="2"
+                      IsReadOnly="True" SelectionMode="Single">
                 <DataGrid.Columns>
                     <DataGridTextColumn Header="ID" Binding="{Binding ChunkId}" Width="50"/>
                     <DataGridTextColumn Header="Path" Binding="{Binding SourcePath}" Width="400"/>
@@ -226,12 +280,14 @@
 
                     <StackPanel Grid.Column="0">
                         <TextBlock x:Name="txtProfileProgress" Text="Profile: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                        <ProgressBar x:Name="pbProfile" Height="20" Background="#3E3E3E" Foreground="#0078D4"/>
+                        <ProgressBar x:Name="pbProfile" Height="20" Minimum="0" Maximum="100" Value="0"
+                                     Background="#1A1A1A" Foreground="#00BFFF" BorderBrush="#555555" BorderThickness="1"/>
                     </StackPanel>
 
                     <StackPanel Grid.Column="1" Margin="20,0,0,0">
                         <TextBlock x:Name="txtOverallProgress" Text="Overall: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                        <ProgressBar x:Name="pbOverall" Height="20" Background="#3E3E3E" Foreground="#4CAF50"/>
+                        <ProgressBar x:Name="pbOverall" Height="20" Minimum="0" Maximum="100" Value="0"
+                                     Background="#1A1A1A" Foreground="#00FF7F" BorderBrush="#555555" BorderThickness="1"/>
                     </StackPanel>
 
                     <StackPanel Grid.Column="2" Margin="20,0,0,0">

@@ -16,7 +16,10 @@
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse; .\\build\\Build-Robocurse.ps1\")",
       "Bash(del \"C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\test-runspace.ps1\")",
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse; Invoke-Pester -Path tests -PassThru -Output Detailed\")",
-      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"robocopy ''D:\\'' ''\\?\\NULL'' /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1 | Select-Object -First 30\")"
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"robocopy ''D:\\'' ''\\?\\NULL'' /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1 | Select-Object -First 30\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"\ncd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode''\nWrite-Host ''=== First run ==='' -ForegroundColor Cyan\n& ''.\\robocurse\\dist\\Robocurse.ps1'' 2>&1 | Select-Object -First 5\n\nWrite-Host ''''\nWrite-Host ''=== Second run ==='' -ForegroundColor Cyan  \n& ''.\\robocurse\\dist\\Robocurse.ps1'' 2>&1 | Select-Object -First 5\n\nWrite-Host ''''\nWrite-Host ''=== Both runs succeeded ==='' -ForegroundColor Green\n\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode''; & ''.\\robocurse\\dist\\Robocurse.ps1'' -Headless -Profile Test 2>&1 | Select-Object -First 50\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode''; & ''.\\robocurse\\dist\\Robocurse.ps1'' -Headless -Profile Test 2>&1 | Select-Object -First 30\")"
     ],
     "deny": [],
     "ask": []

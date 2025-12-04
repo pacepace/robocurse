@@ -1,0 +1,29 @@
+
+-------------------------------------------------------------------------------
+   ROBOCOPY     ::     Robust File Copy for Windows                              
+-------------------------------------------------------------------------------
+
+  Started : Wednesday, December 3, 2025 3:49:43 PM
+   Source = D:\sources\
+     Dest : C:\Users\pace\backups\Test\sources\
+
+    Files : *.*
+	    
+  Options : *.* /BYTES /NDL /NFL /TEE /S /E /DCOPY:T /COPY:DAT /PURGE /MIR /NP /XJF /XJD /LEV:1 /MT:8 /R:3 /W:10 
+
+------------------------------------------------------------------------------
+
+
+------------------------------------------------------------------------------
+
+                Total     Copied   Skipped  Mismatch    FAILED    Extras
+    Dirs :          1          1         1         0         0         0
+   Files :        187        187         0         0         0         0
+   Bytes : 5105569280 5105569280         0         0         0         0
+   Times :    0:00:25    0:00:05                       0:00:00   0:00:03
+
+
+   Speed :            871,406,260 Bytes/sec.
+   Speed :             49,862.266 MegaBytes/min.
+   Ended : Wednesday, December 3, 2025 3:49:52 PM
+

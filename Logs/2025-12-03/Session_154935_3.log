@@ -1,0 +1,227 @@
+﻿2025-12-03 15:49:35 [DEBUG] [General] [Clear-ProfileCache:2659] Cleared profile cache (0 entries removed)
+2025-12-03 15:49:35 [INFO] [Orchestrator] [Initialize-OrchestrationState:5004] Orchestration state initialized: c024a068-cc9d-4c48-9e12-8984adf758c6
+2025-12-03 15:49:35 [DEBUG] [Orchestrator] [Start-ReplicationRun:5119] Using robocopy from: C:\WINDOWS\System32\robocopy.exe
+2025-12-03 15:49:35 [INFO] [Orchestrator] [Start-ReplicationRun:5132] Starting replication run with 1 profile(s)
+2025-12-03 15:49:36 [INFO] [Orchestrator] [Start-ProfileReplication:5221] Starting profile: Test
+2025-12-03 15:49:36 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\
+2025-12-03 15:49:37 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:
+2025-12-03 15:49:37 [DEBUG] [Orchestrator] [Start-ProfileReplication:5274] Chunk settings: MaxSize=1GB, MaxFiles=50000, MaxDepth=5, Mode=Smart
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 0 : D:\
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryProfile:2429] Using cached profile for: D:\
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:3000] Directory too large, recursing into 4 children: D:\
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 1 : D:\boot
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\boot
+2025-12-03 15:49:37 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\boot
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\boot (Size: 17773440, Files: 25)
+2025-12-03 15:49:37 [DEBUG] [General] [New-Chunk:3100] Created chunk #1: D:\boot -> C:\Users\pace\backups\Test\boot (Size: 17773440, Files: 25, FilesOnly: False)
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 1 : D:\efi
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\efi
+2025-12-03 15:49:37 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\efi
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\efi (Size: 22625715, Files: 33)
+2025-12-03 15:49:37 [DEBUG] [General] [New-Chunk:3100] Created chunk #2: D:\efi -> C:\Users\pace\backups\Test\efi (Size: 22625715, Files: 33, FilesOnly: False)
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 1 : D:\sources
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources
+2025-12-03 15:49:37 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:3000] Directory too large, recursing into 16 children: D:\sources
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\_manifest
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\_manifest
+2025-12-03 15:49:37 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\_manifest
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\_manifest (Size: 619315, Files: 3)
+2025-12-03 15:49:37 [DEBUG] [General] [New-Chunk:3100] Created chunk #3: D:\sources\_manifest -> C:\Users\pace\backups\Test\sources\_manifest (Size: 619315, Files: 3, FilesOnly: False)
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\asz
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\asz
+2025-12-03 15:49:37 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\asz
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\asz (Size: 705125, Files: 10)
+2025-12-03 15:49:37 [DEBUG] [General] [New-Chunk:3100] Created chunk #4: D:\sources\asz -> C:\Users\pace\backups\Test\sources\asz (Size: 705125, Files: 10, FilesOnly: False)
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\ca-es
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\ca-es
+2025-12-03 15:49:37 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\ca-es
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\ca-es (Size: 88480, Files: 2)
+2025-12-03 15:49:37 [DEBUG] [General] [New-Chunk:3100] Created chunk #5: D:\sources\ca-es -> C:\Users\pace\backups\Test\sources\ca-es (Size: 88480, Files: 2, FilesOnly: False)
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\dlmanifests
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\dlmanifests
+2025-12-03 15:49:37 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\dlmanifests
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\dlmanifests (Size: 5196949, Files: 161)
+2025-12-03 15:49:37 [DEBUG] [General] [New-Chunk:3100] Created chunk #6: D:\sources\dlmanifests -> C:\Users\pace\backups\Test\sources\dlmanifests (Size: 5196949, Files: 161, FilesOnly: False)
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\en-us
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\en-us
+2025-12-03 15:49:37 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\en-us
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\en-us (Size: 19135602, Files: 50)
+2025-12-03 15:49:37 [DEBUG] [General] [New-Chunk:3100] Created chunk #7: D:\sources\en-us -> C:\Users\pace\backups\Test\sources\en-us (Size: 19135602, Files: 50, FilesOnly: False)
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\etwproviders
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\etwproviders
+2025-12-03 15:49:37 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\etwproviders
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\etwproviders (Size: 241260, Files: 12)
+2025-12-03 15:49:37 [DEBUG] [General] [New-Chunk:3100] Created chunk #8: D:\sources\etwproviders -> C:\Users\pace\backups\Test\sources\etwproviders (Size: 241260, Files: 12, FilesOnly: False)
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\eu-es
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\eu-es
+2025-12-03 15:49:37 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\eu-es
+2025-12-03 15:49:37 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\eu-es (Size: 88480, Files: 2)
+2025-12-03 15:49:37 [DEBUG] [General] [New-Chunk:3100] Created chunk #9: D:\sources\eu-es -> C:\Users\pace\backups\Test\sources\eu-es (Size: 88480, Files: 2, FilesOnly: False)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\gl-es
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\gl-es
+2025-12-03 15:49:38 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\gl-es
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\gl-es (Size: 88504, Files: 2)
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #10: D:\sources\gl-es -> C:\Users\pace\backups\Test\sources\gl-es (Size: 88504, Files: 2, FilesOnly: False)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\id-id
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\id-id
+2025-12-03 15:49:38 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\id-id
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\id-id (Size: 88504, Files: 2)
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #11: D:\sources\id-id -> C:\Users\pace\backups\Test\sources\id-id (Size: 88504, Files: 2, FilesOnly: False)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\inf
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\inf
+2025-12-03 15:49:38 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\inf
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\inf (Size: 3616, Files: 1)
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #12: D:\sources\inf -> C:\Users\pace\backups\Test\sources\inf (Size: 3616, Files: 1, FilesOnly: False)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\miggac
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\miggac
+2025-12-03 15:49:38 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\miggac
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\miggac (Size: 896432, Files: 2)
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #13: D:\sources\miggac -> C:\Users\pace\backups\Test\sources\miggac (Size: 896432, Files: 2, FilesOnly: False)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\migration
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\migration
+2025-12-03 15:49:38 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\migration
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\migration (Size: 35658, Files: 15)
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #14: D:\sources\migration -> C:\Users\pace\backups\Test\sources\migration (Size: 35658, Files: 15, FilesOnly: False)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\replacementmanifests
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\replacementmanifests
+2025-12-03 15:49:38 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\replacementmanifests
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\replacementmanifests (Size: 14816924, Files: 423)
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #15: D:\sources\replacementmanifests -> C:\Users\pace\backups\Test\sources\replacementmanifests (Size: 14816924, Files: 423, FilesOnly: False)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\sxs
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\sxs
+2025-12-03 15:49:38 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\sxs
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\sxs (Size: 71643975, Files: 3)
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #16: D:\sources\sxs -> C:\Users\pace\backups\Test\sources\sxs (Size: 71643975, Files: 3, FilesOnly: False)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\uup
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\uup
+2025-12-03 15:49:38 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\uup
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\uup (Size: 73433, Files: 3)
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #17: D:\sources\uup -> C:\Users\pace\backups\Test\sources\uup (Size: 73433, Files: 3, FilesOnly: False)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 2 : D:\sources\vi-vn
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\sources\vi-vn
+2025-12-03 15:49:38 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\sources\vi-vn
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\sources\vi-vn (Size: 88480, Files: 2)
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #18: D:\sources\vi-vn -> C:\Users\pace\backups\Test\sources\vi-vn (Size: 88480, Files: 2, FilesOnly: False)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:3021] Found 187 files at level: D:\sources
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #19: D:\sources -> C:\Users\pace\backups\Test\sources (Size: 5105569280, Files: 187, FilesOnly: True)
+2025-12-03 15:49:38 [DEBUG] [General] [New-FilesOnlyChunk:3148] Created files-only chunk #19: D:\sources (Files: 187)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2961] Analyzing directory at depth 1 : D:\support
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryProfile:2435] Profiling directory: D:\support
+2025-12-03 15:49:38 [DEBUG] [General] [Set-CachedProfile:2592] Cached profile for: D:\support
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:2968] Directory fits in single chunk: D:\support (Size: 345472, Files: 22)
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #20: D:\support -> C:\Users\pace\backups\Test\support (Size: 345472, Files: 22, FilesOnly: False)
+2025-12-03 15:49:38 [DEBUG] [General] [Get-DirectoryChunks:3021] Found 3 files at level: D:\
+2025-12-03 15:49:38 [DEBUG] [General] [New-Chunk:3100] Created chunk #21: D:\ -> C:\Users\pace\backups\Test (Size: 2710840, Files: 3, FilesOnly: True)
+2025-12-03 15:49:38 [DEBUG] [General] [New-FilesOnlyChunk:3148] Created files-only chunk #21: D:\ (Files: 3)
+2025-12-03 15:49:38 [INFO] [Orchestrator] [Start-ProfileReplication:5321] Profile scan complete: 21 chunks, 4.9 GB
+2025-12-03 15:49:38 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 1: D:\boot
+2025-12-03 15:49:38 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\boot" "C:\Users\pace\backups\Test\boot" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_001.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:38 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 2: D:\efi
+2025-12-03 15:49:38 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\efi" "C:\Users\pace\backups\Test\efi" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_002.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:38 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 3: D:\sources\_manifest
+2025-12-03 15:49:38 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\_manifest" "C:\Users\pace\backups\Test\sources\_manifest" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_003.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:39 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 4: D:\sources\asz
+2025-12-03 15:49:39 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\asz" "C:\Users\pace\backups\Test\sources\asz" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_004.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:39 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_002.log' (585 bytes) - job may still be in progress
+2025-12-03 15:49:39 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=19097880 (completed=0 + active=19097880)
+2025-12-03 15:49:40 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 2 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:40 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 1 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:40 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 4 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:40 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 3 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:40 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 5: D:\sources\ca-es
+2025-12-03 15:49:40 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\ca-es" "C:\Users\pace\backups\Test\sources\ca-es" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_005.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:40 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 6: D:\sources\dlmanifests
+2025-12-03 15:49:40 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\dlmanifests" "C:\Users\pace\backups\Test\sources\dlmanifests" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_006.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:40 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 7: D:\sources\en-us
+2025-12-03 15:49:40 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\en-us" "C:\Users\pace\backups\Test\sources\en-us" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_007.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:40 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 8: D:\sources\etwproviders
+2025-12-03 15:49:40 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\etwproviders" "C:\Users\pace\backups\Test\sources\etwproviders" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_008.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:40 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_005.log' (425 bytes) - job may still be in progress
+2025-12-03 15:49:40 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=41723595 (completed=41723595 + active=0)
+2025-12-03 15:49:40 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 7 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:40 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 6 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:40 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 8 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:40 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 5 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:40 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 9: D:\sources\eu-es
+2025-12-03 15:49:40 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\eu-es" "C:\Users\pace\backups\Test\sources\eu-es" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_009.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:40 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 10: D:\sources\gl-es
+2025-12-03 15:49:40 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\gl-es" "C:\Users\pace\backups\Test\sources\gl-es" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_010.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:40 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 11: D:\sources\id-id
+2025-12-03 15:49:41 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\id-id" "C:\Users\pace\backups\Test\sources\id-id" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_011.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:41 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 12: D:\sources\inf
+2025-12-03 15:49:41 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\inf" "C:\Users\pace\backups\Test\sources\inf" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_012.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:41 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=66651374 (completed=66385886 + active=265488)
+2025-12-03 15:49:41 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 12 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:41 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 9 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:41 [INFO] [Checkpoint] [Save-ReplicationCheckpoint:4423] Checkpoint saved: 10 chunks completed
+2025-12-03 15:49:41 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 10 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:41 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 11 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:41 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 13: D:\sources\miggac
+2025-12-03 15:49:41 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\miggac" "C:\Users\pace\backups\Test\sources\miggac" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_013.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:41 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 14: D:\sources\migration
+2025-12-03 15:49:41 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\migration" "C:\Users\pace\backups\Test\sources\migration" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_014.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:41 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 15: D:\sources\replacementmanifests
+2025-12-03 15:49:41 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\replacementmanifests" "C:\Users\pace\backups\Test\sources\replacementmanifests" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_015.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:42 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 16: D:\sources\sxs
+2025-12-03 15:49:42 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\sxs" "C:\Users\pace\backups\Test\sources\sxs" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_016.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:42 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_015.log' (633 bytes) - job may still be in progress
+2025-12-03 15:49:42 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=67587080 (completed=66654990 + active=932090)
+2025-12-03 15:49:42 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 14 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:42 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 15 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:42 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 16 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:42 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 13 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:42 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 17: D:\sources\uup
+2025-12-03 15:49:42 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\uup" "C:\Users\pace\backups\Test\sources\uup" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_017.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:42 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 18: D:\sources\vi-vn
+2025-12-03 15:49:42 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources\vi-vn" "C:\Users\pace\backups\Test\sources\vi-vn" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_018.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:42 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 19: D:\sources
+2025-12-03 15:49:43 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\sources" "C:\Users\pace\backups\Test\sources" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF /LEV:1
+2025-12-03 15:49:43 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 20: D:\support
+2025-12-03 15:49:43 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\support" "C:\Users\pace\backups\Test\support" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_020.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF
+2025-12-03 15:49:43 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:43 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=154209892 (completed=154047979 + active=161913)
+2025-12-03 15:49:43 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 18 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:43 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 17 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:44 [DEBUG] [Orchestrator] [Start-ChunkJob:5357] Starting chunk 21: D:\
+2025-12-03 15:49:44 [DEBUG] [Robocopy] [Start-RobocopyJob:3736] Robocopy args: "D:\\" "C:\Users\pace\backups\Test" /MIR /COPY:DAT /DCOPY:T /MT:8 /R:3 /W:10 /LOG:"C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_021.log" /TEE /NP /NFL /NDL /BYTES /XJD /XJF /LEV:1
+2025-12-03 15:49:44 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:44 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_020.log' (375 bytes) - job may still be in progress
+2025-12-03 15:49:44 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=154209892 (completed=154209892 + active=0)
+2025-12-03 15:49:44 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_021.log' (582 bytes) - job may still be in progress
+2025-12-03 15:49:44 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:45 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_020.log' (591 bytes) - job may still be in progress
+2025-12-03 15:49:45 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=154209892 (completed=154209892 + active=0)
+2025-12-03 15:49:45 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 21 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:45 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 20 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:45 [INFO] [Checkpoint] [Save-ReplicationCheckpoint:4423] Checkpoint saved: 20 chunks completed
+2025-12-03 15:49:45 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:45 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:46 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:46 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:46 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:46 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:47 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:47 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:48 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:48 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:48 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:48 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:49 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:49 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:49 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:49 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:50 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:50 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:50 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:50 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:51 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:51 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:52 [DEBUG] [Robocopy] [ConvertFrom-RobocopyLog:4029] Could not extract statistics from robocopy log 'C:\Users\pace\pub\dev-wsl\vscode\robocurse\Logs\2025-12-03\Jobs\Chunk_019.log' (598 bytes) - job may still be in progress
+2025-12-03 15:49:52 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=157266204 (completed=157266204 + active=0)
+2025-12-03 15:49:52 [INFO] [Orchestrator] [Complete-RobocopyJob:5603] Chunk 19 completed: Files copied successfully (exit code 1)
+2025-12-03 15:49:52 [INFO] [Orchestrator] [Complete-CurrentProfile:5780] Profile complete: Test in 00:00:16
+2025-12-03 15:49:52 [DEBUG] [Checkpoint] [Remove-ReplicationCheckpoint:4494] Checkpoint file removed (replication complete)
+2025-12-03 15:49:52 [DEBUG] [Health] [Remove-HealthCheckStatus:6158] Removed health check status file
+2025-12-03 15:49:52 [INFO] [Orchestrator] [Complete-CurrentProfile:5836] All profiles complete in 00:00:16
+2025-12-03 15:49:52 [DEBUG] [Progress] [Update-ProgressStats:6209] BytesComplete=5262835484 (completed=5262835484 + active=0)

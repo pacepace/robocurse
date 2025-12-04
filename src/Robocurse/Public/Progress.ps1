@@ -31,6 +31,9 @@ function Update-ProgressStats {
     }
 
     $state.BytesComplete = $bytesFromCompleted + $bytesFromActive
+
+    # Debug logging for progress diagnostics (only logs if session initialized)
+    Write-RobocurseLog -Message "BytesComplete=$($state.BytesComplete) (completed=$bytesFromCompleted + active=$bytesFromActive)" -Level 'Debug' -Component 'Progress'
 }
 
 function Get-OrchestrationStatus {

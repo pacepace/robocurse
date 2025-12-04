@@ -302,6 +302,11 @@ function Start-RobocurseMain {
         # Phase 3b: Initialize logging
         try {
             $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { '.\Logs' }
+            # Resolve relative paths based on config file directory (same as GUI mode)
+            if (-not [System.IO.Path]::IsPathRooted($logRoot)) {
+                $configDir = Split-Path -Parent $ConfigPath
+                $logRoot = [System.IO.Path]::GetFullPath((Join-Path $configDir $logRoot))
+            }
             $compressDays = if ($config.GlobalSettings.LogCompressAfterDays) { $config.GlobalSettings.LogCompressAfterDays } else { $script:LogCompressAfterDays }
             $deleteDays = if ($config.GlobalSettings.LogRetentionDays) { $config.GlobalSettings.LogRetentionDays } else { $script:LogDeleteAfterDays }
             Initialize-LogSession -LogRoot $logRoot -CompressAfterDays $compressDays -DeleteAfterDays $deleteDays
@@ -382,6 +387,8 @@ function Start-RobocurseMain {
         try {
             $window = Initialize-RobocurseGui -ConfigPath $ConfigPath
             if ($window) {
+                # Use ShowDialog() for modal window - Forms.Timer works reliably with this
+                # (unlike DispatcherTimer which got starved in the modal loop)
                 $window.ShowDialog() | Out-Null
                 return 0
             }

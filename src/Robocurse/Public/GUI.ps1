@@ -217,6 +217,8 @@ function Initialize-RobocurseGui {
         Add-Type -AssemblyName PresentationFramework
         Add-Type -AssemblyName PresentationCore
         Add-Type -AssemblyName WindowsBase
+        # Load Windows Forms for Forms.Timer (more reliable than DispatcherTimer in PowerShell)
+        Add-Type -AssemblyName System.Windows.Forms
     }
     catch {
         Write-Warning "Failed to load WPF assemblies. GUI not available: $_"
@@ -267,9 +269,11 @@ function Initialize-RobocurseGui {
         Save-GuiState -Window $script:Window -WorkerCount $workerCount -SelectedProfileName $selectedName
     })
 
-    # Initialize progress timer
-    $script:ProgressTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:ProgressTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    # Initialize progress timer - use Forms.Timer instead of DispatcherTimer
+    # Forms.Timer uses Windows message queue (WM_TIMER) which is more reliable in PowerShell
+    # than WPF's DispatcherTimer which gets starved during background runspace operations
+    $script:ProgressTimer = New-Object System.Windows.Forms.Timer
+    $script:ProgressTimer.Interval = 250  # Forms.Timer uses int milliseconds
     $script:ProgressTimer.Add_Tick({ Update-GuiProgress })
 
     Write-GuiLog "Robocurse GUI initialized"
@@ -459,11 +463,9 @@ function Invoke-WindowClosingHandler {
         Stop-AllJobs
     }
 
-    # Stop and dispose the progress timer to prevent memory leaks
+    # Stop the progress timer to prevent memory leaks
     if ($script:ProgressTimer) {
         $script:ProgressTimer.Stop()
-        # DispatcherTimer doesn't implement IDisposable, but we should null the reference
-        # to allow the event handler closure to be garbage collected
         $script:ProgressTimer = $null
     }
 
@@ -1292,7 +1294,6 @@ function Complete-GuiReplication {
 
     # Show completion message
     $status = Get-OrchestrationStatus
-
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
 
     Write-GuiLog "Replication completed: $($status.ChunksComplete)/$($status.ChunksTotal) chunks, $($status.ChunksFailed) failed"
@@ -1307,6 +1308,10 @@ function Update-GuiProgressText {
         Updates the progress text labels from status object
     .PARAMETER Status
         Orchestration status object from Get-OrchestrationStatus
+    .NOTES
+        Uses Dispatcher.Invoke with Render priority per WPF best practices.
+        This ensures visual updates actually render - direct property assignment
+        doesn't reliably trigger WPF's visual refresh.
     #>
     [CmdletBinding()]
     param(
@@ -1314,31 +1319,34 @@ function Update-GuiProgressText {
         [PSCustomObject]$Status
     )
 
-    # Update progress bars
-    $script:Controls.pbProfile.Value = $Status.ProfileProgress
-    $script:Controls.pbOverall.Value = $Status.OverallProgress
-
-    # Update text labels
+    # Capture values for use in script block
+    $profileProgress = $Status.ProfileProgress
+    $overallProgress = $Status.OverallProgress
     $profileName = if ($Status.CurrentProfile) { $Status.CurrentProfile } else { "--" }
-    $script:Controls.txtProfileProgress.Text = "Profile: $profileName - $($Status.ProfileProgress)%"
-    $script:Controls.txtOverallProgress.Text = "Overall: $($Status.OverallProgress)%"
+    $etaText = if ($Status.ETA) { "ETA: $($Status.ETA.ToString('hh\:mm\:ss'))" } else { "ETA: --:--:--" }
 
-    # Update ETA
-    $script:Controls.txtEta.Text = if ($Status.ETA) {
-        "ETA: $($Status.ETA.ToString('hh\:mm\:ss'))"
-    } else {
-        "ETA: --:--:--"
-    }
-
-    # Update speed (bytes per second from elapsed time)
-    $script:Controls.txtSpeed.Text = if ($Status.Elapsed.TotalSeconds -gt 0 -and $Status.BytesComplete -gt 0) {
+    $speedText = if ($Status.Elapsed.TotalSeconds -gt 0 -and $Status.BytesComplete -gt 0) {
         $speed = $Status.BytesComplete / $Status.Elapsed.TotalSeconds
         "Speed: $(Format-FileSize $speed)/s"
     } else {
         "Speed: -- MB/s"
     }
+    $chunksText = "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
 
-    $script:Controls.txtChunks.Text = "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
+    # Use Dispatcher.Invoke with Render priority - this is the key for WPF visual updates
+    # Direct property assignment doesn't reliably trigger visual refresh in PowerShell
+    $script:Controls.pbProfile.Dispatcher.Invoke(
+        [action]{
+            $script:Controls.pbProfile.Value = $profileProgress
+            $script:Controls.pbOverall.Value = $overallProgress
+            $script:Controls.txtProfileProgress.Text = "Profile: $profileName - $profileProgress%"
+            $script:Controls.txtOverallProgress.Text = "Overall: $overallProgress%"
+            $script:Controls.txtEta.Text = $etaText
+            $script:Controls.txtSpeed.Text = $speedText
+            $script:Controls.txtChunks.Text = $chunksText
+        },
+        [System.Windows.Threading.DispatcherPriority]::Render
+    )
 }
 
 function Get-ChunkDisplayItems {
@@ -1453,7 +1461,28 @@ function Update-GuiProgress {
         # Update progress text (always - lightweight)
         Update-GuiProgressText -Status $status
 
-        # Dequeue and display any pending error messages from background thread
+        # Only flush streams when background is complete (avoid blocking)
+        if ($script:ReplicationHandle -and $script:ReplicationHandle.IsCompleted) {
+            # Flush background runspace output streams to console
+            if ($script:ReplicationPowerShell -and $script:ReplicationPowerShell.Streams) {
+                foreach ($info in $script:ReplicationPowerShell.Streams.Information) {
+                    Write-Host "[BACKGROUND] $($info.MessageData)"
+                }
+                $script:ReplicationPowerShell.Streams.Information.Clear()
+
+                foreach ($warn in $script:ReplicationPowerShell.Streams.Warning) {
+                    Write-Host "[BACKGROUND WARNING] $warn" -ForegroundColor Yellow
+                }
+                $script:ReplicationPowerShell.Streams.Warning.Clear()
+
+                foreach ($err in $script:ReplicationPowerShell.Streams.Error) {
+                    Write-Host "[BACKGROUND ERROR] $($err.Exception.Message)" -ForegroundColor Red
+                }
+                $script:ReplicationPowerShell.Streams.Error.Clear()
+            }
+        }
+
+        # Dequeue errors (thread-safe)
         if ($script:OrchestrationState) {
             $errors = $script:OrchestrationState.DequeueErrors()
             foreach ($err in $errors) {
@@ -1461,30 +1490,8 @@ function Update-GuiProgress {
             }
         }
 
-        # Flush background runspace output streams to console
-        if ($script:ReplicationPowerShell -and $script:ReplicationPowerShell.Streams) {
-            # Flush Information stream (Write-Host output)
-            foreach ($info in $script:ReplicationPowerShell.Streams.Information) {
-                Write-Host "[BACKGROUND] $($info.MessageData)"
-            }
-            $script:ReplicationPowerShell.Streams.Information.Clear()
-
-            # Flush Warning stream
-            foreach ($warn in $script:ReplicationPowerShell.Streams.Warning) {
-                Write-Host "[BACKGROUND WARNING] $warn" -ForegroundColor Yellow
-            }
-            $script:ReplicationPowerShell.Streams.Warning.Clear()
-
-            # Flush Error stream
-            foreach ($err in $script:ReplicationPowerShell.Streams.Error) {
-                Write-Host "[BACKGROUND ERROR] $($err.Exception.Message)" -ForegroundColor Red
-            }
-            $script:ReplicationPowerShell.Streams.Error.Clear()
-        }
-
         # Update chunk grid - only when state changes
         if ($script:OrchestrationState -and (Test-ChunkGridNeedsRebuild)) {
-            # Force array context to prevent PowerShell unwrapping single items
             $script:Controls.dgChunks.ItemsSource = @(Get-ChunkDisplayItems)
         }
 
