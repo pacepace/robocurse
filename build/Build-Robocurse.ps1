@@ -49,6 +49,7 @@ foreach ($xamlFile in $xamlFiles) {
 
 # Define module load order (dependency order)
 # Checkpoint must be loaded before Orchestration (Orchestration uses checkpoint functions)
+# GUI modules are split into separate files for maintainability
 $moduleOrder = @(
     'Public\Utility.ps1'
     'Public\Configuration.ps1'
@@ -62,7 +63,15 @@ $moduleOrder = @(
     'Public\VSS.ps1'
     'Public\Email.ps1'
     'Public\Scheduling.ps1'
-    'Public\GUI.ps1'
+    # GUI modules (split from GUI.ps1 for maintainability)
+    'Public\GuiResources.ps1'
+    'Public\GuiSettings.ps1'
+    'Public\GuiProfiles.ps1'
+    'Public\GuiDialogs.ps1'
+    'Public\GuiReplication.ps1'
+    'Public\GuiProgress.ps1'
+    'Public\GuiMain.ps1'
+    # Entry point
     'Public\Main.ps1'
 )
 
@@ -194,9 +203,9 @@ foreach ($modulePath in $moduleOrder) {
         $content = $content -replace '<#[\s\S]*?#>', ''
     }
 
-    # For GUI.ps1, embed XAML resources as fallback content
-    if ($modulePath -eq 'Public\GUI.ps1') {
-        Write-Host "    Embedding XAML resources..." -ForegroundColor DarkGray
+    # For GUI modules (Gui*.ps1), embed XAML resources as fallback content
+    # XAML calls are in: GuiMain.ps1 (MainWindow.xaml), GuiDialogs.ps1 (CompletionDialog.xaml, ScheduleDialog.xaml)
+    if ($modulePath -match '^Public\\Gui.*\.ps1$') {
         foreach ($xamlName in $xamlResources.Keys) {
             # Create escaped XAML content for embedding in a here-string
             $escapedXaml = $xamlResources[$xamlName] -replace "'", "''"
@@ -208,7 +217,7 @@ foreach ($modulePath in $moduleOrder) {
 
             if ($content -match [regex]::Escape($pattern)) {
                 $content = $content -replace [regex]::Escape($pattern), $replacement
-                Write-Host "      Embedded: $xamlName" -ForegroundColor DarkGray
+                Write-Host "    Embedded XAML: $xamlName in $([System.IO.Path]::GetFileName($modulePath))" -ForegroundColor DarkGray
             }
         }
     }

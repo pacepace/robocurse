@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-04 09:27:51
+    Built: 2025-12-04 10:36:23
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -9756,7 +9756,7 @@ function Test-RobocurseTaskExists {
 
 #endregion
 
-#region ==================== GUI ====================
+#region ==================== GUIRESOURCES ====================
 
 # XAML resources are stored in the Resources folder for maintainability.
 # The Get-XamlResource function loads them at runtime with fallback to embedded content.
@@ -9798,6 +9798,12 @@ function Get-XamlResource {
 
     throw "XAML resource '$ResourceName' not found and no fallback provided"
 }
+
+#endregion
+
+#region ==================== GUISETTINGS ====================
+
+# Handles saving and restoring window position, size, worker count, and selected profile.
 
 function Get-GuiSettingsPath {
     <#
@@ -9946,6 +9952,1480 @@ function Restore-GuiState {
         Write-Verbose "Failed to restore GUI settings: $_"
     }
 }
+
+#endregion
+
+#region ==================== GUIPROFILES ====================
+
+# Handles profile CRUD operations and form synchronization.
+
+function Update-ProfileList {
+    <#
+    .SYNOPSIS
+        Populates the profile listbox from config
+    #>
+    [CmdletBinding()]
+    param()
+
+    $script:Controls.lstProfiles.Items.Clear()
+
+    if ($script:Config.SyncProfiles) {
+        foreach ($profile in $script:Config.SyncProfiles) {
+            $script:Controls.lstProfiles.Items.Add($profile) | Out-Null
+        }
+    }
+
+    # Select first profile if available
+    if ($script:Controls.lstProfiles.Items.Count -gt 0) {
+        $script:Controls.lstProfiles.SelectedIndex = 0
+    }
+}
+
+function Import-ProfileToForm {
+    <#
+    .SYNOPSIS
+        Imports selected profile data into form fields
+    .PARAMETER Profile
+        Profile object to import
+    #>
+    [CmdletBinding()]
+    param([PSCustomObject]$Profile)
+
+    # Guard against null profile
+    if ($null -eq $Profile) { return }
+
+    # Load basic properties with null safety
+    $script:Controls.txtProfileName.Text = if ($Profile.Name) { $Profile.Name } else { "" }
+    $script:Controls.txtSource.Text = if ($Profile.Source) { $Profile.Source } else { "" }
+    $script:Controls.txtDest.Text = if ($Profile.Destination) { $Profile.Destination } else { "" }
+    $script:Controls.chkUseVss.IsChecked = if ($null -ne $Profile.UseVSS) { $Profile.UseVSS } else { $false }
+
+    # Set scan mode
+    $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
+    $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Quick") { 1 } else { 0 }
+
+    # Load chunk settings with defaults from module constants
+    $maxSize = if ($null -ne $Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB } else { $script:DefaultMaxChunkSizeBytes / 1GB }
+    $maxFiles = if ($null -ne $Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
+    $maxDepth = if ($null -ne $Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
+
+    $script:Controls.txtMaxSize.Text = $maxSize.ToString()
+    $script:Controls.txtMaxFiles.Text = $maxFiles.ToString()
+    $script:Controls.txtMaxDepth.Text = $maxDepth.ToString()
+}
+
+function Save-ProfileFromForm {
+    <#
+    .SYNOPSIS
+        Saves form fields back to selected profile
+    #>
+    [CmdletBinding()]
+    param()
+
+    $selected = $script:Controls.lstProfiles.SelectedItem
+    if (-not $selected) { return }
+
+    # Update profile object
+    $selected.Name = $script:Controls.txtProfileName.Text
+    $selected.Source = $script:Controls.txtSource.Text
+    $selected.Destination = $script:Controls.txtDest.Text
+    $selected.UseVSS = $script:Controls.chkUseVss.IsChecked
+    $selected.ScanMode = $script:Controls.cmbScanMode.Text
+
+    # Parse numeric values with validation and bounds checking
+    # Helper function to provide visual feedback for input corrections
+    $showInputCorrected = {
+        param($control, $originalValue, $correctedValue, $fieldName)
+        $control.Text = $correctedValue.ToString()
+        $control.ToolTip = "Value '$originalValue' was corrected to '$correctedValue'"
+        # Flash the background briefly to indicate correction (uses existing theme colors)
+        $originalBg = $control.Background
+        $control.Background = [System.Windows.Media.Brushes]::DarkOrange
+        # Reset after 1.5 seconds using a dispatcher timer
+        $timer = [System.Windows.Threading.DispatcherTimer]::new()
+        $timer.Interval = [TimeSpan]::FromMilliseconds(1500)
+        $timer.Add_Tick({
+            $control.Background = $originalBg
+            $control.ToolTip = $null
+            $this.Stop()
+        })
+        $timer.Start()
+        Write-GuiLog "Input corrected: $fieldName '$originalValue' -> '$correctedValue'"
+    }
+
+    # ChunkMaxSizeGB: valid range 1-1000 GB
+    try {
+        $value = [int]$script:Controls.txtMaxSize.Text
+        $selected.ChunkMaxSizeGB = [Math]::Max(1, [Math]::Min(1000, $value))
+        if ($value -ne $selected.ChunkMaxSizeGB) {
+            & $showInputCorrected $script:Controls.txtMaxSize $value $selected.ChunkMaxSizeGB "Max Size (GB)"
+        }
+    } catch {
+        $originalText = $script:Controls.txtMaxSize.Text
+        $selected.ChunkMaxSizeGB = 10
+        & $showInputCorrected $script:Controls.txtMaxSize $originalText 10 "Max Size (GB)"
+    }
+
+    # ChunkMaxFiles: valid range 1000-10000000
+    try {
+        $value = [int]$script:Controls.txtMaxFiles.Text
+        $selected.ChunkMaxFiles = [Math]::Max(1000, [Math]::Min(10000000, $value))
+        if ($value -ne $selected.ChunkMaxFiles) {
+            & $showInputCorrected $script:Controls.txtMaxFiles $value $selected.ChunkMaxFiles "Max Files"
+        }
+    } catch {
+        $originalText = $script:Controls.txtMaxFiles.Text
+        $selected.ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
+        & $showInputCorrected $script:Controls.txtMaxFiles $originalText $script:DefaultMaxFilesPerChunk "Max Files"
+    }
+
+    # ChunkMaxDepth: valid range 1-20
+    try {
+        $value = [int]$script:Controls.txtMaxDepth.Text
+        $selected.ChunkMaxDepth = [Math]::Max(1, [Math]::Min(20, $value))
+        if ($value -ne $selected.ChunkMaxDepth) {
+            & $showInputCorrected $script:Controls.txtMaxDepth $value $selected.ChunkMaxDepth "Max Depth"
+        }
+    } catch {
+        $originalText = $script:Controls.txtMaxDepth.Text
+        $selected.ChunkMaxDepth = $script:DefaultMaxChunkDepth
+        & $showInputCorrected $script:Controls.txtMaxDepth $originalText $script:DefaultMaxChunkDepth "Max Depth"
+    }
+
+    # Refresh list display
+    $script:Controls.lstProfiles.Items.Refresh()
+
+    # Auto-save config to disk
+    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+    if (-not $saveResult.Success) {
+        Write-GuiLog "Warning: Auto-save failed: $($saveResult.ErrorMessage)"
+    }
+}
+
+function Add-NewProfile {
+    <#
+    .SYNOPSIS
+        Creates a new profile with defaults
+    #>
+    [CmdletBinding()]
+    param()
+
+    $newProfile = [PSCustomObject]@{
+        Name = "New Profile"
+        Source = ""
+        Destination = ""
+        Enabled = $true
+        UseVSS = $false
+        ScanMode = "Smart"
+        ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
+        ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
+        ChunkMaxDepth = $script:DefaultMaxChunkDepth
+    }
+
+    # Add to config
+    if (-not $script:Config.SyncProfiles) {
+        $script:Config.SyncProfiles = @()
+    }
+    $script:Config.SyncProfiles += $newProfile
+
+    # Update UI
+    Update-ProfileList
+    $script:Controls.lstProfiles.SelectedIndex = $script:Controls.lstProfiles.Items.Count - 1
+
+    # Auto-save config to disk
+    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+    if (-not $saveResult.Success) {
+        Write-GuiLog "Warning: Auto-save failed: $($saveResult.ErrorMessage)"
+    }
+
+    Write-GuiLog "New profile created"
+}
+
+function Remove-SelectedProfile {
+    <#
+    .SYNOPSIS
+        Removes selected profile with confirmation
+    #>
+    [CmdletBinding()]
+    param()
+
+    $selected = $script:Controls.lstProfiles.SelectedItem
+    if (-not $selected) {
+        [System.Windows.MessageBox]::Show(
+            "Please select a profile to remove.",
+            "No Selection",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        )
+        return
+    }
+
+    $result = [System.Windows.MessageBox]::Show(
+        "Remove profile '$($selected.Name)'?",
+        "Confirm Removal",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Question
+    )
+
+    if ($result -eq 'Yes') {
+        $script:Config.SyncProfiles = @($script:Config.SyncProfiles | Where-Object { $_ -ne $selected })
+        Update-ProfileList
+
+        # Auto-save config to disk
+        $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+        if (-not $saveResult.Success) {
+            Write-GuiLog "Warning: Auto-save failed: $($saveResult.ErrorMessage)"
+        }
+
+        Write-GuiLog "Profile '$($selected.Name)' removed"
+    }
+}
+
+#endregion
+
+#region ==================== GUIDIALOGS ====================
+
+# Utility dialogs, completion dialog, and schedule configuration.
+
+function Show-FolderBrowser {
+    <#
+    .SYNOPSIS
+        Opens folder browser dialog
+    .PARAMETER Description
+        Dialog description
+    .OUTPUTS
+        Selected path or $null
+    #>
+    [CmdletBinding()]
+    param([string]$Description = "Select folder")
+
+    Add-Type -AssemblyName System.Windows.Forms
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dialog.Description = $Description
+    $dialog.ShowNewFolderButton = $true
+
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        return $dialog.SelectedPath
+    }
+    return $null
+}
+
+function Show-CompletionDialog {
+    <#
+    .SYNOPSIS
+        Shows a modern completion dialog with replication statistics
+    .PARAMETER ChunksComplete
+        Number of chunks completed successfully
+    .PARAMETER ChunksTotal
+        Total number of chunks
+    .PARAMETER ChunksFailed
+        Number of chunks that failed
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$ChunksComplete = 0,
+        [int]$ChunksTotal = 0,
+        [int]$ChunksFailed = 0
+    )
+
+    try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'CompletionDialog.xaml' -FallbackContent @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Replication Complete"
+        Height="280" Width="420"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize">
+
+    <Window.Resources>
+        <!-- Button style that works with dynamic XamlReader loading (no TemplateBinding) -->
+        <Style x:Key="ModernButton" TargetType="Button">
+            <Setter Property="Background" Value="#0078D4"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="24,10"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="#0078D4" CornerRadius="4" Padding="24,10">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#1084D8"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#006CBD"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Border Background="#1E1E1E" CornerRadius="8" BorderBrush="#3E3E3E" BorderThickness="1">
+        <Grid Margin="24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header with icon and title -->
+            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,16">
+                <!-- Success checkmark icon -->
+                <Border x:Name="iconBorder" Width="48" Height="48" CornerRadius="24" Background="#4CAF50" Margin="0,0,16,0">
+                    <TextBlock x:Name="iconText" Text="&#x2713;" FontSize="28" Foreground="White"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold"/>
+                </Border>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock x:Name="txtTitle" Text="Replication Complete" FontSize="20" FontWeight="SemiBold" Foreground="#E0E0E0"/>
+                    <TextBlock x:Name="txtSubtitle" Text="All tasks finished successfully" FontSize="12" Foreground="#808080" Margin="0,2,0,0"/>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Separator -->
+            <Border Grid.Row="1" Height="1" Background="#3E3E3E" Margin="0,0,0,16"/>
+
+            <!-- Stats panel -->
+            <Grid Grid.Row="2" Margin="0,0,0,20">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Chunks completed -->
+                <StackPanel Grid.Column="0" HorizontalAlignment="Center">
+                    <TextBlock x:Name="txtChunksValue" Text="0" FontSize="32" FontWeight="Bold" Foreground="#4CAF50" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Completed" FontSize="11" Foreground="#808080" HorizontalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Total chunks -->
+                <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                    <TextBlock x:Name="txtTotalValue" Text="0" FontSize="32" FontWeight="Bold" Foreground="#0078D4" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Total" FontSize="11" Foreground="#808080" HorizontalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Failed chunks -->
+                <StackPanel Grid.Column="2" HorizontalAlignment="Center">
+                    <TextBlock x:Name="txtFailedValue" Text="0" FontSize="32" FontWeight="Bold" Foreground="#808080" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Failed" FontSize="11" Foreground="#808080" HorizontalAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- OK Button with proper styling -->
+            <Button x:Name="btnOk" Grid.Row="3" Content="OK" Style="{StaticResource ModernButton}" HorizontalAlignment="Center"/>
+        </Grid>
+    </Border>
+</Window>
+
+'@
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $iconBorder = $dialog.FindName("iconBorder")
+        $iconText = $dialog.FindName("iconText")
+        $txtTitle = $dialog.FindName("txtTitle")
+        $txtSubtitle = $dialog.FindName("txtSubtitle")
+        $txtChunksValue = $dialog.FindName("txtChunksValue")
+        $txtTotalValue = $dialog.FindName("txtTotalValue")
+        $txtFailedValue = $dialog.FindName("txtFailedValue")
+        $btnOk = $dialog.FindName("btnOk")
+
+        # Set values
+        $txtChunksValue.Text = $ChunksComplete.ToString()
+        $txtTotalValue.Text = $ChunksTotal.ToString()
+        $txtFailedValue.Text = $ChunksFailed.ToString()
+
+        # Adjust appearance based on results
+        if ($ChunksFailed -gt 0) {
+            # Some failures - show warning state
+            $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
+            $iconText.Text = [char]0x26A0  # Warning triangle
+            $txtTitle.Text = "Replication Complete with Warnings"
+            $txtSubtitle.Text = "$ChunksFailed chunk(s) failed"
+            $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
+        }
+        elseif ($ChunksComplete -eq 0 -and $ChunksTotal -eq 0) {
+            # Nothing to do
+            $txtTitle.Text = "Replication Complete"
+            $txtSubtitle.Text = "No chunks to process"
+        }
+        else {
+            # All success
+            $txtTitle.Text = "Replication Complete"
+            $txtSubtitle.Text = "All tasks finished successfully"
+        }
+
+        # OK button handler
+        $btnOk.Add_Click({
+            $dialog.DialogResult = $true
+            $dialog.Close()
+        })
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+                $dialog.DragMove()
+            }
+        })
+
+        # Set owner to main window for proper modal behavior
+        $dialog.Owner = $script:Window
+        $dialog.ShowDialog() | Out-Null
+    }
+    catch {
+        Write-GuiLog "Error showing completion dialog: $($_.Exception.Message)"
+        # Fallback to simple message
+        [System.Windows.MessageBox]::Show(
+            "Replication completed!`n`nChunks: $ChunksComplete/$ChunksTotal`nFailed: $ChunksFailed",
+            "Replication Complete",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        )
+    }
+}
+
+function Show-ScheduleDialog {
+    <#
+    .SYNOPSIS
+        Shows schedule configuration dialog and registers/unregisters the scheduled task
+    .DESCRIPTION
+        Displays a dialog for configuring scheduled runs. When OK is clicked,
+        the configuration is saved AND the Windows Task Scheduler task is
+        actually created or removed based on the enabled state.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'ScheduleDialog.xaml' -FallbackContent @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Configure Schedule"
+        Height="350" Width="450"
+        WindowStartupLocation="CenterScreen"
+        Background="#1E1E1E">
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <CheckBox x:Name="chkEnabled" Content="Enable Scheduled Runs" Foreground="#E0E0E0" FontWeight="Bold"/>
+
+        <StackPanel Grid.Row="1" Margin="0,15,0,0">
+            <Label Content="Run Time (HH:MM):" Foreground="#E0E0E0"/>
+            <TextBox x:Name="txtTime" Background="#2D2D2D" Foreground="#E0E0E0" Padding="5" Text="02:00" Width="100" HorizontalAlignment="Left"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" Margin="0,15,0,0">
+            <Label Content="Frequency:" Foreground="#E0E0E0"/>
+            <ComboBox x:Name="cmbFrequency" Background="#2D2D2D" Foreground="#E0E0E0" Width="150" HorizontalAlignment="Left">
+                <ComboBoxItem Content="Daily" IsSelected="True"/>
+                <ComboBoxItem Content="Weekdays"/>
+                <ComboBoxItem Content="Hourly"/>
+            </ComboBox>
+        </StackPanel>
+
+        <TextBlock Grid.Row="3" x:Name="txtStatus" Foreground="#808080" Margin="0,15,0,0" TextWrapping="Wrap"/>
+
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="btnOk" Content="Apply" Width="80" Margin="0,0,10,0" Background="#0078D4" Foreground="White" Padding="10,5"/>
+            <Button x:Name="btnCancel" Content="Cancel" Width="80" Background="#4A4A4A" Foreground="White" Padding="10,5"/>
+        </StackPanel>
+    </Grid>
+</Window>
+
+'@
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $chkEnabled = $dialog.FindName("chkEnabled")
+        $txtTime = $dialog.FindName("txtTime")
+        $cmbFrequency = $dialog.FindName("cmbFrequency")
+        $txtStatus = $dialog.FindName("txtStatus")
+        $btnOk = $dialog.FindName("btnOk")
+        $btnCancel = $dialog.FindName("btnCancel")
+
+        # Load current settings
+        $chkEnabled.IsChecked = $script:Config.Schedule.Enabled
+        $txtTime.Text = if ($script:Config.Schedule.Time) { $script:Config.Schedule.Time } else { "02:00" }
+
+        # Add real-time time validation with visual feedback
+        $txtTime.Add_TextChanged({
+            param($sender, $e)
+            $isValid = $false
+            $text = $sender.Text
+            if ($text -match '^([01]?\d|2[0-3]):([0-5]\d)$') {
+                $isValid = $true
+            }
+            if ($isValid) {
+                $sender.BorderBrush = [System.Windows.Media.Brushes]::Gray
+                $sender.ToolTip = "Time in 24-hour format (HH:MM)"
+            } else {
+                $sender.BorderBrush = [System.Windows.Media.Brushes]::Red
+                $sender.ToolTip = "Invalid format. Use HH:MM (24-hour, e.g., 02:00, 14:30)"
+            }
+        })
+
+        # Check current task status
+        $taskExists = Test-RobocurseTaskExists
+        if ($taskExists) {
+            $taskInfo = Get-RobocurseTask
+            if ($taskInfo) {
+                $txtStatus.Text = "Current task status: $($taskInfo.State)`nNext run: $($taskInfo.NextRunTime)"
+            }
+        }
+        else {
+            $txtStatus.Text = "No scheduled task currently configured."
+        }
+
+        # Button handlers
+        $btnOk.Add_Click({
+            try {
+                # Parse time
+                $timeParts = $txtTime.Text -split ':'
+                if ($timeParts.Count -ne 2) {
+                    [System.Windows.MessageBox]::Show("Invalid time format. Use HH:MM", "Error", "OK", "Error")
+                    return
+                }
+                $hour = [int]$timeParts[0]
+                $minute = [int]$timeParts[1]
+
+                if ($hour -lt 0 -or $hour -gt 23 -or $minute -lt 0 -or $minute -gt 59) {
+                    [System.Windows.MessageBox]::Show("Invalid time. Hour must be 0-23, minute must be 0-59", "Error", "OK", "Error")
+                    return
+                }
+
+                # Determine schedule type
+                $scheduleType = switch ($cmbFrequency.Text) {
+                    "Daily" { "Daily" }
+                    "Weekdays" { "Weekdays" }
+                    "Hourly" { "Hourly" }
+                    default { "Daily" }
+                }
+
+                # Update config
+                $script:Config.Schedule.Enabled = $chkEnabled.IsChecked
+                $script:Config.Schedule.Time = $txtTime.Text
+                $script:Config.Schedule.ScheduleType = $scheduleType
+
+                if ($chkEnabled.IsChecked) {
+                    # Register/update the task
+                    Write-GuiLog "Registering scheduled task..."
+
+                    $result = Register-RobocurseTask `
+                        -ConfigPath $script:ConfigPath `
+                        -Schedule $scheduleType `
+                        -Time "$($hour.ToString('00')):$($minute.ToString('00'))"
+
+                    if ($result.Success) {
+                        Write-GuiLog "Scheduled task registered successfully"
+                        [System.Windows.MessageBox]::Show(
+                            "Scheduled task has been registered.`n`nThe task will run $scheduleType at $($txtTime.Text).",
+                            "Schedule Configured",
+                            "OK",
+                            "Information"
+                        )
+                    }
+                    else {
+                        Write-GuiLog "Failed to register scheduled task: $($result.ErrorMessage)"
+                        [System.Windows.MessageBox]::Show(
+                            "Failed to register scheduled task.`n$($result.ErrorMessage)",
+                            "Error",
+                            "OK",
+                            "Error"
+                        )
+                    }
+                }
+                else {
+                    # Remove the task if it exists
+                    if ($taskExists) {
+                        Write-GuiLog "Removing scheduled task..."
+                        $result = Unregister-RobocurseTask
+                        if ($result.Success) {
+                            Write-GuiLog "Scheduled task removed"
+                            [System.Windows.MessageBox]::Show(
+                                "Scheduled task has been removed.",
+                                "Schedule Disabled",
+                                "OK",
+                                "Information"
+                            )
+                        }
+                        else {
+                            Write-GuiLog "Failed to remove scheduled task: $($result.ErrorMessage)"
+                        }
+                    }
+                }
+
+                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+                if (-not $saveResult.Success) {
+                    Write-GuiLog "Warning: Failed to save config: $($saveResult.ErrorMessage)"
+                }
+                $dialog.Close()
+            }
+            catch {
+                [System.Windows.MessageBox]::Show(
+                    "Error configuring schedule: $($_.Exception.Message)",
+                    "Error",
+                    "OK",
+                    "Error"
+                )
+                Write-GuiLog "Error configuring schedule: $($_.Exception.Message)"
+            }
+        })
+
+        $btnCancel.Add_Click({ $dialog.Close() })
+
+        $dialog.ShowDialog() | Out-Null
+    }
+    catch {
+        Show-GuiError -Message "Failed to show schedule dialog" -Details $_.Exception.Message
+    }
+}
+
+#endregion
+
+#region ==================== GUIREPLICATION ====================
+
+# Background runspace management and replication control.
+
+function Get-ProfilesToRun {
+    <#
+    .SYNOPSIS
+        Determines which profiles to run based on selection mode
+    .PARAMETER AllProfiles
+        Include all enabled profiles
+    .PARAMETER SelectedOnly
+        Include only the currently selected profile
+    .OUTPUTS
+        Array of profile objects, or $null if validation fails
+    #>
+    [CmdletBinding()]
+    param(
+        [switch]$AllProfiles,
+        [switch]$SelectedOnly
+    )
+
+    $profilesToRun = @()
+
+    if ($AllProfiles) {
+        $profilesToRun = @($script:Config.SyncProfiles | Where-Object { $_.Enabled -eq $true })
+        if ($profilesToRun.Count -eq 0) {
+            Show-GuiError -Message "No enabled profiles found. Please enable at least one profile."
+            return $null
+        }
+    }
+    elseif ($SelectedOnly) {
+        $selected = $script:Controls.lstProfiles.SelectedItem
+        if (-not $selected) {
+            Show-GuiError -Message "No profile selected. Please select a profile to run."
+            return $null
+        }
+        $profilesToRun = @($selected)
+    }
+
+    # Validate profiles have required paths
+    foreach ($profile in $profilesToRun) {
+        if ([string]::IsNullOrWhiteSpace($profile.Source) -or [string]::IsNullOrWhiteSpace($profile.Destination)) {
+            Show-GuiError -Message "Profile '$($profile.Name)' has invalid source or destination paths."
+            return $null
+        }
+    }
+
+    return $profilesToRun
+}
+
+function New-ReplicationRunspace {
+    <#
+    .SYNOPSIS
+        Creates and configures a background runspace for replication
+    .PARAMETER Profiles
+        Array of profiles to run
+    .PARAMETER MaxWorkers
+        Maximum concurrent robocopy jobs
+    .PARAMETER ConfigPath
+        Path to config file (can be a snapshot for isolation from external changes)
+    .OUTPUTS
+        PSCustomObject with PowerShell, Handle, and Runspace properties
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject[]]$Profiles,
+
+        [Parameter(Mandatory)]
+        [int]$MaxWorkers,
+
+        [string]$ConfigPath = $script:ConfigPath
+    )
+
+    # Determine how to load Robocurse in the background runspace
+    # Two modes: 1) Module mode (Import-Module), 2) Monolith mode (dot-source script)
+    $loadMode = $null
+    $loadPath = $null
+
+    # Check if we're running from a module (RobocurseModulePath is set by psm1)
+    if ($script:RobocurseModulePath -and (Test-Path (Join-Path $script:RobocurseModulePath "Robocurse.psd1"))) {
+        $loadMode = "Module"
+        $loadPath = $script:RobocurseModulePath
+    }
+    # Check if we have a stored script path (set by monolith)
+    elseif ($script:RobocurseScriptPath -and (Test-Path $script:RobocurseScriptPath)) {
+        $loadMode = "Script"
+        $loadPath = $script:RobocurseScriptPath
+    }
+    # Try PSCommandPath (works when running as standalone script)
+    elseif ($PSCommandPath -and (Test-Path $PSCommandPath)) {
+        $loadMode = "Script"
+        $loadPath = $PSCommandPath
+    }
+    # Fall back to looking for Robocurse.ps1 in current directory
+    else {
+        $fallbackPath = Join-Path (Get-Location) "Robocurse.ps1"
+        if (Test-Path $fallbackPath) {
+            $loadMode = "Script"
+            $loadPath = $fallbackPath
+        }
+    }
+
+    if (-not $loadMode -or -not $loadPath) {
+        $errorMsg = "Cannot find Robocurse module or script to load in background runspace. loadPath='$loadPath'"
+        Write-Host "[ERROR] $errorMsg"
+        Write-GuiLog "ERROR: $errorMsg"
+        throw $errorMsg
+    }
+
+    $runspace = [runspacefactory]::CreateRunspace()
+    # Use MTA for background I/O work (STA is only needed for COM/UI operations)
+    $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+    $runspace.Open()
+
+    $powershell = [powershell]::Create()
+    $powershell.Runspace = $runspace
+
+    # Build a script that loads Robocurse and runs replication
+    # Note: We pass the C# OrchestrationState object which is inherently thread-safe
+    # Callbacks are intentionally NOT shared - GUI uses timer-based polling instead
+    if ($loadMode -eq "Module") {
+        # NOTE: We pass ProfileNames (strings) instead of Profile objects because
+        # PSCustomObject properties don't reliably survive runspace boundaries.
+        # See CLAUDE.md for details on this pattern.
+        $backgroundScript = @"
+            param(`$ModulePath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$ConfigPath)
+
+            try {
+                Write-Host "[BACKGROUND] Loading module from: `$ModulePath"
+                Import-Module `$ModulePath -Force -ErrorAction Stop
+                Write-Host "[BACKGROUND] Module loaded successfully"
+            }
+            catch {
+                Write-Host "[BACKGROUND] ERROR loading module: `$(`$_.Exception.Message)"
+                `$SharedState.EnqueueError("Failed to load module: `$(`$_.Exception.Message)")
+                `$SharedState.Phase = 'Complete'
+                return
+            }
+
+            # Initialize logging session (required for Write-RobocurseLog)
+            try {
+                Write-Host "[BACKGROUND] Initializing log session..."
+                `$config = Get-RobocurseConfig -Path `$ConfigPath
+                `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+                # Resolve relative paths based on config file directory and normalize
+                if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
+                    `$configDir = Split-Path -Parent `$ConfigPath
+                    `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
+                }
+                Write-Host "[BACKGROUND] Log root: `$logRoot"
+                Initialize-LogSession -LogRoot `$logRoot
+                Write-Host "[BACKGROUND] Log session initialized"
+            }
+            catch {
+                Write-Host "[BACKGROUND] WARNING: Failed to initialize logging: `$(`$_.Exception.Message)"
+                # Continue anyway - logging is not critical for replication
+            }
+
+            # Use the shared C# OrchestrationState instance (thread-safe by design)
+            `$script:OrchestrationState = `$SharedState
+
+            # Clear callbacks - GUI mode uses timer-based polling, not callbacks
+            `$script:OnProgress = `$null
+            `$script:OnChunkComplete = `$null
+            `$script:OnProfileComplete = `$null
+
+            try {
+                Write-Host "[BACKGROUND] Starting replication run"
+                # Re-read config to get fresh profile data with all properties intact
+                # (PSCustomObject properties don't survive runspace boundaries - see CLAUDE.md)
+                `$bgConfig = Get-RobocurseConfig -Path `$ConfigPath
+                `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
+
+                # Look up profiles by name from freshly-loaded config
+                `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
+                Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
+
+                # Start replication with -SkipInitialization since UI thread already initialized
+                Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+
+                # Run the orchestration loop until complete
+                # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
+                while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
+                    Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
+                    Start-Sleep -Milliseconds 250
+                }
+                Write-Host "[BACKGROUND] Replication loop complete, phase: `$(`$script:OrchestrationState.Phase)"
+            }
+            catch {
+                Write-Host "[BACKGROUND] ERROR in replication: `$(`$_.Exception.Message)"
+                `$SharedState.EnqueueError("Replication error: `$(`$_.Exception.Message)")
+                `$SharedState.Phase = 'Complete'
+            }
+"@
+    }
+    else {
+        # Script/monolith mode
+        # NOTE: We use $GuiConfigPath (not $ConfigPath) because dot-sourcing the script
+        # would shadow our parameter with the script's own $ConfigPath parameter
+        # NOTE: We pass ProfileNames (strings) instead of Profile objects for consistency
+        # with module mode. See CLAUDE.md for the pattern.
+        $backgroundScript = @"
+            param(`$ScriptPath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$GuiConfigPath)
+
+            try {
+                Write-Host "[BACKGROUND] Loading script from: `$ScriptPath"
+                Write-Host "[BACKGROUND] Config path: `$GuiConfigPath"
+                # Load the script to get all functions (with -LoadOnly to prevent main execution)
+                . `$ScriptPath -LoadOnly
+                Write-Host "[BACKGROUND] Script loaded successfully"
+            }
+            catch {
+                Write-Host "[BACKGROUND] ERROR loading script: `$(`$_.Exception.Message)"
+                `$SharedState.EnqueueError("Failed to load script: `$(`$_.Exception.Message)")
+                `$SharedState.Phase = 'Complete'
+                return
+            }
+
+            # Initialize logging session (required for Write-RobocurseLog)
+            try {
+                Write-Host "[BACKGROUND] Initializing log session..."
+                `$config = Get-RobocurseConfig -Path `$GuiConfigPath
+                `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+                # Resolve relative paths based on config file directory and normalize
+                if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
+                    `$configDir = Split-Path -Parent `$GuiConfigPath
+                    `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
+                }
+                Write-Host "[BACKGROUND] Log root: `$logRoot"
+                Initialize-LogSession -LogRoot `$logRoot
+                Write-Host "[BACKGROUND] Log session initialized"
+            }
+            catch {
+                Write-Host "[BACKGROUND] WARNING: Failed to initialize logging: `$(`$_.Exception.Message)"
+                # Continue anyway - logging is not critical for replication
+            }
+
+            # Use the shared C# OrchestrationState instance (thread-safe by design)
+            `$script:OrchestrationState = `$SharedState
+
+            # Clear callbacks - GUI mode uses timer-based polling, not callbacks
+            `$script:OnProgress = `$null
+            `$script:OnChunkComplete = `$null
+            `$script:OnProfileComplete = `$null
+
+            try {
+                Write-Host "[BACKGROUND] Starting replication run"
+                # Re-read config to get fresh profile data (see CLAUDE.md for pattern)
+                `$bgConfig = Get-RobocurseConfig -Path `$GuiConfigPath
+                `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
+
+                # Look up profiles by name from freshly-loaded config
+                `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
+                Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
+
+                # Start replication with -SkipInitialization since UI thread already initialized
+                Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+
+                # Run the orchestration loop until complete
+                # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
+                while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
+                    Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
+                    Start-Sleep -Milliseconds 250
+                }
+                Write-Host "[BACKGROUND] Replication loop complete, phase: `$(`$script:OrchestrationState.Phase)"
+            }
+            catch {
+                Write-Host "[BACKGROUND] ERROR in replication: `$(`$_.Exception.Message)"
+                `$SharedState.EnqueueError("Replication error: `$(`$_.Exception.Message)")
+                `$SharedState.Phase = 'Complete'
+            }
+"@
+    }
+
+    $powershell.AddScript($backgroundScript)
+    $powershell.AddArgument($loadPath)
+    $powershell.AddArgument($script:OrchestrationState)
+    # Pass profile names (strings) - background will look up from config (see CLAUDE.md)
+    $profileNames = @($Profiles | ForEach-Object { $_.Name })
+    $powershell.AddArgument($profileNames)
+    $powershell.AddArgument($MaxWorkers)
+    # Use the provided ConfigPath (may be a snapshot for isolation from external changes)
+    $powershell.AddArgument($ConfigPath)
+
+    $handle = $powershell.BeginInvoke()
+
+    return [PSCustomObject]@{
+        PowerShell = $powershell
+        Handle = $handle
+        Runspace = $runspace
+    }
+}
+
+function Start-GuiReplication {
+    <#
+    .SYNOPSIS
+        Starts replication from GUI
+    .PARAMETER AllProfiles
+        Run all enabled profiles
+    .PARAMETER SelectedOnly
+        Run only selected profile
+    #>
+    [CmdletBinding()]
+    param(
+        [switch]$AllProfiles,
+        [switch]$SelectedOnly
+    )
+
+    # Save any pending form changes before reading profiles
+    # This ensures changes like chunk size are captured even if user clicks Run
+    # without first clicking elsewhere to trigger LostFocus
+    Save-ProfileFromForm
+
+    # Get and validate profiles (force array context to handle PowerShell's single-item unwrapping)
+    $profilesToRun = @(Get-ProfilesToRun -AllProfiles:$AllProfiles -SelectedOnly:$SelectedOnly)
+    if ($profilesToRun.Count -eq 0) { return }
+
+    # Update UI state for replication mode
+    $script:Controls.btnRunAll.IsEnabled = $false
+    $script:Controls.btnRunSelected.IsEnabled = $false
+    $script:Controls.btnStop.IsEnabled = $true
+    $script:Controls.txtStatus.Text = "Replication in progress..."
+    $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::Gray  # Reset error color
+    $script:GuiErrorCount = 0  # Reset error count for new run
+    $script:LastGuiUpdateState = $null
+    $script:Controls.dgChunks.ItemsSource = $null
+
+    Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
+
+    # Get worker count and start progress timer
+    $maxWorkers = [int]$script:Controls.sldWorkers.Value
+    $script:ProgressTimer.Start()
+
+    # Initialize orchestration state (must happen before runspace creation)
+    Initialize-OrchestrationState
+
+    # Create a snapshot of the config to prevent external modifications during replication
+    # This ensures the running replication uses the config state at the time of start
+    $script:ConfigSnapshotPath = $null
+    try {
+        $snapshotDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
+        $script:ConfigSnapshotPath = Join-Path $snapshotDir "Robocurse-ConfigSnapshot-$([Guid]::NewGuid().ToString('N')).json"
+        Copy-Item -Path $script:ConfigPath -Destination $script:ConfigSnapshotPath -Force
+    }
+    catch {
+        Write-GuiLog "Warning: Could not create config snapshot, using live config: $($_.Exception.Message)"
+        $script:ConfigSnapshotPath = $script:ConfigPath  # Fall back to original
+    }
+
+    # Create and start background runspace (using snapshot path)
+    try {
+        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigSnapshotPath
+
+        $script:ReplicationHandle = $runspaceInfo.Handle
+        $script:ReplicationPowerShell = $runspaceInfo.PowerShell
+        $script:ReplicationRunspace = $runspaceInfo.Runspace
+    }
+    catch {
+        Write-Host "[ERROR] Failed to create background runspace: $($_.Exception.Message)"
+        Write-GuiLog "ERROR: Failed to start replication: $($_.Exception.Message)"
+        # Reset UI state
+        $script:Controls.btnRunAll.IsEnabled = $true
+        $script:Controls.btnRunSelected.IsEnabled = $true
+        $script:Controls.btnStop.IsEnabled = $false
+        $script:Controls.txtStatus.Text = "Ready"
+        $script:ProgressTimer.Stop()
+    }
+}
+
+function Complete-GuiReplication {
+    <#
+    .SYNOPSIS
+        Called when replication completes
+    .DESCRIPTION
+        Handles GUI cleanup after replication: stops timer, re-enables buttons,
+        disposes of background runspace resources, and shows completion message.
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Stop timer
+    $script:ProgressTimer.Stop()
+
+    # Dispose of background runspace resources to prevent memory leaks
+    if ($script:ReplicationPowerShell) {
+        try {
+            # End the async invocation if still running
+            if ($script:ReplicationHandle -and -not $script:ReplicationHandle.IsCompleted) {
+                $script:ReplicationPowerShell.Stop()
+            }
+            elseif ($script:ReplicationHandle) {
+                # Collect any remaining output
+                $script:ReplicationPowerShell.EndInvoke($script:ReplicationHandle) | Out-Null
+            }
+
+            # Check for errors from the background runspace and surface them
+            # Note: HadErrors can be true even with empty Error stream, so check count
+            if ($script:ReplicationPowerShell.Streams.Error.Count -gt 0) {
+                Write-GuiLog "Background replication encountered errors:"
+                foreach ($err in $script:ReplicationPowerShell.Streams.Error) {
+                    $errorLocation = if ($err.InvocationInfo) {
+                        "$($err.InvocationInfo.ScriptName):$($err.InvocationInfo.ScriptLineNumber)"
+                    } else { "Unknown" }
+                    Write-GuiLog "  [$errorLocation] $($err.Exception.Message)"
+                }
+            }
+
+            # Dispose the runspace
+            if ($script:ReplicationPowerShell.Runspace) {
+                $script:ReplicationPowerShell.Runspace.Close()
+                $script:ReplicationPowerShell.Runspace.Dispose()
+            }
+
+            # Dispose the PowerShell instance
+            $script:ReplicationPowerShell.Dispose()
+        }
+        catch {
+            Write-GuiLog "Warning: Error disposing runspace: $($_.Exception.Message)"
+        }
+        finally {
+            $script:ReplicationPowerShell = $null
+            $script:ReplicationHandle = $null
+            $script:ReplicationRunspace = $null  # Clear runspace reference for GC
+        }
+    }
+
+    # Re-enable buttons
+    $script:Controls.btnRunAll.IsEnabled = $true
+    $script:Controls.btnRunSelected.IsEnabled = $true
+    $script:Controls.btnStop.IsEnabled = $false
+
+    # Update status with error indicator if applicable
+    if ($script:GuiErrorCount -gt 0) {
+        $script:Controls.txtStatus.Text = "Replication complete ($($script:GuiErrorCount) error(s))"
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
+    } else {
+        $script:Controls.txtStatus.Text = "Replication complete"
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::LimeGreen
+    }
+
+    # Show completion message
+    $status = Get-OrchestrationStatus
+    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
+
+    Write-GuiLog "Replication completed: $($status.ChunksComplete)/$($status.ChunksTotal) chunks, $($status.ChunksFailed) failed"
+
+    # Clean up config snapshot if it was created
+    if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {
+        try {
+            if (Test-Path $script:ConfigSnapshotPath) {
+                Remove-Item $script:ConfigSnapshotPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        catch {
+            # Non-critical - temp files will be cleaned up eventually
+        }
+        $script:ConfigSnapshotPath = $null
+    }
+}
+
+function Close-ReplicationRunspace {
+    <#
+    .SYNOPSIS
+        Cleans up the background replication runspace
+    .DESCRIPTION
+        Safely stops and disposes the PowerShell instance and runspace
+        used for background replication. Called during window close
+        and when replication completes.
+
+        Uses Interlocked.Exchange for atomic capture-and-clear to prevent
+        race conditions when multiple threads attempt cleanup simultaneously
+        (e.g., window close + completion handler firing at the same time).
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Early exit if nothing to clean up
+    if (-not $script:ReplicationPowerShell) { return }
+
+    # Atomically capture and clear the PowerShell instance reference
+    # Interlocked.Exchange ensures only ONE thread gets the reference;
+    # all other threads will get $null and exit early
+    $psInstance = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationPowerShell, $null)
+    $handle = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationHandle, $null)
+    $runspace = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationRunspace, $null)
+
+    # If another thread already claimed the instance, exit
+    if (-not $psInstance) { return }
+
+    try {
+        # Stop the PowerShell instance if still running
+        if ($handle -and -not $handle.IsCompleted) {
+            try {
+                $psInstance.Stop()
+            }
+            catch [System.Management.Automation.PipelineStoppedException] {
+                # Expected when pipeline is already stopped
+            }
+            catch [System.ObjectDisposedException] {
+                # Already disposed by another thread
+                return
+            }
+        }
+
+        # Close and dispose the runspace
+        if ($psInstance.Runspace) {
+            try {
+                $psInstance.Runspace.Close()
+                $psInstance.Runspace.Dispose()
+            }
+            catch [System.ObjectDisposedException] {
+                # Already disposed
+            }
+        }
+
+        # Dispose the PowerShell instance
+        try {
+            $psInstance.Dispose()
+        }
+        catch [System.ObjectDisposedException] {
+            # Already disposed
+        }
+    }
+    catch {
+        # Silently ignore cleanup errors during window close
+        Write-Verbose "Runspace cleanup error (ignored): $($_.Exception.Message)"
+    }
+}
+
+#endregion
+
+#region ==================== GUIPROGRESS ====================
+
+# Real-time progress updates with performance optimizations.
+
+# Cache for GUI progress updates - avoids unnecessary rebuilds
+$script:LastGuiUpdateState = $null
+
+function Update-GuiProgressText {
+    <#
+    .SYNOPSIS
+        Updates the progress text labels from status object
+    .PARAMETER Status
+        Orchestration status object from Get-OrchestrationStatus
+    .NOTES
+        WPF RENDERING QUIRK: In PowerShell, WPF controls don't reliably repaint when
+        properties change via data binding or Dispatcher.BeginInvoke. The solution is:
+        1. Direct property assignment (not Dispatcher calls)
+        2. Call Window.UpdateLayout() to force a complete layout pass
+        This forces WPF to recalculate and repaint all controls.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Status
+    )
+
+    # Capture values for use in script block
+    $profileProgress = $Status.ProfileProgress
+    $overallProgress = $Status.OverallProgress
+    $profileName = if ($Status.CurrentProfile) { $Status.CurrentProfile } else { "--" }
+    $etaText = if ($Status.ETA) { "ETA: $($Status.ETA.ToString('hh\:mm\:ss'))" } else { "ETA: --:--:--" }
+
+    $speedText = if ($Status.Elapsed.TotalSeconds -gt 0 -and $Status.BytesComplete -gt 0) {
+        $speed = $Status.BytesComplete / $Status.Elapsed.TotalSeconds
+        "Speed: $(Format-FileSize $speed)/s"
+    } else {
+        "Speed: -- MB/s"
+    }
+    $chunksText = "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
+
+    # Direct assignment
+    $script:Controls.pbProfile.Value = $profileProgress
+    $script:Controls.pbOverall.Value = $overallProgress
+    $script:Controls.txtProfileProgress.Text = "Profile: $profileName - $profileProgress%"
+    $script:Controls.txtOverallProgress.Text = "Overall: $overallProgress%"
+    $script:Controls.txtEta.Text = $etaText
+    $script:Controls.txtSpeed.Text = $speedText
+    $script:Controls.txtChunks.Text = $chunksText
+
+    # Force complete window layout update
+    $script:Window.UpdateLayout()
+}
+
+function Get-ChunkDisplayItems {
+    <#
+    .SYNOPSIS
+        Builds the chunk display items list for the GUI grid
+    .DESCRIPTION
+        Creates display objects from active, failed, and completed chunks.
+        Limits completed chunks to last 20 to prevent UI lag.
+
+        Each display item includes:
+        - ChunkId, SourcePath, Status, Speed: Standard display properties
+        - Progress: 0-100 percentage for text display
+        - ProgressScale: 0.0-1.0 for ScaleTransform binding (see NOTES)
+    .PARAMETER MaxCompletedItems
+        Maximum number of completed chunks to display (default 20)
+    .OUTPUTS
+        Array of display objects for DataGrid binding
+    .NOTES
+        WPF PROGRESSBAR QUIRK: The standard WPF ProgressBar control doesn't reliably
+        render in PowerShell even when Value property is correctly set. Neither
+        Dispatcher.Invoke nor direct property assignment fixes this.
+
+        SOLUTION: Use a custom progress bar built from Border elements with ScaleTransform.
+        - Background Border (gray) provides the track
+        - Fill Border (green) scales horizontally via ScaleTransform.ScaleX binding
+        - ProgressScale (0.0-1.0) maps directly to ScaleX for smooth scaling
+
+        This approach bypasses ProgressBar entirely and works reliably in PowerShell WPF.
+    #>
+    [CmdletBinding()]
+    param(
+        [int]$MaxCompletedItems = $script:GuiMaxCompletedChunksDisplay
+    )
+
+    $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    # Add active jobs (typically small - MaxConcurrentJobs)
+    foreach ($kvp in $script:OrchestrationState.ActiveJobs.ToArray()) {
+        $job = $kvp.Value
+
+        # Get actual progress from robocopy log parsing
+        $progress = 0
+        $speed = "--"
+        try {
+            $progressData = Get-RobocopyProgress -Job $job
+            if ($progressData) {
+                # Calculate percentage from bytes copied vs estimated chunk size
+                if ($job.Chunk.EstimatedSize -gt 0 -and $progressData.BytesCopied -gt 0) {
+                    $progress = [math]::Min(100, [math]::Round(($progressData.BytesCopied / $job.Chunk.EstimatedSize) * 100, 0))
+                }
+                # Use parsed speed if available
+                if ($progressData.Speed) {
+                    $speed = $progressData.Speed
+                }
+            }
+        }
+        catch {
+            # Progress parsing failure - use defaults
+        }
+
+        $chunkDisplayItems.Add([PSCustomObject]@{
+            ChunkId = $job.Chunk.ChunkId
+            SourcePath = $job.Chunk.SourcePath
+            Status = "Running"
+            Progress = $progress
+            ProgressScale = [double]($progress / 100)  # 0.0 to 1.0 for ScaleTransform
+            Speed = $speed
+        })
+    }
+
+    # Add failed chunks (show all - usually small or indicates problems)
+    foreach ($chunk in $script:OrchestrationState.FailedChunks.ToArray()) {
+        $chunkDisplayItems.Add([PSCustomObject]@{
+            ChunkId = $chunk.ChunkId
+            SourcePath = $chunk.SourcePath
+            Status = "Failed"
+            Progress = 0
+            ProgressScale = [double]0.0
+            Speed = "--"
+        })
+    }
+
+    # Add completed chunks - limit to last N to prevent UI lag
+    $completedSnapshot = $script:OrchestrationState.CompletedChunks.ToArray()
+    $startIndex = [Math]::Max(0, $completedSnapshot.Length - $MaxCompletedItems)
+    for ($i = $startIndex; $i -lt $completedSnapshot.Length; $i++) {
+        $chunk = $completedSnapshot[$i]
+        $chunkDisplayItems.Add([PSCustomObject]@{
+            ChunkId = $chunk.ChunkId
+            SourcePath = $chunk.SourcePath
+            Status = "Complete"
+            Progress = 100
+            ProgressScale = [double]1.0  # Full scale for completed
+            Speed = "--"
+        })
+    }
+
+    return $chunkDisplayItems.ToArray()
+}
+
+function Test-ChunkGridNeedsRebuild {
+    <#
+    .SYNOPSIS
+        Determines if the chunk grid needs to be rebuilt
+    .DESCRIPTION
+        Returns true when:
+        - First call (no previous state)
+        - Active/completed/failed counts changed
+        - There are active jobs (progress values change continuously)
+
+        The last condition is important because PSCustomObject doesn't implement
+        INotifyPropertyChanged, so WPF won't see property changes. We must rebuild
+        the entire ItemsSource to show updated progress values.
+    .OUTPUTS
+        $true if grid needs rebuild, $false otherwise
+    #>
+    [CmdletBinding()]
+    param()
+
+    $currentState = @{
+        ActiveCount = $script:OrchestrationState.ActiveJobs.Count
+        CompletedCount = $script:OrchestrationState.CompletedCount
+        FailedCount = $script:OrchestrationState.FailedChunks.Count
+    }
+
+    $needsRebuild = $false
+    if (-not $script:LastGuiUpdateState) {
+        $needsRebuild = $true
+    }
+    elseif ($script:LastGuiUpdateState.ActiveCount -ne $currentState.ActiveCount -or
+            $script:LastGuiUpdateState.CompletedCount -ne $currentState.CompletedCount -or
+            $script:LastGuiUpdateState.FailedCount -ne $currentState.FailedCount) {
+        $needsRebuild = $true
+    }
+    elseif ($currentState.ActiveCount -gt 0) {
+        # Always refresh when there are active jobs since their progress/speed is constantly changing
+        $needsRebuild = $true
+    }
+
+    if ($needsRebuild) {
+        $script:LastGuiUpdateState = $currentState
+    }
+
+    return $needsRebuild
+}
+
+function Update-GuiProgress {
+    <#
+    .SYNOPSIS
+        Called by timer to update GUI from orchestration state
+    .DESCRIPTION
+        Optimized for performance with large chunk counts:
+        - Only rebuilds display list when chunk counts change
+        - Uses efficient ToArray() snapshot for thread-safe iteration
+        - Limits displayed items to prevent UI sluggishness
+        - Dequeues and displays real-time error messages from background thread
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $status = Get-OrchestrationStatus
+
+        # Update progress text (always - lightweight)
+        Update-GuiProgressText -Status $status
+
+        # Only flush streams when background is complete (avoid blocking)
+        if ($script:ReplicationHandle -and $script:ReplicationHandle.IsCompleted) {
+            # Flush background runspace output streams to console
+            if ($script:ReplicationPowerShell -and $script:ReplicationPowerShell.Streams) {
+                foreach ($info in $script:ReplicationPowerShell.Streams.Information) {
+                    Write-Host "[BACKGROUND] $($info.MessageData)"
+                }
+                $script:ReplicationPowerShell.Streams.Information.Clear()
+
+                foreach ($warn in $script:ReplicationPowerShell.Streams.Warning) {
+                    Write-Host "[BACKGROUND WARNING] $warn" -ForegroundColor Yellow
+                }
+                $script:ReplicationPowerShell.Streams.Warning.Clear()
+
+                foreach ($err in $script:ReplicationPowerShell.Streams.Error) {
+                    Write-Host "[BACKGROUND ERROR] $($err.Exception.Message)" -ForegroundColor Red
+                }
+                $script:ReplicationPowerShell.Streams.Error.Clear()
+            }
+        }
+
+        # Dequeue errors (thread-safe) and update error indicator
+        if ($script:OrchestrationState) {
+            $errors = $script:OrchestrationState.DequeueErrors()
+            foreach ($err in $errors) {
+                Write-GuiLog "[ERROR] $err"
+                $script:GuiErrorCount++
+            }
+
+            # Update status bar with error indicator if errors occurred
+            if ($script:GuiErrorCount -gt 0) {
+                $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
+                $script:Controls.txtStatus.Text = "Replication in progress... ($($script:GuiErrorCount) error(s))"
+            }
+        }
+
+        # Update chunk grid - when state changes or jobs have progress updates
+        if ($script:OrchestrationState -and (Test-ChunkGridNeedsRebuild)) {
+            $script:Controls.dgChunks.ItemsSource = @(Get-ChunkDisplayItems)
+            # Force DataGrid to re-read all bindings (needed for non-INotifyPropertyChanged objects)
+            $script:Controls.dgChunks.Items.Refresh()
+            # Force visual refresh
+            $script:Window.UpdateLayout()
+        }
+
+        # Check if complete
+        if ($status.Phase -eq 'Complete') {
+            Complete-GuiReplication
+        }
+    }
+    catch {
+        Write-Host "[ERROR] Error updating progress: $_"
+        Write-GuiLog "Error updating progress: $_"
+    }
+}
+
+#endregion
+
+#region ==================== GUIMAIN ====================
+
+# Core window initialization, event wiring, and logging functions.
+
+# GUI Log ring buffer (uses $script:GuiLogMaxLines from constants)
+$script:GuiLogBuffer = [System.Collections.Generic.List[string]]::new()
+$script:GuiLogDirty = $false  # Track if buffer needs to be flushed to UI
+
+# Error tracking for visual indicator
+$script:GuiErrorCount = 0  # Count of errors encountered during current run
 
 function Initialize-RobocurseGui {
     <#
@@ -10593,1259 +12073,12 @@ function Invoke-WindowClosingHandler {
     }
 }
 
-function Close-ReplicationRunspace {
-    <#
-    .SYNOPSIS
-        Cleans up the background replication runspace
-    .DESCRIPTION
-        Safely stops and disposes the PowerShell instance and runspace
-        used for background replication. Called during window close
-        and when replication completes.
-
-        Uses Interlocked.Exchange for atomic capture-and-clear to prevent
-        race conditions when multiple threads attempt cleanup simultaneously
-        (e.g., window close + completion handler firing at the same time).
-    #>
-    [CmdletBinding()]
-    param()
-
-    # Early exit if nothing to clean up
-    if (-not $script:ReplicationPowerShell) { return }
-
-    # Atomically capture and clear the PowerShell instance reference
-    # Interlocked.Exchange ensures only ONE thread gets the reference;
-    # all other threads will get $null and exit early
-    $psInstance = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationPowerShell, $null)
-    $handle = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationHandle, $null)
-    $runspace = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationRunspace, $null)
-
-    # If another thread already claimed the instance, exit
-    if (-not $psInstance) { return }
-
-    try {
-        # Stop the PowerShell instance if still running
-        if ($handle -and -not $handle.IsCompleted) {
-            try {
-                $psInstance.Stop()
-            }
-            catch [System.Management.Automation.PipelineStoppedException] {
-                # Expected when pipeline is already stopped
-            }
-            catch [System.ObjectDisposedException] {
-                # Already disposed by another thread
-                return
-            }
-        }
-
-        # Close and dispose the runspace
-        if ($psInstance.Runspace) {
-            try {
-                $psInstance.Runspace.Close()
-                $psInstance.Runspace.Dispose()
-            }
-            catch [System.ObjectDisposedException] {
-                # Already disposed
-            }
-        }
-
-        # Dispose the PowerShell instance
-        try {
-            $psInstance.Dispose()
-        }
-        catch [System.ObjectDisposedException] {
-            # Already disposed
-        }
-    }
-    catch {
-        # Silently ignore cleanup errors during window close
-        Write-Verbose "Runspace cleanup error (ignored): $($_.Exception.Message)"
-    }
-}
-
-function Update-ProfileList {
-    <#
-    .SYNOPSIS
-        Populates the profile listbox from config
-    #>
-    [CmdletBinding()]
-    param()
-
-    $script:Controls.lstProfiles.Items.Clear()
-
-    if ($script:Config.SyncProfiles) {
-        foreach ($profile in $script:Config.SyncProfiles) {
-            $script:Controls.lstProfiles.Items.Add($profile) | Out-Null
-        }
-    }
-
-    # Select first profile if available
-    if ($script:Controls.lstProfiles.Items.Count -gt 0) {
-        $script:Controls.lstProfiles.SelectedIndex = 0
-    }
-}
-
-function Import-ProfileToForm {
-    <#
-    .SYNOPSIS
-        Imports selected profile data into form fields
-    .PARAMETER Profile
-        Profile object to import
-    #>
-    [CmdletBinding()]
-    param([PSCustomObject]$Profile)
-
-    # Guard against null profile
-    if ($null -eq $Profile) { return }
-
-    # Load basic properties with null safety
-    $script:Controls.txtProfileName.Text = if ($Profile.Name) { $Profile.Name } else { "" }
-    $script:Controls.txtSource.Text = if ($Profile.Source) { $Profile.Source } else { "" }
-    $script:Controls.txtDest.Text = if ($Profile.Destination) { $Profile.Destination } else { "" }
-    $script:Controls.chkUseVss.IsChecked = if ($null -ne $Profile.UseVSS) { $Profile.UseVSS } else { $false }
-
-    # Set scan mode
-    $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
-    $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Quick") { 1 } else { 0 }
-
-    # Load chunk settings with defaults from module constants
-    $maxSize = if ($null -ne $Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB } else { $script:DefaultMaxChunkSizeBytes / 1GB }
-    $maxFiles = if ($null -ne $Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
-    $maxDepth = if ($null -ne $Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
-
-    $script:Controls.txtMaxSize.Text = $maxSize.ToString()
-    $script:Controls.txtMaxFiles.Text = $maxFiles.ToString()
-    $script:Controls.txtMaxDepth.Text = $maxDepth.ToString()
-}
-
-function Save-ProfileFromForm {
-    <#
-    .SYNOPSIS
-        Saves form fields back to selected profile
-    #>
-    [CmdletBinding()]
-    param()
-
-    $selected = $script:Controls.lstProfiles.SelectedItem
-    if (-not $selected) { return }
-
-    # Update profile object
-    $selected.Name = $script:Controls.txtProfileName.Text
-    $selected.Source = $script:Controls.txtSource.Text
-    $selected.Destination = $script:Controls.txtDest.Text
-    $selected.UseVSS = $script:Controls.chkUseVss.IsChecked
-    $selected.ScanMode = $script:Controls.cmbScanMode.Text
-
-    # Parse numeric values with validation and bounds checking
-    # Helper function to provide visual feedback for input corrections
-    $showInputCorrected = {
-        param($control, $originalValue, $correctedValue, $fieldName)
-        $control.Text = $correctedValue.ToString()
-        $control.ToolTip = "Value '$originalValue' was corrected to '$correctedValue'"
-        # Flash the background briefly to indicate correction (uses existing theme colors)
-        $originalBg = $control.Background
-        $control.Background = [System.Windows.Media.Brushes]::DarkOrange
-        # Reset after 1.5 seconds using a dispatcher timer
-        $timer = [System.Windows.Threading.DispatcherTimer]::new()
-        $timer.Interval = [TimeSpan]::FromMilliseconds(1500)
-        $timer.Add_Tick({
-            $control.Background = $originalBg
-            $control.ToolTip = $null
-            $this.Stop()
-        })
-        $timer.Start()
-        Write-GuiLog "Input corrected: $fieldName '$originalValue' -> '$correctedValue'"
-    }
-
-    # ChunkMaxSizeGB: valid range 1-1000 GB
-    try {
-        $value = [int]$script:Controls.txtMaxSize.Text
-        $selected.ChunkMaxSizeGB = [Math]::Max(1, [Math]::Min(1000, $value))
-        if ($value -ne $selected.ChunkMaxSizeGB) {
-            & $showInputCorrected $script:Controls.txtMaxSize $value $selected.ChunkMaxSizeGB "Max Size (GB)"
-        }
-    } catch {
-        $originalText = $script:Controls.txtMaxSize.Text
-        $selected.ChunkMaxSizeGB = 10
-        & $showInputCorrected $script:Controls.txtMaxSize $originalText 10 "Max Size (GB)"
-    }
-
-    # ChunkMaxFiles: valid range 1000-10000000
-    try {
-        $value = [int]$script:Controls.txtMaxFiles.Text
-        $selected.ChunkMaxFiles = [Math]::Max(1000, [Math]::Min(10000000, $value))
-        if ($value -ne $selected.ChunkMaxFiles) {
-            & $showInputCorrected $script:Controls.txtMaxFiles $value $selected.ChunkMaxFiles "Max Files"
-        }
-    } catch {
-        $originalText = $script:Controls.txtMaxFiles.Text
-        $selected.ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
-        & $showInputCorrected $script:Controls.txtMaxFiles $originalText $script:DefaultMaxFilesPerChunk "Max Files"
-    }
-
-    # ChunkMaxDepth: valid range 1-20
-    try {
-        $value = [int]$script:Controls.txtMaxDepth.Text
-        $selected.ChunkMaxDepth = [Math]::Max(1, [Math]::Min(20, $value))
-        if ($value -ne $selected.ChunkMaxDepth) {
-            & $showInputCorrected $script:Controls.txtMaxDepth $value $selected.ChunkMaxDepth "Max Depth"
-        }
-    } catch {
-        $originalText = $script:Controls.txtMaxDepth.Text
-        $selected.ChunkMaxDepth = $script:DefaultMaxChunkDepth
-        & $showInputCorrected $script:Controls.txtMaxDepth $originalText $script:DefaultMaxChunkDepth "Max Depth"
-    }
-
-    # Refresh list display
-    $script:Controls.lstProfiles.Items.Refresh()
-
-    # Auto-save config to disk
-    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
-    if (-not $saveResult.Success) {
-        Write-GuiLog "Warning: Auto-save failed: $($saveResult.ErrorMessage)"
-    }
-}
-
-function Add-NewProfile {
-    <#
-    .SYNOPSIS
-        Creates a new profile with defaults
-    #>
-    [CmdletBinding()]
-    param()
-
-    $newProfile = [PSCustomObject]@{
-        Name = "New Profile"
-        Source = ""
-        Destination = ""
-        Enabled = $true
-        UseVSS = $false
-        ScanMode = "Smart"
-        ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
-        ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
-        ChunkMaxDepth = $script:DefaultMaxChunkDepth
-    }
-
-    # Add to config
-    if (-not $script:Config.SyncProfiles) {
-        $script:Config.SyncProfiles = @()
-    }
-    $script:Config.SyncProfiles += $newProfile
-
-    # Update UI
-    Update-ProfileList
-    $script:Controls.lstProfiles.SelectedIndex = $script:Controls.lstProfiles.Items.Count - 1
-
-    # Auto-save config to disk
-    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
-    if (-not $saveResult.Success) {
-        Write-GuiLog "Warning: Auto-save failed: $($saveResult.ErrorMessage)"
-    }
-
-    Write-GuiLog "New profile created"
-}
-
-function Remove-SelectedProfile {
-    <#
-    .SYNOPSIS
-        Removes selected profile with confirmation
-    #>
-    [CmdletBinding()]
-    param()
-
-    $selected = $script:Controls.lstProfiles.SelectedItem
-    if (-not $selected) {
-        [System.Windows.MessageBox]::Show(
-            "Please select a profile to remove.",
-            "No Selection",
-            [System.Windows.MessageBoxButton]::OK,
-            [System.Windows.MessageBoxImage]::Information
-        )
-        return
-    }
-
-    $result = [System.Windows.MessageBox]::Show(
-        "Remove profile '$($selected.Name)'?",
-        "Confirm Removal",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Question
-    )
-
-    if ($result -eq 'Yes') {
-        $script:Config.SyncProfiles = @($script:Config.SyncProfiles | Where-Object { $_ -ne $selected })
-        Update-ProfileList
-
-        # Auto-save config to disk
-        $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
-        if (-not $saveResult.Success) {
-            Write-GuiLog "Warning: Auto-save failed: $($saveResult.ErrorMessage)"
-        }
-
-        Write-GuiLog "Profile '$($selected.Name)' removed"
-    }
-}
-
-function Show-FolderBrowser {
-    <#
-    .SYNOPSIS
-        Opens folder browser dialog
-    .PARAMETER Description
-        Dialog description
-    .OUTPUTS
-        Selected path or $null
-    #>
-    [CmdletBinding()]
-    param([string]$Description = "Select folder")
-
-    Add-Type -AssemblyName System.Windows.Forms
-    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = $Description
-    $dialog.ShowNewFolderButton = $true
-
-    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        return $dialog.SelectedPath
-    }
-    return $null
-}
-
-function Get-ProfilesToRun {
-    <#
-    .SYNOPSIS
-        Determines which profiles to run based on selection mode
-    .PARAMETER AllProfiles
-        Include all enabled profiles
-    .PARAMETER SelectedOnly
-        Include only the currently selected profile
-    .OUTPUTS
-        Array of profile objects, or $null if validation fails
-    #>
-    [CmdletBinding()]
-    param(
-        [switch]$AllProfiles,
-        [switch]$SelectedOnly
-    )
-
-    $profilesToRun = @()
-
-    if ($AllProfiles) {
-        $profilesToRun = @($script:Config.SyncProfiles | Where-Object { $_.Enabled -eq $true })
-        if ($profilesToRun.Count -eq 0) {
-            Show-GuiError -Message "No enabled profiles found. Please enable at least one profile."
-            return $null
-        }
-    }
-    elseif ($SelectedOnly) {
-        $selected = $script:Controls.lstProfiles.SelectedItem
-        if (-not $selected) {
-            Show-GuiError -Message "No profile selected. Please select a profile to run."
-            return $null
-        }
-        $profilesToRun = @($selected)
-    }
-
-    # Validate profiles have required paths
-    foreach ($profile in $profilesToRun) {
-        if ([string]::IsNullOrWhiteSpace($profile.Source) -or [string]::IsNullOrWhiteSpace($profile.Destination)) {
-            Show-GuiError -Message "Profile '$($profile.Name)' has invalid source or destination paths."
-            return $null
-        }
-    }
-
-    return $profilesToRun
-}
-
-function New-ReplicationRunspace {
-    <#
-    .SYNOPSIS
-        Creates and configures a background runspace for replication
-    .PARAMETER Profiles
-        Array of profiles to run
-    .PARAMETER MaxWorkers
-        Maximum concurrent robocopy jobs
-    .PARAMETER ConfigPath
-        Path to config file (can be a snapshot for isolation from external changes)
-    .OUTPUTS
-        PSCustomObject with PowerShell, Handle, and Runspace properties
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject[]]$Profiles,
-
-        [Parameter(Mandatory)]
-        [int]$MaxWorkers,
-
-        [string]$ConfigPath = $script:ConfigPath
-    )
-
-    # Determine how to load Robocurse in the background runspace
-    # Two modes: 1) Module mode (Import-Module), 2) Monolith mode (dot-source script)
-    $loadMode = $null
-    $loadPath = $null
-
-    # Check if we're running from a module (RobocurseModulePath is set by psm1)
-    if ($script:RobocurseModulePath -and (Test-Path (Join-Path $script:RobocurseModulePath "Robocurse.psd1"))) {
-        $loadMode = "Module"
-        $loadPath = $script:RobocurseModulePath
-    }
-    # Check if we have a stored script path (set by monolith)
-    elseif ($script:RobocurseScriptPath -and (Test-Path $script:RobocurseScriptPath)) {
-        $loadMode = "Script"
-        $loadPath = $script:RobocurseScriptPath
-    }
-    # Try PSCommandPath (works when running as standalone script)
-    elseif ($PSCommandPath -and (Test-Path $PSCommandPath)) {
-        $loadMode = "Script"
-        $loadPath = $PSCommandPath
-    }
-    # Fall back to looking for Robocurse.ps1 in current directory
-    else {
-        $fallbackPath = Join-Path (Get-Location) "Robocurse.ps1"
-        if (Test-Path $fallbackPath) {
-            $loadMode = "Script"
-            $loadPath = $fallbackPath
-        }
-    }
-
-    if (-not $loadMode -or -not $loadPath) {
-        $errorMsg = "Cannot find Robocurse module or script to load in background runspace. loadPath='$loadPath'"
-        Write-Host "[ERROR] $errorMsg"
-        Write-GuiLog "ERROR: $errorMsg"
-        throw $errorMsg
-    }
-
-    $runspace = [runspacefactory]::CreateRunspace()
-    # Use MTA for background I/O work (STA is only needed for COM/UI operations)
-    $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
-    $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-    $runspace.Open()
-
-    $powershell = [powershell]::Create()
-    $powershell.Runspace = $runspace
-
-    # Build a script that loads Robocurse and runs replication
-    # Note: We pass the C# OrchestrationState object which is inherently thread-safe
-    # Callbacks are intentionally NOT shared - GUI uses timer-based polling instead
-    if ($loadMode -eq "Module") {
-        # NOTE: We pass ProfileNames (strings) instead of Profile objects because
-        # PSCustomObject properties don't reliably survive runspace boundaries.
-        # See CLAUDE.md for details on this pattern.
-        $backgroundScript = @"
-            param(`$ModulePath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$ConfigPath)
-
-            try {
-                Write-Host "[BACKGROUND] Loading module from: `$ModulePath"
-                Import-Module `$ModulePath -Force -ErrorAction Stop
-                Write-Host "[BACKGROUND] Module loaded successfully"
-            }
-            catch {
-                Write-Host "[BACKGROUND] ERROR loading module: `$(`$_.Exception.Message)"
-                `$SharedState.EnqueueError("Failed to load module: `$(`$_.Exception.Message)")
-                `$SharedState.Phase = 'Complete'
-                return
-            }
-
-            # Initialize logging session (required for Write-RobocurseLog)
-            try {
-                Write-Host "[BACKGROUND] Initializing log session..."
-                `$config = Get-RobocurseConfig -Path `$ConfigPath
-                `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
-                # Resolve relative paths based on config file directory and normalize
-                if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
-                    `$configDir = Split-Path -Parent `$ConfigPath
-                    `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
-                }
-                Write-Host "[BACKGROUND] Log root: `$logRoot"
-                Initialize-LogSession -LogRoot `$logRoot
-                Write-Host "[BACKGROUND] Log session initialized"
-            }
-            catch {
-                Write-Host "[BACKGROUND] WARNING: Failed to initialize logging: `$(`$_.Exception.Message)"
-                # Continue anyway - logging is not critical for replication
-            }
-
-            # Use the shared C# OrchestrationState instance (thread-safe by design)
-            `$script:OrchestrationState = `$SharedState
-
-            # Clear callbacks - GUI mode uses timer-based polling, not callbacks
-            `$script:OnProgress = `$null
-            `$script:OnChunkComplete = `$null
-            `$script:OnProfileComplete = `$null
-
-            try {
-                Write-Host "[BACKGROUND] Starting replication run"
-                # Re-read config to get fresh profile data with all properties intact
-                # (PSCustomObject properties don't survive runspace boundaries - see CLAUDE.md)
-                `$bgConfig = Get-RobocurseConfig -Path `$ConfigPath
-                `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
-
-                # Look up profiles by name from freshly-loaded config
-                `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
-                Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
-
-                # Start replication with -SkipInitialization since UI thread already initialized
-                Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
-
-                # Run the orchestration loop until complete
-                # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
-                while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
-                    Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
-                    Start-Sleep -Milliseconds 250
-                }
-                Write-Host "[BACKGROUND] Replication loop complete, phase: `$(`$script:OrchestrationState.Phase)"
-            }
-            catch {
-                Write-Host "[BACKGROUND] ERROR in replication: `$(`$_.Exception.Message)"
-                `$SharedState.EnqueueError("Replication error: `$(`$_.Exception.Message)")
-                `$SharedState.Phase = 'Complete'
-            }
-"@
-    }
-    else {
-        # Script/monolith mode
-        # NOTE: We use $GuiConfigPath (not $ConfigPath) because dot-sourcing the script
-        # would shadow our parameter with the script's own $ConfigPath parameter
-        # NOTE: We pass ProfileNames (strings) instead of Profile objects for consistency
-        # with module mode. See CLAUDE.md for the pattern.
-        $backgroundScript = @"
-            param(`$ScriptPath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$GuiConfigPath)
-
-            try {
-                Write-Host "[BACKGROUND] Loading script from: `$ScriptPath"
-                Write-Host "[BACKGROUND] Config path: `$GuiConfigPath"
-                # Load the script to get all functions (with -LoadOnly to prevent main execution)
-                . `$ScriptPath -LoadOnly
-                Write-Host "[BACKGROUND] Script loaded successfully"
-            }
-            catch {
-                Write-Host "[BACKGROUND] ERROR loading script: `$(`$_.Exception.Message)"
-                `$SharedState.EnqueueError("Failed to load script: `$(`$_.Exception.Message)")
-                `$SharedState.Phase = 'Complete'
-                return
-            }
-
-            # Initialize logging session (required for Write-RobocurseLog)
-            try {
-                Write-Host "[BACKGROUND] Initializing log session..."
-                `$config = Get-RobocurseConfig -Path `$GuiConfigPath
-                `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
-                # Resolve relative paths based on config file directory and normalize
-                if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
-                    `$configDir = Split-Path -Parent `$GuiConfigPath
-                    `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
-                }
-                Write-Host "[BACKGROUND] Log root: `$logRoot"
-                Initialize-LogSession -LogRoot `$logRoot
-                Write-Host "[BACKGROUND] Log session initialized"
-            }
-            catch {
-                Write-Host "[BACKGROUND] WARNING: Failed to initialize logging: `$(`$_.Exception.Message)"
-                # Continue anyway - logging is not critical for replication
-            }
-
-            # Use the shared C# OrchestrationState instance (thread-safe by design)
-            `$script:OrchestrationState = `$SharedState
-
-            # Clear callbacks - GUI mode uses timer-based polling, not callbacks
-            `$script:OnProgress = `$null
-            `$script:OnChunkComplete = `$null
-            `$script:OnProfileComplete = `$null
-
-            try {
-                Write-Host "[BACKGROUND] Starting replication run"
-                # Re-read config to get fresh profile data (see CLAUDE.md for pattern)
-                `$bgConfig = Get-RobocurseConfig -Path `$GuiConfigPath
-                `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
-
-                # Look up profiles by name from freshly-loaded config
-                `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
-                Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
-
-                # Start replication with -SkipInitialization since UI thread already initialized
-                Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
-
-                # Run the orchestration loop until complete
-                # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
-                while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
-                    Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
-                    Start-Sleep -Milliseconds 250
-                }
-                Write-Host "[BACKGROUND] Replication loop complete, phase: `$(`$script:OrchestrationState.Phase)"
-            }
-            catch {
-                Write-Host "[BACKGROUND] ERROR in replication: `$(`$_.Exception.Message)"
-                `$SharedState.EnqueueError("Replication error: `$(`$_.Exception.Message)")
-                `$SharedState.Phase = 'Complete'
-            }
-"@
-    }
-
-    $powershell.AddScript($backgroundScript)
-    $powershell.AddArgument($loadPath)
-    $powershell.AddArgument($script:OrchestrationState)
-    # Pass profile names (strings) - background will look up from config (see CLAUDE.md)
-    $profileNames = @($Profiles | ForEach-Object { $_.Name })
-    $powershell.AddArgument($profileNames)
-    $powershell.AddArgument($MaxWorkers)
-    # Use the provided ConfigPath (may be a snapshot for isolation from external changes)
-    $powershell.AddArgument($ConfigPath)
-
-    $handle = $powershell.BeginInvoke()
-
-    return [PSCustomObject]@{
-        PowerShell = $powershell
-        Handle = $handle
-        Runspace = $runspace
-    }
-}
-
-function Start-GuiReplication {
-    <#
-    .SYNOPSIS
-        Starts replication from GUI
-    .PARAMETER AllProfiles
-        Run all enabled profiles
-    .PARAMETER SelectedOnly
-        Run only selected profile
-    #>
-    [CmdletBinding()]
-    param(
-        [switch]$AllProfiles,
-        [switch]$SelectedOnly
-    )
-
-    # Save any pending form changes before reading profiles
-    # This ensures changes like chunk size are captured even if user clicks Run
-    # without first clicking elsewhere to trigger LostFocus
-    Save-ProfileFromForm
-
-    # Get and validate profiles (force array context to handle PowerShell's single-item unwrapping)
-    $profilesToRun = @(Get-ProfilesToRun -AllProfiles:$AllProfiles -SelectedOnly:$SelectedOnly)
-    if ($profilesToRun.Count -eq 0) { return }
-
-    # Update UI state for replication mode
-    $script:Controls.btnRunAll.IsEnabled = $false
-    $script:Controls.btnRunSelected.IsEnabled = $false
-    $script:Controls.btnStop.IsEnabled = $true
-    $script:Controls.txtStatus.Text = "Replication in progress..."
-    $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::Gray  # Reset error color
-    $script:GuiErrorCount = 0  # Reset error count for new run
-    $script:LastGuiUpdateState = $null
-    $script:Controls.dgChunks.ItemsSource = $null
-
-    Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
-
-    # Get worker count and start progress timer
-    $maxWorkers = [int]$script:Controls.sldWorkers.Value
-    $script:ProgressTimer.Start()
-
-    # Initialize orchestration state (must happen before runspace creation)
-    Initialize-OrchestrationState
-
-    # Create a snapshot of the config to prevent external modifications during replication
-    # This ensures the running replication uses the config state at the time of start
-    $script:ConfigSnapshotPath = $null
-    try {
-        $snapshotDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
-        $script:ConfigSnapshotPath = Join-Path $snapshotDir "Robocurse-ConfigSnapshot-$([Guid]::NewGuid().ToString('N')).json"
-        Copy-Item -Path $script:ConfigPath -Destination $script:ConfigSnapshotPath -Force
-        Write-GuiLog "Config snapshot created for replication run"
-    }
-    catch {
-        Write-GuiLog "Warning: Could not create config snapshot, using live config: $($_.Exception.Message)"
-        $script:ConfigSnapshotPath = $script:ConfigPath  # Fall back to original
-    }
-
-    # Create and start background runspace (using snapshot path)
-    try {
-        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigSnapshotPath
-
-        $script:ReplicationHandle = $runspaceInfo.Handle
-        $script:ReplicationPowerShell = $runspaceInfo.PowerShell
-        $script:ReplicationRunspace = $runspaceInfo.Runspace
-    }
-    catch {
-        Write-Host "[ERROR] Failed to create background runspace: $($_.Exception.Message)"
-        Write-GuiLog "ERROR: Failed to start replication: $($_.Exception.Message)"
-        # Reset UI state
-        $script:Controls.btnRunAll.IsEnabled = $true
-        $script:Controls.btnRunSelected.IsEnabled = $true
-        $script:Controls.btnStop.IsEnabled = $false
-        $script:Controls.txtStatus.Text = "Ready"
-        $script:ProgressTimer.Stop()
-    }
-}
-
-function Show-CompletionDialog {
-    <#
-    .SYNOPSIS
-        Shows a modern completion dialog with replication statistics
-    .PARAMETER ChunksComplete
-        Number of chunks completed successfully
-    .PARAMETER ChunksTotal
-        Total number of chunks
-    .PARAMETER ChunksFailed
-        Number of chunks that failed
-    #>
-    [CmdletBinding()]
-    param(
-        [int]$ChunksComplete = 0,
-        [int]$ChunksTotal = 0,
-        [int]$ChunksFailed = 0
-    )
-
-    try {
-        # Load XAML from resource file
-        $xaml = Get-XamlResource -ResourceName 'CompletionDialog.xaml' -FallbackContent @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Replication Complete"
-        Height="280" Width="420"
-        WindowStartupLocation="CenterScreen"
-        WindowStyle="None"
-        AllowsTransparency="True"
-        Background="Transparent"
-        ResizeMode="NoResize">
-
-    <Window.Resources>
-        <!-- Button style that works with dynamic XamlReader loading (no TemplateBinding) -->
-        <Style x:Key="ModernButton" TargetType="Button">
-            <Setter Property="Background" Value="#0078D4"/>
-            <Setter Property="Foreground" Value="White"/>
-            <Setter Property="BorderThickness" Value="0"/>
-            <Setter Property="Padding" Value="24,10"/>
-            <Setter Property="FontSize" Value="14"/>
-            <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="Button">
-                        <Border x:Name="border" Background="#0078D4" CornerRadius="4" Padding="24,10">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="border" Property="Background" Value="#1084D8"/>
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="border" Property="Background" Value="#006CBD"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-    </Window.Resources>
-
-    <Border Background="#1E1E1E" CornerRadius="8" BorderBrush="#3E3E3E" BorderThickness="1">
-        <Grid Margin="24">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
-
-            <!-- Header with icon and title -->
-            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,16">
-                <!-- Success checkmark icon -->
-                <Border x:Name="iconBorder" Width="48" Height="48" CornerRadius="24" Background="#4CAF50" Margin="0,0,16,0">
-                    <TextBlock x:Name="iconText" Text="&#x2713;" FontSize="28" Foreground="White"
-                               HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold"/>
-                </Border>
-                <StackPanel VerticalAlignment="Center">
-                    <TextBlock x:Name="txtTitle" Text="Replication Complete" FontSize="20" FontWeight="SemiBold" Foreground="#E0E0E0"/>
-                    <TextBlock x:Name="txtSubtitle" Text="All tasks finished successfully" FontSize="12" Foreground="#808080" Margin="0,2,0,0"/>
-                </StackPanel>
-            </StackPanel>
-
-            <!-- Separator -->
-            <Border Grid.Row="1" Height="1" Background="#3E3E3E" Margin="0,0,0,16"/>
-
-            <!-- Stats panel -->
-            <Grid Grid.Row="2" Margin="0,0,0,20">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-
-                <!-- Chunks completed -->
-                <StackPanel Grid.Column="0" HorizontalAlignment="Center">
-                    <TextBlock x:Name="txtChunksValue" Text="0" FontSize="32" FontWeight="Bold" Foreground="#4CAF50" HorizontalAlignment="Center"/>
-                    <TextBlock Text="Completed" FontSize="11" Foreground="#808080" HorizontalAlignment="Center"/>
-                </StackPanel>
-
-                <!-- Total chunks -->
-                <StackPanel Grid.Column="1" HorizontalAlignment="Center">
-                    <TextBlock x:Name="txtTotalValue" Text="0" FontSize="32" FontWeight="Bold" Foreground="#0078D4" HorizontalAlignment="Center"/>
-                    <TextBlock Text="Total" FontSize="11" Foreground="#808080" HorizontalAlignment="Center"/>
-                </StackPanel>
-
-                <!-- Failed chunks -->
-                <StackPanel Grid.Column="2" HorizontalAlignment="Center">
-                    <TextBlock x:Name="txtFailedValue" Text="0" FontSize="32" FontWeight="Bold" Foreground="#808080" HorizontalAlignment="Center"/>
-                    <TextBlock Text="Failed" FontSize="11" Foreground="#808080" HorizontalAlignment="Center"/>
-                </StackPanel>
-            </Grid>
-
-            <!-- OK Button with proper styling -->
-            <Button x:Name="btnOk" Grid.Row="3" Content="OK" Style="{StaticResource ModernButton}" HorizontalAlignment="Center"/>
-        </Grid>
-    </Border>
-</Window>
-
-'@
-        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
-        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
-        $reader.Close()
-
-        # Get controls
-        $iconBorder = $dialog.FindName("iconBorder")
-        $iconText = $dialog.FindName("iconText")
-        $txtTitle = $dialog.FindName("txtTitle")
-        $txtSubtitle = $dialog.FindName("txtSubtitle")
-        $txtChunksValue = $dialog.FindName("txtChunksValue")
-        $txtTotalValue = $dialog.FindName("txtTotalValue")
-        $txtFailedValue = $dialog.FindName("txtFailedValue")
-        $btnOk = $dialog.FindName("btnOk")
-
-        # Set values
-        $txtChunksValue.Text = $ChunksComplete.ToString()
-        $txtTotalValue.Text = $ChunksTotal.ToString()
-        $txtFailedValue.Text = $ChunksFailed.ToString()
-
-        # Adjust appearance based on results
-        if ($ChunksFailed -gt 0) {
-            # Some failures - show warning state
-            $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
-            $iconText.Text = [char]0x26A0  # Warning triangle
-            $txtTitle.Text = "Replication Complete with Warnings"
-            $txtSubtitle.Text = "$ChunksFailed chunk(s) failed"
-            $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
-        }
-        elseif ($ChunksComplete -eq 0 -and $ChunksTotal -eq 0) {
-            # Nothing to do
-            $txtTitle.Text = "Replication Complete"
-            $txtSubtitle.Text = "No chunks to process"
-        }
-        else {
-            # All success
-            $txtTitle.Text = "Replication Complete"
-            $txtSubtitle.Text = "All tasks finished successfully"
-        }
-
-        # OK button handler
-        $btnOk.Add_Click({
-            $dialog.DialogResult = $true
-            $dialog.Close()
-        })
-
-        # Allow dragging the window
-        $dialog.Add_MouseLeftButtonDown({
-            param($sender, $e)
-            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
-                $dialog.DragMove()
-            }
-        })
-
-        # Set owner to main window for proper modal behavior
-        $dialog.Owner = $script:Window
-        $dialog.ShowDialog() | Out-Null
-    }
-    catch {
-        Write-GuiLog "Error showing completion dialog: $($_.Exception.Message)"
-        # Fallback to simple message
-        [System.Windows.MessageBox]::Show(
-            "Replication completed!`n`nChunks: $ChunksComplete/$ChunksTotal`nFailed: $ChunksFailed",
-            "Replication Complete",
-            [System.Windows.MessageBoxButton]::OK,
-            [System.Windows.MessageBoxImage]::Information
-        )
-    }
-}
-
-function Complete-GuiReplication {
-    <#
-    .SYNOPSIS
-        Called when replication completes
-    .DESCRIPTION
-        Handles GUI cleanup after replication: stops timer, re-enables buttons,
-        disposes of background runspace resources, and shows completion message.
-    #>
-    [CmdletBinding()]
-    param()
-
-    # Stop timer
-    $script:ProgressTimer.Stop()
-
-    # Dispose of background runspace resources to prevent memory leaks
-    if ($script:ReplicationPowerShell) {
-        try {
-            # End the async invocation if still running
-            if ($script:ReplicationHandle -and -not $script:ReplicationHandle.IsCompleted) {
-                $script:ReplicationPowerShell.Stop()
-            }
-            elseif ($script:ReplicationHandle) {
-                # Collect any remaining output
-                $script:ReplicationPowerShell.EndInvoke($script:ReplicationHandle) | Out-Null
-            }
-
-            # Check for errors from the background runspace and surface them
-            if ($script:ReplicationPowerShell.HadErrors) {
-                Write-GuiLog "Background replication encountered errors:"
-                foreach ($err in $script:ReplicationPowerShell.Streams.Error) {
-                    $errorLocation = if ($err.InvocationInfo) {
-                        "$($err.InvocationInfo.ScriptName):$($err.InvocationInfo.ScriptLineNumber)"
-                    } else { "Unknown" }
-                    Write-GuiLog "  [$errorLocation] $($err.Exception.Message)"
-                }
-            }
-
-            # Dispose the runspace
-            if ($script:ReplicationPowerShell.Runspace) {
-                $script:ReplicationPowerShell.Runspace.Close()
-                $script:ReplicationPowerShell.Runspace.Dispose()
-            }
-
-            # Dispose the PowerShell instance
-            $script:ReplicationPowerShell.Dispose()
-        }
-        catch {
-            Write-GuiLog "Warning: Error disposing runspace: $($_.Exception.Message)"
-        }
-        finally {
-            $script:ReplicationPowerShell = $null
-            $script:ReplicationHandle = $null
-            $script:ReplicationRunspace = $null  # Clear runspace reference for GC
-        }
-    }
-
-    # Re-enable buttons
-    $script:Controls.btnRunAll.IsEnabled = $true
-    $script:Controls.btnRunSelected.IsEnabled = $true
-    $script:Controls.btnStop.IsEnabled = $false
-
-    # Update status with error indicator if applicable
-    if ($script:GuiErrorCount -gt 0) {
-        $script:Controls.txtStatus.Text = "Replication complete ($($script:GuiErrorCount) error(s))"
-        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
-    } else {
-        $script:Controls.txtStatus.Text = "Replication complete"
-        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::LimeGreen
-    }
-
-    # Show completion message
-    $status = Get-OrchestrationStatus
-    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
-
-    Write-GuiLog "Replication completed: $($status.ChunksComplete)/$($status.ChunksTotal) chunks, $($status.ChunksFailed) failed"
-
-    # Clean up config snapshot if it was created
-    if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {
-        try {
-            if (Test-Path $script:ConfigSnapshotPath) {
-                Remove-Item $script:ConfigSnapshotPath -Force -ErrorAction SilentlyContinue
-                Write-GuiLog "Config snapshot cleaned up"
-            }
-        }
-        catch {
-            # Non-critical - temp files will be cleaned up eventually
-        }
-        $script:ConfigSnapshotPath = $null
-    }
-}
-
-# Cache for GUI progress updates - avoids unnecessary rebuilds
-$script:LastGuiUpdateState = $null
-
-function Update-GuiProgressText {
-    <#
-    .SYNOPSIS
-        Updates the progress text labels from status object
-    .PARAMETER Status
-        Orchestration status object from Get-OrchestrationStatus
-    .NOTES
-        WPF RENDERING QUIRK: In PowerShell, WPF controls don't reliably repaint when
-        properties change via data binding or Dispatcher.BeginInvoke. The solution is:
-        1. Direct property assignment (not Dispatcher calls)
-        2. Call Window.UpdateLayout() to force a complete layout pass
-        This forces WPF to recalculate and repaint all controls.
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject]$Status
-    )
-
-    # Capture values for use in script block
-    $profileProgress = $Status.ProfileProgress
-    $overallProgress = $Status.OverallProgress
-    $profileName = if ($Status.CurrentProfile) { $Status.CurrentProfile } else { "--" }
-    $etaText = if ($Status.ETA) { "ETA: $($Status.ETA.ToString('hh\:mm\:ss'))" } else { "ETA: --:--:--" }
-
-    $speedText = if ($Status.Elapsed.TotalSeconds -gt 0 -and $Status.BytesComplete -gt 0) {
-        $speed = $Status.BytesComplete / $Status.Elapsed.TotalSeconds
-        "Speed: $(Format-FileSize $speed)/s"
-    } else {
-        "Speed: -- MB/s"
-    }
-    $chunksText = "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
-
-    # Direct assignment
-    $script:Controls.pbProfile.Value = $profileProgress
-    $script:Controls.pbOverall.Value = $overallProgress
-    $script:Controls.txtProfileProgress.Text = "Profile: $profileName - $profileProgress%"
-    $script:Controls.txtOverallProgress.Text = "Overall: $overallProgress%"
-    $script:Controls.txtEta.Text = $etaText
-    $script:Controls.txtSpeed.Text = $speedText
-    $script:Controls.txtChunks.Text = $chunksText
-
-    # Force complete window layout update
-    $script:Window.UpdateLayout()
-}
-
-function Get-ChunkDisplayItems {
-    <#
-    .SYNOPSIS
-        Builds the chunk display items list for the GUI grid
-    .DESCRIPTION
-        Creates display objects from active, failed, and completed chunks.
-        Limits completed chunks to last 20 to prevent UI lag.
-
-        Each display item includes:
-        - ChunkId, SourcePath, Status, Speed: Standard display properties
-        - Progress: 0-100 percentage for text display
-        - ProgressScale: 0.0-1.0 for ScaleTransform binding (see NOTES)
-    .PARAMETER MaxCompletedItems
-        Maximum number of completed chunks to display (default 20)
-    .OUTPUTS
-        Array of display objects for DataGrid binding
-    .NOTES
-        WPF PROGRESSBAR QUIRK: The standard WPF ProgressBar control doesn't reliably
-        render in PowerShell even when Value property is correctly set. Neither
-        Dispatcher.Invoke nor direct property assignment fixes this.
-
-        SOLUTION: Use a custom progress bar built from Border elements with ScaleTransform.
-        - Background Border (gray) provides the track
-        - Fill Border (green) scales horizontally via ScaleTransform.ScaleX binding
-        - ProgressScale (0.0-1.0) maps directly to ScaleX for smooth scaling
-
-        This approach bypasses ProgressBar entirely and works reliably in PowerShell WPF.
-    #>
-    [CmdletBinding()]
-    param(
-        [int]$MaxCompletedItems = $script:GuiMaxCompletedChunksDisplay
-    )
-
-    $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
-
-    # Add active jobs (typically small - MaxConcurrentJobs)
-    foreach ($kvp in $script:OrchestrationState.ActiveJobs.ToArray()) {
-        $job = $kvp.Value
-
-        # Get actual progress from robocopy log parsing
-        $progress = 0
-        $speed = "--"
-        try {
-            $progressData = Get-RobocopyProgress -Job $job
-            if ($progressData) {
-                # Calculate percentage from bytes copied vs estimated chunk size
-                if ($job.Chunk.EstimatedSize -gt 0 -and $progressData.BytesCopied -gt 0) {
-                    $progress = [math]::Min(100, [math]::Round(($progressData.BytesCopied / $job.Chunk.EstimatedSize) * 100, 0))
-                }
-                # Use parsed speed if available
-                if ($progressData.Speed) {
-                    $speed = $progressData.Speed
-                }
-            }
-        }
-        catch {
-            # Progress parsing failure - use defaults
-        }
-
-        $chunkDisplayItems.Add([PSCustomObject]@{
-            ChunkId = $job.Chunk.ChunkId
-            SourcePath = $job.Chunk.SourcePath
-            Status = "Running"
-            Progress = $progress
-            ProgressScale = [double]($progress / 100)  # 0.0 to 1.0 for ScaleTransform
-            Speed = $speed
-        })
-    }
-
-    # Add failed chunks (show all - usually small or indicates problems)
-    foreach ($chunk in $script:OrchestrationState.FailedChunks.ToArray()) {
-        $chunkDisplayItems.Add([PSCustomObject]@{
-            ChunkId = $chunk.ChunkId
-            SourcePath = $chunk.SourcePath
-            Status = "Failed"
-            Progress = 0
-            ProgressScale = [double]0.0
-            Speed = "--"
-        })
-    }
-
-    # Add completed chunks - limit to last N to prevent UI lag
-    $completedSnapshot = $script:OrchestrationState.CompletedChunks.ToArray()
-    $startIndex = [Math]::Max(0, $completedSnapshot.Length - $MaxCompletedItems)
-    for ($i = $startIndex; $i -lt $completedSnapshot.Length; $i++) {
-        $chunk = $completedSnapshot[$i]
-        $chunkDisplayItems.Add([PSCustomObject]@{
-            ChunkId = $chunk.ChunkId
-            SourcePath = $chunk.SourcePath
-            Status = "Complete"
-            Progress = 100
-            ProgressScale = [double]1.0  # Full scale for completed
-            Speed = "--"
-        })
-    }
-
-    return $chunkDisplayItems.ToArray()
-}
-
-function Test-ChunkGridNeedsRebuild {
-    <#
-    .SYNOPSIS
-        Determines if the chunk grid needs to be rebuilt
-    .DESCRIPTION
-        Returns true when:
-        - First call (no previous state)
-        - Active/completed/failed counts changed
-        - There are active jobs (progress values change continuously)
-
-        The last condition is important because PSCustomObject doesn't implement
-        INotifyPropertyChanged, so WPF won't see property changes. We must rebuild
-        the entire ItemsSource to show updated progress values.
-    .OUTPUTS
-        $true if grid needs rebuild, $false otherwise
-    #>
-    [CmdletBinding()]
-    param()
-
-    $currentState = @{
-        ActiveCount = $script:OrchestrationState.ActiveJobs.Count
-        CompletedCount = $script:OrchestrationState.CompletedCount
-        FailedCount = $script:OrchestrationState.FailedChunks.Count
-    }
-
-    $needsRebuild = $false
-    if (-not $script:LastGuiUpdateState) {
-        $needsRebuild = $true
-    }
-    elseif ($script:LastGuiUpdateState.ActiveCount -ne $currentState.ActiveCount -or
-            $script:LastGuiUpdateState.CompletedCount -ne $currentState.CompletedCount -or
-            $script:LastGuiUpdateState.FailedCount -ne $currentState.FailedCount) {
-        $needsRebuild = $true
-    }
-    elseif ($currentState.ActiveCount -gt 0) {
-        # Always refresh when there are active jobs since their progress/speed is constantly changing
-        $needsRebuild = $true
-    }
-
-    if ($needsRebuild) {
-        $script:LastGuiUpdateState = $currentState
-    }
-
-    return $needsRebuild
-}
-
-function Update-GuiProgress {
-    <#
-    .SYNOPSIS
-        Called by timer to update GUI from orchestration state
-    .DESCRIPTION
-        Optimized for performance with large chunk counts:
-        - Only rebuilds display list when chunk counts change
-        - Uses efficient ToArray() snapshot for thread-safe iteration
-        - Limits displayed items to prevent UI sluggishness
-        - Dequeues and displays real-time error messages from background thread
-    #>
-    [CmdletBinding()]
-    param()
-
-    try {
-        $status = Get-OrchestrationStatus
-
-        # Debug: Log phase and state every tick (throttled to every 10th tick to reduce noise)
-        # Using Write-Host because GUI thread doesn't have log session initialized
-        if (-not $script:GuiTickCount) { $script:GuiTickCount = 0 }
-        $script:GuiTickCount++
-        if ($script:GuiTickCount % 10 -eq 0) {
-            Write-Host "[GUI TICK #$($script:GuiTickCount)] Phase=$($status.Phase), Chunks=$($status.ChunksComplete)/$($status.ChunksTotal), ProfilePct=$($status.ProfileProgress)%, OverallPct=$($status.OverallProgress)%, Bytes=$($status.BytesComplete)"
-        }
-
-        # Update progress text (always - lightweight)
-        Update-GuiProgressText -Status $status
-
-        # Only flush streams when background is complete (avoid blocking)
-        if ($script:ReplicationHandle -and $script:ReplicationHandle.IsCompleted) {
-            # Flush background runspace output streams to console
-            if ($script:ReplicationPowerShell -and $script:ReplicationPowerShell.Streams) {
-                foreach ($info in $script:ReplicationPowerShell.Streams.Information) {
-                    Write-Host "[BACKGROUND] $($info.MessageData)"
-                }
-                $script:ReplicationPowerShell.Streams.Information.Clear()
-
-                foreach ($warn in $script:ReplicationPowerShell.Streams.Warning) {
-                    Write-Host "[BACKGROUND WARNING] $warn" -ForegroundColor Yellow
-                }
-                $script:ReplicationPowerShell.Streams.Warning.Clear()
-
-                foreach ($err in $script:ReplicationPowerShell.Streams.Error) {
-                    Write-Host "[BACKGROUND ERROR] $($err.Exception.Message)" -ForegroundColor Red
-                }
-                $script:ReplicationPowerShell.Streams.Error.Clear()
-            }
-        }
-
-        # Dequeue errors (thread-safe) and update error indicator
-        if ($script:OrchestrationState) {
-            $errors = $script:OrchestrationState.DequeueErrors()
-            foreach ($err in $errors) {
-                Write-GuiLog "[ERROR] $err"
-                $script:GuiErrorCount++
-            }
-
-            # Update status bar with error indicator if errors occurred
-            if ($script:GuiErrorCount -gt 0) {
-                $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
-                $script:Controls.txtStatus.Text = "Replication in progress... ($($script:GuiErrorCount) error(s))"
-            }
-        }
-
-        # Update chunk grid - when state changes or jobs have progress updates
-        if ($script:OrchestrationState -and (Test-ChunkGridNeedsRebuild)) {
-            $script:Controls.dgChunks.ItemsSource = @(Get-ChunkDisplayItems)
-            # Force DataGrid to re-read all bindings (needed for non-INotifyPropertyChanged objects)
-            $script:Controls.dgChunks.Items.Refresh()
-            # Force visual refresh
-            $script:Window.UpdateLayout()
-        }
-
-        # Check if complete
-        if ($status.Phase -eq 'Complete') {
-            Complete-GuiReplication
-        }
-    }
-    catch {
-        Write-Host "[ERROR] Error updating progress: $_"
-        Write-GuiLog "Error updating progress: $_"
-    }
-}
-
-# GUI Log ring buffer (uses $script:GuiLogMaxLines from constants)
-$script:GuiLogBuffer = [System.Collections.Generic.List[string]]::new()
-$script:GuiLogDirty = $false  # Track if buffer needs to be flushed to UI
-
-# Error tracking for visual indicator
-$script:GuiErrorCount = 0  # Count of errors encountered during current run
-
 function Write-GuiLog {
     <#
     .SYNOPSIS
         Writes a message to the GUI log panel and console
     .DESCRIPTION
-        Uses a fixed-size ring buffer to prevent O(n²) string concatenation
+        Uses a fixed-size ring buffer to prevent O(nÂ²) string concatenation
         performance issues. When the buffer exceeds GuiLogMaxLines, oldest
         entries are removed. This keeps the GUI responsive during long runs.
         Also writes to console for debugging visibility with caller info.
@@ -11948,212 +12181,6 @@ function Show-GuiError {
     )
 
     Write-GuiLog "ERROR: $Message"
-}
-
-function Show-ScheduleDialog {
-    <#
-    .SYNOPSIS
-        Shows schedule configuration dialog and registers/unregisters the scheduled task
-    .DESCRIPTION
-        Displays a dialog for configuring scheduled runs. When OK is clicked,
-        the configuration is saved AND the Windows Task Scheduler task is
-        actually created or removed based on the enabled state.
-    #>
-    [CmdletBinding()]
-    param()
-
-    try {
-        # Load XAML from resource file
-        $xaml = Get-XamlResource -ResourceName 'ScheduleDialog.xaml' -FallbackContent @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Configure Schedule"
-        Height="350" Width="450"
-        WindowStartupLocation="CenterScreen"
-        Background="#1E1E1E">
-    <Grid Margin="15">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
-
-        <CheckBox x:Name="chkEnabled" Content="Enable Scheduled Runs" Foreground="#E0E0E0" FontWeight="Bold"/>
-
-        <StackPanel Grid.Row="1" Margin="0,15,0,0">
-            <Label Content="Run Time (HH:MM):" Foreground="#E0E0E0"/>
-            <TextBox x:Name="txtTime" Background="#2D2D2D" Foreground="#E0E0E0" Padding="5" Text="02:00" Width="100" HorizontalAlignment="Left"/>
-        </StackPanel>
-
-        <StackPanel Grid.Row="2" Margin="0,15,0,0">
-            <Label Content="Frequency:" Foreground="#E0E0E0"/>
-            <ComboBox x:Name="cmbFrequency" Background="#2D2D2D" Foreground="#E0E0E0" Width="150" HorizontalAlignment="Left">
-                <ComboBoxItem Content="Daily" IsSelected="True"/>
-                <ComboBoxItem Content="Weekdays"/>
-                <ComboBoxItem Content="Hourly"/>
-            </ComboBox>
-        </StackPanel>
-
-        <TextBlock Grid.Row="3" x:Name="txtStatus" Foreground="#808080" Margin="0,15,0,0" TextWrapping="Wrap"/>
-
-        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button x:Name="btnOk" Content="Apply" Width="80" Margin="0,0,10,0" Background="#0078D4" Foreground="White" Padding="10,5"/>
-            <Button x:Name="btnCancel" Content="Cancel" Width="80" Background="#4A4A4A" Foreground="White" Padding="10,5"/>
-        </StackPanel>
-    </Grid>
-</Window>
-
-'@
-        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
-        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
-        $reader.Close()
-
-        # Get controls
-        $chkEnabled = $dialog.FindName("chkEnabled")
-        $txtTime = $dialog.FindName("txtTime")
-        $cmbFrequency = $dialog.FindName("cmbFrequency")
-        $txtStatus = $dialog.FindName("txtStatus")
-        $btnOk = $dialog.FindName("btnOk")
-        $btnCancel = $dialog.FindName("btnCancel")
-
-        # Load current settings
-        $chkEnabled.IsChecked = $script:Config.Schedule.Enabled
-        $txtTime.Text = if ($script:Config.Schedule.Time) { $script:Config.Schedule.Time } else { "02:00" }
-
-        # Add real-time time validation with visual feedback
-        $txtTime.Add_TextChanged({
-            param($sender, $e)
-            $isValid = $false
-            $text = $sender.Text
-            if ($text -match '^([01]?\d|2[0-3]):([0-5]\d)$') {
-                $isValid = $true
-            }
-            if ($isValid) {
-                $sender.BorderBrush = [System.Windows.Media.Brushes]::Gray
-                $sender.ToolTip = "Time in 24-hour format (HH:MM)"
-            } else {
-                $sender.BorderBrush = [System.Windows.Media.Brushes]::Red
-                $sender.ToolTip = "Invalid format. Use HH:MM (24-hour, e.g., 02:00, 14:30)"
-            }
-        })
-
-        # Check current task status
-        $taskExists = Test-RobocurseTaskExists
-        if ($taskExists) {
-            $taskInfo = Get-RobocurseTask
-            if ($taskInfo) {
-                $txtStatus.Text = "Current task status: $($taskInfo.State)`nNext run: $($taskInfo.NextRunTime)"
-            }
-        }
-        else {
-            $txtStatus.Text = "No scheduled task currently configured."
-        }
-
-        # Button handlers
-        $btnOk.Add_Click({
-            try {
-                # Parse time
-                $timeParts = $txtTime.Text -split ':'
-                if ($timeParts.Count -ne 2) {
-                    [System.Windows.MessageBox]::Show("Invalid time format. Use HH:MM", "Error", "OK", "Error")
-                    return
-                }
-                $hour = [int]$timeParts[0]
-                $minute = [int]$timeParts[1]
-
-                if ($hour -lt 0 -or $hour -gt 23 -or $minute -lt 0 -or $minute -gt 59) {
-                    [System.Windows.MessageBox]::Show("Invalid time. Hour must be 0-23, minute must be 0-59", "Error", "OK", "Error")
-                    return
-                }
-
-                # Determine schedule type
-                $scheduleType = switch ($cmbFrequency.Text) {
-                    "Daily" { "Daily" }
-                    "Weekdays" { "Weekdays" }
-                    "Hourly" { "Hourly" }
-                    default { "Daily" }
-                }
-
-                # Update config
-                $script:Config.Schedule.Enabled = $chkEnabled.IsChecked
-                $script:Config.Schedule.Time = $txtTime.Text
-                $script:Config.Schedule.ScheduleType = $scheduleType
-
-                if ($chkEnabled.IsChecked) {
-                    # Register/update the task
-                    Write-GuiLog "Registering scheduled task..."
-
-                    $result = Register-RobocurseTask `
-                        -ConfigPath $script:ConfigPath `
-                        -Schedule $scheduleType `
-                        -Time "$($hour.ToString('00')):$($minute.ToString('00'))"
-
-                    if ($result.Success) {
-                        Write-GuiLog "Scheduled task registered successfully"
-                        [System.Windows.MessageBox]::Show(
-                            "Scheduled task has been registered.`n`nThe task will run $scheduleType at $($txtTime.Text).",
-                            "Schedule Configured",
-                            "OK",
-                            "Information"
-                        )
-                    }
-                    else {
-                        Write-GuiLog "Failed to register scheduled task: $($result.ErrorMessage)"
-                        [System.Windows.MessageBox]::Show(
-                            "Failed to register scheduled task.`n$($result.ErrorMessage)",
-                            "Error",
-                            "OK",
-                            "Error"
-                        )
-                    }
-                }
-                else {
-                    # Remove the task if it exists
-                    if ($taskExists) {
-                        Write-GuiLog "Removing scheduled task..."
-                        $result = Unregister-RobocurseTask
-                        if ($result.Success) {
-                            Write-GuiLog "Scheduled task removed"
-                            [System.Windows.MessageBox]::Show(
-                                "Scheduled task has been removed.",
-                                "Schedule Disabled",
-                                "OK",
-                                "Information"
-                            )
-                        }
-                        else {
-                            Write-GuiLog "Failed to remove scheduled task: $($result.ErrorMessage)"
-                        }
-                    }
-                }
-
-                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
-                if (-not $saveResult.Success) {
-                    Write-GuiLog "Warning: Failed to save config: $($saveResult.ErrorMessage)"
-                }
-                $dialog.Close()
-            }
-            catch {
-                [System.Windows.MessageBox]::Show(
-                    "Error configuring schedule: $($_.Exception.Message)",
-                    "Error",
-                    "OK",
-                    "Error"
-                )
-                Write-GuiLog "Error configuring schedule: $($_.Exception.Message)"
-            }
-        })
-
-        $btnCancel.Add_Click({ $dialog.Close() })
-
-        $dialog.ShowDialog() | Out-Null
-    }
-    catch {
-        Show-GuiError -Message "Failed to show schedule dialog" -Details $_.Exception.Message
-    }
 }
 
 #endregion

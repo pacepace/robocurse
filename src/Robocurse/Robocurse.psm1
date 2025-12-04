@@ -178,7 +178,14 @@ $publicFunctionOrder = @(
     'VSS.ps1'
     'Email.ps1'
     'Scheduling.ps1'
-    'GUI.ps1'
+    # GUI modules (split for maintainability)
+    'GuiResources.ps1'
+    'GuiSettings.ps1'
+    'GuiProfiles.ps1'
+    'GuiDialogs.ps1'
+    'GuiReplication.ps1'
+    'GuiProgress.ps1'
+    'GuiMain.ps1'
     'Main.ps1'
 )
 
