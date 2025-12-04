@@ -25,7 +25,7 @@ Describe "Robocurse Main Script" {
             $requiredFiles = @(
                 'Utility.ps1', 'Configuration.ps1', 'Logging.ps1', 'DirectoryProfiling.ps1',
                 'Chunking.ps1', 'Robocopy.ps1', 'Orchestration.ps1', 'Progress.ps1',
-                'VSS.ps1', 'Email.ps1', 'Scheduling.ps1',
+                'VssCore.ps1', 'VssLocal.ps1', 'VssRemote.ps1', 'Email.ps1', 'Scheduling.ps1',
                 # GUI modules (split for maintainability)
                 'GuiResources.ps1', 'GuiSettings.ps1', 'GuiProfiles.ps1', 'GuiDialogs.ps1',
                 'GuiReplication.ps1', 'GuiProgress.ps1', 'GuiMain.ps1',

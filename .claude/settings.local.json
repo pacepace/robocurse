@@ -32,7 +32,13 @@
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; (Invoke-Pester -Path tests\\Unit\\Orchestration.Tests.ps1 -Output Detailed *>&1) | Select-Object -Last 15\")",
       "Bash(grep:*)",
       "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''''; Invoke-Pester -Path tests -PassThru -Output Detailed\")",
-      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''''; .\\build\\Build-Robocurse.ps1 && Invoke-Pester -Path tests -PassThru -Output Detailed\")"
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''''; .\\build\\Build-Robocurse.ps1 && Invoke-Pester -Path tests -PassThru -Output Detailed\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"Rename-Item ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\src\\Robocurse\\Public\\VSS.Core.ps1'' ''VssCore.ps1''\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"Rename-Item ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\src\\Robocurse\\Public\\VSS.Local.ps1'' ''VssLocal.ps1''\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"Rename-Item ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\src\\Robocurse\\Public\\VSS.Remote.ps1'' ''VssRemote.ps1''\")",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"cd ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse''; Invoke-Pester -Path tests -PassThru -Output Detailed\")",
+      "Bash(Select-Object -Last 60)",
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"(Invoke-Pester -Path ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\tests'' -PassThru -Output Detailed *>&1) | Select-Object -Last 80\")"
     ],
     "deny": [],
     "ask": []

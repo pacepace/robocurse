@@ -175,7 +175,9 @@ $publicFunctionOrder = @(
     'Checkpoint.ps1'       # Checkpoint/resume (before Orchestration)
     'Orchestration.ps1'
     'Progress.ps1'
-    'VSS.ps1'
+    'VssCore.ps1'
+    'VssLocal.ps1'
+    'VssRemote.ps1'
     'Email.ps1'
     'Scheduling.ps1'
     # GUI modules (split for maintainability)

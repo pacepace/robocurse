@@ -41,7 +41,9 @@ Describe "Build Script Configuration" {
             'Checkpoint.ps1',  # Must be before Orchestration
             'Orchestration.ps1',
             'Progress.ps1',
-            'VSS.ps1',
+            'VssCore.ps1',
+            'VssLocal.ps1',
+            'VssRemote.ps1',
             'Email.ps1',
             'Scheduling.ps1',
             # GUI modules (split for maintainability)
@@ -179,7 +181,9 @@ Describe "Source Module Validation" {
             'Checkpoint.ps1',
             'Orchestration.ps1',
             'Progress.ps1',
-            'VSS.ps1',
+            'VssCore.ps1',
+            'VssLocal.ps1',
+            'VssRemote.ps1',
             'Email.ps1',
             'Scheduling.ps1',
             # GUI modules (split for maintainability)

@@ -60,7 +60,9 @@ $moduleOrder = @(
     'Public\Checkpoint.ps1'
     'Public\Orchestration.ps1'
     'Public\Progress.ps1'
-    'Public\VSS.ps1'
+    'Public\VssCore.ps1'
+    'Public\VssLocal.ps1'
+    'Public\VssRemote.ps1'
     'Public\Email.ps1'
     'Public\Scheduling.ps1'
     # GUI modules (split from GUI.ps1 for maintainability)
