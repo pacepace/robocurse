@@ -48,7 +48,11 @@
           "maxAgeDays": 30
         }
       },
-      "verboseFileLogging": false
+      "verboseFileLogging": false,
+      "redactPaths": false,
+      "redactServerNames": [
+        
+      ]
     },
     "email": {
       "enabled": false,

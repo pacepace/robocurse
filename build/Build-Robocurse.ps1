@@ -70,6 +70,7 @@ $moduleOrder = @(
     'Public\GuiSettings.ps1'
     'Public\GuiProfiles.ps1'
     'Public\GuiDialogs.ps1'
+    'Public\GuiRunspace.ps1'
     'Public\GuiReplication.ps1'
     'Public\GuiProgress.ps1'
     'Public\GuiMain.ps1'

@@ -80,6 +80,8 @@ function New-DefaultConfig {
             LogRetentionDays = $script:LogDeleteAfterDays
             MismatchSeverity = $script:DefaultMismatchSeverity  # "Warning", "Error", or "Success"
             VerboseFileLogging = $false  # If true, log every file copied; if false, only log summary
+            RedactPaths = $false  # If true, redact file paths in logs for security/privacy
+            RedactServerNames = @()  # Array of server names to specifically redact from logs
         }
         Email = [PSCustomObject]@{
             Enabled = $false
@@ -240,6 +242,14 @@ function ConvertFrom-GlobalSettings {
         # Verbose file logging - log every file name if true (default: false for smaller logs)
         if ($null -ne $RawGlobal.logging.verboseFileLogging) {
             $Config.GlobalSettings.VerboseFileLogging = [bool]$RawGlobal.logging.verboseFileLogging
+        }
+        # Path redaction - redact file paths in logs for security/privacy
+        if ($null -ne $RawGlobal.logging.redactPaths) {
+            $Config.GlobalSettings.RedactPaths = [bool]$RawGlobal.logging.redactPaths
+        }
+        # Server names to specifically redact from logs
+        if ($RawGlobal.logging.redactServerNames) {
+            $Config.GlobalSettings.RedactServerNames = @($RawGlobal.logging.redactServerNames)
         }
     }
 
@@ -404,6 +414,8 @@ function ConvertTo-FriendlyConfig {
                     }
                 }
                 verboseFileLogging = $Config.GlobalSettings.VerboseFileLogging
+                redactPaths = $Config.GlobalSettings.RedactPaths
+                redactServerNames = @($Config.GlobalSettings.RedactServerNames)
             }
             email = [ordered]@{
                 enabled = $Config.Email.Enabled

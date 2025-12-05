@@ -147,12 +147,6 @@ $script:HealthCheckStatusFile = Join-Path $script:HealthCheckTempDir "Robocurse-
 # Dry-run mode state (set during replication, used by Start-ChunkJob)
 $script:DryRunMode = $false
 
-# Mutex timeouts
-# Timeout in milliseconds for log file mutex acquisition.
-# 5 seconds is typically sufficient; if exceeded, logging proceeds without lock
-# (better to log without synchronization than lose the log entry).
-$script:LogMutexTimeoutMs = 5000
-
 # Timeout in milliseconds for VSS tracking file mutex acquisition.
 # VSS operations are less frequent, so 10 seconds is acceptable.
 $script:VssMutexTimeoutMs = 10000
@@ -198,6 +192,7 @@ $publicFunctionOrder = @(
     'GuiSettings.ps1'
     'GuiProfiles.ps1'
     'GuiDialogs.ps1'
+    'GuiRunspace.ps1'      # Background runspace management (before GuiReplication)
     'GuiReplication.ps1'
     'GuiProgress.ps1'
     'GuiMain.ps1'

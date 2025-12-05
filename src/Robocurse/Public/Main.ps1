@@ -311,6 +311,12 @@ function Start-RobocurseMain {
             $deleteDays = if ($config.GlobalSettings.LogRetentionDays) { $config.GlobalSettings.LogRetentionDays } else { $script:LogDeleteAfterDays }
             Initialize-LogSession -LogRoot $logRoot -CompressAfterDays $compressDays -DeleteAfterDays $deleteDays
             $logSessionInitialized = $true
+
+            # Enable path redaction if configured (for security/privacy)
+            if ($config.GlobalSettings.RedactPaths) {
+                $serverNames = if ($config.GlobalSettings.RedactServerNames) { @($config.GlobalSettings.RedactServerNames) } else { @() }
+                Enable-PathRedaction -ServerNames $serverNames
+            }
         }
         catch {
             Write-Error "Failed to initialize logging: $($_.Exception.Message)"

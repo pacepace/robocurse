@@ -3,6 +3,10 @@
 $script:CurrentSessionId = $null
 # Note: LogMutexTimeoutMs and MinLogLevel are defined in Robocurse.psm1 CONSTANTS region
 
+# Path redaction settings - can be set via Enable-PathRedaction
+$script:PathRedactionEnabled = $false
+$script:PathRedactionPatterns = @()  # Array of regex patterns to redact
+
 # Log level priority mapping for filtering
 $script:LogLevelPriority = @{
     'Debug'   = 0
@@ -66,6 +70,176 @@ function Set-RobocurseLogLevel {
 
     $script:MinLogLevel = $Level
     Write-Verbose "Log level set to: $Level"
+}
+
+function Enable-PathRedaction {
+    <#
+    .SYNOPSIS
+        Enables path redaction in log messages for security/privacy
+    .DESCRIPTION
+        When enabled, file paths in log messages are redacted to hide sensitive
+        directory structures, server names, or project paths. This is useful for:
+        - Sharing logs with third parties without exposing internal paths
+        - Compliance with data privacy requirements
+        - Reducing sensitive information in SIEM logs
+    .PARAMETER RedactionPatterns
+        Optional array of custom regex patterns to redact. If not provided,
+        uses default patterns that redact:
+        - Full Windows paths (C:\path\to\file -> [PATH]\file)
+        - UNC paths (\\server\share\path -> [UNC]\path)
+        - Drive letters with paths
+    .PARAMETER ServerNames
+        Optional array of server names to specifically redact.
+        These are replaced with [SERVER] in the output.
+    .PARAMETER PreserveFilenames
+        If true, preserves the final filename while redacting the directory path.
+        Default: $true
+    .EXAMPLE
+        Enable-PathRedaction
+        # Enables default path redaction
+
+    .EXAMPLE
+        Enable-PathRedaction -ServerNames @('PRODSERVER01', 'FILESERVER')
+        # Redacts specific server names in addition to paths
+
+    .EXAMPLE
+        Enable-PathRedaction -PreserveFilenames $false
+        # Redacts entire paths including filenames
+    #>
+    [CmdletBinding()]
+    param(
+        [string[]]$RedactionPatterns,
+        [string[]]$ServerNames,
+        [bool]$PreserveFilenames = $true
+    )
+
+    $script:PathRedactionEnabled = $true
+    $script:PathRedactionPreserveFilenames = $PreserveFilenames
+
+    # Build redaction patterns
+    $patterns = @()
+
+    # Add custom patterns if provided
+    if ($RedactionPatterns) {
+        $patterns += $RedactionPatterns
+    }
+
+    # Add server name patterns if provided
+    if ($ServerNames) {
+        foreach ($server in $ServerNames) {
+            # Escape special regex characters in server name
+            $escapedServer = [regex]::Escape($server)
+            $patterns += "\\\\$escapedServer(?=\\|$)"  # UNC server reference
+            $patterns += "\b$escapedServer\b"          # Server name in text
+        }
+        $script:PathRedactionServerNames = $ServerNames
+    }
+
+    $script:PathRedactionPatterns = $patterns
+    Write-Verbose "Path redaction enabled with $($patterns.Count) custom patterns"
+}
+
+function Disable-PathRedaction {
+    <#
+    .SYNOPSIS
+        Disables path redaction in log messages
+    .DESCRIPTION
+        Turns off path redaction. Log messages will contain full paths.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $script:PathRedactionEnabled = $false
+    $script:PathRedactionPatterns = @()
+    $script:PathRedactionServerNames = @()
+    Write-Verbose "Path redaction disabled"
+}
+
+function Get-PathRedactionStatus {
+    <#
+    .SYNOPSIS
+        Returns current path redaction configuration
+    .OUTPUTS
+        Hashtable with Enabled, PatternCount, PreserveFilenames
+    #>
+    [CmdletBinding()]
+    param()
+
+    return @{
+        Enabled = $script:PathRedactionEnabled
+        PatternCount = $script:PathRedactionPatterns.Count
+        PreserveFilenames = $script:PathRedactionPreserveFilenames
+        ServerNames = $script:PathRedactionServerNames
+    }
+}
+
+function Invoke-PathRedaction {
+    <#
+    .SYNOPSIS
+        Redacts file paths from a string
+    .DESCRIPTION
+        Replaces file paths in the input string with redacted versions.
+        Used internally by Write-RobocurseLog and Write-SiemEvent when
+        path redaction is enabled.
+    .PARAMETER Text
+        The text to redact paths from
+    .OUTPUTS
+        String with paths redacted
+    .EXAMPLE
+        Invoke-PathRedaction -Text "Error copying C:\Users\john\Documents\secret.txt"
+        # Returns: "Error copying [PATH]\secret.txt"
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    if (-not $script:PathRedactionEnabled -or [string]::IsNullOrEmpty($Text)) {
+        return $Text
+    }
+
+    $result = $Text
+
+    # Apply custom patterns first
+    foreach ($pattern in $script:PathRedactionPatterns) {
+        try {
+            $result = $result -replace $pattern, '[REDACTED]'
+        }
+        catch {
+            # Invalid regex - skip this pattern
+            Write-Verbose "Invalid redaction pattern: $pattern"
+        }
+    }
+
+    # Redact UNC paths: \\server\share\path\file.txt -> [UNC]\file.txt or [UNC]
+    if ($script:PathRedactionPreserveFilenames) {
+        # Preserve filename: \\server\share\path\file.txt -> [UNC]\file.txt
+        $result = $result -replace '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*\\([^\\]+)(?=\s|$|"|''|])', '[UNC]\$1'
+        # Handle UNC paths without trailing filename (directories)
+        $result = $result -replace '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*(?=\s|$|"|''|])', '[UNC]'
+    }
+    else {
+        $result = $result -replace '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*', '[UNC]'
+    }
+
+    # Redact Windows paths: C:\path\to\file.txt -> [PATH]\file.txt or [PATH]
+    if ($script:PathRedactionPreserveFilenames) {
+        # Preserve filename: C:\Users\john\file.txt -> [PATH]\file.txt
+        $result = $result -replace '([A-Za-z]:(?:\\[^\\:*?"<>|]+)+)\\([^\\:*?"<>|\s]+)(?=\s|$|"|''|])', '[PATH]\$2'
+        # Handle paths without trailing filename (directories or paths ending in \)
+        $result = $result -replace '[A-Za-z]:(?:\\[^\\:*?"<>|]+)+(?=\s|$|"|''|]|\\)', '[PATH]'
+        # Handle drive root paths: C:\ -> [PATH]
+        $result = $result -replace '[A-Za-z]:\\(?=\s|$|"|'')', '[PATH]'
+    }
+    else {
+        $result = $result -replace '[A-Za-z]:(?:\\[^\\:*?"<>|]+)+', '[PATH]'
+        $result = $result -replace '[A-Za-z]:\\', '[PATH]'
+    }
+
+    return $result
 }
 
 function Invoke-WithLogMutex {
@@ -259,10 +433,13 @@ function Write-RobocurseLog {
         $callerInfo = "${functionName}:${lineNumber}"
     }
 
+    # Apply path redaction if enabled (for security/privacy)
+    $redactedMessage = Invoke-PathRedaction -Text $Message
+
     # Format the log entry with caller info
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $levelUpper = $Level.ToUpper()
-    $logEntry = "${timestamp} [${levelUpper}] [${Component}] [${callerInfo}] ${Message}"
+    $logEntry = "${timestamp} [${levelUpper}] [${Component}] [${callerInfo}] ${redactedMessage}"
 
     # Check if log session is initialized
     $logPath = $script:CurrentOperationalLogPath
@@ -331,7 +508,7 @@ function Write-RobocurseLog {
             Level = $Level
             Component = $Component
             Caller = $callerInfo
-            Message = $Message
+            Message = $redactedMessage  # Use redacted message for SIEM
         } -SessionId $SessionId
     }
 }
@@ -418,6 +595,24 @@ function Write-SiemEvent {
         $env:USER
     }
 
+    # Apply path redaction to data values if enabled
+    $redactedData = @{}
+    foreach ($key in $Data.Keys) {
+        $value = $Data[$key]
+        if ($value -is [string]) {
+            $redactedData[$key] = Invoke-PathRedaction -Text $value
+        }
+        elseif ($value -is [array]) {
+            # Redact string items in arrays
+            $redactedData[$key] = @($value | ForEach-Object {
+                if ($_ -is [string]) { Invoke-PathRedaction -Text $_ } else { $_ }
+            })
+        }
+        else {
+            $redactedData[$key] = $value
+        }
+    }
+
     # Create SIEM event object with required fields
     $siemEvent = @{
         timestamp = $timestamp
@@ -425,7 +620,7 @@ function Write-SiemEvent {
         sessionId = $SessionId
         user = $userName
         machine = $machineName
-        data = $Data
+        data = $redactedData
     }
 
     # Convert to JSON (single line) and write with mutex protection

@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-04 13:11:07
+    Built: 2025-12-04 18:24:01
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -207,12 +207,6 @@ $script:HealthCheckStatusFile = Join-Path $script:HealthCheckTempDir "Robocurse-
 
 # Dry-run mode state (set during replication, used by Start-ChunkJob)
 $script:DryRunMode = $false
-
-# Mutex timeouts
-# Timeout in milliseconds for log file mutex acquisition.
-# 5 seconds is typically sufficient; if exceeded, logging proceeds without lock
-# (better to log without synchronization than lose the log entry).
-$script:LogMutexTimeoutMs = 5000
 
 # Timeout in milliseconds for VSS tracking file mutex acquisition.
 # VSS operations are less frequent, so 10 seconds is acceptable.
@@ -1049,6 +1043,8 @@ function New-DefaultConfig {
             LogRetentionDays = $script:LogDeleteAfterDays
             MismatchSeverity = $script:DefaultMismatchSeverity  # "Warning", "Error", or "Success"
             VerboseFileLogging = $false  # If true, log every file copied; if false, only log summary
+            RedactPaths = $false  # If true, redact file paths in logs for security/privacy
+            RedactServerNames = @()  # Array of server names to specifically redact from logs
         }
         Email = [PSCustomObject]@{
             Enabled = $false
@@ -1209,6 +1205,14 @@ function ConvertFrom-GlobalSettings {
         # Verbose file logging - log every file name if true (default: false for smaller logs)
         if ($null -ne $RawGlobal.logging.verboseFileLogging) {
             $Config.GlobalSettings.VerboseFileLogging = [bool]$RawGlobal.logging.verboseFileLogging
+        }
+        # Path redaction - redact file paths in logs for security/privacy
+        if ($null -ne $RawGlobal.logging.redactPaths) {
+            $Config.GlobalSettings.RedactPaths = [bool]$RawGlobal.logging.redactPaths
+        }
+        # Server names to specifically redact from logs
+        if ($RawGlobal.logging.redactServerNames) {
+            $Config.GlobalSettings.RedactServerNames = @($RawGlobal.logging.redactServerNames)
         }
     }
 
@@ -1373,6 +1377,8 @@ function ConvertTo-FriendlyConfig {
                     }
                 }
                 verboseFileLogging = $Config.GlobalSettings.VerboseFileLogging
+                redactPaths = $Config.GlobalSettings.RedactPaths
+                redactServerNames = @($Config.GlobalSettings.RedactServerNames)
             }
             email = [ordered]@{
                 enabled = $Config.Email.Enabled
@@ -1817,6 +1823,10 @@ function Test-PathFormat {
 $script:CurrentSessionId = $null
 # Note: LogMutexTimeoutMs and MinLogLevel are defined in Robocurse.psm1 CONSTANTS region
 
+# Path redaction settings - can be set via Enable-PathRedaction
+$script:PathRedactionEnabled = $false
+$script:PathRedactionPatterns = @()  # Array of regex patterns to redact
+
 # Log level priority mapping for filtering
 $script:LogLevelPriority = @{
     'Debug'   = 0
@@ -1880,6 +1890,176 @@ function Set-RobocurseLogLevel {
 
     $script:MinLogLevel = $Level
     Write-Verbose "Log level set to: $Level"
+}
+
+function Enable-PathRedaction {
+    <#
+    .SYNOPSIS
+        Enables path redaction in log messages for security/privacy
+    .DESCRIPTION
+        When enabled, file paths in log messages are redacted to hide sensitive
+        directory structures, server names, or project paths. This is useful for:
+        - Sharing logs with third parties without exposing internal paths
+        - Compliance with data privacy requirements
+        - Reducing sensitive information in SIEM logs
+    .PARAMETER RedactionPatterns
+        Optional array of custom regex patterns to redact. If not provided,
+        uses default patterns that redact:
+        - Full Windows paths (C:\path\to\file -> [PATH]\file)
+        - UNC paths (\\server\share\path -> [UNC]\path)
+        - Drive letters with paths
+    .PARAMETER ServerNames
+        Optional array of server names to specifically redact.
+        These are replaced with [SERVER] in the output.
+    .PARAMETER PreserveFilenames
+        If true, preserves the final filename while redacting the directory path.
+        Default: $true
+    .EXAMPLE
+        Enable-PathRedaction
+        # Enables default path redaction
+
+    .EXAMPLE
+        Enable-PathRedaction -ServerNames @('PRODSERVER01', 'FILESERVER')
+        # Redacts specific server names in addition to paths
+
+    .EXAMPLE
+        Enable-PathRedaction -PreserveFilenames $false
+        # Redacts entire paths including filenames
+    #>
+    [CmdletBinding()]
+    param(
+        [string[]]$RedactionPatterns,
+        [string[]]$ServerNames,
+        [bool]$PreserveFilenames = $true
+    )
+
+    $script:PathRedactionEnabled = $true
+    $script:PathRedactionPreserveFilenames = $PreserveFilenames
+
+    # Build redaction patterns
+    $patterns = @()
+
+    # Add custom patterns if provided
+    if ($RedactionPatterns) {
+        $patterns += $RedactionPatterns
+    }
+
+    # Add server name patterns if provided
+    if ($ServerNames) {
+        foreach ($server in $ServerNames) {
+            # Escape special regex characters in server name
+            $escapedServer = [regex]::Escape($server)
+            $patterns += "\\\\$escapedServer(?=\\|$)"  # UNC server reference
+            $patterns += "\b$escapedServer\b"          # Server name in text
+        }
+        $script:PathRedactionServerNames = $ServerNames
+    }
+
+    $script:PathRedactionPatterns = $patterns
+    Write-Verbose "Path redaction enabled with $($patterns.Count) custom patterns"
+}
+
+function Disable-PathRedaction {
+    <#
+    .SYNOPSIS
+        Disables path redaction in log messages
+    .DESCRIPTION
+        Turns off path redaction. Log messages will contain full paths.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $script:PathRedactionEnabled = $false
+    $script:PathRedactionPatterns = @()
+    $script:PathRedactionServerNames = @()
+    Write-Verbose "Path redaction disabled"
+}
+
+function Get-PathRedactionStatus {
+    <#
+    .SYNOPSIS
+        Returns current path redaction configuration
+    .OUTPUTS
+        Hashtable with Enabled, PatternCount, PreserveFilenames
+    #>
+    [CmdletBinding()]
+    param()
+
+    return @{
+        Enabled = $script:PathRedactionEnabled
+        PatternCount = $script:PathRedactionPatterns.Count
+        PreserveFilenames = $script:PathRedactionPreserveFilenames
+        ServerNames = $script:PathRedactionServerNames
+    }
+}
+
+function Invoke-PathRedaction {
+    <#
+    .SYNOPSIS
+        Redacts file paths from a string
+    .DESCRIPTION
+        Replaces file paths in the input string with redacted versions.
+        Used internally by Write-RobocurseLog and Write-SiemEvent when
+        path redaction is enabled.
+    .PARAMETER Text
+        The text to redact paths from
+    .OUTPUTS
+        String with paths redacted
+    .EXAMPLE
+        Invoke-PathRedaction -Text "Error copying C:\Users\john\Documents\secret.txt"
+        # Returns: "Error copying [PATH]\secret.txt"
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    if (-not $script:PathRedactionEnabled -or [string]::IsNullOrEmpty($Text)) {
+        return $Text
+    }
+
+    $result = $Text
+
+    # Apply custom patterns first
+    foreach ($pattern in $script:PathRedactionPatterns) {
+        try {
+            $result = $result -replace $pattern, '[REDACTED]'
+        }
+        catch {
+            # Invalid regex - skip this pattern
+            Write-Verbose "Invalid redaction pattern: $pattern"
+        }
+    }
+
+    # Redact UNC paths: \\server\share\path\file.txt -> [UNC]\file.txt or [UNC]
+    if ($script:PathRedactionPreserveFilenames) {
+        # Preserve filename: \\server\share\path\file.txt -> [UNC]\file.txt
+        $result = $result -replace '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*\\([^\\]+)(?=\s|$|"|''|])', '[UNC]\$1'
+        # Handle UNC paths without trailing filename (directories)
+        $result = $result -replace '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*(?=\s|$|"|''|])', '[UNC]'
+    }
+    else {
+        $result = $result -replace '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*', '[UNC]'
+    }
+
+    # Redact Windows paths: C:\path\to\file.txt -> [PATH]\file.txt or [PATH]
+    if ($script:PathRedactionPreserveFilenames) {
+        # Preserve filename: C:\Users\john\file.txt -> [PATH]\file.txt
+        $result = $result -replace '([A-Za-z]:(?:\\[^\\:*?"<>|]+)+)\\([^\\:*?"<>|\s]+)(?=\s|$|"|''|])', '[PATH]\$2'
+        # Handle paths without trailing filename (directories or paths ending in \)
+        $result = $result -replace '[A-Za-z]:(?:\\[^\\:*?"<>|]+)+(?=\s|$|"|''|]|\\)', '[PATH]'
+        # Handle drive root paths: C:\ -> [PATH]
+        $result = $result -replace '[A-Za-z]:\\(?=\s|$|"|'')', '[PATH]'
+    }
+    else {
+        $result = $result -replace '[A-Za-z]:(?:\\[^\\:*?"<>|]+)+', '[PATH]'
+        $result = $result -replace '[A-Za-z]:\\', '[PATH]'
+    }
+
+    return $result
 }
 
 function Invoke-WithLogMutex {
@@ -2073,10 +2253,13 @@ function Write-RobocurseLog {
         $callerInfo = "${functionName}:${lineNumber}"
     }
 
+    # Apply path redaction if enabled (for security/privacy)
+    $redactedMessage = Invoke-PathRedaction -Text $Message
+
     # Format the log entry with caller info
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $levelUpper = $Level.ToUpper()
-    $logEntry = "${timestamp} [${levelUpper}] [${Component}] [${callerInfo}] ${Message}"
+    $logEntry = "${timestamp} [${levelUpper}] [${Component}] [${callerInfo}] ${redactedMessage}"
 
     # Check if log session is initialized
     $logPath = $script:CurrentOperationalLogPath
@@ -2145,7 +2328,7 @@ function Write-RobocurseLog {
             Level = $Level
             Component = $Component
             Caller = $callerInfo
-            Message = $Message
+            Message = $redactedMessage  # Use redacted message for SIEM
         } -SessionId $SessionId
     }
 }
@@ -2232,6 +2415,24 @@ function Write-SiemEvent {
         $env:USER
     }
 
+    # Apply path redaction to data values if enabled
+    $redactedData = @{}
+    foreach ($key in $Data.Keys) {
+        $value = $Data[$key]
+        if ($value -is [string]) {
+            $redactedData[$key] = Invoke-PathRedaction -Text $value
+        }
+        elseif ($value -is [array]) {
+            # Redact string items in arrays
+            $redactedData[$key] = @($value | ForEach-Object {
+                if ($_ -is [string]) { Invoke-PathRedaction -Text $_ } else { $_ }
+            })
+        }
+        else {
+            $redactedData[$key] = $value
+        }
+    }
+
     # Create SIEM event object with required fields
     $siemEvent = @{
         timestamp = $timestamp
@@ -2239,7 +2440,7 @@ function Write-SiemEvent {
         sessionId = $SessionId
         user = $userName
         machine = $machineName
-        data = $Data
+        data = $redactedData
     }
 
     # Convert to JSON (single line) and write with mutex protection
@@ -10974,55 +11175,9 @@ function Show-ScheduleDialog {
 
 #endregion
 
-#region ==================== GUIREPLICATION ====================
+#region ==================== GUIRUNSPACE ====================
 
-# Background runspace management and replication control.
-
-function Get-ProfilesToRun {
-    <#
-    .SYNOPSIS
-        Determines which profiles to run based on selection mode
-    .PARAMETER AllProfiles
-        Include all enabled profiles
-    .PARAMETER SelectedOnly
-        Include only the currently selected profile
-    .OUTPUTS
-        Array of profile objects, or $null if validation fails
-    #>
-    [CmdletBinding()]
-    param(
-        [switch]$AllProfiles,
-        [switch]$SelectedOnly
-    )
-
-    $profilesToRun = @()
-
-    if ($AllProfiles) {
-        $profilesToRun = @($script:Config.SyncProfiles | Where-Object { $_.Enabled -eq $true })
-        if ($profilesToRun.Count -eq 0) {
-            Show-GuiError -Message "No enabled profiles found. Please enable at least one profile."
-            return $null
-        }
-    }
-    elseif ($SelectedOnly) {
-        $selected = $script:Controls.lstProfiles.SelectedItem
-        if (-not $selected) {
-            Show-GuiError -Message "No profile selected. Please select a profile to run."
-            return $null
-        }
-        $profilesToRun = @($selected)
-    }
-
-    # Validate profiles have required paths
-    foreach ($profile in $profilesToRun) {
-        if ([string]::IsNullOrWhiteSpace($profile.Source) -or [string]::IsNullOrWhiteSpace($profile.Destination)) {
-            Show-GuiError -Message "Profile '$($profile.Name)' has invalid source or destination paths."
-            return $null
-        }
-    }
-
-    return $profilesToRun
-}
+# Background PowerShell runspace creation and cleanup for replication.
 
 function New-ReplicationRunspace {
     <#
@@ -11097,157 +11252,11 @@ function New-ReplicationRunspace {
     # Note: We pass the C# OrchestrationState object which is inherently thread-safe
     # Callbacks are intentionally NOT shared - GUI uses timer-based polling instead
     if ($loadMode -eq "Module") {
-        # NOTE: We pass ProfileNames (strings) instead of Profile objects because
-        # PSCustomObject properties don't reliably survive runspace boundaries.
-        # See CLAUDE.md for details on this pattern.
-        $backgroundScript = @"
-            param(`$ModulePath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$ConfigPath)
-
-            try {
-                Write-Host "[BACKGROUND] Loading module from: `$ModulePath"
-                Import-Module `$ModulePath -Force -ErrorAction Stop
-                Write-Host "[BACKGROUND] Module loaded successfully"
-            }
-            catch {
-                Write-Host "[BACKGROUND] ERROR loading module: `$(`$_.Exception.Message)"
-                `$SharedState.EnqueueError("Failed to load module: `$(`$_.Exception.Message)")
-                `$SharedState.Phase = 'Complete'
-                return
-            }
-
-            # Initialize logging session (required for Write-RobocurseLog)
-            try {
-                Write-Host "[BACKGROUND] Initializing log session..."
-                `$config = Get-RobocurseConfig -Path `$ConfigPath
-                `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
-                # Resolve relative paths based on config file directory and normalize
-                if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
-                    `$configDir = Split-Path -Parent `$ConfigPath
-                    `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
-                }
-                Write-Host "[BACKGROUND] Log root: `$logRoot"
-                Initialize-LogSession -LogRoot `$logRoot
-                Write-Host "[BACKGROUND] Log session initialized"
-            }
-            catch {
-                Write-Host "[BACKGROUND] WARNING: Failed to initialize logging: `$(`$_.Exception.Message)"
-                # Continue anyway - logging is not critical for replication
-            }
-
-            # Use the shared C# OrchestrationState instance (thread-safe by design)
-            `$script:OrchestrationState = `$SharedState
-
-            # Clear callbacks - GUI mode uses timer-based polling, not callbacks
-            `$script:OnProgress = `$null
-            `$script:OnChunkComplete = `$null
-            `$script:OnProfileComplete = `$null
-
-            try {
-                Write-Host "[BACKGROUND] Starting replication run"
-                # Re-read config to get fresh profile data with all properties intact
-                # (PSCustomObject properties don't survive runspace boundaries - see CLAUDE.md)
-                `$bgConfig = Get-RobocurseConfig -Path `$ConfigPath
-                `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
-
-                # Look up profiles by name from freshly-loaded config
-                `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
-                Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
-
-                # Start replication with -SkipInitialization since UI thread already initialized
-                Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
-
-                # Run the orchestration loop until complete
-                # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
-                while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
-                    Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
-                    Start-Sleep -Milliseconds 250
-                }
-                Write-Host "[BACKGROUND] Replication loop complete, phase: `$(`$script:OrchestrationState.Phase)"
-            }
-            catch {
-                Write-Host "[BACKGROUND] ERROR in replication: `$(`$_.Exception.Message)"
-                `$SharedState.EnqueueError("Replication error: `$(`$_.Exception.Message)")
-                `$SharedState.Phase = 'Complete'
-            }
-"@
+        $backgroundScript = New-ModuleModeBackgroundScript
     }
     else {
         # Script/monolith mode
-        # NOTE: We use $GuiConfigPath (not $ConfigPath) because dot-sourcing the script
-        # would shadow our parameter with the script's own $ConfigPath parameter
-        # NOTE: We pass ProfileNames (strings) instead of Profile objects for consistency
-        # with module mode. See CLAUDE.md for the pattern.
-        $backgroundScript = @"
-            param(`$ScriptPath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$GuiConfigPath)
-
-            try {
-                Write-Host "[BACKGROUND] Loading script from: `$ScriptPath"
-                Write-Host "[BACKGROUND] Config path: `$GuiConfigPath"
-                # Load the script to get all functions (with -LoadOnly to prevent main execution)
-                . `$ScriptPath -LoadOnly
-                Write-Host "[BACKGROUND] Script loaded successfully"
-            }
-            catch {
-                Write-Host "[BACKGROUND] ERROR loading script: `$(`$_.Exception.Message)"
-                `$SharedState.EnqueueError("Failed to load script: `$(`$_.Exception.Message)")
-                `$SharedState.Phase = 'Complete'
-                return
-            }
-
-            # Initialize logging session (required for Write-RobocurseLog)
-            try {
-                Write-Host "[BACKGROUND] Initializing log session..."
-                `$config = Get-RobocurseConfig -Path `$GuiConfigPath
-                `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
-                # Resolve relative paths based on config file directory and normalize
-                if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
-                    `$configDir = Split-Path -Parent `$GuiConfigPath
-                    `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
-                }
-                Write-Host "[BACKGROUND] Log root: `$logRoot"
-                Initialize-LogSession -LogRoot `$logRoot
-                Write-Host "[BACKGROUND] Log session initialized"
-            }
-            catch {
-                Write-Host "[BACKGROUND] WARNING: Failed to initialize logging: `$(`$_.Exception.Message)"
-                # Continue anyway - logging is not critical for replication
-            }
-
-            # Use the shared C# OrchestrationState instance (thread-safe by design)
-            `$script:OrchestrationState = `$SharedState
-
-            # Clear callbacks - GUI mode uses timer-based polling, not callbacks
-            `$script:OnProgress = `$null
-            `$script:OnChunkComplete = `$null
-            `$script:OnProfileComplete = `$null
-
-            try {
-                Write-Host "[BACKGROUND] Starting replication run"
-                # Re-read config to get fresh profile data (see CLAUDE.md for pattern)
-                `$bgConfig = Get-RobocurseConfig -Path `$GuiConfigPath
-                `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
-
-                # Look up profiles by name from freshly-loaded config
-                `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
-                Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
-
-                # Start replication with -SkipInitialization since UI thread already initialized
-                Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
-
-                # Run the orchestration loop until complete
-                # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
-                while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
-                    Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
-                    Start-Sleep -Milliseconds 250
-                }
-                Write-Host "[BACKGROUND] Replication loop complete, phase: `$(`$script:OrchestrationState.Phase)"
-            }
-            catch {
-                Write-Host "[BACKGROUND] ERROR in replication: `$(`$_.Exception.Message)"
-                `$SharedState.EnqueueError("Replication error: `$(`$_.Exception.Message)")
-                `$SharedState.Phase = 'Complete'
-            }
-"@
+        $backgroundScript = New-ScriptModeBackgroundScript
     }
 
     $powershell.AddScript($backgroundScript)
@@ -11267,6 +11276,300 @@ function New-ReplicationRunspace {
         Handle = $handle
         Runspace = $runspace
     }
+}
+
+function New-ModuleModeBackgroundScript {
+    <#
+    .SYNOPSIS
+        Creates the background script for module loading mode
+    .DESCRIPTION
+        Returns a script block string that loads Robocurse as a module and runs replication.
+        NOTE: We pass ProfileNames (strings) instead of Profile objects because
+        PSCustomObject properties don't reliably survive runspace boundaries.
+        See CLAUDE.md for details on this pattern.
+    #>
+    [CmdletBinding()]
+    param()
+
+    return @"
+        param(`$ModulePath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$ConfigPath)
+
+        try {
+            Write-Host "[BACKGROUND] Loading module from: `$ModulePath"
+            Import-Module `$ModulePath -Force -ErrorAction Stop
+            Write-Host "[BACKGROUND] Module loaded successfully"
+        }
+        catch {
+            Write-Host "[BACKGROUND] ERROR loading module: `$(`$_.Exception.Message)"
+            `$SharedState.EnqueueError("Failed to load module: `$(`$_.Exception.Message)")
+            `$SharedState.Phase = 'Complete'
+            return
+        }
+
+        # Initialize logging session (required for Write-RobocurseLog)
+        try {
+            Write-Host "[BACKGROUND] Initializing log session..."
+            `$config = Get-RobocurseConfig -Path `$ConfigPath
+            `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+            # Resolve relative paths based on config file directory and normalize
+            if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
+                `$configDir = Split-Path -Parent `$ConfigPath
+                `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
+            }
+            Write-Host "[BACKGROUND] Log root: `$logRoot"
+            Initialize-LogSession -LogRoot `$logRoot
+            Write-Host "[BACKGROUND] Log session initialized"
+        }
+        catch {
+            Write-Host "[BACKGROUND] WARNING: Failed to initialize logging: `$(`$_.Exception.Message)"
+            # Continue anyway - logging is not critical for replication
+        }
+
+        # Use the shared C# OrchestrationState instance (thread-safe by design)
+        `$script:OrchestrationState = `$SharedState
+
+        # Clear callbacks - GUI mode uses timer-based polling, not callbacks
+        `$script:OnProgress = `$null
+        `$script:OnChunkComplete = `$null
+        `$script:OnProfileComplete = `$null
+
+        try {
+            Write-Host "[BACKGROUND] Starting replication run"
+            # Re-read config to get fresh profile data with all properties intact
+            # (PSCustomObject properties don't survive runspace boundaries - see CLAUDE.md)
+            `$bgConfig = Get-RobocurseConfig -Path `$ConfigPath
+            `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
+
+            # Look up profiles by name from freshly-loaded config
+            `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
+            Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
+
+            # Start replication with -SkipInitialization since UI thread already initialized
+            Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+
+            # Run the orchestration loop until complete
+            # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
+            while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
+                Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
+                Start-Sleep -Milliseconds 250
+            }
+            Write-Host "[BACKGROUND] Replication loop complete, phase: `$(`$script:OrchestrationState.Phase)"
+        }
+        catch {
+            Write-Host "[BACKGROUND] ERROR in replication: `$(`$_.Exception.Message)"
+            `$SharedState.EnqueueError("Replication error: `$(`$_.Exception.Message)")
+            `$SharedState.Phase = 'Complete'
+        }
+"@
+}
+
+function New-ScriptModeBackgroundScript {
+    <#
+    .SYNOPSIS
+        Creates the background script for monolith/script loading mode
+    .DESCRIPTION
+        Returns a script block string that dot-sources the Robocurse script and runs replication.
+        NOTE: We use $GuiConfigPath (not $ConfigPath) because dot-sourcing the script
+        would shadow our parameter with the script's own $ConfigPath parameter.
+        NOTE: We pass ProfileNames (strings) instead of Profile objects for consistency
+        with module mode. See CLAUDE.md for the pattern.
+    #>
+    [CmdletBinding()]
+    param()
+
+    return @"
+        param(`$ScriptPath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$GuiConfigPath)
+
+        try {
+            Write-Host "[BACKGROUND] Loading script from: `$ScriptPath"
+            Write-Host "[BACKGROUND] Config path: `$GuiConfigPath"
+            # Load the script to get all functions (with -LoadOnly to prevent main execution)
+            . `$ScriptPath -LoadOnly
+            Write-Host "[BACKGROUND] Script loaded successfully"
+        }
+        catch {
+            Write-Host "[BACKGROUND] ERROR loading script: `$(`$_.Exception.Message)"
+            `$SharedState.EnqueueError("Failed to load script: `$(`$_.Exception.Message)")
+            `$SharedState.Phase = 'Complete'
+            return
+        }
+
+        # Initialize logging session (required for Write-RobocurseLog)
+        try {
+            Write-Host "[BACKGROUND] Initializing log session..."
+            `$config = Get-RobocurseConfig -Path `$GuiConfigPath
+            `$logRoot = if (`$config.GlobalSettings.LogPath) { `$config.GlobalSettings.LogPath } else { '.\Logs' }
+            # Resolve relative paths based on config file directory and normalize
+            if (-not [System.IO.Path]::IsPathRooted(`$logRoot)) {
+                `$configDir = Split-Path -Parent `$GuiConfigPath
+                `$logRoot = [System.IO.Path]::GetFullPath((Join-Path `$configDir `$logRoot))
+            }
+            Write-Host "[BACKGROUND] Log root: `$logRoot"
+            Initialize-LogSession -LogRoot `$logRoot
+            Write-Host "[BACKGROUND] Log session initialized"
+        }
+        catch {
+            Write-Host "[BACKGROUND] WARNING: Failed to initialize logging: `$(`$_.Exception.Message)"
+            # Continue anyway - logging is not critical for replication
+        }
+
+        # Use the shared C# OrchestrationState instance (thread-safe by design)
+        `$script:OrchestrationState = `$SharedState
+
+        # Clear callbacks - GUI mode uses timer-based polling, not callbacks
+        `$script:OnProgress = `$null
+        `$script:OnChunkComplete = `$null
+        `$script:OnProfileComplete = `$null
+
+        try {
+            Write-Host "[BACKGROUND] Starting replication run"
+            # Re-read config to get fresh profile data (see CLAUDE.md for pattern)
+            `$bgConfig = Get-RobocurseConfig -Path `$GuiConfigPath
+            `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
+
+            # Look up profiles by name from freshly-loaded config
+            `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
+            Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
+
+            # Start replication with -SkipInitialization since UI thread already initialized
+            Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+
+            # Run the orchestration loop until complete
+            # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
+            while (`$script:OrchestrationState.Phase -notin @('Complete', 'Stopped', 'Idle')) {
+                Invoke-ReplicationTick -MaxConcurrentJobs `$MaxWorkers
+                Start-Sleep -Milliseconds 250
+            }
+            Write-Host "[BACKGROUND] Replication loop complete, phase: `$(`$script:OrchestrationState.Phase)"
+        }
+        catch {
+            Write-Host "[BACKGROUND] ERROR in replication: `$(`$_.Exception.Message)"
+            `$SharedState.EnqueueError("Replication error: `$(`$_.Exception.Message)")
+            `$SharedState.Phase = 'Complete'
+        }
+"@
+}
+
+function Close-ReplicationRunspace {
+    <#
+    .SYNOPSIS
+        Cleans up the background replication runspace
+    .DESCRIPTION
+        Safely stops and disposes the PowerShell instance and runspace
+        used for background replication. Called during window close
+        and when replication completes.
+
+        Uses Interlocked.Exchange for atomic capture-and-clear to prevent
+        race conditions when multiple threads attempt cleanup simultaneously
+        (e.g., window close + completion handler firing at the same time).
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Early exit if nothing to clean up
+    if (-not $script:ReplicationPowerShell) { return }
+
+    # Atomically capture and clear the PowerShell instance reference
+    # Interlocked.Exchange ensures only ONE thread gets the reference;
+    # all other threads will get $null and exit early
+    $psInstance = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationPowerShell, $null)
+    $handle = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationHandle, $null)
+    $runspace = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationRunspace, $null)
+
+    # If another thread already claimed the instance, exit
+    if (-not $psInstance) { return }
+
+    try {
+        # Stop the PowerShell instance if still running
+        if ($handle -and -not $handle.IsCompleted) {
+            try {
+                $psInstance.Stop()
+            }
+            catch [System.Management.Automation.PipelineStoppedException] {
+                # Expected when pipeline is already stopped
+            }
+            catch [System.ObjectDisposedException] {
+                # Already disposed by another thread
+                return
+            }
+        }
+
+        # Close and dispose the runspace
+        if ($psInstance.Runspace) {
+            try {
+                $psInstance.Runspace.Close()
+                $psInstance.Runspace.Dispose()
+            }
+            catch [System.ObjectDisposedException] {
+                # Already disposed
+            }
+        }
+
+        # Dispose the PowerShell instance
+        try {
+            $psInstance.Dispose()
+        }
+        catch [System.ObjectDisposedException] {
+            # Already disposed
+        }
+    }
+    catch {
+        # Silently ignore cleanup errors during window close
+        Write-Verbose "Runspace cleanup error (ignored): $($_.Exception.Message)"
+    }
+}
+
+#endregion
+
+#region ==================== GUIREPLICATION ====================
+
+# High-level replication control: profile selection, start, and completion handling.
+# Background runspace management is in GuiRunspace.ps1.
+
+function Get-ProfilesToRun {
+    <#
+    .SYNOPSIS
+        Determines which profiles to run based on selection mode
+    .PARAMETER AllProfiles
+        Include all enabled profiles
+    .PARAMETER SelectedOnly
+        Include only the currently selected profile
+    .OUTPUTS
+        Array of profile objects, or $null if validation fails
+    #>
+    [CmdletBinding()]
+    param(
+        [switch]$AllProfiles,
+        [switch]$SelectedOnly
+    )
+
+    $profilesToRun = @()
+
+    if ($AllProfiles) {
+        $profilesToRun = @($script:Config.SyncProfiles | Where-Object { $_.Enabled -eq $true })
+        if ($profilesToRun.Count -eq 0) {
+            Show-GuiError -Message "No enabled profiles found. Please enable at least one profile."
+            return $null
+        }
+    }
+    elseif ($SelectedOnly) {
+        $selected = $script:Controls.lstProfiles.SelectedItem
+        if (-not $selected) {
+            Show-GuiError -Message "No profile selected. Please select a profile to run."
+            return $null
+        }
+        $profilesToRun = @($selected)
+    }
+
+    # Validate profiles have required paths
+    foreach ($profile in $profilesToRun) {
+        if ([string]::IsNullOrWhiteSpace($profile.Source) -or [string]::IsNullOrWhiteSpace($profile.Destination)) {
+            Show-GuiError -Message "Profile '$($profile.Name)' has invalid source or destination paths."
+            return $null
+        }
+    }
+
+    return $profilesToRun
 }
 
 function Start-GuiReplication {
@@ -11433,75 +11736,6 @@ function Complete-GuiReplication {
             # Non-critical - temp files will be cleaned up eventually
         }
         $script:ConfigSnapshotPath = $null
-    }
-}
-
-function Close-ReplicationRunspace {
-    <#
-    .SYNOPSIS
-        Cleans up the background replication runspace
-    .DESCRIPTION
-        Safely stops and disposes the PowerShell instance and runspace
-        used for background replication. Called during window close
-        and when replication completes.
-
-        Uses Interlocked.Exchange for atomic capture-and-clear to prevent
-        race conditions when multiple threads attempt cleanup simultaneously
-        (e.g., window close + completion handler firing at the same time).
-    #>
-    [CmdletBinding()]
-    param()
-
-    # Early exit if nothing to clean up
-    if (-not $script:ReplicationPowerShell) { return }
-
-    # Atomically capture and clear the PowerShell instance reference
-    # Interlocked.Exchange ensures only ONE thread gets the reference;
-    # all other threads will get $null and exit early
-    $psInstance = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationPowerShell, $null)
-    $handle = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationHandle, $null)
-    $runspace = [System.Threading.Interlocked]::Exchange([ref]$script:ReplicationRunspace, $null)
-
-    # If another thread already claimed the instance, exit
-    if (-not $psInstance) { return }
-
-    try {
-        # Stop the PowerShell instance if still running
-        if ($handle -and -not $handle.IsCompleted) {
-            try {
-                $psInstance.Stop()
-            }
-            catch [System.Management.Automation.PipelineStoppedException] {
-                # Expected when pipeline is already stopped
-            }
-            catch [System.ObjectDisposedException] {
-                # Already disposed by another thread
-                return
-            }
-        }
-
-        # Close and dispose the runspace
-        if ($psInstance.Runspace) {
-            try {
-                $psInstance.Runspace.Close()
-                $psInstance.Runspace.Dispose()
-            }
-            catch [System.ObjectDisposedException] {
-                # Already disposed
-            }
-        }
-
-        # Dispose the PowerShell instance
-        try {
-            $psInstance.Dispose()
-        }
-        catch [System.ObjectDisposedException] {
-            # Already disposed
-        }
-    }
-    catch {
-        # Silently ignore cleanup errors during window close
-        Write-Verbose "Runspace cleanup error (ignored): $($_.Exception.Message)"
     }
 }
 
@@ -12865,6 +13099,12 @@ function Start-RobocurseMain {
             $deleteDays = if ($config.GlobalSettings.LogRetentionDays) { $config.GlobalSettings.LogRetentionDays } else { $script:LogDeleteAfterDays }
             Initialize-LogSession -LogRoot $logRoot -CompressAfterDays $compressDays -DeleteAfterDays $deleteDays
             $logSessionInitialized = $true
+
+            # Enable path redaction if configured (for security/privacy)
+            if ($config.GlobalSettings.RedactPaths) {
+                $serverNames = if ($config.GlobalSettings.RedactServerNames) { @($config.GlobalSettings.RedactServerNames) } else { @() }
+                Enable-PathRedaction -ServerNames $serverNames
+            }
         }
         catch {
             Write-Error "Failed to initialize logging: $($_.Exception.Message)"

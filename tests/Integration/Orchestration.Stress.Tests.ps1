@@ -422,5 +422,388 @@ InModuleScope 'Robocurse' {
                 $stopwatch.ElapsedMilliseconds | Should -BeLessThan 500
             }
         }
+
+        Context "High Concurrency Job Management (50+ Jobs)" {
+            BeforeEach {
+                Initialize-OrchestrationState
+            }
+
+            It "Should handle 50 concurrent active jobs" {
+                $jobCount = 50
+
+                # Simulate 50 concurrent jobs
+                for ($i = 0; $i -lt $jobCount; $i++) {
+                    $mockProcess = [PSCustomObject]@{
+                        Id = 1000 + $i
+                        HasExited = $false
+                    }
+                    $chunk = [PSCustomObject]@{
+                        ChunkId = $i
+                        SourcePath = "C:\Test\Chunk$i"
+                        EstimatedSize = 10000000
+                        Status = 'Running'
+                    }
+                    $job = [PSCustomObject]@{
+                        Process = $mockProcess
+                        Chunk = $chunk
+                        StartTime = [datetime]::Now
+                        LogPath = "C:\Logs\chunk$i.log"
+                    }
+                    $script:OrchestrationState.ActiveJobs[$mockProcess.Id] = $job
+                }
+
+                $script:OrchestrationState.ActiveJobs.Count | Should -Be $jobCount
+            }
+
+            It "Should handle rapid job completion (50 jobs completing nearly simultaneously)" {
+                $jobCount = 50
+
+                # Add 50 jobs
+                for ($i = 0; $i -lt $jobCount; $i++) {
+                    $pid = 2000 + $i
+                    $script:OrchestrationState.ActiveJobs[$pid] = [PSCustomObject]@{
+                        Process = [PSCustomObject]@{ Id = $pid; HasExited = $true; ExitCode = 0 }
+                        Chunk = [PSCustomObject]@{ ChunkId = $i; Status = 'Pending' }
+                    }
+                }
+
+                # Simulate rapid completion (snapshot then iterate pattern)
+                $activeJobsCopy = $script:OrchestrationState.ActiveJobs.ToArray()
+                $completedCount = 0
+
+                foreach ($kvp in $activeJobsCopy) {
+                    if ($kvp.Value.Process.HasExited) {
+                        $removed = $null
+                        if ($script:OrchestrationState.ActiveJobs.TryRemove($kvp.Key, [ref]$removed)) {
+                            $completedCount++
+                            $script:OrchestrationState.CompletedChunks.Enqueue($removed.Chunk)
+                            $script:OrchestrationState.IncrementCompletedCount()
+                        }
+                    }
+                }
+
+                $completedCount | Should -Be $jobCount
+                $script:OrchestrationState.ActiveJobs.Count | Should -Be 0
+                $script:OrchestrationState.CompletedChunks.Count | Should -Be $jobCount
+                $script:OrchestrationState.CompletedCount | Should -Be $jobCount
+            }
+
+            It "Should handle 100 jobs with mixed success and failure" {
+                $totalJobs = 100
+                $successRate = 0.9  # 90% success
+
+                for ($i = 0; $i -lt $totalJobs; $i++) {
+                    $willSucceed = $i -lt ($totalJobs * $successRate)
+                    $chunk = [PSCustomObject]@{
+                        ChunkId = $i
+                        SourcePath = "C:\Test\Path$i"
+                        Status = if ($willSucceed) { 'Completed' } else { 'Failed' }
+                        RetryCount = if ($willSucceed) { 0 } else { 3 }
+                    }
+
+                    if ($willSucceed) {
+                        $script:OrchestrationState.CompletedChunks.Enqueue($chunk)
+                        $script:OrchestrationState.IncrementCompletedCount()
+                    }
+                    else {
+                        $failedChunk = [PSCustomObject]@{
+                            Chunk = $chunk
+                            ErrorMessage = "Failed after 3 retries"
+                            ExitCode = 8
+                        }
+                        $script:OrchestrationState.FailedChunks.Enqueue($failedChunk)
+                    }
+                }
+
+                $script:OrchestrationState.CompletedChunks.Count | Should -Be 90
+                $script:OrchestrationState.FailedChunks.Count | Should -Be 10
+                $script:OrchestrationState.CompletedCount | Should -Be 90
+            }
+
+            It "Should handle 64 concurrent jobs (max reasonable for most systems)" {
+                $jobCount = 64
+
+                # Add 64 concurrent jobs
+                for ($i = 0; $i -lt $jobCount; $i++) {
+                    $script:OrchestrationState.ActiveJobs[3000 + $i] = [PSCustomObject]@{
+                        JobId = $i
+                        Progress = $i * 1.5  # Varying progress
+                    }
+                }
+
+                # Verify all added
+                $script:OrchestrationState.ActiveJobs.Count | Should -Be $jobCount
+
+                # Iterate safely using ToArray
+                $snapshot = $script:OrchestrationState.ActiveJobs.ToArray()
+                $totalProgress = ($snapshot | ForEach-Object { $_.Value.Progress } | Measure-Object -Sum).Sum
+
+                $totalProgress | Should -BeGreaterThan 0
+
+                # Clear all using TryRemove pattern
+                foreach ($kvp in $snapshot) {
+                    $removed = $null
+                    $script:OrchestrationState.ActiveJobs.TryRemove($kvp.Key, [ref]$removed) | Out-Null
+                }
+
+                $script:OrchestrationState.ActiveJobs.Count | Should -Be 0
+            }
+        }
+
+        Context "Extreme Load Testing" {
+            BeforeEach {
+                Initialize-OrchestrationState
+            }
+
+            It "Should handle 10000 chunks queued and processed" {
+                $chunkCount = 10000
+
+                # Phase 1: Queue all chunks
+                $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+                for ($i = 0; $i -lt $chunkCount; $i++) {
+                    $chunk = [PSCustomObject]@{
+                        ChunkId = $i
+                        SourcePath = "C:\Source\Dir$([int]($i / 100))\Subdir$([int]($i / 10) % 10)\file$($i % 10).txt"
+                        EstimatedSize = 1000000 + ($i * 100)
+                    }
+                    $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
+                }
+                $stopwatch.Stop()
+
+                $script:OrchestrationState.ChunkQueue.Count | Should -Be $chunkCount
+                # Enqueueing 10000 items should take < 2 seconds
+                $stopwatch.ElapsedMilliseconds | Should -BeLessThan 2000
+
+                # Phase 2: Process all chunks (simulated)
+                $stopwatch.Restart()
+                $processedCount = 0
+                $chunk = $null
+                while ($script:OrchestrationState.ChunkQueue.TryDequeue([ref]$chunk)) {
+                    # Simulate minimal processing
+                    $chunk.Status = 'Completed'
+                    $script:OrchestrationState.CompletedChunks.Enqueue($chunk)
+                    $script:OrchestrationState.IncrementCompletedCount()
+                    $script:OrchestrationState.AddCompletedChunkBytes($chunk.EstimatedSize)
+                    $processedCount++
+                }
+                $stopwatch.Stop()
+
+                $processedCount | Should -Be $chunkCount
+                $script:OrchestrationState.CompletedCount | Should -Be $chunkCount
+                # Processing 10000 items should take < 5 seconds
+                $stopwatch.ElapsedMilliseconds | Should -BeLessThan 5000
+            }
+
+            It "Should maintain data integrity with 50+ concurrent simulated workers" {
+                $workerCount = 50
+                $chunksPerWorker = 20
+
+                # Queue chunks for all workers
+                $totalChunks = $workerCount * $chunksPerWorker
+                for ($i = 0; $i -lt $totalChunks; $i++) {
+                    $script:OrchestrationState.ChunkQueue.Enqueue([PSCustomObject]@{
+                        ChunkId = $i
+                        WorkerId = $i % $workerCount
+                        SourcePath = "C:\Worker$($i % $workerCount)\Chunk$([int]($i / $workerCount))"
+                    })
+                }
+
+                $script:OrchestrationState.ChunkQueue.Count | Should -Be $totalChunks
+
+                # Simulate 50 workers processing chunks
+                $workerResults = @{}
+                for ($w = 0; $w -lt $workerCount; $w++) {
+                    $workerResults[$w] = 0
+                }
+
+                $chunk = $null
+                while ($script:OrchestrationState.ChunkQueue.TryDequeue([ref]$chunk)) {
+                    $workerResults[$chunk.WorkerId]++
+                    $script:OrchestrationState.IncrementCompletedCount()
+                }
+
+                # Each worker should have processed their chunks
+                foreach ($w in $workerResults.Keys) {
+                    $workerResults[$w] | Should -Be $chunksPerWorker
+                }
+
+                $script:OrchestrationState.CompletedCount | Should -Be $totalChunks
+            }
+
+            It "Should handle burst of 100 errors without data loss" {
+                $errorCount = 100
+
+                # Burst of errors
+                $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+                for ($i = 0; $i -lt $errorCount; $i++) {
+                    $script:OrchestrationState.EnqueueError("Error $i`: File copy failed - Access denied to C:\Protected\file$i.txt")
+                }
+                $stopwatch.Stop()
+
+                # All errors should be captured
+                $script:OrchestrationState.ErrorMessages.Count | Should -Be $errorCount
+
+                # Should be fast
+                $stopwatch.ElapsedMilliseconds | Should -BeLessThan 500
+
+                # Dequeue and verify
+                $errors = $script:OrchestrationState.DequeueErrors()
+                $errors.Count | Should -Be $errorCount
+
+                # Verify content integrity
+                $errors[0] | Should -Match "Error 0"
+                $errors[99] | Should -Match "Error 99"
+            }
+        }
+
+        Context "Retry Queue Stress" {
+            BeforeEach {
+                Initialize-OrchestrationState
+            }
+
+            It "Should handle chunks cycling through retry queue multiple times" {
+                $chunkCount = 50
+                $maxRetries = 3
+
+                # Create chunks that will need retries
+                for ($i = 0; $i -lt $chunkCount; $i++) {
+                    $chunk = [PSCustomObject]@{
+                        ChunkId = $i
+                        SourcePath = "C:\Flaky\Path$i"
+                        RetryCount = 0
+                        RetryAfter = $null
+                    }
+                    $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
+                }
+
+                # Simulate multiple retry cycles
+                for ($retry = 0; $retry -lt $maxRetries; $retry++) {
+                    $processedThisCycle = 0
+                    $chunk = $null
+
+                    while ($script:OrchestrationState.ChunkQueue.TryDequeue([ref]$chunk)) {
+                        $chunk.RetryCount++
+                        $chunk.RetryAfter = [datetime]::Now.AddSeconds(5)
+
+                        if ($chunk.RetryCount -lt $maxRetries) {
+                            # Re-queue for retry
+                            $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
+                        }
+                        else {
+                            # Max retries reached, mark as failed
+                            $script:OrchestrationState.FailedChunks.Enqueue([PSCustomObject]@{
+                                Chunk = $chunk
+                                ErrorMessage = "Failed after $maxRetries retries"
+                            })
+                        }
+                        $processedThisCycle++
+                    }
+                }
+
+                # All chunks should eventually fail
+                $script:OrchestrationState.FailedChunks.Count | Should -Be $chunkCount
+                $script:OrchestrationState.ChunkQueue.Count | Should -Be 0
+            }
+        }
+
+        Context "Profile Transition Under Load" {
+            BeforeEach {
+                Initialize-OrchestrationState
+            }
+
+            It "Should cleanly transition between 10 profiles with 100 chunks each" {
+                $profileCount = 10
+                $chunksPerProfile = 100
+
+                for ($p = 0; $p -lt $profileCount; $p++) {
+                    # Set up profile
+                    $script:OrchestrationState.CurrentProfile = "Profile$p"
+                    $script:OrchestrationState.Phase = "Replicating"
+
+                    # Queue chunks for this profile
+                    for ($c = 0; $c -lt $chunksPerProfile; $c++) {
+                        $chunk = [PSCustomObject]@{
+                            ChunkId = $c
+                            ProfileIndex = $p
+                            SourcePath = "C:\Profile$p\Chunk$c"
+                        }
+                        $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
+                    }
+                    $script:OrchestrationState.TotalChunks = $chunksPerProfile
+
+                    # Process all chunks
+                    $chunk = $null
+                    while ($script:OrchestrationState.ChunkQueue.TryDequeue([ref]$chunk)) {
+                        $script:OrchestrationState.CompletedChunks.Enqueue($chunk)
+                        $script:OrchestrationState.IncrementCompletedCount()
+                    }
+
+                    # Store profile result
+                    $result = [PSCustomObject]@{
+                        ProfileName = "Profile$p"
+                        ChunksComplete = $script:OrchestrationState.CompletedCount
+                        ChunksTotal = $chunksPerProfile
+                        BytesCopied = $chunksPerProfile * 1000000
+                    }
+                    $script:OrchestrationState.ProfileResults.Enqueue($result)
+
+                    # Verify profile completion
+                    $script:OrchestrationState.CompletedCount | Should -Be $chunksPerProfile
+
+                    # Reset for next profile
+                    $script:OrchestrationState.ResetForNewProfile()
+                }
+
+                # Verify all profiles completed
+                $script:OrchestrationState.ProfileResults.Count | Should -Be $profileCount
+
+                # Verify total work done
+                $allResults = $script:OrchestrationState.ProfileResults.ToArray()
+                $totalChunks = ($allResults | Measure-Object -Property ChunksComplete -Sum).Sum
+                $totalChunks | Should -Be ($profileCount * $chunksPerProfile)
+            }
+        }
+
+        Context "Concurrent Bytes Tracking Accuracy" {
+            BeforeEach {
+                Initialize-OrchestrationState
+            }
+
+            It "Should accurately track bytes from 100 concurrent chunks" {
+                $chunkCount = 100
+                $bytesPerChunk = 10000000  # 10MB
+
+                for ($i = 0; $i -lt $chunkCount; $i++) {
+                    $script:OrchestrationState.AddCompletedChunkBytes($bytesPerChunk)
+                    $script:OrchestrationState.AddCompletedChunkFiles(100)  # 100 files per chunk
+                }
+
+                $script:OrchestrationState.CompletedChunkBytes | Should -Be ($chunkCount * $bytesPerChunk)
+                $script:OrchestrationState.CompletedChunkFiles | Should -Be ($chunkCount * 100)
+            }
+
+            It "Should handle varying chunk sizes accurately" {
+                $chunks = @(
+                    @{ Size = 100MB; Files = 1000 }
+                    @{ Size = 500MB; Files = 5000 }
+                    @{ Size = 1GB; Files = 10000 }
+                    @{ Size = 50MB; Files = 500 }
+                    @{ Size = 2GB; Files = 20000 }
+                )
+
+                $expectedBytes = 0
+                $expectedFiles = 0
+
+                foreach ($chunk in $chunks) {
+                    $script:OrchestrationState.AddCompletedChunkBytes($chunk.Size)
+                    $script:OrchestrationState.AddCompletedChunkFiles($chunk.Files)
+                    $expectedBytes += $chunk.Size
+                    $expectedFiles += $chunk.Files
+                }
+
+                $script:OrchestrationState.CompletedChunkBytes | Should -Be $expectedBytes
+                $script:OrchestrationState.CompletedChunkFiles | Should -Be $expectedFiles
+            }
+        }
     }
 }
