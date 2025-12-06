@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-05 20:49:54
+    Built: 2025-12-06 13:13:06
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -10944,23 +10944,56 @@ function Get-GuiState {
     .SYNOPSIS
         Loads GUI state from settings file
     .OUTPUTS
-        PSCustomObject with saved state or $null if not found
+        PSCustomObject with saved state or defaults if not found
     #>
     [CmdletBinding()]
     param()
 
+    # Define defaults
+    $defaults = [PSCustomObject]@{
+        WindowLeft = 100
+        WindowTop = 100
+        WindowWidth = 650
+        WindowHeight = 550
+        WindowState = 'Normal'
+        WorkerCount = 4
+        SelectedProfile = $null
+        ActivePanel = 'Profiles'
+        LastRun = $null
+        SavedAt = $null
+    }
+
     $settingsPath = Get-GuiSettingsPath
     if (-not (Test-Path $settingsPath)) {
-        return $null
+        return $defaults
     }
 
     try {
         $json = Get-Content -Path $settingsPath -Raw -ErrorAction Stop
-        return $json | ConvertFrom-Json
+        $loaded = $json | ConvertFrom-Json
+
+        # Merge loaded state with defaults (preserve any new properties)
+        $merged = [PSCustomObject]@{}
+        foreach ($prop in $defaults.PSObject.Properties) {
+            if ($null -ne $loaded.PSObject.Properties[$prop.Name]) {
+                $merged | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $loaded.PSObject.Properties[$prop.Name].Value
+            } else {
+                $merged | Add-Member -NotePropertyName $prop.Name -NotePropertyValue $prop.Value
+            }
+        }
+
+        # Migration: Update old 1100x800 defaults to new 650x550
+        if ($merged.WindowWidth -eq 1100 -and $merged.WindowHeight -eq 800) {
+            Write-Verbose "Migrating window size from 1100x800 to 650x550"
+            $merged.WindowWidth = 650
+            $merged.WindowHeight = 550
+        }
+
+        return $merged
     }
     catch {
         Write-Verbose "Failed to load GUI settings: $_"
-        return $null
+        return $defaults
     }
 }
 
@@ -10969,36 +11002,55 @@ function Save-GuiState {
     .SYNOPSIS
         Saves GUI state to settings file
     .PARAMETER Window
-        WPF Window object
+        WPF Window object (optional - for saving window position/size)
     .PARAMETER WorkerCount
         Current worker slider value
     .PARAMETER SelectedProfileName
         Name of currently selected profile
+    .PARAMETER StateObject
+        Existing state object to save directly (alternative to Window parameters)
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
-        [System.Windows.Window]$Window,
+        $Window,
 
         [int]$WorkerCount,
 
-        [string]$SelectedProfileName
+        [string]$SelectedProfileName,
+
+        [PSCustomObject]$StateObject
     )
 
     try {
-        $state = [PSCustomObject]@{
-            WindowLeft = $Window.Left
-            WindowTop = $Window.Top
-            WindowWidth = $Window.Width
-            WindowHeight = $Window.Height
-            WindowState = $Window.WindowState.ToString()
-            WorkerCount = $WorkerCount
-            SelectedProfile = $SelectedProfileName
-            SavedAt = [datetime]::Now.ToString('o')
+        if ($StateObject) {
+            # Save provided state object directly
+            $stateToSave = $StateObject
+            # Update SavedAt timestamp
+            $stateToSave | Add-Member -NotePropertyName 'SavedAt' -NotePropertyValue ([datetime]::Now.ToString('o')) -Force
+        } elseif ($Window) {
+            # Get existing state to preserve LastRun and ActivePanel
+            $existingState = Get-GuiState
+            $lastRun = if ($existingState) { $existingState.LastRun } else { $null }
+            $activePanel = if ($existingState) { $existingState.ActivePanel } else { 'Profiles' }
+
+            $stateToSave = [PSCustomObject]@{
+                WindowLeft = $Window.Left
+                WindowTop = $Window.Top
+                WindowWidth = $Window.Width
+                WindowHeight = $Window.Height
+                WindowState = $Window.WindowState.ToString()
+                WorkerCount = $WorkerCount
+                SelectedProfile = $SelectedProfileName
+                ActivePanel = $activePanel
+                SavedAt = [datetime]::Now.ToString('o')
+                LastRun = $lastRun
+            }
+        } else {
+            throw "Either Window or StateObject parameter must be provided"
         }
 
         $settingsPath = Get-GuiSettingsPath
-        $state | ConvertTo-Json -Depth 3 | Set-Content -Path $settingsPath -Encoding UTF8 -ErrorAction Stop
+        $stateToSave | ConvertTo-Json -Depth 5 | Set-Content -Path $settingsPath -Encoding UTF8 -ErrorAction Stop
         Write-Verbose "GUI state saved to $settingsPath"
     }
     catch {
@@ -11038,9 +11090,10 @@ function Restore-GuiState {
             }
         }
 
+        # Restore window size with minimum bounds
         if ($state.WindowWidth -gt 0 -and $state.WindowHeight -gt 0) {
-            $Window.Width = $state.WindowWidth
-            $Window.Height = $state.WindowHeight
+            $Window.Width = [math]::Max($state.WindowWidth, 500)
+            $Window.Height = [math]::Max($state.WindowHeight, 400)
         }
 
         # Restore window state (but not Minimized - that would be annoying)
@@ -11068,11 +11121,289 @@ function Restore-GuiState {
             }
         }
 
+        # Restore active panel
+        $validPanels = @('Profiles', 'Settings', 'Progress', 'Logs')
+        if ($state.ActivePanel -and $state.ActivePanel -in $validPanels) {
+            # Note: Set-ActivePanel will be called after controls are initialized
+            # Store in script scope for later use in Initialize-RobocurseGui
+            $script:RestoredActivePanel = $state.ActivePanel
+        } else {
+            $script:RestoredActivePanel = 'Profiles'
+        }
+
         Write-Verbose "GUI state restored"
     }
     catch {
         Write-Verbose "Failed to restore GUI settings: $_"
     }
+}
+
+function Import-SettingsToForm {
+    <#
+    .SYNOPSIS
+        Loads global settings from config and populates the Settings panel controls
+    .DESCRIPTION
+        Reads settings from $script:Config.GlobalSettings, $script:Config.Email, and
+        $script:Config.Schedule and populates all Settings panel form controls.
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Guard against missing controls
+    if (-not $script:Controls) {
+        Write-Warning "Controls not initialized - cannot import settings to form"
+        return
+    }
+
+    # Reload config from file to ensure we have latest values
+    $config = Get-RobocurseConfig -Path $script:ConfigPath
+    if (-not $config) {
+        Write-GuiLog "Failed to load configuration"
+        return
+    }
+
+    # Update script-scoped config reference
+    $script:Config = $config
+
+    # PERFORMANCE Section
+    if ($script:Controls['sldSettingsJobs']) {
+        $jobs = if ($config.GlobalSettings.MaxConcurrentJobs) { $config.GlobalSettings.MaxConcurrentJobs } else { 4 }
+        $script:Controls.sldSettingsJobs.Value = $jobs
+        $script:Controls.txtSettingsJobs.Text = $jobs.ToString()
+    }
+
+    if ($script:Controls['sldSettingsThreads']) {
+        $threads = if ($config.GlobalSettings.ThreadsPerJob) { $config.GlobalSettings.ThreadsPerJob } else { 8 }
+        $script:Controls.sldSettingsThreads.Value = $threads
+        $script:Controls.txtSettingsThreads.Text = $threads.ToString()
+    }
+
+    if ($script:Controls['txtSettingsBandwidth']) {
+        $bandwidth = if ($config.GlobalSettings.BandwidthLimitMbps) { $config.GlobalSettings.BandwidthLimitMbps } else { 0 }
+        $script:Controls.txtSettingsBandwidth.Text = $bandwidth.ToString()
+    }
+
+    # LOGGING Section
+    if ($script:Controls['txtSettingsLogPath']) {
+        $logPath = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { ".\Logs" }
+        $script:Controls.txtSettingsLogPath.Text = $logPath
+    }
+
+    # SIEM settings (not yet in config structure - use placeholder defaults)
+    if ($script:Controls['chkSettingsSiem']) {
+        $script:Controls.chkSettingsSiem.IsChecked = $false
+    }
+    if ($script:Controls['txtSettingsSiemPath']) {
+        $script:Controls.txtSettingsSiemPath.Text = ".\Logs\SIEM"
+    }
+
+    # EMAIL NOTIFICATIONS Section
+    if ($script:Controls['chkSettingsEmailEnabled']) {
+        $enabled = if ($null -ne $config.Email.Enabled) { $config.Email.Enabled } else { $false }
+        $script:Controls.chkSettingsEmailEnabled.IsChecked = $enabled
+    }
+
+    if ($script:Controls['txtSettingsSmtp']) {
+        $smtp = if ($config.Email.SmtpServer) { $config.Email.SmtpServer } else { "" }
+        $script:Controls.txtSettingsSmtp.Text = $smtp
+    }
+
+    if ($script:Controls['txtSettingsSmtpPort']) {
+        $port = if ($config.Email.Port) { $config.Email.Port } else { 587 }
+        $script:Controls.txtSettingsSmtpPort.Text = $port.ToString()
+    }
+
+    if ($script:Controls['chkSettingsTls']) {
+        $useTls = if ($null -ne $config.Email.UseTls) { $config.Email.UseTls } else { $true }
+        $script:Controls.chkSettingsTls.IsChecked = $useTls
+    }
+
+    if ($script:Controls['txtSettingsCredential']) {
+        $cred = if ($config.Email.CredentialTarget) { $config.Email.CredentialTarget } else { "Robocurse-SMTP" }
+        $script:Controls.txtSettingsCredential.Text = $cred
+    }
+
+    if ($script:Controls['txtSettingsEmailFrom']) {
+        $from = if ($config.Email.From) { $config.Email.From } else { "" }
+        $script:Controls.txtSettingsEmailFrom.Text = $from
+    }
+
+    if ($script:Controls['txtSettingsEmailTo']) {
+        # Convert array to comma-separated string
+        $to = if ($config.Email.To -and $config.Email.To.Count -gt 0) {
+            $config.Email.To -join ", "
+        } else {
+            ""
+        }
+        $script:Controls.txtSettingsEmailTo.Text = $to
+    }
+
+    # SCHEDULE Section
+    if ($script:Controls['txtSettingsScheduleStatus']) {
+        if ($config.Schedule.Enabled) {
+            $time = if ($config.Schedule.Time) { $config.Schedule.Time } else { "02:00" }
+            $days = if ($config.Schedule.Days -and $config.Schedule.Days.Count -gt 0) {
+                $config.Schedule.Days -join ", "
+            } else {
+                "Daily"
+            }
+            $script:Controls.txtSettingsScheduleStatus.Text = "Enabled - $days at $time"
+        } else {
+            $script:Controls.txtSettingsScheduleStatus.Text = "Not configured"
+        }
+    }
+
+    Write-GuiLog "Settings loaded from configuration"
+}
+
+function Save-SettingsFromForm {
+    <#
+    .SYNOPSIS
+        Saves Settings panel form values back to configuration file
+    .DESCRIPTION
+        Reads all Settings panel controls and updates $script:Config, then saves to disk.
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Guard against missing controls
+    if (-not $script:Controls -or -not $script:Config) {
+        Write-Warning "Controls or config not initialized - cannot save settings"
+        return
+    }
+
+    try {
+        # PERFORMANCE Section
+        if ($script:Controls['sldSettingsJobs']) {
+            $script:Config.GlobalSettings.MaxConcurrentJobs = [int]$script:Controls.sldSettingsJobs.Value
+        }
+
+        if ($script:Controls['sldSettingsThreads']) {
+            $script:Config.GlobalSettings.ThreadsPerJob = [int]$script:Controls.sldSettingsThreads.Value
+        }
+
+        if ($script:Controls['txtSettingsBandwidth']) {
+            $bandwidthText = $script:Controls.txtSettingsBandwidth.Text.Trim()
+            $bandwidth = 0
+            if ([int]::TryParse($bandwidthText, [ref]$bandwidth)) {
+                $script:Config.GlobalSettings.BandwidthLimitMbps = $bandwidth
+            }
+        }
+
+        # LOGGING Section
+        if ($script:Controls['txtSettingsLogPath']) {
+            $script:Config.GlobalSettings.LogPath = $script:Controls.txtSettingsLogPath.Text.Trim()
+        }
+
+        # SIEM settings (placeholder - not yet in config structure)
+        # Future: Add to GlobalSettings when SIEM path is implemented
+
+        # EMAIL NOTIFICATIONS Section
+        if ($script:Controls['chkSettingsEmailEnabled']) {
+            $script:Config.Email.Enabled = $script:Controls.chkSettingsEmailEnabled.IsChecked
+        }
+
+        if ($script:Controls['txtSettingsSmtp']) {
+            $script:Config.Email.SmtpServer = $script:Controls.txtSettingsSmtp.Text.Trim()
+        }
+
+        if ($script:Controls['txtSettingsSmtpPort']) {
+            $portText = $script:Controls.txtSettingsSmtpPort.Text.Trim()
+            $port = 587
+            if ([int]::TryParse($portText, [ref]$port)) {
+                $script:Config.Email.Port = $port
+            }
+        }
+
+        if ($script:Controls['chkSettingsTls']) {
+            $script:Config.Email.UseTls = $script:Controls.chkSettingsTls.IsChecked
+        }
+
+        if ($script:Controls['txtSettingsCredential']) {
+            $script:Config.Email.CredentialTarget = $script:Controls.txtSettingsCredential.Text.Trim()
+        }
+
+        if ($script:Controls['txtSettingsEmailFrom']) {
+            $script:Config.Email.From = $script:Controls.txtSettingsEmailFrom.Text.Trim()
+        }
+
+        if ($script:Controls['txtSettingsEmailTo']) {
+            # Convert comma-separated string to array, trimming whitespace
+            $toText = $script:Controls.txtSettingsEmailTo.Text
+            if ([string]::IsNullOrWhiteSpace($toText)) {
+                $script:Config.Email.To = @()
+            } else {
+                $script:Config.Email.To = @($toText -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+            }
+        }
+
+        # Save configuration to file
+        $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+        if ($saveResult.Success) {
+            if ($script:Controls['txtStatus']) {
+                $script:Controls.txtStatus.Text = "Settings saved"
+            }
+            Write-GuiLog "Settings saved to configuration file"
+        } else {
+            Show-GuiError -Message "Failed to save settings" -Details $saveResult.ErrorMessage
+        }
+    }
+    catch {
+        Show-GuiError -Message "Error saving settings" -Details $_.Exception.Message
+    }
+}
+
+function Save-LastRunSummary {
+    <#
+    .SYNOPSIS
+        Saves the last run summary to GUI settings
+    .PARAMETER Summary
+        Hashtable containing last run details
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Summary
+    )
+
+    $settings = Get-GuiState
+    if (-not $settings) {
+        # Create minimal settings if none exist
+        $settings = [PSCustomObject]@{
+            WindowLeft = 100
+            WindowTop = 100
+            WindowWidth = 1200
+            WindowHeight = 800
+            WindowState = 'Normal'
+            WorkerCount = 4
+            SelectedProfile = $null
+            SavedAt = [datetime]::Now.ToString('o')
+            LastRun = $Summary
+        }
+    } else {
+        # Add or update LastRun property
+        $settings | Add-Member -NotePropertyName 'LastRun' -NotePropertyValue $Summary -Force
+    }
+
+    Save-GuiState -StateObject $settings
+}
+
+function Get-LastRunSummary {
+    <#
+    .SYNOPSIS
+        Gets the last run summary from GUI settings
+    .OUTPUTS
+        Hashtable with last run details, or $null if no previous run
+    #>
+    [CmdletBinding()]
+    param()
+
+    $settings = Get-GuiState
+    if (-not $settings -or -not $settings.LastRun) {
+        return $null
+    }
+
+    return $settings.LastRun
 }
 
 #endregion
@@ -12277,6 +12608,74 @@ function Clear-GuiLogBuffer {
     }
 }
 
+function Update-InlineLogContent {
+    <#
+    .SYNOPSIS
+        Updates the inline log panel content from the ring buffer
+    .DESCRIPTION
+        Filters log entries based on the selected log level checkboxes
+        and updates the txtLogContent control in the main window's Logs panel.
+        Called when filters change or when the log buffer is updated.
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Check if control exists
+    if (-not $script:Controls['txtLogContent']) {
+        return
+    }
+
+    # Get filter settings (default to true if controls don't exist)
+    $showDebug = if ($script:Controls['chkLogDebug']) { $script:Controls.chkLogDebug.IsChecked } else { $true }
+    $showInfo = if ($script:Controls['chkLogInfo']) { $script:Controls.chkLogInfo.IsChecked } else { $true }
+    $showWarning = if ($script:Controls['chkLogWarning']) { $script:Controls.chkLogWarning.IsChecked } else { $true }
+    $showError = if ($script:Controls['chkLogError']) { $script:Controls.chkLogError.IsChecked } else { $true }
+
+    # Thread-safe buffer read
+    $lines = @()
+    [System.Threading.Monitor]::Enter($script:GuiLogBuffer)
+    try {
+        $lines = @($script:GuiLogBuffer)
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:GuiLogBuffer)
+    }
+
+    # Apply filters - lines without level markers are always included
+    $filteredLines = $lines | Where-Object {
+        $line = $_
+        # Parse log level from line format: [HH:mm:ss] [LEVEL] Message
+        $isDebug = $line -match '\[DEBUG\]'
+        $isWarning = $line -match '\[WARNING\]' -or $line -match '\[WARN\]'
+        $isError = $line -match '\[ERROR\]' -or $line -match '\[ERR\]'
+        $isInfo = $line -match '\[INFO\]'
+        $noLevel = -not $isDebug -and -not $isWarning -and -not $isError -and -not $isInfo
+
+        # Show lines without level markers always, or apply filters
+        $noLevel -or
+        ($showDebug -and $isDebug) -or
+        ($showInfo -and $isInfo) -or
+        ($showWarning -and $isWarning) -or
+        ($showError -and $isError)
+    }
+
+    # Update display
+    $script:Controls.txtLogContent.Text = $filteredLines -join "`r`n"
+
+    # Update line count if control exists
+    if ($script:Controls['txtLogLineCount']) {
+        $script:Controls.txtLogLineCount.Text = "$($filteredLines.Count) lines"
+    }
+
+    # Auto-scroll if enabled
+    if ($script:Controls['chkLogAutoScroll'] -and $script:Controls.chkLogAutoScroll.IsChecked) {
+        # Scroll to end using Dispatcher to ensure UI is ready
+        $script:Controls.txtLogContent.Dispatcher.Invoke([action]{
+            $script:Controls.txtLogContent.ScrollToEnd()
+        }, [System.Windows.Threading.DispatcherPriority]::Background)
+    }
+}
+
 function Close-LogWindow {
     <#
     .SYNOPSIS
@@ -12747,6 +13146,9 @@ function Start-GuiReplication {
 
     Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
 
+    # Auto-switch to Progress panel
+    Set-ActivePanel -PanelName 'Progress'
+
     # Get worker count and start progress timer
     $maxWorkers = [int]$script:Controls.sldWorkers.Value
     $script:ProgressTimer.Start()
@@ -12840,6 +13242,47 @@ function Complete-GuiReplication {
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
 
     Write-GuiLog "Replication completed: $($status.ChunksComplete)/$($status.ChunksTotal) chunks, $($status.ChunksFailed) failed"
+
+    # Save last run summary for empty state display
+    try {
+        # Capture profile names from orchestration state
+        $profileNames = @()
+        if ($script:OrchestrationState -and $script:OrchestrationState.Profiles) {
+            $profileNames = @($script:OrchestrationState.Profiles | ForEach-Object { $_.Name })
+        }
+
+        # Calculate elapsed time
+        $elapsed = if ($script:OrchestrationState.StartTime) {
+            [datetime]::Now - $script:OrchestrationState.StartTime
+        } else {
+            [timespan]::Zero
+        }
+
+        # Determine status
+        $runStatus = if ($status.ChunksFailed -eq 0) {
+            'Success'
+        } elseif ($status.ChunksComplete -gt 0) {
+            'PartialFailure'
+        } else {
+            'Failed'
+        }
+
+        $lastRun = @{
+            Timestamp = ([datetime]::Now).ToString('o')
+            ProfilesRun = $profileNames
+            ChunksTotal = $status.ChunksTotal
+            ChunksCompleted = $status.ChunksComplete
+            ChunksFailed = $status.ChunksFailed
+            BytesCopied = $status.BytesComplete
+            Duration = $elapsed.ToString('hh\:mm\:ss')
+            Status = $runStatus
+        }
+
+        Save-LastRunSummary -Summary $lastRun
+    }
+    catch {
+        Write-GuiLog "Warning: Failed to save last run summary: $_"
+    }
 
     # Clean up config snapshot if it was created
     if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {
@@ -13166,6 +13609,130 @@ function Update-GuiProgress {
     }
 }
 
+function Show-ProgressEmptyState {
+    <#
+    .SYNOPSIS
+        Displays the progress panel empty state (last run summary or ready message)
+    .DESCRIPTION
+        When no replication is active, shows a summary of the last completed run.
+        If no previous run exists, shows a "ready to run" message.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $lastRun = Get-LastRunSummary
+
+        if (-not $lastRun) {
+            # No previous runs - show ready state
+            $script:Controls.txtProfileProgress.Text = "No previous runs"
+            $script:Controls.txtOverallProgress.Text = "Select profiles and click Run"
+            $script:Controls.pbProfile.Value = 0
+            $script:Controls.pbOverall.Value = 0
+            $script:Controls.txtEta.Text = "Ready"
+            $script:Controls.txtSpeed.Text = "--"
+            $script:Controls.txtChunks.Text = "Ready"
+            $script:Controls.dgChunks.ItemsSource = $null
+        } else {
+            # Show last run summary
+            $timestamp = [datetime]::Parse($lastRun.Timestamp)
+            $timeAgo = Get-TimeAgoString -Timestamp $timestamp
+
+            # Format profile names
+            $profileNames = if ($lastRun.ProfilesRun -is [array]) {
+                $lastRun.ProfilesRun -join ", "
+            } else {
+                $lastRun.ProfilesRun
+            }
+            $script:Controls.txtProfileProgress.Text = "Last: $profileNames"
+
+            # Calculate completion percentage
+            $completionPct = if ($lastRun.ChunksTotal -gt 0) {
+                [math]::Round(($lastRun.ChunksCompleted / $lastRun.ChunksTotal) * 100, 0)
+            } else {
+                0
+            }
+
+            # Set status text with color
+            $statusText = "$($lastRun.Status) - $timeAgo"
+            $script:Controls.txtOverallProgress.Text = $statusText
+
+            # Set color based on status (only if WPF is available)
+            try {
+                $colorBrush = switch ($lastRun.Status) {
+                    'Success' { [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(0x00, 0xFF, 0x7F)) }  # LimeGreen
+                    'PartialFailure' { [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(0xFF, 0xB3, 0x40)) }  # Orange
+                    'Failed' { [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(0xFF, 0x6B, 0x6B)) }  # Red
+                    default { [System.Windows.Media.Brushes]::Gray }
+                }
+                $script:Controls.txtOverallProgress.Foreground = $colorBrush
+            }
+            catch {
+                # WPF types not available (headless/test mode) - skip color setting
+                Write-Verbose "WPF color types not available - skipping color assignment"
+            }
+
+            # Set progress bars
+            $script:Controls.pbProfile.Value = $completionPct
+            $script:Controls.pbOverall.Value = $completionPct
+
+            # Set duration and bytes copied
+            $script:Controls.txtEta.Text = "Duration: $($lastRun.Duration)"
+            $script:Controls.txtSpeed.Text = "Copied: $(Format-FileSize -Bytes $lastRun.BytesCopied)"
+
+            # Set chunks text
+            $chunksText = "Chunks: $($lastRun.ChunksCompleted)/$($lastRun.ChunksTotal)"
+            if ($lastRun.ChunksFailed -gt 0) {
+                $chunksText += " ($($lastRun.ChunksFailed) failed)"
+            }
+            $script:Controls.txtChunks.Text = $chunksText
+
+            # Clear the chunks grid
+            $script:Controls.dgChunks.ItemsSource = $null
+        }
+
+        # Force visual update
+        $script:Window.UpdateLayout()
+    }
+    catch {
+        Write-GuiLog "Error displaying empty state: $_"
+    }
+}
+
+function Get-TimeAgoString {
+    <#
+    .SYNOPSIS
+        Formats a timestamp as a "time ago" string
+    .PARAMETER Timestamp
+        DateTime to format
+    .OUTPUTS
+        String like "2 hours ago", "5 minutes ago", etc.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [datetime]$Timestamp
+    )
+
+    $elapsed = [datetime]::Now - $Timestamp
+
+    if ($elapsed.TotalDays -ge 1) {
+        $days = [math]::Floor($elapsed.TotalDays)
+        return "$days day$(if ($days -ne 1) {'s'}) ago"
+    }
+    elseif ($elapsed.TotalHours -ge 1) {
+        $hours = [math]::Floor($elapsed.TotalHours)
+        return "$hours hour$(if ($hours -ne 1) {'s'}) ago"
+    }
+    elseif ($elapsed.TotalMinutes -ge 1) {
+        $minutes = [math]::Floor($elapsed.TotalMinutes)
+        return "$minutes minute$(if ($minutes -ne 1) {'s'}) ago"
+    }
+    else {
+        return "Just now"
+    }
+}
+
 #endregion
 
 #region ==================== GUIMAIN ====================
@@ -13232,7 +13799,8 @@ function Initialize-RobocurseGui {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Robocurse - Multi-Share Replication"
-        Height="800" Width="1100"
+        Height="550" Width="650"
+        MinHeight="400" MinWidth="500"
         WindowStartupLocation="CenterScreen"
         Background="#1E1E1E">
 
@@ -13399,254 +13967,546 @@ function Initialize-RobocurseGui {
             <Setter Property="Padding" Value="8,5"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
         </Style>
+
+        <!-- NEW: Rail Button Style for Navigation -->
+        <Style x:Key="RailButton" TargetType="RadioButton">
+            <Setter Property="Width" Value="50"/>
+            <Setter Property="Height" Value="50"/>
+            <Setter Property="FontSize" Value="20"/>
+            <Setter Property="Foreground" Value="#808080"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="border"
+                                Background="{TemplateBinding Background}"
+                                BorderThickness="3,0,0,0"
+                                BorderBrush="Transparent">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter Property="Background" Value="#3E3E3E"/>
+                                <Setter Property="Foreground" Value="#E0E0E0"/>
+                                <Setter TargetName="border" Property="BorderBrush" Value="#0078D4"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#2D2D2D"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
 
-    <!-- ==================== LAYOUT: Main Grid ==================== -->
-    <!-- Row 0: Header, Row 1: Profile/Settings, Row 2: Progress Area, Row 3: Status Bar -->
-    <!-- Note: Log panel removed - now in separate popup window via "Logs" button -->
-    <Grid Margin="10">
+    <!-- ==================== MAIN GRID LAYOUT ==================== -->
+    <Grid>
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>      <!-- Content area -->
+            <RowDefinition Height="Auto"/>   <!-- Bottom control bar -->
         </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="50"/>   <!-- Navigation rail -->
+            <ColumnDefinition Width="*"/>    <!-- Content panels -->
+        </Grid.ColumnDefinitions>
 
-        <!-- ==================== ROW 0: Header ==================== -->
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
-            <TextBlock Text="ROBOCURSE" FontSize="28" FontWeight="Bold" Foreground="#0078D4"/>
-            <TextBlock Text=" | Multi-Share Replication" FontSize="14" Foreground="#808080"
-                       VerticalAlignment="Bottom" Margin="0,0,0,4"/>
-        </StackPanel>
+        <!-- ==================== NAVIGATION RAIL ==================== -->
+        <Border Grid.Row="0" Grid.Column="0" Background="#252525">
+            <StackPanel>
+                <RadioButton x:Name="btnNavProfiles"
+                             GroupName="NavRail"
+                             IsChecked="True"
+                             Style="{StaticResource RailButton}"
+                             Content="&#x2699;"
+                             ToolTip="Profiles (1)"/>
+                <RadioButton x:Name="btnNavSettings"
+                             GroupName="NavRail"
+                             Style="{StaticResource RailButton}"
+                             Content="&#x2699;"
+                             ToolTip="Settings (2)"/>
+                <RadioButton x:Name="btnNavProgress"
+                             GroupName="NavRail"
+                             Style="{StaticResource RailButton}"
+                             Content="&#x1F4CA;"
+                             ToolTip="Progress (3)"/>
+                <RadioButton x:Name="btnNavLogs"
+                             GroupName="NavRail"
+                             Style="{StaticResource RailButton}"
+                             Content="&#x1F4DC;"
+                             ToolTip="Logs (4)"/>
+            </StackPanel>
+        </Border>
 
-        <!-- ==================== ROW 1: Profile and Settings Panel ==================== -->
-        <Grid Grid.Row="1" Margin="0,0,0,10">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="250"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
+        <!-- ==================== CONTENT PANELS ==================== -->
+        <Grid Grid.Row="0" Grid.Column="1">
 
-            <!-- ===== COLUMN 0: Profile List Sidebar ===== -->
-            <Border Grid.Column="0" Background="#252525" CornerRadius="4" Margin="0,0,10,0" Padding="10">
-                <DockPanel>
-                    <Label DockPanel.Dock="Top" Content="Sync Profiles" Style="{StaticResource DarkLabel}" FontWeight="Bold"/>
-                    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,10,0,0">
-                        <Button x:Name="btnAddProfile" Content="+ Add" Style="{StaticResource DarkButton}" Width="70" Margin="0,0,5,0"
-                                ToolTip="Add a new sync profile for a source/destination pair"/>
-                        <Button x:Name="btnRemoveProfile" Content="Remove" Style="{StaticResource DarkButton}" Width="70"
-                                ToolTip="Remove the selected sync profile"/>
-                    </StackPanel>
-                    <ListBox x:Name="lstProfiles" Style="{StaticResource DarkListBox}" Margin="0,5,0,0"
-                             ToolTip="List of configured sync profiles. Check to enable, uncheck to disable.">
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
-                                <CheckBox IsChecked="{Binding Enabled}" Content="{Binding Name}"
-                                          Style="{StaticResource DarkCheckBox}"/>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
-                </DockPanel>
-            </Border>
+            <!-- ==================== PROFILES PANEL ==================== -->
+            <Grid x:Name="panelProfiles" Visibility="Visible" Margin="10">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="200"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
 
-            <!-- Selected Profile Settings -->
-            <Border Grid.Column="1" Background="#252525" CornerRadius="4" Padding="15">
-                <Grid x:Name="pnlProfileSettings">
-                    <Grid.RowDefinitions>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                        <RowDefinition Height="Auto"/>
-                    </Grid.RowDefinitions>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="100"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="80"/>
-                    </Grid.ColumnDefinitions>
-
-                    <Label Grid.Row="0" Content="Name:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                    <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtProfileName"
-                             Style="{StaticResource DarkTextBox}" Margin="0,0,0,8"
-                             ToolTip="Display name for this sync profile"/>
-
-                    <Label Grid.Row="1" Content="Source:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="txtSource" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
-                             ToolTip="The network share or local path to copy FROM.&#x0a;Example: \\fileserver\users$ or D:\SourceData"/>
-                    <Button Grid.Row="1" Grid.Column="2" x:Name="btnBrowseSource" Content="Browse"
-                            Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
-
-                    <Label Grid.Row="2" Content="Destination:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtDest" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
-                             ToolTip="Where files will be copied TO. Directory will be created if needed."/>
-                    <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
-                            Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
-
-                    <!-- VSS and Scan Mode - aligned with column layout -->
-                    <Label Grid.Row="3" Grid.Column="0" Content="Options:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,4,0,8"/>
-                    <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,0,8">
-                        <CheckBox x:Name="chkUseVss" Content="Use VSS" Style="{StaticResource DarkCheckBox}" VerticalAlignment="Center"
-                                  ToolTip="Create a shadow copy snapshot before syncing.&#x0a;Allows copying locked files (like Outlook PST).&#x0a;Requires admin rights."/>
-                        <Label Content="Scan Mode:" Style="{StaticResource DarkLabel}" Margin="20,0,0,0" VerticalAlignment="Center"/>
-                        <ComboBox x:Name="cmbScanMode" Width="100" Margin="5,0,0,0" VerticalAlignment="Center"
-                                  ToolTip="Smart: Scans and splits based on size (recommended).&#x0a;Quick: Fixed depth split, faster startup.">
-                            <ComboBoxItem Content="Smart" IsSelected="True"/>
-                            <ComboBoxItem Content="Quick"/>
-                        </ComboBox>
-                    </StackPanel>
-
-                    <!-- Chunking options - consistent spacing -->
-                    <Label Grid.Row="4" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-                    <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center">
-                        <TextBox x:Name="txtMaxSize" Width="50" Style="{StaticResource DarkTextBox}" Text="10"
-                                 ToolTip="Split directories larger than this (GB).&#x0a;Smaller = more parallel jobs.&#x0a;Recommended: 5-20 GB"/>
-                        <Label Content="GB max" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-
-                        <TextBox x:Name="txtMaxFiles" Width="60" Style="{StaticResource DarkTextBox}" Text="50000" Margin="15,0,0,0"
-                                 ToolTip="Split directories with more files than this.&#x0a;Recommended: 20,000-100,000"/>
-                        <Label Content="files max" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-
-                        <TextBox x:Name="txtMaxDepth" Width="40" Style="{StaticResource DarkTextBox}" Text="5" Margin="15,0,0,0"
-                                 ToolTip="How deep to split directories.&#x0a;Higher = more granular but slower scan.&#x0a;Recommended: 3-6"/>
-                        <Label Content="depth" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-                    </StackPanel>
-                </Grid>
-            </Border>
-        </Grid>
-
-        <!-- Progress Area -->
-        <Grid Grid.Row="2">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
-            </Grid.RowDefinitions>
-
-            <!-- Control Bar with buttons aligned to config panel -->
-            <Border Grid.Row="0" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="250"/>  <!-- Match profile sidebar width -->
-                        <ColumnDefinition Width="*"/>
-                    </Grid.ColumnDefinitions>
-
-                    <!-- Workers slider - centered under profile sidebar -->
-                    <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                        <Label Content="Workers:" Style="{StaticResource DarkLabel}"
-                               ToolTip="Number of simultaneous robocopy processes.&#x0a;More = faster but uses more resources.&#x0a;Recommended: 2-8"/>
-                        <Slider x:Name="sldWorkers" Width="100" Minimum="1" Maximum="16" Value="4" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="txtWorkerCount" Text="4" Foreground="#E0E0E0" Width="25" Margin="5,0,0,0" VerticalAlignment="Center"/>
-                    </StackPanel>
-
-                    <!-- Action buttons - left aligned with config panel, uniform width -->
-                    <DockPanel Grid.Column="1" Margin="10,0,0,0">
-                        <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
-                            <Button x:Name="btnRunAll" Content="&#x25B6; Run All" Style="{StaticResource RunButton}" Width="100" Margin="0,0,8,0"
-                                    ToolTip="Start syncing all enabled profiles in sequence"/>
-                            <Button x:Name="btnRunSelected" Content="&#x25B6; Run Sel" Style="{StaticResource RunButton}" Width="100" Margin="0,0,8,0"
-                                    ToolTip="Run only the currently selected profile"/>
-                            <Button x:Name="btnStop" Content="&#x23F9; Stop" Style="{StaticResource StopButton}" Width="100" Margin="0,0,8,0" IsEnabled="False"
-                                    ToolTip="Stop all running robocopy jobs"/>
-                            <Button x:Name="btnSchedule" Content="&#x1F4C5; Schedule" Style="{StaticResource ScheduleButton}" Width="100"
-                                    ToolTip="Configure automated scheduled runs"/>
+                <!-- Profile List Sidebar -->
+                <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="0" Background="#252525" CornerRadius="4" Margin="0,0,10,0" Padding="10">
+                    <DockPanel>
+                        <Label DockPanel.Dock="Top" Content="Sync Profiles" Style="{StaticResource DarkLabel}" FontWeight="Bold"/>
+                        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,10,0,0">
+                            <Button x:Name="btnAddProfile" Content="+ Add" Style="{StaticResource DarkButton}" Width="70" Margin="0,0,5,0"
+                                    ToolTip="Add a new sync profile"/>
+                            <Button x:Name="btnRemoveProfile" Content="Remove" Style="{StaticResource DarkButton}" Width="70"
+                                    ToolTip="Remove selected profile"/>
                         </StackPanel>
-                        <!-- Logs button pinned right -->
-                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
-                            <Button x:Name="btnLogs" Content="&#x1F4CB; Logs" Style="{StaticResource LogsButton}" Width="100"
-                                    ToolTip="Open log viewer window"/>
-                        </StackPanel>
+                        <ListBox x:Name="lstProfiles" Style="{StaticResource DarkListBox}" Margin="0,5,0,0"
+                                 ToolTip="List of configured sync profiles">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <CheckBox IsChecked="{Binding Enabled}" Content="{Binding Name}"
+                                              Style="{StaticResource DarkCheckBox}"/>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
                     </DockPanel>
-                </Grid>
-            </Border>
+                </Border>
 
-            <!-- Progress Summary - NOW ABOVE chunk grid -->
-            <Border Grid.Row="1" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="200"/>
-                    </Grid.ColumnDefinitions>
+                <!-- Profile Settings Editor -->
+                <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="1" Background="#252525" CornerRadius="4" Padding="15">
+                    <Grid x:Name="pnlProfileSettings">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="80"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="70"/>
+                        </Grid.ColumnDefinitions>
 
-                    <StackPanel Grid.Column="0">
-                        <TextBlock x:Name="txtProfileProgress" Text="Profile: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                        <ProgressBar x:Name="pbProfile" Height="20" Minimum="0" Maximum="100" Value="0"
-                                     Background="#1A1A1A" Foreground="#00BFFF" BorderBrush="#555555" BorderThickness="1"/>
-                    </StackPanel>
+                        <Label Grid.Row="0" Content="Name:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                        <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtProfileName"
+                                 Style="{StaticResource DarkTextBox}" Margin="0,0,0,8"
+                                 ToolTip="Profile display name"/>
 
-                    <StackPanel Grid.Column="1" Margin="20,0,0,0">
-                        <TextBlock x:Name="txtOverallProgress" Text="Overall: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                        <ProgressBar x:Name="pbOverall" Height="20" Minimum="0" Maximum="100" Value="0"
-                                     Background="#1A1A1A" Foreground="#00FF7F" BorderBrush="#555555" BorderThickness="1"/>
-                    </StackPanel>
+                        <Label Grid.Row="1" Content="Source:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="txtSource" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
+                                 ToolTip="Source path to copy from"/>
+                        <Button Grid.Row="1" Grid.Column="2" x:Name="btnBrowseSource" Content="Browse"
+                                Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                    <StackPanel Grid.Column="2" Margin="20,0,0,0">
-                        <TextBlock x:Name="txtEta" Text="ETA: --:--:--" Foreground="#808080"/>
-                        <TextBlock x:Name="txtSpeed" Text="Speed: -- MB/s" Foreground="#808080"/>
-                        <TextBlock x:Name="txtChunks" Text="Chunks: 0/0" Foreground="#808080"/>
-                    </StackPanel>
-                </Grid>
-            </Border>
+                        <Label Grid.Row="2" Content="Destination:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtDest" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
+                                 ToolTip="Destination path"/>
+                        <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
+                                Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-            <!-- Chunk DataGrid - NOW BELOW progress summary, takes remaining space -->
-            <DataGrid Grid.Row="2" x:Name="dgChunks" AutoGenerateColumns="False"
-                      Style="{StaticResource DarkDataGrid}"
-                      CellStyle="{StaticResource DarkDataGridCell}"
-                      RowStyle="{StaticResource DarkDataGridRow}"
-                      ColumnHeaderStyle="{StaticResource DarkDataGridColumnHeader}"
-                      AlternationCount="2"
-                      IsReadOnly="True" SelectionMode="Single">
-                <DataGrid.Columns>
-                    <DataGridTextColumn Header="ID" Binding="{Binding ChunkId}" Width="50"/>
-                    <DataGridTextColumn Header="Path" Binding="{Binding SourcePath}" Width="400"/>
-                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
-                    <!--
-                        CUSTOM PROGRESS BAR - ScaleTransform Workaround
+                        <Label Grid.Row="3" Grid.Column="0" Content="Options:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,4,0,8"/>
+                        <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,0,8">
+                            <CheckBox x:Name="chkUseVss" Content="Use VSS" Style="{StaticResource DarkCheckBox}" VerticalAlignment="Center"
+                                      ToolTip="Use Volume Shadow Copy"/>
+                            <Label Content="Scan:" Style="{StaticResource DarkLabel}" Margin="15,0,0,0" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="cmbScanMode" Width="80" Margin="5,0,0,0" VerticalAlignment="Center"
+                                      ToolTip="Scan mode: Smart or Quick">
+                                <ComboBoxItem Content="Smart" IsSelected="True"/>
+                                <ComboBoxItem Content="Quick"/>
+                            </ComboBox>
+                        </StackPanel>
 
-                        WPF ProgressBar doesn't reliably render in PowerShell - the Value property
-                        updates but the visual fill doesn't repaint. Neither Dispatcher.Invoke,
-                        UpdateLayout(), nor Items.Refresh() fixes this.
+                        <Label Grid.Row="4" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                        <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBox x:Name="txtMaxSize" Width="40" Style="{StaticResource DarkTextBox}" Text="10"
+                                     ToolTip="Max size (GB)"/>
+                            <Label Content="GB" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                            <TextBox x:Name="txtMaxFiles" Width="50" Style="{StaticResource DarkTextBox}" Text="50000" Margin="10,0,0,0"
+                                     ToolTip="Max files"/>
+                            <Label Content="files" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                            <TextBox x:Name="txtMaxDepth" Width="30" Style="{StaticResource DarkTextBox}" Text="5" Margin="10,0,0,0"
+                                     ToolTip="Max depth"/>
+                            <Label Content="depth" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+            </Grid>
 
-                        SOLUTION: Custom progress bar using Border + ScaleTransform:
-                        - Gray Border = background track
-                        - Green Border = fill, scaled horizontally via ScaleTransform.ScaleX
-                        - ProgressScale (0.0-1.0) binds directly to ScaleX
-                        - RenderTransformOrigin at X=0 makes it scale from left edge
+            <!-- ==================== SETTINGS PANEL ==================== -->
+            <Grid x:Name="panelSettings" Visibility="Collapsed" Margin="10">
+                <Border Background="#252525" CornerRadius="4" Padding="15">
+                    <DockPanel>
+                        <!-- Button bar at bottom -->
+                        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
+                            <Button x:Name="btnSettingsRevert" Content="Revert" Style="{StaticResource DarkButton}" Width="90" Margin="0,0,10,0"
+                                    ToolTip="Revert changes and reload current settings"/>
+                            <Button x:Name="btnSettingsSave" Content="Save" Style="{StaticResource RunButton}" Width="90"
+                                    ToolTip="Save settings to configuration file"/>
+                        </StackPanel>
 
-                        This bypasses ProgressBar entirely and works reliably.
-                    -->
-                    <DataGridTemplateColumn Header="Progress" Width="150">
-                        <DataGridTemplateColumn.CellTemplate>
-                            <DataTemplate>
-                                <Grid Height="18">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*"/>
-                                    </Grid.ColumnDefinitions>
-                                    <!-- Background track -->
-                                    <Border Background="#3E3E3E" CornerRadius="2"/>
-                                    <!-- Progress fill - ScaleX bound to ProgressScale (0.0-1.0) -->
-                                    <Border Background="#4CAF50" CornerRadius="2" HorizontalAlignment="Stretch">
-                                        <Border.RenderTransform>
-                                            <ScaleTransform ScaleX="{Binding ProgressScale}" ScaleY="1"/>
-                                        </Border.RenderTransform>
-                                        <Border.RenderTransformOrigin>
-                                            <Point X="0" Y="0.5"/>
-                                        </Border.RenderTransformOrigin>
-                                    </Border>
-                                    <!-- Percentage text overlay -->
-                                    <TextBlock Text="{Binding Progress, StringFormat={}{0}%}"
-                                               HorizontalAlignment="Center" VerticalAlignment="Center"
-                                               Foreground="White" FontWeight="Bold"/>
-                                </Grid>
-                            </DataTemplate>
-                        </DataGridTemplateColumn.CellTemplate>
-                    </DataGridTemplateColumn>
-                    <DataGridTextColumn Header="Speed" Binding="{Binding Speed}" Width="80"/>
-                </DataGrid.Columns>
-            </DataGrid>
+                        <!-- Scrollable settings content -->
+                        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel>
+                                <!-- PERFORMANCE Section -->
+                                <TextBlock Text="PERFORMANCE" FontWeight="Bold" Foreground="#0078D4" Margin="0,0,0,10"/>
+                                <Border Background="#1E1E1E" CornerRadius="4" Padding="15" Margin="0,0,0,20">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="150"/>
+                                            <ColumnDefinition Width="200"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Concurrent Jobs -->
+                                        <Label Grid.Row="0" Content="Concurrent Jobs:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                        <Slider Grid.Row="0" Grid.Column="1" x:Name="sldSettingsJobs" Minimum="1" Maximum="16" Value="4"
+                                                TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center" Margin="0,0,10,10"/>
+                                        <TextBlock Grid.Row="0" Grid.Column="2" x:Name="txtSettingsJobs" Text="4" Foreground="#E0E0E0"
+                                                   VerticalAlignment="Center" Margin="0,0,0,10"/>
+
+                                        <!-- Threads per Job -->
+                                        <Label Grid.Row="1" Content="Threads per Job:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                        <Slider Grid.Row="1" Grid.Column="1" x:Name="sldSettingsThreads" Minimum="1" Maximum="32" Value="8"
+                                                TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center" Margin="0,0,10,10"/>
+                                        <TextBlock Grid.Row="1" Grid.Column="2" x:Name="txtSettingsThreads" Text="8" Foreground="#E0E0E0"
+                                                   VerticalAlignment="Center" Margin="0,0,0,10"/>
+
+                                        <!-- Bandwidth Limit -->
+                                        <Label Grid.Row="2" Content="Bandwidth Limit:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtSettingsBandwidth" Text="0" Style="{StaticResource DarkTextBox}"
+                                                 VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                        <Label Grid.Row="2" Grid.Column="2" Content="MB/s (0 = unlimited)" Style="{StaticResource DarkLabel}"
+                                               VerticalAlignment="Center" Foreground="#808080"/>
+                                    </Grid>
+                                </Border>
+
+                                <!-- LOGGING Section -->
+                                <TextBlock Text="LOGGING" FontWeight="Bold" Foreground="#0078D4" Margin="0,0,0,10"/>
+                                <Border Background="#1E1E1E" CornerRadius="4" Padding="15" Margin="0,0,0,20">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="150"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="80"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Log Path -->
+                                        <Label Grid.Row="0" Content="Log Path:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                        <TextBox Grid.Row="0" Grid.Column="1" x:Name="txtSettingsLogPath" Text=".\Logs" Style="{StaticResource DarkTextBox}"
+                                                 VerticalAlignment="Center" Margin="0,0,5,10"/>
+                                        <Button Grid.Row="0" Grid.Column="2" x:Name="btnSettingsLogBrowse" Content="Browse" Style="{StaticResource DarkButton}"
+                                                VerticalAlignment="Center" Margin="0,0,0,10"/>
+
+                                        <!-- Enable SIEM -->
+                                        <Label Grid.Row="1" Content="Enable SIEM:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                        <CheckBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" x:Name="chkSettingsSiem" Content="Enable JSON Lines logging for SIEM"
+                                                  Style="{StaticResource DarkCheckBox}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+
+                                        <!-- SIEM Path -->
+                                        <Label Grid.Row="2" Content="SIEM Path:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtSettingsSiemPath" Text=".\Logs\SIEM" Style="{StaticResource DarkTextBox}"
+                                                 VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                        <Button Grid.Row="2" Grid.Column="2" x:Name="btnSettingsSiemBrowse" Content="Browse" Style="{StaticResource DarkButton}"
+                                                VerticalAlignment="Center"/>
+                                    </Grid>
+                                </Border>
+
+                                <!-- EMAIL NOTIFICATIONS Section -->
+                                <TextBlock Text="EMAIL NOTIFICATIONS" FontWeight="Bold" Foreground="#0078D4" Margin="0,0,0,10"/>
+                                <Border Background="#1E1E1E" CornerRadius="4" Padding="15" Margin="0,0,0,20">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="150"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="80"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Enable Email -->
+                                        <Label Grid.Row="0" Content="Enable Email:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                        <CheckBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" x:Name="chkSettingsEmailEnabled" Content="Send email notifications on completion"
+                                                  Style="{StaticResource DarkCheckBox}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+
+                                        <!-- SMTP Server and Port -->
+                                        <Label Grid.Row="1" Content="SMTP Server:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                        <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,10">
+                                            <TextBox x:Name="txtSettingsSmtp" Text="" Style="{StaticResource DarkTextBox}" Width="250" Margin="0,0,10,0"/>
+                                            <Label Content="Port:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                            <TextBox x:Name="txtSettingsSmtpPort" Text="587" Style="{StaticResource DarkTextBox}" Width="60"/>
+                                        </StackPanel>
+
+                                        <!-- Use TLS -->
+                                        <Label Grid.Row="2" Content="Use TLS:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                        <CheckBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" x:Name="chkSettingsTls" Content="Use TLS/SSL encryption"
+                                                  Style="{StaticResource DarkCheckBox}" VerticalAlignment="Center" IsChecked="True" Margin="0,0,0,10"/>
+
+                                        <!-- Credential -->
+                                        <Label Grid.Row="3" Content="Credential:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                        <TextBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtSettingsCredential" Text="Robocurse-SMTP"
+                                                 Style="{StaticResource DarkTextBox}" Margin="0,0,0,10"
+                                                 ToolTip="Windows Credential Manager target name"/>
+
+                                        <!-- From -->
+                                        <Label Grid.Row="4" Content="From:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                        <TextBox Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtSettingsEmailFrom" Text=""
+                                                 Style="{StaticResource DarkTextBox}" Margin="0,0,0,10"/>
+
+                                        <!-- To -->
+                                        <Label Grid.Row="5" Content="To:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                                        <TextBox Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtSettingsEmailTo" Text=""
+                                                 Style="{StaticResource DarkTextBox}"
+                                                 ToolTip="Comma-separated email addresses"/>
+                                    </Grid>
+                                </Border>
+
+                                <!-- SCHEDULE Section -->
+                                <TextBlock Text="SCHEDULE" FontWeight="Bold" Foreground="#0078D4" Margin="0,0,0,10"/>
+                                <Border Background="#1E1E1E" CornerRadius="4" Padding="15" Margin="0,0,0,0">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto"/>
+                                            <RowDefinition Height="Auto"/>
+                                        </Grid.RowDefinitions>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="150"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Schedule Status -->
+                                        <Label Grid.Row="0" Content="Status:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
+                                        <TextBlock Grid.Row="0" Grid.Column="1" x:Name="txtSettingsScheduleStatus" Text="Not configured" Foreground="#808080"
+                                                   VerticalAlignment="Center" Margin="0,0,0,10"/>
+
+                                        <!-- Configure Button -->
+                                        <Button Grid.Row="1" Grid.Column="1" x:Name="btnSettingsSchedule" Content="Configure Schedule..."
+                                                Style="{StaticResource ScheduleButton}" Width="150" HorizontalAlignment="Left"
+                                                ToolTip="Configure Windows Task Scheduler"/>
+                                    </Grid>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+                    </DockPanel>
+                </Border>
+            </Grid>
+
+            <!-- ==================== PROGRESS PANEL ==================== -->
+            <Grid x:Name="panelProgress" Visibility="Collapsed" Margin="10">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Progress Summary -->
+                <Border Grid.Row="0" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="150"/>
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0">
+                            <TextBlock x:Name="txtProfileProgress" Text="Profile: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
+                            <ProgressBar x:Name="pbProfile" Height="20" Minimum="0" Maximum="100" Value="0"
+                                         Background="#1A1A1A" Foreground="#00BFFF" BorderBrush="#555555" BorderThickness="1"/>
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1" Margin="15,0,0,0">
+                            <TextBlock x:Name="txtOverallProgress" Text="Overall: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
+                            <ProgressBar x:Name="pbOverall" Height="20" Minimum="0" Maximum="100" Value="0"
+                                         Background="#1A1A1A" Foreground="#00FF7F" BorderBrush="#555555" BorderThickness="1"/>
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="2" Margin="15,0,0,0">
+                            <TextBlock x:Name="txtEta" Text="ETA: --:--:--" Foreground="#808080"/>
+                            <TextBlock x:Name="txtSpeed" Text="Speed: -- MB/s" Foreground="#808080"/>
+                            <TextBlock x:Name="txtChunks" Text="Chunks: 0/0" Foreground="#808080"/>
+                        </StackPanel>
+                    </Grid>
+                </Border>
+
+                <!-- Chunk DataGrid -->
+                <DataGrid Grid.Row="1" x:Name="dgChunks" AutoGenerateColumns="False"
+                          Style="{StaticResource DarkDataGrid}"
+                          CellStyle="{StaticResource DarkDataGridCell}"
+                          RowStyle="{StaticResource DarkDataGridRow}"
+                          ColumnHeaderStyle="{StaticResource DarkDataGridColumnHeader}"
+                          AlternationCount="2"
+                          IsReadOnly="True" SelectionMode="Single">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="ID" Binding="{Binding ChunkId}" Width="50"/>
+                        <DataGridTextColumn Header="Path" Binding="{Binding SourcePath}" Width="250"/>
+                        <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
+                        <DataGridTemplateColumn Header="Progress" Width="120">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <Grid Height="18">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border Background="#3E3E3E" CornerRadius="2"/>
+                                        <Border Background="#4CAF50" CornerRadius="2" HorizontalAlignment="Stretch">
+                                            <Border.RenderTransform>
+                                                <ScaleTransform ScaleX="{Binding ProgressScale}" ScaleY="1"/>
+                                            </Border.RenderTransform>
+                                            <Border.RenderTransformOrigin>
+                                                <Point X="0" Y="0.5"/>
+                                            </Border.RenderTransformOrigin>
+                                        </Border>
+                                        <TextBlock Text="{Binding Progress, StringFormat={}{0}%}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                   Foreground="White" FontWeight="Bold"/>
+                                    </Grid>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                        <DataGridTextColumn Header="Speed" Binding="{Binding Speed}" Width="80"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+
+            <!-- ==================== LOGS PANEL ==================== -->
+            <Grid x:Name="panelLogs" Visibility="Collapsed" Margin="10">
+                <Border Background="#252525" CornerRadius="4" Padding="15">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <!-- Filter Bar -->
+                        <Border Grid.Row="0" Background="#1E1E1E" CornerRadius="4" Padding="10" Margin="0,0,0,10">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+
+                                <!-- Level Filters -->
+                                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                                    <Label Content="Show:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                                    <CheckBox x:Name="chkLogDebug" Content="DEBUG" Style="{StaticResource DarkCheckBox}"
+                                              VerticalAlignment="Center" Margin="0,0,15,0" IsChecked="True"/>
+                                    <CheckBox x:Name="chkLogInfo" Content="INFO" Style="{StaticResource DarkCheckBox}"
+                                              VerticalAlignment="Center" Margin="0,0,15,0" IsChecked="True"/>
+                                    <CheckBox x:Name="chkLogWarning" Content="WARNING" Style="{StaticResource DarkCheckBox}"
+                                              VerticalAlignment="Center" Margin="0,0,15,0" IsChecked="True"/>
+                                    <CheckBox x:Name="chkLogError" Content="ERROR" Style="{StaticResource DarkCheckBox}"
+                                              VerticalAlignment="Center" IsChecked="True"/>
+                                </StackPanel>
+
+                                <!-- Line Count and Auto-scroll -->
+                                <StackPanel Grid.Column="2" Orientation="Horizontal">
+                                    <TextBlock x:Name="txtLogLineCount" Text="0 lines" Foreground="#808080"
+                                               VerticalAlignment="Center" Margin="0,0,15,0"/>
+                                    <CheckBox x:Name="chkLogAutoScroll" Content="Auto-scroll" Style="{StaticResource DarkCheckBox}"
+                                              VerticalAlignment="Center" IsChecked="True"/>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+
+                        <!-- Log Content -->
+                        <Border Grid.Row="1" Background="#1E1E1E" BorderBrush="#252525" BorderThickness="1" CornerRadius="4">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                                <TextBox x:Name="txtLogContent"
+                                         Background="#1E1E1E"
+                                         Foreground="#E0E0E0"
+                                         FontFamily="Consolas"
+                                         FontSize="11"
+                                         BorderThickness="0"
+                                         IsReadOnly="True"
+                                         TextWrapping="NoWrap"
+                                         VerticalScrollBarVisibility="Auto"
+                                         HorizontalScrollBarVisibility="Auto"
+                                         AcceptsReturn="True"/>
+                            </ScrollViewer>
+                        </Border>
+
+                        <!-- Button Bar -->
+                        <Border Grid.Row="2" Background="#1E1E1E" CornerRadius="4" Padding="10" Margin="0,10,0,0">
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button x:Name="btnLogClear" Content="Clear" Style="{StaticResource DarkButton}"
+                                        Width="80" Margin="0,0,5,0"/>
+                                <Button x:Name="btnLogCopy" Content="Copy All" Style="{StaticResource DarkButton}"
+                                        Width="80" Margin="0,0,5,0"/>
+                                <Button x:Name="btnLogSave" Content="Save..." Style="{StaticResource DarkButton}"
+                                        Width="80" Margin="0,0,10,0"/>
+                                <Button x:Name="btnLogPopOut" Content="Pop Out" Style="{StaticResource LogsButton}"
+                                        Width="90" ToolTip="Open log in separate window (Ctrl+L)"/>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Border>
+            </Grid>
+
         </Grid>
 
-        <!-- Status Bar -->
-        <TextBlock Grid.Row="3" x:Name="txtStatus" Text="Ready" Foreground="#808080" Margin="0,10,0,5"/>
+        <!-- ==================== BOTTOM CONTROL BAR ==================== -->
+        <Border Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2"
+                Background="#252525" Padding="10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Run/Stop/Schedule buttons -->
+                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                    <Button x:Name="btnRunAll" Content="&#x25B6; Run All"
+                            Style="{StaticResource RunButton}" Width="90" Margin="0,0,5,0"
+                            ToolTip="Run all enabled profiles"/>
+                    <Button x:Name="btnRunSelected" Content="&#x25B6; Run Sel"
+                            Style="{StaticResource RunButton}" Width="90" Margin="0,0,5,0"
+                            ToolTip="Run selected profile (Ctrl+R)"/>
+                    <Button x:Name="btnStop" Content="&#x23F9; Stop"
+                            Style="{StaticResource StopButton}" Width="90" Margin="0,0,5,0" IsEnabled="False"
+                            ToolTip="Stop replication (Escape)"/>
+                    <Button x:Name="btnSchedule" Content="&#x1F4C5; Schedule"
+                            Style="{StaticResource ScheduleButton}" Width="90"
+                            ToolTip="Configure scheduled runs"/>
+                </StackPanel>
+
+                <!-- Status text -->
+                <TextBlock Grid.Column="1" x:Name="txtStatus" Text="Ready"
+                           Foreground="#808080" VerticalAlignment="Center" Margin="15,0"/>
+
+                <!-- Workers slider -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal">
+                    <Label Content="Workers:" Style="{StaticResource DarkLabel}" ToolTip="Number of parallel workers"/>
+                    <Slider x:Name="sldWorkers" Width="80" Minimum="1" Maximum="16" Value="4"
+                            VerticalAlignment="Center"/>
+                    <TextBlock x:Name="txtWorkerCount" Text="4" Foreground="#E0E0E0"
+                               Width="20" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
     </Grid>
 </Window>
 
@@ -13667,15 +14527,45 @@ function Initialize-RobocurseGui {
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
         'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
-        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule', 'btnLogs',
+        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
-        'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus'
+        'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus',
+        'btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs',
+        'panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs',
+        'chkLogDebug', 'chkLogInfo', 'chkLogWarning', 'chkLogError',
+        'chkLogAutoScroll', 'txtLogLineCount', 'txtLogContent',
+        'btnLogClear', 'btnLogCopy', 'btnLogSave', 'btnLogPopOut',
+        'sldSettingsJobs', 'txtSettingsJobs', 'sldSettingsThreads', 'txtSettingsThreads',
+        'txtSettingsBandwidth', 'txtSettingsLogPath', 'btnSettingsLogBrowse',
+        'chkSettingsSiem', 'txtSettingsSiemPath', 'btnSettingsSiemBrowse',
+        'chkSettingsEmailEnabled', 'txtSettingsSmtp', 'txtSettingsSmtpPort',
+        'chkSettingsTls', 'txtSettingsCredential', 'txtSettingsEmailFrom', 'txtSettingsEmailTo',
+        'btnSettingsSchedule', 'txtSettingsScheduleStatus', 'btnSettingsRevert', 'btnSettingsSave'
     ) | ForEach-Object {
         $script:Controls[$_] = $script:Window.FindName($_)
     }
 
     # Wire up event handlers
     Initialize-EventHandlers
+
+    # Add keyboard shortcut handler
+    $script:Window.Add_PreviewKeyDown({
+        param($sender, $e)
+
+        Invoke-SafeEventHandler -HandlerName 'Window_PreviewKeyDown' -ScriptBlock {
+            $ctrl = ($e.KeyboardDevice.Modifiers -band [System.Windows.Input.ModifierKeys]::Control) -ne 0
+
+            # Check if TextBox has focus
+            $focusedElement = [System.Windows.Input.Keyboard]::FocusedElement
+            $isTextBoxFocused = $focusedElement -is [System.Windows.Controls.TextBox]
+
+            $handled = Invoke-KeyboardShortcut -Key $e.Key.ToString() -Ctrl $ctrl -IsTextBoxFocused $isTextBoxFocused
+
+            if ($handled) {
+                $e.Handled = $true
+            }
+        }
+    })
 
     # Load config and populate UI
     $script:Config = Get-RobocurseConfig -Path $script:ConfigPath
@@ -13690,7 +14580,21 @@ function Initialize-RobocurseGui {
         $selectedName = if ($selectedProfile) { $selectedProfile.Name } else { $null }
         $workerCount = [int]$script:Controls.sldWorkers.Value
 
-        Save-GuiState -Window $script:Window -WorkerCount $workerCount -SelectedProfileName $selectedName
+        # Create state object to save
+        $state = [PSCustomObject]@{
+            WindowLeft = $script:Window.Left
+            WindowTop = $script:Window.Top
+            WindowWidth = $script:Window.Width
+            WindowHeight = $script:Window.Height
+            WindowState = $script:Window.WindowState.ToString()
+            WorkerCount = $workerCount
+            SelectedProfile = $selectedName
+            ActivePanel = if ($script:ActivePanel) { $script:ActivePanel } else { 'Profiles' }
+            LastRun = if ($script:CurrentGuiState -and $script:CurrentGuiState.LastRun) { $script:CurrentGuiState.LastRun } else { $null }
+            SavedAt = [datetime]::Now.ToString('o')
+        }
+
+        Save-GuiState -StateObject $state
     })
 
     # Initialize progress timer - use Forms.Timer instead of DispatcherTimer
@@ -13702,6 +14606,10 @@ function Initialize-RobocurseGui {
 
     # Mark initialization complete - event handlers can now save
     $script:GuiInitializing = $false
+
+    # Set active panel (from restored state or default to Profiles)
+    $panelToActivate = if ($script:RestoredActivePanel) { $script:RestoredActivePanel } else { 'Profiles' }
+    Set-ActivePanel -PanelName $panelToActivate
 
     Write-GuiLog "Robocurse GUI initialized"
 
@@ -13747,6 +14655,97 @@ function Invoke-SafeEventHandler {
             Write-Warning $errorMsg
         }
     }
+}
+
+function Show-Panel {
+    <#
+    .SYNOPSIS
+        Shows the specified panel and hides all others
+    .DESCRIPTION
+        Implements the navigation rail panel switching logic by setting Visibility
+        to 'Visible' for the selected panel and 'Collapsed' for all others.
+    .PARAMETER PanelName
+        Name of the panel to show (panelProfiles, panelSettings, panelProgress, panelLogs)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs')]
+        [string]$PanelName
+    )
+
+    # Hide all panels
+    @('panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs') | ForEach-Object {
+        if ($script:Controls[$_]) {
+            $script:Controls[$_].Visibility = [System.Windows.Visibility]::Collapsed
+        }
+    }
+
+    # Show selected panel
+    if ($script:Controls[$PanelName]) {
+        $script:Controls[$PanelName].Visibility = [System.Windows.Visibility]::Visible
+    }
+}
+
+function Set-ActivePanel {
+    <#
+    .SYNOPSIS
+        Switches the active panel and updates navigation button states
+    .DESCRIPTION
+        Sets the specified panel as active by showing it, hiding all other panels,
+        and updating the navigation rail button states. Maintains state tracking
+        for the currently active panel.
+    .PARAMETER PanelName
+        Name of the panel to activate (Profiles, Settings, Progress, Logs)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Profiles', 'Settings', 'Progress', 'Logs')]
+        [string]$PanelName
+    )
+
+    Write-RobocurseLog -Level 'Debug' -Component 'GUI' -Message "Switching to panel: $PanelName"
+
+    # Map friendly name to control name
+    $panelControlName = "panel$PanelName"
+    $buttonControlName = "btnNav$PanelName"
+
+    # Hide all panels
+    @('panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs') | ForEach-Object {
+        if ($script:Controls[$_]) {
+            $script:Controls[$_].Visibility = [System.Windows.Visibility]::Collapsed
+        }
+    }
+
+    # Show selected panel
+    if ($script:Controls[$panelControlName]) {
+        $script:Controls[$panelControlName].Visibility = [System.Windows.Visibility]::Visible
+    }
+
+    # Update button states - set IsChecked for the active button
+    # RadioButtons in the same GroupName will automatically uncheck others
+    @('btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs') | ForEach-Object {
+        if ($script:Controls[$_]) {
+            $script:Controls[$_].IsChecked = ($_ -eq $buttonControlName)
+        }
+    }
+
+    # Panel-specific initialization when switching
+    if ($PanelName -eq 'Settings') {
+        # Load current settings into form when switching to Settings panel
+        Import-SettingsToForm
+    }
+    elseif ($PanelName -eq 'Progress') {
+        # Show empty state if idle (no replication running)
+        if (-not $script:OrchestrationState -or
+            $script:OrchestrationState.Phase -in @('Idle', 'Complete', $null)) {
+            Show-ProgressEmptyState
+        }
+    }
+
+    # Store active panel in script scope
+    $script:ActivePanel = $PanelName
 }
 
 function Initialize-EventHandlers {
@@ -13814,10 +14813,99 @@ function Initialize-EventHandlers {
         Invoke-SafeEventHandler -HandlerName "Schedule" -ScriptBlock { Show-ScheduleDialog }
     })
 
-    # Logs button - opens popup log viewer window
-    $script:Controls.btnLogs.Add_Click({
-        Invoke-SafeEventHandler -HandlerName "Logs" -ScriptBlock { Show-LogWindow }
+    # Navigation rail buttons - toggle panel visibility
+    $script:Controls.btnNavProfiles.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "NavProfiles" -ScriptBlock { Set-ActivePanel -PanelName 'Profiles' }
     })
+    $script:Controls.btnNavSettings.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "NavSettings" -ScriptBlock { Set-ActivePanel -PanelName 'Settings' }
+    })
+    $script:Controls.btnNavProgress.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "NavProgress" -ScriptBlock { Set-ActivePanel -PanelName 'Progress' }
+    })
+    $script:Controls.btnNavLogs.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "NavLogs" -ScriptBlock { Set-ActivePanel -PanelName 'Logs' }
+    })
+
+    # Inline log viewer - filter checkboxes
+    if ($script:Controls['chkLogDebug']) {
+        $script:Controls.chkLogDebug.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterDebug" -ScriptBlock { Update-InlineLogContent }
+        })
+        $script:Controls.chkLogDebug.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterDebug" -ScriptBlock { Update-InlineLogContent }
+        })
+    }
+    if ($script:Controls['chkLogInfo']) {
+        $script:Controls.chkLogInfo.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterInfo" -ScriptBlock { Update-InlineLogContent }
+        })
+        $script:Controls.chkLogInfo.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterInfo" -ScriptBlock { Update-InlineLogContent }
+        })
+    }
+    if ($script:Controls['chkLogWarning']) {
+        $script:Controls.chkLogWarning.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterWarning" -ScriptBlock { Update-InlineLogContent }
+        })
+        $script:Controls.chkLogWarning.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterWarning" -ScriptBlock { Update-InlineLogContent }
+        })
+    }
+    if ($script:Controls['chkLogError']) {
+        $script:Controls.chkLogError.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterError" -ScriptBlock { Update-InlineLogContent }
+        })
+        $script:Controls.chkLogError.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterError" -ScriptBlock { Update-InlineLogContent }
+        })
+    }
+
+    # Inline log viewer - button handlers
+    if ($script:Controls['btnLogClear']) {
+        $script:Controls.btnLogClear.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "LogClear" -ScriptBlock {
+                Clear-GuiLogBuffer
+                Update-InlineLogContent
+            }
+        })
+    }
+    if ($script:Controls['btnLogCopy']) {
+        $script:Controls.btnLogCopy.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "LogCopy" -ScriptBlock {
+                if ($script:Controls['txtLogContent'] -and $script:Controls.txtLogContent.Text) {
+                    [System.Windows.Clipboard]::SetText($script:Controls.txtLogContent.Text)
+                }
+            }
+        })
+    }
+    if ($script:Controls['btnLogSave']) {
+        $script:Controls.btnLogSave.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "LogSave" -ScriptBlock {
+                try {
+                    $saveDialog = New-Object Microsoft.Win32.SaveFileDialog
+                    $saveDialog.Filter = "Log files (*.log)|*.log|Text files (*.txt)|*.txt|All files (*.*)|*.*"
+                    $saveDialog.DefaultExt = ".log"
+                    $saveDialog.FileName = "robocurse-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+
+                    if ($saveDialog.ShowDialog() -eq $true) {
+                        if ($script:Controls['txtLogContent']) {
+                            $script:Controls.txtLogContent.Text | Set-Content -Path $saveDialog.FileName -Encoding UTF8
+                            Write-GuiLog "Log saved to: $($saveDialog.FileName)"
+                        }
+                    }
+                }
+                catch {
+                    Show-GuiError -Message "Failed to save log file" -Details $_.Exception.Message
+                }
+            }
+        })
+    }
+    if ($script:Controls['btnLogPopOut']) {
+        $script:Controls.btnLogPopOut.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "LogPopOut" -ScriptBlock { Show-LogWindow }
+        })
+    }
 
     # Form field changes - save to profile
     @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
@@ -13858,6 +14946,68 @@ function Initialize-EventHandlers {
     $script:Controls.cmbScanMode.Add_SelectionChanged({
         Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock { Save-ProfileFromForm }
     })
+
+    # Settings panel event handlers
+    # Slider ValueChanged - sync text displays
+    if ($script:Controls['sldSettingsJobs']) {
+        $script:Controls.sldSettingsJobs.Add_ValueChanged({
+            Invoke-SafeEventHandler -HandlerName "SettingsJobsSlider" -ScriptBlock {
+                if ($script:Controls['txtSettingsJobs']) {
+                    $script:Controls.txtSettingsJobs.Text = [int]$script:Controls.sldSettingsJobs.Value
+                }
+            }
+        })
+    }
+    if ($script:Controls['sldSettingsThreads']) {
+        $script:Controls.sldSettingsThreads.Add_ValueChanged({
+            Invoke-SafeEventHandler -HandlerName "SettingsThreadsSlider" -ScriptBlock {
+                if ($script:Controls['txtSettingsThreads']) {
+                    $script:Controls.txtSettingsThreads.Text = [int]$script:Controls.sldSettingsThreads.Value
+                }
+            }
+        })
+    }
+
+    # Browse buttons
+    if ($script:Controls['btnSettingsLogBrowse']) {
+        $script:Controls.btnSettingsLogBrowse.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsLogBrowse" -ScriptBlock {
+                $path = Show-FolderBrowser -Description "Select log folder"
+                if ($path -and $script:Controls['txtSettingsLogPath']) {
+                    $script:Controls.txtSettingsLogPath.Text = $path
+                }
+            }
+        })
+    }
+    if ($script:Controls['btnSettingsSiemBrowse']) {
+        $script:Controls.btnSettingsSiemBrowse.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsSiemBrowse" -ScriptBlock {
+                $path = Show-FolderBrowser -Description "Select SIEM log folder"
+                if ($path -and $script:Controls['txtSettingsSiemPath']) {
+                    $script:Controls.txtSettingsSiemPath.Text = $path
+                }
+            }
+        })
+    }
+
+    # Save and Revert buttons
+    if ($script:Controls['btnSettingsSave']) {
+        $script:Controls.btnSettingsSave.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsSave" -ScriptBlock { Save-SettingsFromForm }
+        })
+    }
+    if ($script:Controls['btnSettingsRevert']) {
+        $script:Controls.btnSettingsRevert.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsRevert" -ScriptBlock { Import-SettingsToForm }
+        })
+    }
+
+    # Schedule button (reuses existing handler from main panel)
+    if ($script:Controls['btnSettingsSchedule']) {
+        $script:Controls.btnSettingsSchedule.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsSchedule" -ScriptBlock { Show-ScheduleDialog }
+        })
+    }
 
     # Window closing
     $script:Window.Add_Closing({
@@ -13975,6 +15125,11 @@ function Write-GuiLog {
 
     # Update the log window if it's visible
     Update-LogWindowContent
+
+    # Update inline log panel if visible
+    if ($script:Controls['txtLogContent'] -and $script:ActivePanel -eq 'Logs') {
+        Update-InlineLogContent
+    }
 }
 
 function Show-GuiError {
@@ -14008,6 +15163,95 @@ function Show-GuiError {
     )
 
     Write-GuiLog "ERROR: $Message"
+}
+
+function Invoke-KeyboardShortcut {
+    <#
+    .SYNOPSIS
+        Handles keyboard shortcuts for the GUI
+    .DESCRIPTION
+        Processes keyboard shortcuts and invokes the appropriate actions.
+        Returns $true if the shortcut was handled, $false otherwise.
+    .PARAMETER Key
+        The key that was pressed (e.g., 'L', 'R', 'Escape', 'D1', 'NumPad1')
+    .PARAMETER Ctrl
+        Whether the Ctrl modifier key is pressed
+    .PARAMETER IsTextBoxFocused
+        Whether a TextBox control currently has focus
+    .OUTPUTS
+        Boolean - $true if shortcut was handled, $false otherwise
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Key,
+
+        [Parameter(Mandatory)]
+        [bool]$Ctrl,
+
+        [Parameter(Mandatory)]
+        [bool]$IsTextBoxFocused
+    )
+
+    # Ctrl+L: Open log popup (always works)
+    if ($Ctrl -and $Key -eq 'L') {
+        Show-LogWindow
+        return $true
+    }
+
+    # Ctrl+R: Run selected (if enabled)
+    if ($Ctrl -and $Key -eq 'R') {
+        if ($script:Controls['btnRunSelected'].IsEnabled) {
+            Start-GuiReplication -SelectedOnly
+        }
+        return $true
+    }
+
+    # Escape: Stop (if running)
+    if ($Key -eq 'Escape') {
+        if ($script:Controls['btnStop'].IsEnabled) {
+            Request-Stop
+        }
+        return $true
+    }
+
+    # 1-4: Switch panels (if not in TextBox)
+    if (-not $Ctrl -and -not $IsTextBoxFocused) {
+        $panel = Get-PanelForKey -Key $Key
+        if ($panel) {
+            Set-ActivePanel -PanelName $panel
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-PanelForKey {
+    <#
+    .SYNOPSIS
+        Maps a key to a panel name
+    .DESCRIPTION
+        Returns the panel name for number keys 1-4 and NumPad1-4.
+        Returns $null if the key doesn't map to a panel.
+    .PARAMETER Key
+        The key name (e.g., 'D1', 'D2', 'NumPad1', etc.)
+    .OUTPUTS
+        String - Panel name ('Profiles', 'Settings', 'Progress', 'Logs') or $null
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Key
+    )
+
+    switch ($Key) {
+        { $_ -in @('D1', 'NumPad1') } { return 'Profiles' }
+        { $_ -in @('D2', 'NumPad2') } { return 'Settings' }
+        { $_ -in @('D3', 'NumPad3') } { return 'Progress' }
+        { $_ -in @('D4', 'NumPad4') } { return 'Logs' }
+        default { return $null }
+    }
 }
 
 #endregion

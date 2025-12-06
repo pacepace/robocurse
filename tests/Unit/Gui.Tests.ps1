@@ -68,6 +68,18 @@ InModuleScope 'Robocurse' {
             It "Should have Show-ScheduleDialog function" {
                 Get-Command Show-ScheduleDialog -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
             }
+
+            It "Should have Show-Panel function" {
+                Get-Command Show-Panel -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have Invoke-KeyboardShortcut function" {
+                Get-Command Invoke-KeyboardShortcut -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have Get-PanelForKey function" {
+                Get-Command Get-PanelForKey -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
         }
 
         Context "XAML Definition Tests" {
@@ -95,7 +107,7 @@ InModuleScope 'Robocurse' {
 
             It "Should have required controls defined" {
                 # Note: txtLog and svLog removed - now in separate LogWindow.xaml
-                # btnLogs added - opens popup log viewer
+                # btnLogs replaced by navigation rail buttons (btnNavProfiles, btnNavSettings, btnNavProgress, btnNavLogs)
                 $requiredControls = @(
                     'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
                     'txtProfileName', 'txtSource', 'txtDest',
@@ -103,7 +115,7 @@ InModuleScope 'Robocurse' {
                     'chkUseVss', 'cmbScanMode',
                     'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
                     'sldWorkers', 'txtWorkerCount',
-                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule', 'btnLogs',
+                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
                     'dgChunks', 'pbProfile', 'pbOverall',
                     'txtProfileProgress', 'txtOverallProgress',
                     'txtEta', 'txtSpeed', 'txtChunks',
@@ -113,6 +125,32 @@ InModuleScope 'Robocurse' {
                 foreach ($control in $requiredControls) {
                     $script:TestXamlContent | Should -Match "x:Name=`"$control`""
                 }
+            }
+
+            It "Should have navigation rail controls defined" {
+                # Navigation rail radio buttons for panel switching
+                $navControls = @(
+                    'btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs'
+                )
+
+                foreach ($control in $navControls) {
+                    $script:TestXamlContent | Should -Match "x:Name=`"$control`""
+                }
+            }
+
+            It "Should have content panel controls defined" {
+                # Content panels switched by navigation rail
+                $panelControls = @(
+                    'panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs'
+                )
+
+                foreach ($control in $panelControls) {
+                    $script:TestXamlContent | Should -Match "x:Name=`"$control`""
+                }
+            }
+
+            It "Should have RailButton style defined" {
+                $script:TestXamlContent | Should -Match 'RailButton'
             }
 
             It "Should have tooltips defined" {
@@ -716,13 +754,67 @@ InModuleScope 'Robocurse' {
                     'dgChunks', 'pbProfile', 'pbOverall',
                     'txtProfileProgress', 'txtOverallProgress',
                     'txtEta', 'txtSpeed', 'txtChunks',
-                    'txtStatus', 'btnLogs'
+                    'txtStatus'
                 )
 
                 foreach ($controlName in $requiredControls) {
                     $control = $script:TestWindow.FindName($controlName)
                     $control | Should -Not -BeNullOrEmpty -Because "Control '$controlName' should exist"
                 }
+            }
+
+            It "Should find all navigation rail controls by name" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $script:TestWindow | Should -Not -BeNullOrEmpty
+
+                $navControls = @(
+                    'btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs'
+                )
+
+                foreach ($controlName in $navControls) {
+                    $control = $script:TestWindow.FindName($controlName)
+                    $control | Should -Not -BeNullOrEmpty -Because "Navigation control '$controlName' should exist"
+                }
+            }
+
+            It "Should find all content panel controls by name" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $script:TestWindow | Should -Not -BeNullOrEmpty
+
+                $panelControls = @(
+                    'panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs'
+                )
+
+                foreach ($controlName in $panelControls) {
+                    $control = $script:TestWindow.FindName($controlName)
+                    $control | Should -Not -BeNullOrEmpty -Because "Panel '$controlName' should exist"
+                }
+            }
+
+            It "Should have Profiles panel visible by default" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $panelProfiles = $script:TestWindow.FindName('panelProfiles')
+                $panelSettings = $script:TestWindow.FindName('panelSettings')
+                $panelProgress = $script:TestWindow.FindName('panelProgress')
+                $panelLogs = $script:TestWindow.FindName('panelLogs')
+
+                $panelProfiles.Visibility | Should -Be ([System.Windows.Visibility]::Visible)
+                $panelSettings.Visibility | Should -Be ([System.Windows.Visibility]::Collapsed)
+                $panelProgress.Visibility | Should -Be ([System.Windows.Visibility]::Collapsed)
+                $panelLogs.Visibility | Should -Be ([System.Windows.Visibility]::Collapsed)
+            }
+
+            It "Should have Profiles nav button checked by default" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $btnNavProfiles = $script:TestWindow.FindName('btnNavProfiles')
+                $btnNavSettings = $script:TestWindow.FindName('btnNavSettings')
+                $btnNavProgress = $script:TestWindow.FindName('btnNavProgress')
+                $btnNavLogs = $script:TestWindow.FindName('btnNavLogs')
+
+                $btnNavProfiles.IsChecked | Should -Be $true
+                $btnNavSettings.IsChecked | Should -Be $false
+                $btnNavProgress.IsChecked | Should -Be $false
+                $btnNavLogs.IsChecked | Should -Be $false
             }
 
             It "Should have Stop button initially disabled" {

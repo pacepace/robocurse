@@ -74,15 +74,45 @@ function Initialize-RobocurseGui {
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
         'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
-        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule', 'btnLogs',
+        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
-        'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus'
+        'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus',
+        'btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs',
+        'panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs',
+        'chkLogDebug', 'chkLogInfo', 'chkLogWarning', 'chkLogError',
+        'chkLogAutoScroll', 'txtLogLineCount', 'txtLogContent',
+        'btnLogClear', 'btnLogCopy', 'btnLogSave', 'btnLogPopOut',
+        'sldSettingsJobs', 'txtSettingsJobs', 'sldSettingsThreads', 'txtSettingsThreads',
+        'txtSettingsBandwidth', 'txtSettingsLogPath', 'btnSettingsLogBrowse',
+        'chkSettingsSiem', 'txtSettingsSiemPath', 'btnSettingsSiemBrowse',
+        'chkSettingsEmailEnabled', 'txtSettingsSmtp', 'txtSettingsSmtpPort',
+        'chkSettingsTls', 'txtSettingsCredential', 'txtSettingsEmailFrom', 'txtSettingsEmailTo',
+        'btnSettingsSchedule', 'txtSettingsScheduleStatus', 'btnSettingsRevert', 'btnSettingsSave'
     ) | ForEach-Object {
         $script:Controls[$_] = $script:Window.FindName($_)
     }
 
     # Wire up event handlers
     Initialize-EventHandlers
+
+    # Add keyboard shortcut handler
+    $script:Window.Add_PreviewKeyDown({
+        param($sender, $e)
+
+        Invoke-SafeEventHandler -HandlerName 'Window_PreviewKeyDown' -ScriptBlock {
+            $ctrl = ($e.KeyboardDevice.Modifiers -band [System.Windows.Input.ModifierKeys]::Control) -ne 0
+
+            # Check if TextBox has focus
+            $focusedElement = [System.Windows.Input.Keyboard]::FocusedElement
+            $isTextBoxFocused = $focusedElement -is [System.Windows.Controls.TextBox]
+
+            $handled = Invoke-KeyboardShortcut -Key $e.Key.ToString() -Ctrl $ctrl -IsTextBoxFocused $isTextBoxFocused
+
+            if ($handled) {
+                $e.Handled = $true
+            }
+        }
+    })
 
     # Load config and populate UI
     $script:Config = Get-RobocurseConfig -Path $script:ConfigPath
@@ -97,7 +127,21 @@ function Initialize-RobocurseGui {
         $selectedName = if ($selectedProfile) { $selectedProfile.Name } else { $null }
         $workerCount = [int]$script:Controls.sldWorkers.Value
 
-        Save-GuiState -Window $script:Window -WorkerCount $workerCount -SelectedProfileName $selectedName
+        # Create state object to save
+        $state = [PSCustomObject]@{
+            WindowLeft = $script:Window.Left
+            WindowTop = $script:Window.Top
+            WindowWidth = $script:Window.Width
+            WindowHeight = $script:Window.Height
+            WindowState = $script:Window.WindowState.ToString()
+            WorkerCount = $workerCount
+            SelectedProfile = $selectedName
+            ActivePanel = if ($script:ActivePanel) { $script:ActivePanel } else { 'Profiles' }
+            LastRun = if ($script:CurrentGuiState -and $script:CurrentGuiState.LastRun) { $script:CurrentGuiState.LastRun } else { $null }
+            SavedAt = [datetime]::Now.ToString('o')
+        }
+
+        Save-GuiState -StateObject $state
     })
 
     # Initialize progress timer - use Forms.Timer instead of DispatcherTimer
@@ -109,6 +153,10 @@ function Initialize-RobocurseGui {
 
     # Mark initialization complete - event handlers can now save
     $script:GuiInitializing = $false
+
+    # Set active panel (from restored state or default to Profiles)
+    $panelToActivate = if ($script:RestoredActivePanel) { $script:RestoredActivePanel } else { 'Profiles' }
+    Set-ActivePanel -PanelName $panelToActivate
 
     Write-GuiLog "Robocurse GUI initialized"
 
@@ -154,6 +202,97 @@ function Invoke-SafeEventHandler {
             Write-Warning $errorMsg
         }
     }
+}
+
+function Show-Panel {
+    <#
+    .SYNOPSIS
+        Shows the specified panel and hides all others
+    .DESCRIPTION
+        Implements the navigation rail panel switching logic by setting Visibility
+        to 'Visible' for the selected panel and 'Collapsed' for all others.
+    .PARAMETER PanelName
+        Name of the panel to show (panelProfiles, panelSettings, panelProgress, panelLogs)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs')]
+        [string]$PanelName
+    )
+
+    # Hide all panels
+    @('panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs') | ForEach-Object {
+        if ($script:Controls[$_]) {
+            $script:Controls[$_].Visibility = [System.Windows.Visibility]::Collapsed
+        }
+    }
+
+    # Show selected panel
+    if ($script:Controls[$PanelName]) {
+        $script:Controls[$PanelName].Visibility = [System.Windows.Visibility]::Visible
+    }
+}
+
+function Set-ActivePanel {
+    <#
+    .SYNOPSIS
+        Switches the active panel and updates navigation button states
+    .DESCRIPTION
+        Sets the specified panel as active by showing it, hiding all other panels,
+        and updating the navigation rail button states. Maintains state tracking
+        for the currently active panel.
+    .PARAMETER PanelName
+        Name of the panel to activate (Profiles, Settings, Progress, Logs)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Profiles', 'Settings', 'Progress', 'Logs')]
+        [string]$PanelName
+    )
+
+    Write-RobocurseLog -Level 'Debug' -Component 'GUI' -Message "Switching to panel: $PanelName"
+
+    # Map friendly name to control name
+    $panelControlName = "panel$PanelName"
+    $buttonControlName = "btnNav$PanelName"
+
+    # Hide all panels
+    @('panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs') | ForEach-Object {
+        if ($script:Controls[$_]) {
+            $script:Controls[$_].Visibility = [System.Windows.Visibility]::Collapsed
+        }
+    }
+
+    # Show selected panel
+    if ($script:Controls[$panelControlName]) {
+        $script:Controls[$panelControlName].Visibility = [System.Windows.Visibility]::Visible
+    }
+
+    # Update button states - set IsChecked for the active button
+    # RadioButtons in the same GroupName will automatically uncheck others
+    @('btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs') | ForEach-Object {
+        if ($script:Controls[$_]) {
+            $script:Controls[$_].IsChecked = ($_ -eq $buttonControlName)
+        }
+    }
+
+    # Panel-specific initialization when switching
+    if ($PanelName -eq 'Settings') {
+        # Load current settings into form when switching to Settings panel
+        Import-SettingsToForm
+    }
+    elseif ($PanelName -eq 'Progress') {
+        # Show empty state if idle (no replication running)
+        if (-not $script:OrchestrationState -or
+            $script:OrchestrationState.Phase -in @('Idle', 'Complete', $null)) {
+            Show-ProgressEmptyState
+        }
+    }
+
+    # Store active panel in script scope
+    $script:ActivePanel = $PanelName
 }
 
 function Initialize-EventHandlers {
@@ -221,10 +360,99 @@ function Initialize-EventHandlers {
         Invoke-SafeEventHandler -HandlerName "Schedule" -ScriptBlock { Show-ScheduleDialog }
     })
 
-    # Logs button - opens popup log viewer window
-    $script:Controls.btnLogs.Add_Click({
-        Invoke-SafeEventHandler -HandlerName "Logs" -ScriptBlock { Show-LogWindow }
+    # Navigation rail buttons - toggle panel visibility
+    $script:Controls.btnNavProfiles.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "NavProfiles" -ScriptBlock { Set-ActivePanel -PanelName 'Profiles' }
     })
+    $script:Controls.btnNavSettings.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "NavSettings" -ScriptBlock { Set-ActivePanel -PanelName 'Settings' }
+    })
+    $script:Controls.btnNavProgress.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "NavProgress" -ScriptBlock { Set-ActivePanel -PanelName 'Progress' }
+    })
+    $script:Controls.btnNavLogs.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "NavLogs" -ScriptBlock { Set-ActivePanel -PanelName 'Logs' }
+    })
+
+    # Inline log viewer - filter checkboxes
+    if ($script:Controls['chkLogDebug']) {
+        $script:Controls.chkLogDebug.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterDebug" -ScriptBlock { Update-InlineLogContent }
+        })
+        $script:Controls.chkLogDebug.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterDebug" -ScriptBlock { Update-InlineLogContent }
+        })
+    }
+    if ($script:Controls['chkLogInfo']) {
+        $script:Controls.chkLogInfo.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterInfo" -ScriptBlock { Update-InlineLogContent }
+        })
+        $script:Controls.chkLogInfo.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterInfo" -ScriptBlock { Update-InlineLogContent }
+        })
+    }
+    if ($script:Controls['chkLogWarning']) {
+        $script:Controls.chkLogWarning.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterWarning" -ScriptBlock { Update-InlineLogContent }
+        })
+        $script:Controls.chkLogWarning.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterWarning" -ScriptBlock { Update-InlineLogContent }
+        })
+    }
+    if ($script:Controls['chkLogError']) {
+        $script:Controls.chkLogError.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterError" -ScriptBlock { Update-InlineLogContent }
+        })
+        $script:Controls.chkLogError.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "LogFilterError" -ScriptBlock { Update-InlineLogContent }
+        })
+    }
+
+    # Inline log viewer - button handlers
+    if ($script:Controls['btnLogClear']) {
+        $script:Controls.btnLogClear.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "LogClear" -ScriptBlock {
+                Clear-GuiLogBuffer
+                Update-InlineLogContent
+            }
+        })
+    }
+    if ($script:Controls['btnLogCopy']) {
+        $script:Controls.btnLogCopy.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "LogCopy" -ScriptBlock {
+                if ($script:Controls['txtLogContent'] -and $script:Controls.txtLogContent.Text) {
+                    [System.Windows.Clipboard]::SetText($script:Controls.txtLogContent.Text)
+                }
+            }
+        })
+    }
+    if ($script:Controls['btnLogSave']) {
+        $script:Controls.btnLogSave.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "LogSave" -ScriptBlock {
+                try {
+                    $saveDialog = New-Object Microsoft.Win32.SaveFileDialog
+                    $saveDialog.Filter = "Log files (*.log)|*.log|Text files (*.txt)|*.txt|All files (*.*)|*.*"
+                    $saveDialog.DefaultExt = ".log"
+                    $saveDialog.FileName = "robocurse-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+
+                    if ($saveDialog.ShowDialog() -eq $true) {
+                        if ($script:Controls['txtLogContent']) {
+                            $script:Controls.txtLogContent.Text | Set-Content -Path $saveDialog.FileName -Encoding UTF8
+                            Write-GuiLog "Log saved to: $($saveDialog.FileName)"
+                        }
+                    }
+                }
+                catch {
+                    Show-GuiError -Message "Failed to save log file" -Details $_.Exception.Message
+                }
+            }
+        })
+    }
+    if ($script:Controls['btnLogPopOut']) {
+        $script:Controls.btnLogPopOut.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "LogPopOut" -ScriptBlock { Show-LogWindow }
+        })
+    }
 
     # Form field changes - save to profile
     @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
@@ -265,6 +493,68 @@ function Initialize-EventHandlers {
     $script:Controls.cmbScanMode.Add_SelectionChanged({
         Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock { Save-ProfileFromForm }
     })
+
+    # Settings panel event handlers
+    # Slider ValueChanged - sync text displays
+    if ($script:Controls['sldSettingsJobs']) {
+        $script:Controls.sldSettingsJobs.Add_ValueChanged({
+            Invoke-SafeEventHandler -HandlerName "SettingsJobsSlider" -ScriptBlock {
+                if ($script:Controls['txtSettingsJobs']) {
+                    $script:Controls.txtSettingsJobs.Text = [int]$script:Controls.sldSettingsJobs.Value
+                }
+            }
+        })
+    }
+    if ($script:Controls['sldSettingsThreads']) {
+        $script:Controls.sldSettingsThreads.Add_ValueChanged({
+            Invoke-SafeEventHandler -HandlerName "SettingsThreadsSlider" -ScriptBlock {
+                if ($script:Controls['txtSettingsThreads']) {
+                    $script:Controls.txtSettingsThreads.Text = [int]$script:Controls.sldSettingsThreads.Value
+                }
+            }
+        })
+    }
+
+    # Browse buttons
+    if ($script:Controls['btnSettingsLogBrowse']) {
+        $script:Controls.btnSettingsLogBrowse.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsLogBrowse" -ScriptBlock {
+                $path = Show-FolderBrowser -Description "Select log folder"
+                if ($path -and $script:Controls['txtSettingsLogPath']) {
+                    $script:Controls.txtSettingsLogPath.Text = $path
+                }
+            }
+        })
+    }
+    if ($script:Controls['btnSettingsSiemBrowse']) {
+        $script:Controls.btnSettingsSiemBrowse.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsSiemBrowse" -ScriptBlock {
+                $path = Show-FolderBrowser -Description "Select SIEM log folder"
+                if ($path -and $script:Controls['txtSettingsSiemPath']) {
+                    $script:Controls.txtSettingsSiemPath.Text = $path
+                }
+            }
+        })
+    }
+
+    # Save and Revert buttons
+    if ($script:Controls['btnSettingsSave']) {
+        $script:Controls.btnSettingsSave.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsSave" -ScriptBlock { Save-SettingsFromForm }
+        })
+    }
+    if ($script:Controls['btnSettingsRevert']) {
+        $script:Controls.btnSettingsRevert.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsRevert" -ScriptBlock { Import-SettingsToForm }
+        })
+    }
+
+    # Schedule button (reuses existing handler from main panel)
+    if ($script:Controls['btnSettingsSchedule']) {
+        $script:Controls.btnSettingsSchedule.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsSchedule" -ScriptBlock { Show-ScheduleDialog }
+        })
+    }
 
     # Window closing
     $script:Window.Add_Closing({
@@ -382,6 +672,11 @@ function Write-GuiLog {
 
     # Update the log window if it's visible
     Update-LogWindowContent
+
+    # Update inline log panel if visible
+    if ($script:Controls['txtLogContent'] -and $script:ActivePanel -eq 'Logs') {
+        Update-InlineLogContent
+    }
 }
 
 function Show-GuiError {
@@ -415,4 +710,93 @@ function Show-GuiError {
     )
 
     Write-GuiLog "ERROR: $Message"
+}
+
+function Invoke-KeyboardShortcut {
+    <#
+    .SYNOPSIS
+        Handles keyboard shortcuts for the GUI
+    .DESCRIPTION
+        Processes keyboard shortcuts and invokes the appropriate actions.
+        Returns $true if the shortcut was handled, $false otherwise.
+    .PARAMETER Key
+        The key that was pressed (e.g., 'L', 'R', 'Escape', 'D1', 'NumPad1')
+    .PARAMETER Ctrl
+        Whether the Ctrl modifier key is pressed
+    .PARAMETER IsTextBoxFocused
+        Whether a TextBox control currently has focus
+    .OUTPUTS
+        Boolean - $true if shortcut was handled, $false otherwise
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Key,
+
+        [Parameter(Mandatory)]
+        [bool]$Ctrl,
+
+        [Parameter(Mandatory)]
+        [bool]$IsTextBoxFocused
+    )
+
+    # Ctrl+L: Open log popup (always works)
+    if ($Ctrl -and $Key -eq 'L') {
+        Show-LogWindow
+        return $true
+    }
+
+    # Ctrl+R: Run selected (if enabled)
+    if ($Ctrl -and $Key -eq 'R') {
+        if ($script:Controls['btnRunSelected'].IsEnabled) {
+            Start-GuiReplication -SelectedOnly
+        }
+        return $true
+    }
+
+    # Escape: Stop (if running)
+    if ($Key -eq 'Escape') {
+        if ($script:Controls['btnStop'].IsEnabled) {
+            Request-Stop
+        }
+        return $true
+    }
+
+    # 1-4: Switch panels (if not in TextBox)
+    if (-not $Ctrl -and -not $IsTextBoxFocused) {
+        $panel = Get-PanelForKey -Key $Key
+        if ($panel) {
+            Set-ActivePanel -PanelName $panel
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-PanelForKey {
+    <#
+    .SYNOPSIS
+        Maps a key to a panel name
+    .DESCRIPTION
+        Returns the panel name for number keys 1-4 and NumPad1-4.
+        Returns $null if the key doesn't map to a panel.
+    .PARAMETER Key
+        The key name (e.g., 'D1', 'D2', 'NumPad1', etc.)
+    .OUTPUTS
+        String - Panel name ('Profiles', 'Settings', 'Progress', 'Logs') or $null
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Key
+    )
+
+    switch ($Key) {
+        { $_ -in @('D1', 'NumPad1') } { return 'Profiles' }
+        { $_ -in @('D2', 'NumPad2') } { return 'Settings' }
+        { $_ -in @('D3', 'NumPad3') } { return 'Progress' }
+        { $_ -in @('D4', 'NumPad4') } { return 'Logs' }
+        default { return $null }
+    }
 }
