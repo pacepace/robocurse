@@ -127,6 +127,10 @@ function Initialize-RobocurseGui {
         $selectedName = if ($selectedProfile) { $selectedProfile.Name } else { $null }
         $workerCount = [int]$script:Controls.sldWorkers.Value
 
+        # Get LastRun from in-memory state (updated by Save-LastRunSummary after each run)
+        $lastRun = if ($script:CurrentGuiState -and $script:CurrentGuiState.LastRun) { $script:CurrentGuiState.LastRun } else { $null }
+        Write-Verbose "Window closing: LastRun from CurrentGuiState = $(if ($lastRun) { $lastRun.Timestamp } else { 'null' })"
+
         # Create state object to save
         $state = [PSCustomObject]@{
             WindowLeft = $script:Window.Left
@@ -137,7 +141,7 @@ function Initialize-RobocurseGui {
             WorkerCount = $workerCount
             SelectedProfile = $selectedName
             ActivePanel = if ($script:ActivePanel) { $script:ActivePanel } else { 'Profiles' }
-            LastRun = if ($script:CurrentGuiState -and $script:CurrentGuiState.LastRun) { $script:CurrentGuiState.LastRun } else { $null }
+            LastRun = $lastRun
             SavedAt = [datetime]::Now.ToString('o')
         }
 

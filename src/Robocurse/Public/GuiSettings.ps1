@@ -205,6 +205,9 @@ function Restore-GuiState {
             $script:RestoredActivePanel = 'Profiles'
         }
 
+        # Store the full state including LastRun for preservation on window close
+        $script:CurrentGuiState = $state
+
         Write-Verbose "GUI state restored"
     }
     catch {
@@ -440,14 +443,16 @@ function Save-LastRunSummary {
         [hashtable]$Summary
     )
 
+    Write-Verbose "Save-LastRunSummary: Saving summary with Status=$($Summary.Status), ChunksCompleted=$($Summary.ChunksCompleted)"
+
     $settings = Get-GuiState
     if (-not $settings) {
         # Create minimal settings if none exist
         $settings = [PSCustomObject]@{
             WindowLeft = 100
             WindowTop = 100
-            WindowWidth = 1200
-            WindowHeight = 800
+            WindowWidth = 650
+            WindowHeight = 550
             WindowState = 'Normal'
             WorkerCount = 4
             SelectedProfile = $null
@@ -460,6 +465,15 @@ function Save-LastRunSummary {
     }
 
     Save-GuiState -StateObject $settings
+
+    # CRITICAL: Also update in-memory state so window close handler has latest data
+    # Without this, window close overwrites the file with stale $script:CurrentGuiState
+    if ($script:CurrentGuiState) {
+        $script:CurrentGuiState | Add-Member -NotePropertyName 'LastRun' -NotePropertyValue $Summary -Force
+        Write-Verbose "Save-LastRunSummary: Updated in-memory CurrentGuiState.LastRun"
+    } else {
+        Write-Verbose "Save-LastRunSummary: Warning - CurrentGuiState not set, window close may overwrite LastRun"
+    }
 }
 
 function Get-LastRunSummary {
@@ -472,10 +486,15 @@ function Get-LastRunSummary {
     [CmdletBinding()]
     param()
 
+    $settingsPath = Get-GuiSettingsPath
+    Write-Verbose "Get-LastRunSummary: Reading from $settingsPath"
+
     $settings = Get-GuiState
     if (-not $settings -or -not $settings.LastRun) {
+        Write-Verbose "Get-LastRunSummary: No LastRun found in settings"
         return $null
     }
 
+    Write-Verbose "Get-LastRunSummary: Found LastRun with Timestamp=$($settings.LastRun.Timestamp)"
     return $settings.LastRun
 }

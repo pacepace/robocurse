@@ -223,7 +223,7 @@
                              GroupName="NavRail"
                              IsChecked="True"
                              Style="{StaticResource RailButton}"
-                             Content="&#x2699;"
+                             Content="&#x2630;"
                              ToolTip="Profiles (1)"/>
                 <RadioButton x:Name="btnNavSettings"
                              GroupName="NavRail"

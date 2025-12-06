@@ -318,18 +318,24 @@ function Show-ProgressEmptyState {
     param()
 
     try {
+        # Check if controls exist
+        if (-not $script:Controls -or -not $script:Controls['txtProfileProgress']) {
+            Write-Verbose "Progress controls not available for empty state display"
+            return
+        }
+
         $lastRun = Get-LastRunSummary
 
         if (-not $lastRun) {
             # No previous runs - show ready state
-            $script:Controls.txtProfileProgress.Text = "No previous runs"
-            $script:Controls.txtOverallProgress.Text = "Select profiles and click Run"
-            $script:Controls.pbProfile.Value = 0
-            $script:Controls.pbOverall.Value = 0
-            $script:Controls.txtEta.Text = "Ready"
-            $script:Controls.txtSpeed.Text = "--"
-            $script:Controls.txtChunks.Text = "Ready"
-            $script:Controls.dgChunks.ItemsSource = $null
+            if ($script:Controls['txtProfileProgress']) { $script:Controls['txtProfileProgress'].Text = "No previous runs" }
+            if ($script:Controls['txtOverallProgress']) { $script:Controls['txtOverallProgress'].Text = "Select profiles and click Run" }
+            if ($script:Controls['pbProfile']) { $script:Controls['pbProfile'].Value = 0 }
+            if ($script:Controls['pbOverall']) { $script:Controls['pbOverall'].Value = 0 }
+            if ($script:Controls['txtEta']) { $script:Controls['txtEta'].Text = "Ready" }
+            if ($script:Controls['txtSpeed']) { $script:Controls['txtSpeed'].Text = "--" }
+            if ($script:Controls['txtChunks']) { $script:Controls['txtChunks'].Text = "Ready" }
+            if ($script:Controls['dgChunks']) { $script:Controls['dgChunks'].ItemsSource = $null }
         } else {
             # Show last run summary
             $timestamp = [datetime]::Parse($lastRun.Timestamp)
@@ -341,7 +347,7 @@ function Show-ProgressEmptyState {
             } else {
                 $lastRun.ProfilesRun
             }
-            $script:Controls.txtProfileProgress.Text = "Last: $profileNames"
+            if ($script:Controls['txtProfileProgress']) { $script:Controls['txtProfileProgress'].Text = "Last: $profileNames" }
 
             # Calculate completion percentage
             $completionPct = if ($lastRun.ChunksTotal -gt 0) {
@@ -352,7 +358,7 @@ function Show-ProgressEmptyState {
 
             # Set status text with color
             $statusText = "$($lastRun.Status) - $timeAgo"
-            $script:Controls.txtOverallProgress.Text = $statusText
+            if ($script:Controls['txtOverallProgress']) { $script:Controls['txtOverallProgress'].Text = $statusText }
 
             # Set color based on status (only if WPF is available)
             try {
@@ -362,7 +368,7 @@ function Show-ProgressEmptyState {
                     'Failed' { [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(0xFF, 0x6B, 0x6B)) }  # Red
                     default { [System.Windows.Media.Brushes]::Gray }
                 }
-                $script:Controls.txtOverallProgress.Foreground = $colorBrush
+                if ($script:Controls['txtOverallProgress']) { $script:Controls['txtOverallProgress'].Foreground = $colorBrush }
             }
             catch {
                 # WPF types not available (headless/test mode) - skip color setting
@@ -370,26 +376,26 @@ function Show-ProgressEmptyState {
             }
 
             # Set progress bars
-            $script:Controls.pbProfile.Value = $completionPct
-            $script:Controls.pbOverall.Value = $completionPct
+            if ($script:Controls['pbProfile']) { $script:Controls['pbProfile'].Value = $completionPct }
+            if ($script:Controls['pbOverall']) { $script:Controls['pbOverall'].Value = $completionPct }
 
             # Set duration and bytes copied
-            $script:Controls.txtEta.Text = "Duration: $($lastRun.Duration)"
-            $script:Controls.txtSpeed.Text = "Copied: $(Format-FileSize -Bytes $lastRun.BytesCopied)"
+            if ($script:Controls['txtEta']) { $script:Controls['txtEta'].Text = "Duration: $($lastRun.Duration)" }
+            if ($script:Controls['txtSpeed']) { $script:Controls['txtSpeed'].Text = "Copied: $(Format-FileSize -Bytes $lastRun.BytesCopied)" }
 
             # Set chunks text
             $chunksText = "Chunks: $($lastRun.ChunksCompleted)/$($lastRun.ChunksTotal)"
             if ($lastRun.ChunksFailed -gt 0) {
                 $chunksText += " ($($lastRun.ChunksFailed) failed)"
             }
-            $script:Controls.txtChunks.Text = $chunksText
+            if ($script:Controls['txtChunks']) { $script:Controls['txtChunks'].Text = $chunksText }
 
             # Clear the chunks grid
-            $script:Controls.dgChunks.ItemsSource = $null
+            if ($script:Controls['dgChunks']) { $script:Controls['dgChunks'].ItemsSource = $null }
         }
 
         # Force visual update
-        $script:Window.UpdateLayout()
+        if ($script:Window) { $script:Window.UpdateLayout() }
     }
     catch {
         Write-GuiLog "Error displaying empty state: $_"

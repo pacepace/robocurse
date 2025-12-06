@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-06 13:13:06
+    Built: 2025-12-06 14:36:35
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -11131,6 +11131,9 @@ function Restore-GuiState {
             $script:RestoredActivePanel = 'Profiles'
         }
 
+        # Store the full state including LastRun for preservation on window close
+        $script:CurrentGuiState = $state
+
         Write-Verbose "GUI state restored"
     }
     catch {
@@ -11366,14 +11369,16 @@ function Save-LastRunSummary {
         [hashtable]$Summary
     )
 
+    Write-Verbose "Save-LastRunSummary: Saving summary with Status=$($Summary.Status), ChunksCompleted=$($Summary.ChunksCompleted)"
+
     $settings = Get-GuiState
     if (-not $settings) {
         # Create minimal settings if none exist
         $settings = [PSCustomObject]@{
             WindowLeft = 100
             WindowTop = 100
-            WindowWidth = 1200
-            WindowHeight = 800
+            WindowWidth = 650
+            WindowHeight = 550
             WindowState = 'Normal'
             WorkerCount = 4
             SelectedProfile = $null
@@ -11386,6 +11391,15 @@ function Save-LastRunSummary {
     }
 
     Save-GuiState -StateObject $settings
+
+    # CRITICAL: Also update in-memory state so window close handler has latest data
+    # Without this, window close overwrites the file with stale $script:CurrentGuiState
+    if ($script:CurrentGuiState) {
+        $script:CurrentGuiState | Add-Member -NotePropertyName 'LastRun' -NotePropertyValue $Summary -Force
+        Write-Verbose "Save-LastRunSummary: Updated in-memory CurrentGuiState.LastRun"
+    } else {
+        Write-Verbose "Save-LastRunSummary: Warning - CurrentGuiState not set, window close may overwrite LastRun"
+    }
 }
 
 function Get-LastRunSummary {
@@ -11398,11 +11412,16 @@ function Get-LastRunSummary {
     [CmdletBinding()]
     param()
 
+    $settingsPath = Get-GuiSettingsPath
+    Write-Verbose "Get-LastRunSummary: Reading from $settingsPath"
+
     $settings = Get-GuiState
     if (-not $settings -or -not $settings.LastRun) {
+        Write-Verbose "Get-LastRunSummary: No LastRun found in settings"
         return $null
     }
 
+    Write-Verbose "Get-LastRunSummary: Found LastRun with Timestamp=$($settings.LastRun.Timestamp)"
     return $settings.LastRun
 }
 
@@ -13621,18 +13640,24 @@ function Show-ProgressEmptyState {
     param()
 
     try {
+        # Check if controls exist
+        if (-not $script:Controls -or -not $script:Controls['txtProfileProgress']) {
+            Write-Verbose "Progress controls not available for empty state display"
+            return
+        }
+
         $lastRun = Get-LastRunSummary
 
         if (-not $lastRun) {
             # No previous runs - show ready state
-            $script:Controls.txtProfileProgress.Text = "No previous runs"
-            $script:Controls.txtOverallProgress.Text = "Select profiles and click Run"
-            $script:Controls.pbProfile.Value = 0
-            $script:Controls.pbOverall.Value = 0
-            $script:Controls.txtEta.Text = "Ready"
-            $script:Controls.txtSpeed.Text = "--"
-            $script:Controls.txtChunks.Text = "Ready"
-            $script:Controls.dgChunks.ItemsSource = $null
+            if ($script:Controls['txtProfileProgress']) { $script:Controls['txtProfileProgress'].Text = "No previous runs" }
+            if ($script:Controls['txtOverallProgress']) { $script:Controls['txtOverallProgress'].Text = "Select profiles and click Run" }
+            if ($script:Controls['pbProfile']) { $script:Controls['pbProfile'].Value = 0 }
+            if ($script:Controls['pbOverall']) { $script:Controls['pbOverall'].Value = 0 }
+            if ($script:Controls['txtEta']) { $script:Controls['txtEta'].Text = "Ready" }
+            if ($script:Controls['txtSpeed']) { $script:Controls['txtSpeed'].Text = "--" }
+            if ($script:Controls['txtChunks']) { $script:Controls['txtChunks'].Text = "Ready" }
+            if ($script:Controls['dgChunks']) { $script:Controls['dgChunks'].ItemsSource = $null }
         } else {
             # Show last run summary
             $timestamp = [datetime]::Parse($lastRun.Timestamp)
@@ -13644,7 +13669,7 @@ function Show-ProgressEmptyState {
             } else {
                 $lastRun.ProfilesRun
             }
-            $script:Controls.txtProfileProgress.Text = "Last: $profileNames"
+            if ($script:Controls['txtProfileProgress']) { $script:Controls['txtProfileProgress'].Text = "Last: $profileNames" }
 
             # Calculate completion percentage
             $completionPct = if ($lastRun.ChunksTotal -gt 0) {
@@ -13655,7 +13680,7 @@ function Show-ProgressEmptyState {
 
             # Set status text with color
             $statusText = "$($lastRun.Status) - $timeAgo"
-            $script:Controls.txtOverallProgress.Text = $statusText
+            if ($script:Controls['txtOverallProgress']) { $script:Controls['txtOverallProgress'].Text = $statusText }
 
             # Set color based on status (only if WPF is available)
             try {
@@ -13665,7 +13690,7 @@ function Show-ProgressEmptyState {
                     'Failed' { [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(0xFF, 0x6B, 0x6B)) }  # Red
                     default { [System.Windows.Media.Brushes]::Gray }
                 }
-                $script:Controls.txtOverallProgress.Foreground = $colorBrush
+                if ($script:Controls['txtOverallProgress']) { $script:Controls['txtOverallProgress'].Foreground = $colorBrush }
             }
             catch {
                 # WPF types not available (headless/test mode) - skip color setting
@@ -13673,26 +13698,26 @@ function Show-ProgressEmptyState {
             }
 
             # Set progress bars
-            $script:Controls.pbProfile.Value = $completionPct
-            $script:Controls.pbOverall.Value = $completionPct
+            if ($script:Controls['pbProfile']) { $script:Controls['pbProfile'].Value = $completionPct }
+            if ($script:Controls['pbOverall']) { $script:Controls['pbOverall'].Value = $completionPct }
 
             # Set duration and bytes copied
-            $script:Controls.txtEta.Text = "Duration: $($lastRun.Duration)"
-            $script:Controls.txtSpeed.Text = "Copied: $(Format-FileSize -Bytes $lastRun.BytesCopied)"
+            if ($script:Controls['txtEta']) { $script:Controls['txtEta'].Text = "Duration: $($lastRun.Duration)" }
+            if ($script:Controls['txtSpeed']) { $script:Controls['txtSpeed'].Text = "Copied: $(Format-FileSize -Bytes $lastRun.BytesCopied)" }
 
             # Set chunks text
             $chunksText = "Chunks: $($lastRun.ChunksCompleted)/$($lastRun.ChunksTotal)"
             if ($lastRun.ChunksFailed -gt 0) {
                 $chunksText += " ($($lastRun.ChunksFailed) failed)"
             }
-            $script:Controls.txtChunks.Text = $chunksText
+            if ($script:Controls['txtChunks']) { $script:Controls['txtChunks'].Text = $chunksText }
 
             # Clear the chunks grid
-            $script:Controls.dgChunks.ItemsSource = $null
+            if ($script:Controls['dgChunks']) { $script:Controls['dgChunks'].ItemsSource = $null }
         }
 
         # Force visual update
-        $script:Window.UpdateLayout()
+        if ($script:Window) { $script:Window.UpdateLayout() }
     }
     catch {
         Write-GuiLog "Error displaying empty state: $_"
@@ -14021,7 +14046,7 @@ function Initialize-RobocurseGui {
                              GroupName="NavRail"
                              IsChecked="True"
                              Style="{StaticResource RailButton}"
-                             Content="&#x2699;"
+                             Content="&#x2630;"
                              ToolTip="Profiles (1)"/>
                 <RadioButton x:Name="btnNavSettings"
                              GroupName="NavRail"
@@ -14580,6 +14605,10 @@ function Initialize-RobocurseGui {
         $selectedName = if ($selectedProfile) { $selectedProfile.Name } else { $null }
         $workerCount = [int]$script:Controls.sldWorkers.Value
 
+        # Get LastRun from in-memory state (updated by Save-LastRunSummary after each run)
+        $lastRun = if ($script:CurrentGuiState -and $script:CurrentGuiState.LastRun) { $script:CurrentGuiState.LastRun } else { $null }
+        Write-Verbose "Window closing: LastRun from CurrentGuiState = $(if ($lastRun) { $lastRun.Timestamp } else { 'null' })"
+
         # Create state object to save
         $state = [PSCustomObject]@{
             WindowLeft = $script:Window.Left
@@ -14590,7 +14619,7 @@ function Initialize-RobocurseGui {
             WorkerCount = $workerCount
             SelectedProfile = $selectedName
             ActivePanel = if ($script:ActivePanel) { $script:ActivePanel } else { 'Profiles' }
-            LastRun = if ($script:CurrentGuiState -and $script:CurrentGuiState.LastRun) { $script:CurrentGuiState.LastRun } else { $null }
+            LastRun = $lastRun
             SavedAt = [datetime]::Now.ToString('o')
         }
 
