@@ -305,3 +305,127 @@ function Update-GuiProgress {
         Write-GuiLog "Error updating progress: $_"
     }
 }
+
+function Show-ProgressEmptyState {
+    <#
+    .SYNOPSIS
+        Displays the progress panel empty state (last run summary or ready message)
+    .DESCRIPTION
+        When no replication is active, shows a summary of the last completed run.
+        If no previous run exists, shows a "ready to run" message.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $lastRun = Get-LastRunSummary
+
+        if (-not $lastRun) {
+            # No previous runs - show ready state
+            $script:Controls.txtProfileProgress.Text = "No previous runs"
+            $script:Controls.txtOverallProgress.Text = "Select profiles and click Run"
+            $script:Controls.pbProfile.Value = 0
+            $script:Controls.pbOverall.Value = 0
+            $script:Controls.txtEta.Text = "Ready"
+            $script:Controls.txtSpeed.Text = "--"
+            $script:Controls.txtChunks.Text = "Ready"
+            $script:Controls.dgChunks.ItemsSource = $null
+        } else {
+            # Show last run summary
+            $timestamp = [datetime]::Parse($lastRun.Timestamp)
+            $timeAgo = Get-TimeAgoString -Timestamp $timestamp
+
+            # Format profile names
+            $profileNames = if ($lastRun.ProfilesRun -is [array]) {
+                $lastRun.ProfilesRun -join ", "
+            } else {
+                $lastRun.ProfilesRun
+            }
+            $script:Controls.txtProfileProgress.Text = "Last: $profileNames"
+
+            # Calculate completion percentage
+            $completionPct = if ($lastRun.ChunksTotal -gt 0) {
+                [math]::Round(($lastRun.ChunksCompleted / $lastRun.ChunksTotal) * 100, 0)
+            } else {
+                0
+            }
+
+            # Set status text with color
+            $statusText = "$($lastRun.Status) - $timeAgo"
+            $script:Controls.txtOverallProgress.Text = $statusText
+
+            # Set color based on status (only if WPF is available)
+            try {
+                $colorBrush = switch ($lastRun.Status) {
+                    'Success' { [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(0x00, 0xFF, 0x7F)) }  # LimeGreen
+                    'PartialFailure' { [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(0xFF, 0xB3, 0x40)) }  # Orange
+                    'Failed' { [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(0xFF, 0x6B, 0x6B)) }  # Red
+                    default { [System.Windows.Media.Brushes]::Gray }
+                }
+                $script:Controls.txtOverallProgress.Foreground = $colorBrush
+            }
+            catch {
+                # WPF types not available (headless/test mode) - skip color setting
+                Write-Verbose "WPF color types not available - skipping color assignment"
+            }
+
+            # Set progress bars
+            $script:Controls.pbProfile.Value = $completionPct
+            $script:Controls.pbOverall.Value = $completionPct
+
+            # Set duration and bytes copied
+            $script:Controls.txtEta.Text = "Duration: $($lastRun.Duration)"
+            $script:Controls.txtSpeed.Text = "Copied: $(Format-FileSize -Bytes $lastRun.BytesCopied)"
+
+            # Set chunks text
+            $chunksText = "Chunks: $($lastRun.ChunksCompleted)/$($lastRun.ChunksTotal)"
+            if ($lastRun.ChunksFailed -gt 0) {
+                $chunksText += " ($($lastRun.ChunksFailed) failed)"
+            }
+            $script:Controls.txtChunks.Text = $chunksText
+
+            # Clear the chunks grid
+            $script:Controls.dgChunks.ItemsSource = $null
+        }
+
+        # Force visual update
+        $script:Window.UpdateLayout()
+    }
+    catch {
+        Write-GuiLog "Error displaying empty state: $_"
+    }
+}
+
+function Get-TimeAgoString {
+    <#
+    .SYNOPSIS
+        Formats a timestamp as a "time ago" string
+    .PARAMETER Timestamp
+        DateTime to format
+    .OUTPUTS
+        String like "2 hours ago", "5 minutes ago", etc.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [datetime]$Timestamp
+    )
+
+    $elapsed = [datetime]::Now - $Timestamp
+
+    if ($elapsed.TotalDays -ge 1) {
+        $days = [math]::Floor($elapsed.TotalDays)
+        return "$days day$(if ($days -ne 1) {'s'}) ago"
+    }
+    elseif ($elapsed.TotalHours -ge 1) {
+        $hours = [math]::Floor($elapsed.TotalHours)
+        return "$hours hour$(if ($hours -ne 1) {'s'}) ago"
+    }
+    elseif ($elapsed.TotalMinutes -ge 1) {
+        $minutes = [math]::Floor($elapsed.TotalMinutes)
+        return "$minutes minute$(if ($minutes -ne 1) {'s'}) ago"
+    }
+    else {
+        return "Just now"
+    }
+}

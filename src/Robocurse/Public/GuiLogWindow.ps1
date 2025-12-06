@@ -227,6 +227,74 @@ function Clear-GuiLogBuffer {
     }
 }
 
+function Update-InlineLogContent {
+    <#
+    .SYNOPSIS
+        Updates the inline log panel content from the ring buffer
+    .DESCRIPTION
+        Filters log entries based on the selected log level checkboxes
+        and updates the txtLogContent control in the main window's Logs panel.
+        Called when filters change or when the log buffer is updated.
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Check if control exists
+    if (-not $script:Controls['txtLogContent']) {
+        return
+    }
+
+    # Get filter settings (default to true if controls don't exist)
+    $showDebug = if ($script:Controls['chkLogDebug']) { $script:Controls.chkLogDebug.IsChecked } else { $true }
+    $showInfo = if ($script:Controls['chkLogInfo']) { $script:Controls.chkLogInfo.IsChecked } else { $true }
+    $showWarning = if ($script:Controls['chkLogWarning']) { $script:Controls.chkLogWarning.IsChecked } else { $true }
+    $showError = if ($script:Controls['chkLogError']) { $script:Controls.chkLogError.IsChecked } else { $true }
+
+    # Thread-safe buffer read
+    $lines = @()
+    [System.Threading.Monitor]::Enter($script:GuiLogBuffer)
+    try {
+        $lines = @($script:GuiLogBuffer)
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:GuiLogBuffer)
+    }
+
+    # Apply filters - lines without level markers are always included
+    $filteredLines = $lines | Where-Object {
+        $line = $_
+        # Parse log level from line format: [HH:mm:ss] [LEVEL] Message
+        $isDebug = $line -match '\[DEBUG\]'
+        $isWarning = $line -match '\[WARNING\]' -or $line -match '\[WARN\]'
+        $isError = $line -match '\[ERROR\]' -or $line -match '\[ERR\]'
+        $isInfo = $line -match '\[INFO\]'
+        $noLevel = -not $isDebug -and -not $isWarning -and -not $isError -and -not $isInfo
+
+        # Show lines without level markers always, or apply filters
+        $noLevel -or
+        ($showDebug -and $isDebug) -or
+        ($showInfo -and $isInfo) -or
+        ($showWarning -and $isWarning) -or
+        ($showError -and $isError)
+    }
+
+    # Update display
+    $script:Controls.txtLogContent.Text = $filteredLines -join "`r`n"
+
+    # Update line count if control exists
+    if ($script:Controls['txtLogLineCount']) {
+        $script:Controls.txtLogLineCount.Text = "$($filteredLines.Count) lines"
+    }
+
+    # Auto-scroll if enabled
+    if ($script:Controls['chkLogAutoScroll'] -and $script:Controls.chkLogAutoScroll.IsChecked) {
+        # Scroll to end using Dispatcher to ensure UI is ready
+        $script:Controls.txtLogContent.Dispatcher.Invoke([action]{
+            $script:Controls.txtLogContent.ScrollToEnd()
+        }, [System.Windows.Threading.DispatcherPriority]::Background)
+    }
+}
+
 function Close-LogWindow {
     <#
     .SYNOPSIS

@@ -97,6 +97,9 @@ function Start-GuiReplication {
 
     Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
 
+    # Auto-switch to Progress panel
+    Set-ActivePanel -PanelName 'Progress'
+
     # Get worker count and start progress timer
     $maxWorkers = [int]$script:Controls.sldWorkers.Value
     $script:ProgressTimer.Start()
@@ -190,6 +193,47 @@ function Complete-GuiReplication {
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
 
     Write-GuiLog "Replication completed: $($status.ChunksComplete)/$($status.ChunksTotal) chunks, $($status.ChunksFailed) failed"
+
+    # Save last run summary for empty state display
+    try {
+        # Capture profile names from orchestration state
+        $profileNames = @()
+        if ($script:OrchestrationState -and $script:OrchestrationState.Profiles) {
+            $profileNames = @($script:OrchestrationState.Profiles | ForEach-Object { $_.Name })
+        }
+
+        # Calculate elapsed time
+        $elapsed = if ($script:OrchestrationState.StartTime) {
+            [datetime]::Now - $script:OrchestrationState.StartTime
+        } else {
+            [timespan]::Zero
+        }
+
+        # Determine status
+        $runStatus = if ($status.ChunksFailed -eq 0) {
+            'Success'
+        } elseif ($status.ChunksComplete -gt 0) {
+            'PartialFailure'
+        } else {
+            'Failed'
+        }
+
+        $lastRun = @{
+            Timestamp = ([datetime]::Now).ToString('o')
+            ProfilesRun = $profileNames
+            ChunksTotal = $status.ChunksTotal
+            ChunksCompleted = $status.ChunksComplete
+            ChunksFailed = $status.ChunksFailed
+            BytesCopied = $status.BytesComplete
+            Duration = $elapsed.ToString('hh\:mm\:ss')
+            Status = $runStatus
+        }
+
+        Save-LastRunSummary -Summary $lastRun
+    }
+    catch {
+        Write-GuiLog "Warning: Failed to save last run summary: $_"
+    }
 
     # Clean up config snapshot if it was created
     if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {

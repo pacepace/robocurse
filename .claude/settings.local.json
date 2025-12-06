@@ -11,7 +11,18 @@
       "Bash(powershell.exe:*)",
       "Bash(git rm:*)",
       "Bash(git diff:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(mkdir:*)",
+      "Bash(taskkill:*)",
+      "Bash(findstr:*)",
+      "Bash(Invoke-Pester -Path testsUnitGui.Tests.ps1 -Output Detailed)",
+      "Bash(pwsh -Command \"Invoke-Pester -Path tests\\Unit\\Gui.Tests.ps1 -Output Detailed\")",
+      "Bash(.scriptsrun-tests.ps1)",
+      "Bash(Get-Content \"C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\src\\Robocurse\\Public\\Configuration.ps1\")",
+      "Bash(Select-Object -First 200)",
+      "Bash(pwsh -NoProfile -Command \"Invoke-Pester -Path ''tests\\Unit\\GuiSettingsPanel.Tests.ps1'' -Output Detailed\")",
+      "Bash(pwsh -Command \"Invoke-Pester -Path tests\\Unit\\GuiProgressEmptyState.Tests.ps1 -Output Detailed\")",
+      "Bash(Select-Object -First 150)"
     ],
     "deny": [],
     "ask": []
