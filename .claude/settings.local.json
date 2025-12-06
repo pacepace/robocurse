@@ -10,7 +10,8 @@
       "Bash(xargs:*)",
       "Bash(powershell.exe:*)",
       "Bash(git rm:*)",
-      "Bash(git diff:*)"
+      "Bash(git diff:*)",
+      "WebSearch"
     ],
     "deny": [],
     "ask": []

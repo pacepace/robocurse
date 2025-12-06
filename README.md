@@ -1,149 +1,131 @@
 # Robocurse
 
-**Multi-Share Parallel Robocopy Orchestrator**
+**Parallel Robocopy Orchestration for Windows**
 
-Robocurse is a PowerShell-based tool designed to manage multiple robocopy instances for replicating large directory structures that would otherwise overwhelm a single robocopy process. It intelligently chunks large directories and runs parallel robocopy jobs to improve performance and reliability.
+Robocurse manages what robocopy alone cannot: large-scale file replication across multiple sources without falling over. It intelligently chunks directories, runs parallel jobs, handles VSS snapshots for locked files, and recovers from failures—all without requiring expensive enterprise backup software.
 
-## Features
+> **Status**: Production-tested in enterprise environments. The core functionality is stable.
 
-- **Intelligent Directory Chunking**: Automatically analyzes and divides large directory structures into optimal chunks
-- **Parallel Execution**: Runs multiple robocopy instances simultaneously with configurable concurrency
-- **Volume Shadow Copy (VSS) Support**: Backup locked files using VSS snapshots
-- **Flexible Configuration**: JSON-based configuration with support for multiple profiles
-- **Comprehensive Logging**: Operational logs, robocopy logs, and SIEM integration
-- **Progress Tracking**: Real-time progress monitoring with ETA calculations
-- **Email Notifications**: Automated completion emails with detailed statistics
-- **Scheduled Execution**: Built-in support for Windows Task Scheduler integration
-- **GUI and Headless Modes**: Run interactively with a GUI or in headless mode for automation
-- **Retry Logic**: Configurable retry policies for transient failures (chunks and VSS)
-- **Credential Management**: Secure credential storage with audit logging
-- **Aggregate Bandwidth Throttling**: Dynamic bandwidth limiting across all concurrent jobs
-- **VSS Orphan Cleanup**: Automatic cleanup of VSS snapshots from crashed runs
-- **VSS Privilege Check**: Preflight validation of VSS requirements before operations
-- **Enhanced Logging**: Function name and line number tracing for troubleshooting
-- **Dry-Run Mode**: Preview what would be copied without actually copying
-- **Configurable Mismatch Severity**: Control how robocopy exit code 4 (mismatches) is treated
-- **GUI State Persistence**: Window position, size, and settings remembered between sessions
-- **Real-Time Error Display**: Errors from background replication shown immediately in GUI
-- **Exponential Backoff**: Failed chunks retry with increasing delays (5s → 10s → 20s, capped at 120s)
-- **Health Check Endpoint**: JSON status file for external monitoring systems
-- **Parallel Directory Profiling**: Concurrent directory scanning for multi-source profiles
-- **WhatIf Support**: Preview destructive operations before execution
-- **Build Artifact Integrity**: SHA256 hash generated for built monolith
+## The Problem
 
-## Prerequisites
+Robocopy is the backbone of Windows file replication. But at scale, it breaks down:
 
-- **Operating System**: Windows Server 2016+ or Windows 10+
-- **PowerShell**: Version 5.1 or higher
-- **Privileges**: Administrator rights (required for VSS operations)
-- **Robocopy**: Included with Windows (System32), or specify custom path
-- **Pester**: Version 5.x (for running tests)
+- **Single-threaded orchestration**: One massive directory tree overwhelms a single robocopy process
+- **No parallel job management**: Running multiple robocopy instances manually is tedious and error-prone
+- **Locked file failures**: Production servers have open files that robocopy can't copy
+- **No recovery**: Crash mid-job and you're starting over
+- **DFS Replication**: If you've tried DFS-R for this, you know why you're here
 
-### Installing Pester
+Robocurse solves these problems with a single deployable PowerShell script.
 
-```powershell
-Install-Module -Name Pester -Force -SkipPublisherCheck
+## Key Features
+
+| Feature | What It Does |
+|---------|--------------|
+| **Intelligent Chunking** | Splits large directories into optimal parallel workloads |
+| **Parallel Execution** | Runs 1-128 concurrent robocopy jobs with load balancing |
+| **VSS Integration** | Backs up locked files via Volume Shadow Copy (local and remote) |
+| **Crash Recovery** | Checkpoints progress; resumes from last completed chunk |
+| **GUI + Headless** | Interactive WPF interface or CLI for scheduled tasks |
+| **Email Notifications** | Completion reports with statistics |
+| **Bandwidth Throttling** | Aggregate limit across all concurrent jobs |
+
+## Quick Start
+
+### 1. Deploy
+
+Copy two files to your server:
+```
+dist/Robocurse.ps1          # The application (~550KB)
+Robocurse.config.json       # Your configuration
 ```
 
-## Installation
+### 2. Configure
 
-**For Deployment:**
-1. Copy `dist/Robocurse.ps1` to your target server
-2. Copy and customize `Robocurse.config.json` to the same directory
-3. Ensure you have administrator privileges (required for VSS)
-
-**For Development:**
-1. Clone this repository
-2. Edit modules in `src/Robocurse/Public/`
-3. Run tests: `Invoke-Pester ./tests`
-4. Build monolith: `.\build\Build-Robocurse.ps1`
-
-## Configuration
-
-Edit `Robocurse.config.json` to configure your replication profiles. The configuration file supports:
-
-- **Multiple Profiles**: Define different backup/replication scenarios
-- **Source/Destination Paths**: Local or UNC paths
-- **Robocopy Options**: Full control over robocopy switches
-- **Chunking Strategy**: Configure chunk sizes and parallel execution
-- **Scheduling**: Set up automated execution times
-- **Logging**: Configure operational and robocopy log locations
-- **Email Settings**: SMTP configuration for notifications
-- **Retry Policies**: Define how failures are handled
-
-**Note**: Robocurse supports two configuration formats and auto-detects which you're using:
-- **Enterprise format** (`profiles`/`global`): The full JSON structure in `Robocurse.config.json`
-- **Simplified format** (`SyncProfiles`/`GlobalSettings`): Flatter structure for programmatic use
-
-### Chunk Size Configuration
-
-When configuring chunking, these constraints apply:
-
-| Setting | Valid Range | Default | Description |
-|---------|-------------|---------|-------------|
-| `ChunkMaxSizeGB` | 0.001 - 1024 | 10 | Maximum size per chunk |
-| `ChunkMinSizeGB` | 0.001 - 1024 | 0.1 | Minimum size to create a chunk |
-| `ChunkMaxFiles` | 1 - 10,000,000 | 50,000 | Maximum files per chunk |
-| `ChunkMaxDepth` | 0 - 20 | 5 | Maximum recursion depth |
-
-**Important**: `ChunkMaxSizeGB` must be greater than `ChunkMinSizeGB`. Invalid configurations will fail validation.
-
-### Example Profile (Simplified Format)
-
-For headless/CLI operation, profiles use this simplified structure:
+Edit `Robocurse.config.json`:
 
 ```json
 {
   "Version": "1.0",
   "GlobalSettings": {
     "MaxConcurrentJobs": 4,
-    "ThreadsPerJob": 8,
-    "BandwidthLimitMbps": 0,
     "LogPath": ".\\Logs"
   },
   "SyncProfiles": [
     {
       "Name": "DailyBackup",
-      "Source": "\\\\FILESERVER01\\Share1",
-      "Destination": "D:\\Backups\\FileServer01",
+      "Source": "\\\\FILESERVER\\Share",
+      "Destination": "D:\\Backups\\FileServer",
       "UseVss": true,
-      "ScanMode": "Smart",
-      "ChunkMaxSizeGB": 10,
-      "ChunkMaxFiles": 50000,
       "RobocopyOptions": {
-        "Switches": ["/COPYALL", "/DCOPY:DAT"],
-        "ExcludeFiles": ["*.tmp", "*.temp", "~*"],
-        "ExcludeDirs": ["$RECYCLE.BIN", "System Volume Information"],
-        "NoMirror": false,
-        "SkipJunctions": true,
-        "RetryCount": 3,
-        "RetryWait": 10
+        "Switches": ["/COPYALL"],
+        "ExcludeDirs": ["$RECYCLE.BIN", "System Volume Information"]
       }
     }
   ]
 }
 ```
 
-### Robocopy Options Reference
+### 3. Run
 
-Each profile can specify `RobocopyOptions` to customize robocopy behavior:
+**GUI mode:**
+```powershell
+.\Robocurse.ps1
+```
+
+**Headless (for scheduled tasks):**
+```powershell
+.\Robocurse.ps1 -Headless -Profile "DailyBackup"
+```
+
+**Dry run (preview without copying):**
+```powershell
+.\Robocurse.ps1 -Headless -Profile "DailyBackup" -DryRun
+```
+
+## Requirements
+
+- Windows Server 2016+ or Windows 10+
+- PowerShell 5.1+
+- Administrator rights (for VSS)
+- Robocopy (included with Windows)
+
+No external dependencies. No modules to install. One file.
+
+---
+
+## Configuration Reference
+
+### Chunk Settings
+
+Control how directories are split for parallel processing:
+
+| Setting | Range | Default | Description |
+|---------|-------|---------|-------------|
+| `ChunkMaxSizeGB` | 0.001 - 1024 | 10 | Maximum GB per chunk |
+| `ChunkMinSizeGB` | 0.001 - 1024 | 0.1 | Minimum GB to create a chunk |
+| `ChunkMaxFiles` | 1 - 10M | 50,000 | Maximum files per chunk |
+| `ChunkMaxDepth` | 0 - 20 | 5 | Maximum directory recursion |
+
+### Robocopy Options
+
+Per-profile robocopy customization:
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `Switches` | string[] | `/COPY:DAT /DCOPY:T` | Additional robocopy switches |
-| `ExcludeFiles` | string[] | `[]` | File patterns to exclude (e.g., `*.tmp`) |
-| `ExcludeDirs` | string[] | `[]` | Directory names to exclude |
-| `NoMirror` | bool | `false` | Use `/E` instead of `/MIR` (don't delete extras) |
-| `SkipJunctions` | bool | `true` | Skip junction points (`/XJD /XJF`) |
-| `RetryCount` | int | `3` | Retry count for failed files (`/R:`) |
-| `RetryWait` | int | `10` | Wait seconds between retries (`/W:`) |
-| `InterPacketGapMs` | int | `null` | Bandwidth throttling - ms between packets (`/IPG:`) |
+| `Switches` | string[] | `/COPY:DAT /DCOPY:T` | Additional robocopy flags |
+| `ExcludeFiles` | string[] | `[]` | File patterns to skip (e.g., `*.tmp`) |
+| `ExcludeDirs` | string[] | `[]` | Directory names to skip |
+| `NoMirror` | bool | `false` | Use `/E` instead of `/MIR` |
+| `SkipJunctions` | bool | `true` | Skip junction points |
+| `RetryCount` | int | `3` | Retries per failed file |
+| `RetryWait` | int | `10` | Seconds between retries |
 
-**Note**: Threading (`/MT:`), logging (`/LOG:`), and progress (`/TEE /BYTES`) flags are always applied by Robocurse and cannot be overridden.
+**Note**: Robocurse manages `/MT:`, `/LOG:`, and progress flags automatically.
 
-### Aggregate Bandwidth Throttling
+### Bandwidth Throttling
 
-Set `BandwidthLimitMbps` in `GlobalSettings` to limit total bandwidth consumption across all concurrent robocopy jobs. This is useful when replicating over WAN links or shared network infrastructure.
+Limit aggregate bandwidth across all concurrent jobs:
 
 ```json
 "GlobalSettings": {
@@ -152,50 +134,23 @@ Set `BandwidthLimitMbps` in `GlobalSettings` to limit total bandwidth consumptio
 }
 ```
 
-The bandwidth is dynamically divided among active jobs. For example:
-- 100 Mbps limit with 4 concurrent jobs = ~25 Mbps per job
-- As jobs complete, remaining jobs get more bandwidth
-- Set to `0` for unlimited (default)
+Bandwidth is dynamically divided among active jobs. Set to `0` for unlimited.
 
-**Implementation Note**: Robocurse uses robocopy's `/IPG` (Inter-Packet Gap) flag, which introduces a delay between 512-byte packets. The IPG value is automatically calculated based on the per-job bandwidth allocation.
+### Mismatch Handling
 
-**Caveat**: Bandwidth limiting via IPG is approximate, not precise. Actual throughput depends on file size distribution - copying many small files involves more overhead than few large files, so effective bandwidth may vary. This is a limitation of the IPG mechanism, not Robocurse. For strict bandwidth control, consider OS-level QoS policies.
-
-### Mismatch Severity Configuration
-
-Control how robocopy exit code 4 (mismatches detected) is treated. This can be set globally or per-profile:
-
-```json
-"GlobalSettings": {
-  "MismatchSeverity": "Warning"
-}
-```
-
-Or override per-profile:
-
-```json
-"SyncProfiles": [
-  {
-    "Name": "BidirectionalSync",
-    "MismatchSeverity": "Success",
-    ...
-  }
-]
-```
+Control how robocopy exit code 4 (mismatches) is treated:
 
 | Value | Behavior |
 |-------|----------|
-| `Warning` | (Default) Log as warning, don't trigger retry |
-| `Error` | Treat as error, trigger retry logic |
-| `Success` | Ignore mismatches entirely |
+| `Warning` | (Default) Log warning, continue |
+| `Error` | Treat as failure, trigger retry |
+| `Success` | Ignore entirely |
 
-This is useful for sync scenarios where mismatches are expected (e.g., bidirectional sync, or when destination files are intentionally modified). Per-profile overrides allow different behaviors for different backup scenarios within the same configuration.
+Set globally or per-profile via `MismatchSeverity`.
 
 ### VSS Configuration
 
-#### VSS Privilege Check
-
-Before attempting VSS operations, you can verify the system has the required privileges:
+#### Pre-flight Check
 
 ```powershell
 $check = Test-VssPrivileges
@@ -204,398 +159,137 @@ if (-not $check.Success) {
 }
 ```
 
-This checks for:
-- Administrator privileges (required for VSS)
-- VSS service availability (not disabled)
-
-#### VSS Retry Logic
-
-VSS snapshot creation supports automatic retry for transient failures (lock contention, VSS busy):
+#### Local VSS
 
 ```powershell
-# Default: 3 retries with 5-second delay
-$result = New-VssSnapshot -SourcePath "C:\Data"
-
-# Custom retry settings for busy systems
-$result = New-VssSnapshot -SourcePath "C:\Data" -RetryCount 5 -RetryDelaySeconds 10
-```
-
-Retryable errors include VSS busy, lock contention, and timeout conditions. Non-retryable errors (invalid path, permissions) fail immediately.
-
-#### VSS Orphan Cleanup
-
-If Robocurse crashes or is terminated while VSS snapshots are active, those snapshots may be left behind consuming disk space. Robocurse automatically cleans up orphaned snapshots from previous failed runs at startup.
-
-The tracking file is stored at `$PSScriptRoot\vss_active.json` and records all active VSS snapshots. On startup, any snapshots still in this file are removed.
-
-To manually trigger orphan cleanup:
-
-```powershell
-# After dot-sourcing the script
-Clear-OrphanVssSnapshots
-```
-
-#### Local VSS with Robocopy
-
-Use `Invoke-WithVssJunction` to backup local paths with VSS:
-
-```powershell
-$result = Invoke-WithVssJunction -SourcePath "C:\Users\Data" -ScriptBlock {
+$result = Invoke-WithVssJunction -SourcePath "C:\Data" -ScriptBlock {
     param($SourcePath)
-    robocopy $SourcePath "D:\Backup\Data" /MIR /R:0 /W:0
-    return $LASTEXITCODE
+    robocopy $SourcePath "D:\Backup" /MIR /R:0 /W:0
 }
 ```
-
-This creates a VSS snapshot, makes it accessible to robocopy via a temporary junction, runs your scriptblock, and cleans up automatically.
 
 #### Remote VSS (Network Shares)
 
-Use `Invoke-WithRemoteVssJunction` to backup network shares with VSS snapshots created on the file server:
-
 ```powershell
-$result = Invoke-WithRemoteVssJunction -UncPath "\\FileServer01\Data\Projects" -ScriptBlock {
+$result = Invoke-WithRemoteVssJunction -UncPath "\\FileServer\Share" -ScriptBlock {
     param($SourcePath)
-    robocopy $SourcePath "D:\Backup\Projects" /MIR /R:0 /W:0
-    return $LASTEXITCODE
+    robocopy $SourcePath "D:\Backup" /MIR /R:0 /W:0
 }
 ```
 
-**Requirements for remote VSS:**
-- Admin rights on the remote file server
-- PowerShell remoting enabled on the server (`Enable-PSRemoting`)
+**Requirements**: Admin rights on remote server, PowerShell remoting enabled.
 
-To check if remote VSS is available before use:
+### Retry Behavior
 
-```powershell
-$check = Test-RemoteVssSupported -UncPath "\\FileServer01\Data"
-if (-not $check.Success) {
-    Write-Warning "Remote VSS not available: $($check.ErrorMessage)"
-}
+Failed chunks retry with exponential backoff: 5s → 10s → 20s → ... (capped at 120s).
+
+VSS operations retry automatically for transient failures (lock contention, VSS busy).
+
+---
+
+## Logging
+
+Robocurse generates three log types:
+
+| Log | Purpose |
+|-----|---------|
+| **Operational** | Application events with function:line tracing |
+| **Robocopy** | Per-job robocopy output |
+| **SIEM** | JSON Lines format for security monitoring |
+
+Example operational log entry:
+```
+2024-01-15 14:32:45 [INFO] [Orchestrator] Start-ReplicationJob:1234 - Starting profile 'DailyBackup'
 ```
 
-## Usage
+---
 
-Use `dist/Robocurse.ps1` for deployment (or import the module from `src/Robocurse/` for development).
+## Development
 
-### GUI Mode
+### Project Structure
 
-Launch the graphical interface:
+```
+src/Robocurse/           # Module source (edit here)
+├── Public/              # 26 function files
+└── Resources/           # XAML templates
 
-```powershell
-.\dist\Robocurse.ps1
+build/                   # Build tools
+dist/                    # Built monolith (deploy this)
+tests/                   # Pester test suite (900+ cases)
 ```
 
-### Headless Mode
-
-Run a specific profile in headless mode (ideal for scheduled tasks):
+### Building
 
 ```powershell
-.\dist\Robocurse.ps1 -Headless -Profile "DailyBackup"
+.\build\Build-Robocurse.ps1
 ```
 
-### Custom Configuration File
+Output: `dist/Robocurse.ps1` with SHA256 hash.
 
-Specify a different configuration file:
-
-```powershell
-.\dist\Robocurse.ps1 -ConfigPath "C:\Configs\custom-config.json" -Headless -Profile "WeeklyFull"
-```
-
-### Dry-Run Mode
-
-Preview what would be copied without actually performing the copy:
+### Testing
 
 ```powershell
-.\dist\Robocurse.ps1 -Headless -Profile "DailyBackup" -DryRun
-```
+# All tests (recommended - avoids output truncation)
+.\scripts\run-tests.ps1
 
-This runs robocopy with the `/L` flag, which lists files that would be copied without actually copying them. Useful for:
-- Verifying your profile configuration before a real run
-- Estimating how long a replication will take
-- Checking what files have changed since the last sync
-
-### Display Help
-
-```powershell
-.\dist\Robocurse.ps1 -Help
-```
-
-## Testing
-
-This project uses Pester 5 for testing. Tests load from the modular source (`src/Robocurse/`).
-
-### Run All Tests
-
-```powershell
-Invoke-Pester ./tests -Output Detailed
-```
-
-### Run Specific Test Categories
-
-```powershell
-# Unit tests only
+# Specific tests
 Invoke-Pester ./tests/Unit -Output Detailed
-
-# Integration tests only
-Invoke-Pester ./tests/Integration -Output Detailed
-
-# Specific test file
-Invoke-Pester ./tests/Unit/Configuration.Tests.ps1 -Output Detailed
 ```
 
-### Test the Built Monolith
+---
 
-To test the built artifact instead of the modules:
+## Security Notes
+
+### Log Confidentiality
+
+DEBUG logs contain full file paths. Restrict access to log directories.
+
+### Credentials
+
+- SMTP credentials use Windows Credential Manager
+- Credential access is logged to SIEM for auditing
+- Use dedicated service accounts with minimal permissions
+
+### Pre-flight Validations
+
+Before replication, Robocurse checks:
+- Source path accessibility
+- Destination disk space (warns at 90% full)
+- Dangerous robocopy switch combinations
+
+---
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| VSS errors | Run as Administrator; check `Test-VssPrivileges` |
+| Script won't load | `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` |
+| Exit code confusion | Use `Get-RobocopyExitMeaning` for interpretation |
+
+### Custom Robocopy Path
 
 ```powershell
-# In test file BeforeAll block, use:
-Initialize-RobocurseForTesting -UseBuiltMonolith
+Set-RobocopyPath -Path "D:\Tools\robocopy.exe"
+Clear-RobocopyPath  # Revert to auto-detection
 ```
 
-## Project Structure
+---
 
-```
-robocurse/
-├── src/Robocurse/             # SOURCE OF TRUTH - Module files
-│   ├── Robocurse.psd1         # Module manifest (exported functions)
-│   ├── Robocurse.psm1         # Module loader + constants
-│   ├── Public/                # Exported functions (26 .ps1 files)
-│   │   ├── Utility.ps1        # Platform detection, validation, pre-flight checks
-│   │   ├── Configuration.ps1  # Config loading/validation
-│   │   ├── Logging.ps1        # Operational & SIEM logging (with timeout-protected rotation)
-│   │   ├── DirectoryProfiling.ps1
-│   │   ├── Chunking.ps1       # Directory chunking algorithms
-│   │   ├── Robocopy.ps1       # Robocopy wrapper (process handle cleanup)
-│   │   ├── Checkpoint.ps1     # Crash recovery
-│   │   ├── OrchestrationCore.ps1  # C# types, state management, circuit breaker
-│   │   ├── HealthCheck.ps1    # Health monitoring for external systems
-│   │   ├── JobManagement.ps1  # Job execution, retry logic, profile management
-│   │   ├── Progress.ps1       # Progress tracking
-│   │   ├── VssCore.ps1        # VSS core infrastructure (shared retry logic)
-│   │   ├── VssLocal.ps1       # Local VSS snapshot operations
-│   │   ├── VssRemote.ps1      # Remote VSS via PowerShell remoting
-│   │   ├── Email.ps1          # SMTP notifications
-│   │   ├── Scheduling.ps1     # Task Scheduler integration
-│   │   ├── GuiResources.ps1   # XAML resource loading
-│   │   ├── GuiSettings.ps1    # Window state persistence
-│   │   ├── GuiProfiles.ps1    # Profile management UI
-│   │   ├── GuiDialogs.ps1     # Dialog helpers (schedule, completion)
-│   │   ├── GuiLogWindow.ps1   # Popup log viewer window
-│   │   ├── GuiRunspace.ps1    # Background runspace management
-│   │   ├── GuiReplication.ps1 # Replication control and monitoring
-│   │   ├── GuiProgress.ps1    # Progress display and updates
-│   │   ├── GuiMain.ps1        # WPF window initialization
-│   │   └── Main.ps1           # Entry point dispatcher
-│   └── Resources/             # XAML resources
-│       ├── MainWindow.xaml    # Main application window
-│       ├── LogWindow.xaml     # Popup log viewer
-│       ├── ConfirmDialog.xaml # Styled confirmation dialog
-│       ├── ScheduleDialog.xaml
-│       └── CompletionDialog.xaml
-├── build/                     # Build tools
-│   ├── Build-Robocurse.ps1    # Assembles modules into monolith
-│   └── README.md              # Build documentation
-├── dist/                      # Built artifacts
-│   ├── Robocurse.ps1          # DEPLOYABLE MONOLITH (~12,600 lines)
-│   └── Robocurse.ps1.sha256   # Integrity hash
-├── tests/                     # Test directory (900+ test cases)
-│   ├── TestHelper.ps1         # Test loader (uses modules)
-│   ├── Robocurse.Tests.ps1    # Main test suite
-│   ├── Unit/                  # Unit tests (14 files)
-│   └── Integration/           # Integration tests (7 files)
-├── Robocurse.config.json      # Configuration file
-├── CLAUDE.md                  # Development notes
-├── docs/                      # Documentation
-└── README.md                  # This file
-```
+## License
 
-**Development Workflow:**
-- Edit files in `src/Robocurse/Public/`
-- Run tests: `Invoke-Pester ./tests -Output Detailed`
-- Build monolith: `.\build\Build-Robocurse.ps1`
-- Deploy: Copy `dist/Robocurse.ps1` to target server
-
-See [build/README.md](build/README.md) for detailed build documentation.
-
-## Development Status
-
-This project is currently under active development. The following features are implemented or planned:
-
-- [x] Project structure and testing framework
-- [x] Configuration management (auto-converts between JSON and internal formats)
-- [x] Logging system (operational logs + SIEM JSON Lines)
-- [x] Directory profiling (robocopy /L based scanning with caching)
-- [x] Chunking algorithms (Smart + Flat modes)
-- [x] Robocopy wrapper with configurable options per profile
-- [x] Job orchestration (parallel execution, retry logic)
-- [x] Progress tracking (ETA, byte/file counts)
-- [x] VSS integration (snapshot creation/cleanup)
-- [x] Email notifications (SMTP with Credential Manager)
-- [x] Scheduling support (Windows Task Scheduler)
-- [x] GUI interface (WPF dark theme)
-- [x] Headless/CLI mode with full orchestration loop
+MIT License - see [LICENSE](LICENSE) file.
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Write tests for new functionality
-4. Ensure all tests pass: `Invoke-Pester ./tests`
+4. Run `.\scripts\run-tests.ps1` - all tests must pass
 5. Submit a pull request
-
-## Logging
-
-Robocurse generates several types of logs:
-
-- **Operational Log**: High-level application events and errors
-- **Robocopy Logs**: Detailed per-job robocopy output
-- **SIEM Integration**: JSON Lines format for security monitoring tools
-
-Log locations are configured in the `global.logging` section of the configuration file.
-
-### Log Format
-
-Each operational log entry includes:
-- Timestamp (local time)
-- Log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`)
-- Component name
-- **Caller info**: Function name and line number (e.g., `Start-ReplicationJob:1234`)
-- Message
-
-Example log entry:
-```
-2024-01-15 14:32:45 [INFO] [Orchestrator] Start-ReplicationJob:1234 - Starting profile 'DailyBackup'
-```
-
-This caller tracing makes debugging significantly easier when tracking down issues.
-
-## Credential Management
-
-Network credentials can be stored securely using Windows Credential Manager:
-
-```powershell
-# Store credentials (from GUI or manually)
-cmdkey /add:FILESERVER01 /user:DOMAIN\Username /pass:Password
-```
-
-Reference credentials in your configuration using the `credentialName` field.
-
-## Troubleshooting
-
-### Tests Fail to Load Script
-
-Ensure you have administrator privileges and PowerShell execution policy allows script execution:
-
-```powershell
-Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
-```
-
-### VSS Errors
-
-VSS operations require administrator privileges. Run PowerShell as Administrator.
-
-Use `Test-VssPrivileges` to check for common VSS issues before starting replication.
-
-### Custom Robocopy Location
-
-By default, Robocurse looks for robocopy.exe in System32 then PATH. For portable installations or custom robocopy builds:
-
-```powershell
-# Set a custom robocopy path
-Set-RobocopyPath -Path "D:\Tools\robocopy.exe"
-
-# Clear override and revert to auto-detection
-Clear-RobocopyPath
-```
-
-### Robocopy Exit Codes
-
-Robocopy uses bit-flag exit codes. Consult the `Get-RobocopyExitMeaning` function for interpretation.
-
-## Security Considerations
-
-### DEBUG Log Confidentiality
-
-**DEBUG-level logs contain sensitive path information** and should be treated as confidential:
-
-- Full file paths including project/directory names are logged
-- Robocopy command lines with source/destination paths are logged
-- VSS junction paths and shadow copy IDs are logged
-- SIEM logs (JSON Lines format) contain structured path data
-
-**Recommendations:**
-- Restrict access to log files and directories
-- Consider redacting paths if logs are shared externally
-- Use log rotation (built-in) to limit log retention
-- Review logs before sharing for troubleshooting
-
-### SMTP Credentials
-
-When retrieving SMTP credentials from Windows Credential Manager, the password briefly exists as a plaintext string in memory before being converted to a `SecureString`. This is an unavoidable limitation of the Windows Credential Manager P/Invoke API.
-
-**Mitigations:**
-- Byte arrays containing credential data are explicitly zeroed immediately after use via `[Array]::Clear()` rather than waiting for garbage collection
-- The plaintext string is immediately eligible for garbage collection after `SecureString` creation
-- Credentials are only retrieved when sending email notifications (not at startup)
-- The credential retrieval code runs in the main PowerShell process, not persisted to disk
-
-**Recommendations:**
-- Use a dedicated SMTP account with limited permissions for Robocurse notifications
-- Consider using an application-specific password if your email provider supports it
-- On high-security systems, disable email notifications and use log file monitoring instead
-
-### Credential Access Audit Logging
-
-All credential retrievals are logged to the SIEM event log for security auditing:
-
-```json
-{
-  "timestamp": "2024-01-15T14:32:45.123Z",
-  "event": "ConfigChange",
-  "sessionId": "143245_123",
-  "data": {
-    "action": "CredentialRetrieved",
-    "source": "WindowsCredentialManager",
-    "target": "Robocurse-SMTP",
-    "user": "smtp-user@example.com"
-  }
-}
-```
-
-This creates an audit trail of when credentials are accessed, useful for compliance and security monitoring.
-
-### Network Share Credentials
-
-For network share access, Robocurse relies on the Windows security context of the executing user. Use a service account with minimal required permissions when running as a scheduled task.
-
-### Pre-flight Validations
-
-Before starting replication, Robocurse performs several safety checks:
-
-1. **Source Path Accessibility**: Verifies the source path exists and is readable. For UNC paths, provides helpful error messages about network connectivity.
-
-2. **Destination Disk Space**: Checks if the destination drive is more than 90% full, and optionally verifies estimated data will fit. UNC paths skip this check due to the complexity of remote disk space queries.
-
-3. **Robocopy Options Validation**: Warns about potentially dangerous switch combinations:
-   - `/PURGE` without `/MIR` (deletes destination files without ensuring full sync)
-   - `/MOVE` or `/MOV` (deletes source files after copy)
-   - `/XX` with `/MIR` or `/PURGE` (conflicting behaviors)
-   - Switches that conflict with Robocurse-managed options (`/MT:`, `/LOG:`, etc.)
-
-These validations log warnings but do not block replication (except source path failures), allowing you to proceed with intentional configurations while being informed of potential issues.
-
-## License
-
-See LICENSE file for details.
-
-## Support
-
-For issues, questions, or contributions, please use the project's issue tracker.
 
 ## References
 
 - [Robocopy Documentation](https://docs.microsoft.com/en-us/windows-server/administration/windows-commands/robocopy)
+- [Volume Shadow Copy Service](https://docs.microsoft.com/en-us/windows/win32/vss/volume-shadow-copy-service-portal)
 - [Pester Testing Framework](https://pester.dev/)
-- [VSS (Volume Shadow Copy Service)](https://docs.microsoft.com/en-us/windows/win32/vss/volume-shadow-copy-service-portal)
-- [PowerShell Documentation](https://docs.microsoft.com/en-us/powershell/)
