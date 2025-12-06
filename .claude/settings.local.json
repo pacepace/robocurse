@@ -11,7 +11,8 @@
       "Bash(powershell.exe:*)",
       "Bash(git rm:*)",
       "Bash(git diff:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(mkdir:*)"
     ],
     "deny": [],
     "ask": []
