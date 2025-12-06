@@ -164,12 +164,16 @@ function ConvertTo-ChunkSettingsInternal {
     )
 
     if ($RawChunking) {
-        if ($RawChunking.maxChunkSizeGB) {
+        # Use $null -ne checks instead of truthiness to handle 0 and low values correctly
+        if ($null -ne $RawChunking.maxChunkSizeGB) {
             $Profile.ChunkMaxSizeGB = $RawChunking.maxChunkSizeGB
+        }
+        if ($null -ne $RawChunking.maxFiles) {
+            $Profile.ChunkMaxFiles = $RawChunking.maxFiles
         }
         # Note: parallelChunks from config is intentionally not mapped.
         # Parallelism is controlled by MaxConcurrentJobs at the orchestration level.
-        if ($RawChunking.maxDepthToScan) {
+        if ($null -ne $RawChunking.maxDepthToScan) {
             $Profile.ChunkMaxDepth = $RawChunking.maxDepthToScan
         }
         if ($RawChunking.strategy) {

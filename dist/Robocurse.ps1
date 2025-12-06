@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-05 19:02:11
+    Built: 2025-12-05 19:33:04
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -1266,12 +1266,16 @@ function ConvertTo-ChunkSettingsInternal {
     )
 
     if ($RawChunking) {
-        if ($RawChunking.maxChunkSizeGB) {
+        # Use $null -ne checks instead of truthiness to handle 0 and low values correctly
+        if ($null -ne $RawChunking.maxChunkSizeGB) {
             $Profile.ChunkMaxSizeGB = $RawChunking.maxChunkSizeGB
+        }
+        if ($null -ne $RawChunking.maxFiles) {
+            $Profile.ChunkMaxFiles = $RawChunking.maxFiles
         }
         # Note: parallelChunks from config is intentionally not mapped.
         # Parallelism is controlled by MaxConcurrentJobs at the orchestration level.
-        if ($RawChunking.maxDepthToScan) {
+        if ($null -ne $RawChunking.maxDepthToScan) {
             $Profile.ChunkMaxDepth = $RawChunking.maxDepthToScan
         }
         if ($RawChunking.strategy) {
