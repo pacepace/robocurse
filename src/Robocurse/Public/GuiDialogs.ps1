@@ -24,6 +24,101 @@ function Show-FolderBrowser {
     return $null
 }
 
+function Show-ConfirmDialog {
+    <#
+    .SYNOPSIS
+        Shows a styled confirmation dialog matching the app's dark theme
+    .PARAMETER Title
+        Dialog title text
+    .PARAMETER Message
+        Message to display
+    .PARAMETER ConfirmText
+        Text for the confirm button (default: "Confirm")
+    .PARAMETER CancelText
+        Text for the cancel button (default: "Cancel")
+    .OUTPUTS
+        $true if confirmed, $false if cancelled
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Title = "Confirm",
+        [string]$Message = "Are you sure?",
+        [string]$ConfirmText = "Confirm",
+        [string]$CancelText = "Cancel"
+    )
+
+    try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'ConfirmDialog.xaml'
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $txtTitle = $dialog.FindName("txtTitle")
+        $txtMessage = $dialog.FindName("txtMessage")
+        $btnConfirm = $dialog.FindName("btnConfirm")
+        $btnCancel = $dialog.FindName("btnCancel")
+
+        # Set content
+        $txtTitle.Text = $Title
+        $txtMessage.Text = $Message
+        $btnConfirm.Content = $ConfirmText
+        $btnCancel.Content = $CancelText
+
+        # Track result
+        $script:ConfirmDialogResult = $false
+
+        # Confirm button handler
+        $btnConfirm.Add_Click({
+            $script:ConfirmDialogResult = $true
+            $dialog.Close()
+        })
+
+        # Cancel button handler
+        $btnCancel.Add_Click({
+            $script:ConfirmDialogResult = $false
+            $dialog.Close()
+        })
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+                $dialog.DragMove()
+            }
+        })
+
+        # Escape key to cancel
+        $dialog.Add_KeyDown({
+            param($sender, $e)
+            if ($e.Key -eq [System.Windows.Input.Key]::Escape) {
+                $script:ConfirmDialogResult = $false
+                $dialog.Close()
+            }
+        })
+
+        # Set owner to main window for proper modal behavior
+        if ($script:Window) {
+            $dialog.Owner = $script:Window
+        }
+        $dialog.ShowDialog() | Out-Null
+
+        return $script:ConfirmDialogResult
+    }
+    catch {
+        Write-GuiLog "Error showing confirm dialog: $($_.Exception.Message)"
+        # Fallback to MessageBox
+        $result = [System.Windows.MessageBox]::Show(
+            $Message,
+            $Title,
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Question
+        )
+        return ($result -eq 'Yes')
+    }
+}
+
 function Show-CompletionDialog {
     <#
     .SYNOPSIS

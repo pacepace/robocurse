@@ -202,14 +202,13 @@ function Remove-SelectedProfile {
         return
     }
 
-    $result = [System.Windows.MessageBox]::Show(
-        "Remove profile '$($selected.Name)'?",
-        "Confirm Removal",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Question
-    )
+    $confirmed = Show-ConfirmDialog `
+        -Title "Remove Profile" `
+        -Message "Are you sure you want to remove the profile '$($selected.Name)'?" `
+        -ConfirmText "Remove" `
+        -CancelText "Cancel"
 
-    if ($result -eq 'Yes') {
+    if ($confirmed) {
         $script:Config.SyncProfiles = @($script:Config.SyncProfiles | Where-Object { $_ -ne $selected })
         Update-ProfileList
 

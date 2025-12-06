@@ -390,6 +390,7 @@ robocurse/
 │   └── Resources/             # XAML resources
 │       ├── MainWindow.xaml    # Main application window
 │       ├── LogWindow.xaml     # Popup log viewer
+│       ├── ConfirmDialog.xaml # Styled confirmation dialog
 │       ├── ScheduleDialog.xaml
 │       └── CompletionDialog.xaml
 ├── build/                     # Build tools

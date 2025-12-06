@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-05 18:38:26
+    Built: 2025-12-05 19:02:11
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -11276,14 +11276,13 @@ function Remove-SelectedProfile {
         return
     }
 
-    $result = [System.Windows.MessageBox]::Show(
-        "Remove profile '$($selected.Name)'?",
-        "Confirm Removal",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Question
-    )
+    $confirmed = Show-ConfirmDialog `
+        -Title "Remove Profile" `
+        -Message "Are you sure you want to remove the profile '$($selected.Name)'?" `
+        -ConfirmText "Remove" `
+        -CancelText "Cancel"
 
-    if ($result -eq 'Yes') {
+    if ($confirmed) {
         $script:Config.SyncProfiles = @($script:Config.SyncProfiles | Where-Object { $_ -ne $selected })
         Update-ProfileList
 
@@ -11324,6 +11323,198 @@ function Show-FolderBrowser {
         return $dialog.SelectedPath
     }
     return $null
+}
+
+function Show-ConfirmDialog {
+    <#
+    .SYNOPSIS
+        Shows a styled confirmation dialog matching the app's dark theme
+    .PARAMETER Title
+        Dialog title text
+    .PARAMETER Message
+        Message to display
+    .PARAMETER ConfirmText
+        Text for the confirm button (default: "Confirm")
+    .PARAMETER CancelText
+        Text for the cancel button (default: "Cancel")
+    .OUTPUTS
+        $true if confirmed, $false if cancelled
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Title = "Confirm",
+        [string]$Message = "Are you sure?",
+        [string]$ConfirmText = "Confirm",
+        [string]$CancelText = "Cancel"
+    )
+
+    try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'ConfirmDialog.xaml' -FallbackContent @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Confirm"
+        Height="200" Width="380"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize">
+
+    <Window.Resources>
+        <!-- Confirm button (blue) -->
+        <Style x:Key="ConfirmButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#1E1E1E"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="#FF6B6B" CornerRadius="4" Padding="20,8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#FF8787"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#E55A5A"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Cancel button (subtle) -->
+        <Style x:Key="CancelButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="#3E3E3E" CornerRadius="4" Padding="20,8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#4E4E4E"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#2E2E2E"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Border Background="#1E1E1E" CornerRadius="8" BorderBrush="#3E3E3E" BorderThickness="1">
+        <Grid Margin="24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header with icon and title -->
+            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,16">
+                <!-- Warning/question icon -->
+                <Border Width="40" Height="40" CornerRadius="20" Background="#FF6B6B" Margin="0,0,14,0">
+                    <TextBlock Text="?" FontSize="24" Foreground="White"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold"
+                               Margin="0,-2,0,0"/>
+                </Border>
+                <TextBlock x:Name="txtTitle" Text="Confirm" FontSize="18" FontWeight="SemiBold"
+                           Foreground="#E0E0E0" VerticalAlignment="Center"/>
+            </StackPanel>
+
+            <!-- Message -->
+            <TextBlock x:Name="txtMessage" Grid.Row="1" Text="Are you sure?"
+                       FontSize="14" Foreground="#B0B0B0" TextWrapping="Wrap"
+                       Margin="54,0,0,16" VerticalAlignment="Top"/>
+
+            <!-- Buttons -->
+            <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="btnCancel" Content="Cancel" Style="{StaticResource CancelButton}" Margin="0,0,10,0"/>
+                <Button x:Name="btnConfirm" Content="Remove" Style="{StaticResource ConfirmButton}"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>
+
+'@
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $txtTitle = $dialog.FindName("txtTitle")
+        $txtMessage = $dialog.FindName("txtMessage")
+        $btnConfirm = $dialog.FindName("btnConfirm")
+        $btnCancel = $dialog.FindName("btnCancel")
+
+        # Set content
+        $txtTitle.Text = $Title
+        $txtMessage.Text = $Message
+        $btnConfirm.Content = $ConfirmText
+        $btnCancel.Content = $CancelText
+
+        # Track result
+        $script:ConfirmDialogResult = $false
+
+        # Confirm button handler
+        $btnConfirm.Add_Click({
+            $script:ConfirmDialogResult = $true
+            $dialog.Close()
+        })
+
+        # Cancel button handler
+        $btnCancel.Add_Click({
+            $script:ConfirmDialogResult = $false
+            $dialog.Close()
+        })
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+                $dialog.DragMove()
+            }
+        })
+
+        # Escape key to cancel
+        $dialog.Add_KeyDown({
+            param($sender, $e)
+            if ($e.Key -eq [System.Windows.Input.Key]::Escape) {
+                $script:ConfirmDialogResult = $false
+                $dialog.Close()
+            }
+        })
+
+        # Set owner to main window for proper modal behavior
+        if ($script:Window) {
+            $dialog.Owner = $script:Window
+        }
+        $dialog.ShowDialog() | Out-Null
+
+        return $script:ConfirmDialogResult
+    }
+    catch {
+        Write-GuiLog "Error showing confirm dialog: $($_.Exception.Message)"
+        # Fallback to MessageBox
+        $result = [System.Windows.MessageBox]::Show(
+            $Message,
+            $Title,
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Question
+        )
+        return ($result -eq 'Yes')
+    }
 }
 
 function Show-CompletionDialog {

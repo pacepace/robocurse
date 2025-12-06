@@ -146,6 +146,7 @@
         'Update-GuiProgress'
         'Show-GuiError'
         'Write-GuiLog'
+        'Show-ConfirmDialog'
 
         # GUI Log Window
         'Show-LogWindow'
