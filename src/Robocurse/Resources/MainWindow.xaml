@@ -23,26 +23,87 @@
 
         <Style x:Key="DarkButton" TargetType="Button">
             <Setter Property="Background" Value="#0078D4"/>
-            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Foreground" Value="#1E1E1E"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Padding" Value="12,6"/>
             <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
                     <Setter Property="Background" Value="#1084D8"/>
                 </Trigger>
                 <Trigger Property="IsEnabled" Value="False">
                     <Setter Property="Background" Value="#4A4A4A"/>
-                    <Setter Property="Foreground" Value="#808080"/>
+                    <Setter Property="Foreground" Value="#707070"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
-        <Style x:Key="StopButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
-            <Setter Property="Background" Value="#D32F2F"/>
+        <!-- Soft Green Run button style (Apple-inspired) -->
+        <Style x:Key="RunButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
+            <Setter Property="Background" Value="#34C759"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#E53935"/>
+                    <Setter Property="Background" Value="#4CD964"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#3D5A45"/>
+                    <Setter Property="Foreground" Value="#6A8A72"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Soft Red Stop button style (Apple-inspired) -->
+        <Style x:Key="StopButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
+            <Setter Property="Background" Value="#FF6B6B"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#FF8787"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#703030"/>
+                    <Setter Property="Foreground" Value="#995050"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Soft Purple Schedule button style (Apple-inspired) -->
+        <Style x:Key="ScheduleButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
+            <Setter Property="Background" Value="#AF52DE"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#BF6AE8"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#4A3A5A"/>
+                    <Setter Property="Foreground" Value="#7A6A8A"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Soft Amber Logs button style (Apple-inspired) -->
+        <Style x:Key="LogsButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
+            <Setter Property="Background" Value="#FFB340"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#FFC266"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#5A4A30"/>
+                    <Setter Property="Foreground" Value="#8A7A5A"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
@@ -56,17 +117,68 @@
             <Setter Property="Foreground" Value="#E0E0E0"/>
             <Setter Property="BorderBrush" Value="#3E3E3E"/>
         </Style>
+
+        <!-- Dark DataGrid Styles -->
+        <Style x:Key="DarkDataGrid" TargetType="DataGrid">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="#3E3E3E"/>
+            <Setter Property="RowHeaderWidth" Value="0"/>
+            <Setter Property="AlternatingRowBackground" Value="#252525"/>
+            <Setter Property="RowBackground" Value="#2D2D2D"/>
+        </Style>
+
+        <Style x:Key="DarkDataGridCell" TargetType="DataGridCell">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="Padding" Value="5,2"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#0078D4"/>
+                    <Setter Property="Foreground" Value="White"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="DarkDataGridRow" TargetType="DataGridRow">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Style.Triggers>
+                <Trigger Property="AlternationIndex" Value="1">
+                    <Setter Property="Background" Value="#252525"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#0078D4"/>
+                    <Setter Property="Foreground" Value="White"/>
+                </Trigger>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#3A3A3A"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="DarkDataGridColumnHeader" TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="#1E1E1E"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="BorderThickness" Value="0,0,0,1"/>
+            <Setter Property="Padding" Value="8,5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
     </Window.Resources>
 
     <!-- ==================== LAYOUT: Main Grid ==================== -->
-    <!-- Row 0: Header, Row 1: Profile/Settings, Row 2: Progress, Row 3: Action Buttons, Row 4: Log -->
+    <!-- Row 0: Header, Row 1: Profile/Settings, Row 2: Progress Area, Row 3: Status Bar -->
+    <!-- Note: Log panel removed - now in separate popup window via "Logs" button -->
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="120"/>
         </Grid.RowDefinitions>
 
         <!-- ==================== ROW 0: Header ==================== -->
@@ -121,47 +233,50 @@
                         <ColumnDefinition Width="80"/>
                     </Grid.ColumnDefinitions>
 
-                    <Label Grid.Row="0" Content="Name:" Style="{StaticResource DarkLabel}"/>
+                    <Label Grid.Row="0" Content="Name:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                     <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtProfileName"
                              Style="{StaticResource DarkTextBox}" Margin="0,0,0,8"
                              ToolTip="Display name for this sync profile"/>
 
-                    <Label Grid.Row="1" Content="Source:" Style="{StaticResource DarkLabel}"/>
+                    <Label Grid.Row="1" Content="Source:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                     <TextBox Grid.Row="1" Grid.Column="1" x:Name="txtSource" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
                              ToolTip="The network share or local path to copy FROM.&#x0a;Example: \\fileserver\users$ or D:\SourceData"/>
                     <Button Grid.Row="1" Grid.Column="2" x:Name="btnBrowseSource" Content="Browse"
-                            Style="{StaticResource DarkButton}"/>
+                            Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                    <Label Grid.Row="2" Content="Destination:" Style="{StaticResource DarkLabel}"/>
+                    <Label Grid.Row="2" Content="Destination:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                     <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtDest" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
                              ToolTip="Where files will be copied TO. Directory will be created if needed."/>
                     <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
-                            Style="{StaticResource DarkButton}"/>
+                            Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                    <StackPanel Grid.Row="3" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,5,0,8">
-                        <CheckBox x:Name="chkUseVss" Content="Use VSS" Style="{StaticResource DarkCheckBox}" Margin="0,0,20,0"
+                    <!-- VSS and Scan Mode - aligned with column layout -->
+                    <Label Grid.Row="3" Grid.Column="0" Content="Options:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,4,0,8"/>
+                    <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,0,8">
+                        <CheckBox x:Name="chkUseVss" Content="Use VSS" Style="{StaticResource DarkCheckBox}" VerticalAlignment="Center"
                                   ToolTip="Create a shadow copy snapshot before syncing.&#x0a;Allows copying locked files (like Outlook PST).&#x0a;Requires admin rights."/>
-                        <Label Content="Scan Mode:" Style="{StaticResource DarkLabel}"/>
-                        <ComboBox x:Name="cmbScanMode" Width="100" Margin="5,0,0,0"
+                        <Label Content="Scan Mode:" Style="{StaticResource DarkLabel}" Margin="20,0,0,0" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="cmbScanMode" Width="100" Margin="5,0,0,0" VerticalAlignment="Center"
                                   ToolTip="Smart: Scans and splits based on size (recommended).&#x0a;Quick: Fixed depth split, faster startup.">
                             <ComboBoxItem Content="Smart" IsSelected="True"/>
                             <ComboBoxItem Content="Quick"/>
                         </ComboBox>
                     </StackPanel>
 
-                    <StackPanel Grid.Row="4" Grid.ColumnSpan="3" Orientation="Horizontal">
-                        <Label Content="Max Size:" Style="{StaticResource DarkLabel}"/>
+                    <!-- Chunking options - consistent spacing -->
+                    <Label Grid.Row="4" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center">
                         <TextBox x:Name="txtMaxSize" Width="50" Style="{StaticResource DarkTextBox}" Text="10"
                                  ToolTip="Split directories larger than this (GB).&#x0a;Smaller = more parallel jobs.&#x0a;Recommended: 5-20 GB"/>
-                        <Label Content="GB" Style="{StaticResource DarkLabel}" Margin="0,0,15,0"/>
+                        <Label Content="GB max" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
 
-                        <Label Content="Max Files:" Style="{StaticResource DarkLabel}"/>
-                        <TextBox x:Name="txtMaxFiles" Width="60" Style="{StaticResource DarkTextBox}" Text="50000"
+                        <TextBox x:Name="txtMaxFiles" Width="60" Style="{StaticResource DarkTextBox}" Text="50000" Margin="15,0,0,0"
                                  ToolTip="Split directories with more files than this.&#x0a;Recommended: 20,000-100,000"/>
+                        <Label Content="files max" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
 
-                        <Label Content="Max Depth:" Style="{StaticResource DarkLabel}" Margin="15,0,0,0"/>
-                        <TextBox x:Name="txtMaxDepth" Width="40" Style="{StaticResource DarkTextBox}" Text="5"
+                        <TextBox x:Name="txtMaxDepth" Width="40" Style="{StaticResource DarkTextBox}" Text="5" Margin="15,0,0,0"
                                  ToolTip="How deep to split directories.&#x0a;Higher = more granular but slower scan.&#x0a;Recommended: 3-6"/>
+                        <Label Content="depth" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Grid>
             </Border>
@@ -171,52 +286,49 @@
         <Grid Grid.Row="2">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
 
-            <!-- Control Bar -->
+            <!-- Control Bar with buttons aligned to config panel -->
             <Border Grid.Row="0" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
-                <StackPanel Orientation="Horizontal">
-                    <Label Content="Workers:" Style="{StaticResource DarkLabel}"
-                           ToolTip="Number of simultaneous robocopy processes.&#x0a;More = faster but uses more resources.&#x0a;Recommended: 2-8"/>
-                    <Slider x:Name="sldWorkers" Width="100" Minimum="1" Maximum="16" Value="4" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="txtWorkerCount" Text="4" Foreground="#E0E0E0" Width="25" Margin="5,0,20,0" VerticalAlignment="Center"/>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="250"/>  <!-- Match profile sidebar width -->
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
 
-                    <Button x:Name="btnRunAll" Content="&#x25B6; Run All" Style="{StaticResource DarkButton}" Width="100" Margin="0,0,10,0"
-                            ToolTip="Start syncing all enabled profiles in sequence"/>
-                    <Button x:Name="btnRunSelected" Content="&#x25B6; Run Selected" Style="{StaticResource DarkButton}" Width="120" Margin="0,0,10,0"
-                            ToolTip="Run only the currently selected profile"/>
-                    <Button x:Name="btnStop" Content="&#x23F9; Stop" Style="{StaticResource StopButton}" Width="80" Margin="0,0,10,0" IsEnabled="False"
-                            ToolTip="Stop all running robocopy jobs"/>
-                    <Button x:Name="btnSchedule" Content="&#x2699; Schedule" Style="{StaticResource DarkButton}" Width="100"
-                            ToolTip="Configure automated scheduled runs"/>
-                </StackPanel>
+                    <!-- Workers slider - centered under profile sidebar -->
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <Label Content="Workers:" Style="{StaticResource DarkLabel}"
+                               ToolTip="Number of simultaneous robocopy processes.&#x0a;More = faster but uses more resources.&#x0a;Recommended: 2-8"/>
+                        <Slider x:Name="sldWorkers" Width="100" Minimum="1" Maximum="16" Value="4" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="txtWorkerCount" Text="4" Foreground="#E0E0E0" Width="25" Margin="5,0,0,0" VerticalAlignment="Center"/>
+                    </StackPanel>
+
+                    <!-- Action buttons - left aligned with config panel, uniform width -->
+                    <DockPanel Grid.Column="1" Margin="10,0,0,0">
+                        <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                            <Button x:Name="btnRunAll" Content="&#x25B6; Run All" Style="{StaticResource RunButton}" Width="100" Margin="0,0,8,0"
+                                    ToolTip="Start syncing all enabled profiles in sequence"/>
+                            <Button x:Name="btnRunSelected" Content="&#x25B6; Run Sel" Style="{StaticResource RunButton}" Width="100" Margin="0,0,8,0"
+                                    ToolTip="Run only the currently selected profile"/>
+                            <Button x:Name="btnStop" Content="&#x23F9; Stop" Style="{StaticResource StopButton}" Width="100" Margin="0,0,8,0" IsEnabled="False"
+                                    ToolTip="Stop all running robocopy jobs"/>
+                            <Button x:Name="btnSchedule" Content="&#x1F4C5; Schedule" Style="{StaticResource ScheduleButton}" Width="100"
+                                    ToolTip="Configure automated scheduled runs"/>
+                        </StackPanel>
+                        <!-- Logs button pinned right -->
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button x:Name="btnLogs" Content="&#x1F4CB; Logs" Style="{StaticResource LogsButton}" Width="100"
+                                    ToolTip="Open log viewer window"/>
+                        </StackPanel>
+                    </DockPanel>
+                </Grid>
             </Border>
 
-            <!-- Chunk DataGrid -->
-            <DataGrid Grid.Row="1" x:Name="dgChunks" AutoGenerateColumns="False"
-                      Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
-                      GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#3E3E3E"
-                      RowHeaderWidth="0" IsReadOnly="True" SelectionMode="Single">
-                <DataGrid.Columns>
-                    <DataGridTextColumn Header="ID" Binding="{Binding ChunkId}" Width="50"/>
-                    <DataGridTextColumn Header="Path" Binding="{Binding SourcePath}" Width="400"/>
-                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
-                    <DataGridTemplateColumn Header="Progress" Width="150">
-                        <DataGridTemplateColumn.CellTemplate>
-                            <DataTemplate>
-                                <ProgressBar Value="{Binding Progress}" Maximum="100" Height="18"
-                                             Background="#3E3E3E" Foreground="#4CAF50"/>
-                            </DataTemplate>
-                        </DataGridTemplateColumn.CellTemplate>
-                    </DataGridTemplateColumn>
-                    <DataGridTextColumn Header="Speed" Binding="{Binding Speed}" Width="80"/>
-                </DataGrid.Columns>
-            </DataGrid>
-
-            <!-- Progress Summary -->
-            <Border Grid.Row="2" Background="#252525" CornerRadius="4" Padding="10" Margin="0,10,0,0">
+            <!-- Progress Summary - NOW ABOVE chunk grid -->
+            <Border Grid.Row="1" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
                 <Grid>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="*"/>
@@ -226,12 +338,14 @@
 
                     <StackPanel Grid.Column="0">
                         <TextBlock x:Name="txtProfileProgress" Text="Profile: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                        <ProgressBar x:Name="pbProfile" Height="20" Background="#3E3E3E" Foreground="#0078D4"/>
+                        <ProgressBar x:Name="pbProfile" Height="20" Minimum="0" Maximum="100" Value="0"
+                                     Background="#1A1A1A" Foreground="#00BFFF" BorderBrush="#555555" BorderThickness="1"/>
                     </StackPanel>
 
                     <StackPanel Grid.Column="1" Margin="20,0,0,0">
                         <TextBlock x:Name="txtOverallProgress" Text="Overall: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                        <ProgressBar x:Name="pbOverall" Height="20" Background="#3E3E3E" Foreground="#4CAF50"/>
+                        <ProgressBar x:Name="pbOverall" Height="20" Minimum="0" Maximum="100" Value="0"
+                                     Background="#1A1A1A" Foreground="#00FF7F" BorderBrush="#555555" BorderThickness="1"/>
                     </StackPanel>
 
                     <StackPanel Grid.Column="2" Margin="20,0,0,0">
@@ -241,17 +355,66 @@
                     </StackPanel>
                 </Grid>
             </Border>
+
+            <!-- Chunk DataGrid - NOW BELOW progress summary, takes remaining space -->
+            <DataGrid Grid.Row="2" x:Name="dgChunks" AutoGenerateColumns="False"
+                      Style="{StaticResource DarkDataGrid}"
+                      CellStyle="{StaticResource DarkDataGridCell}"
+                      RowStyle="{StaticResource DarkDataGridRow}"
+                      ColumnHeaderStyle="{StaticResource DarkDataGridColumnHeader}"
+                      AlternationCount="2"
+                      IsReadOnly="True" SelectionMode="Single">
+                <DataGrid.Columns>
+                    <DataGridTextColumn Header="ID" Binding="{Binding ChunkId}" Width="50"/>
+                    <DataGridTextColumn Header="Path" Binding="{Binding SourcePath}" Width="400"/>
+                    <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="100"/>
+                    <!--
+                        CUSTOM PROGRESS BAR - ScaleTransform Workaround
+
+                        WPF ProgressBar doesn't reliably render in PowerShell - the Value property
+                        updates but the visual fill doesn't repaint. Neither Dispatcher.Invoke,
+                        UpdateLayout(), nor Items.Refresh() fixes this.
+
+                        SOLUTION: Custom progress bar using Border + ScaleTransform:
+                        - Gray Border = background track
+                        - Green Border = fill, scaled horizontally via ScaleTransform.ScaleX
+                        - ProgressScale (0.0-1.0) binds directly to ScaleX
+                        - RenderTransformOrigin at X=0 makes it scale from left edge
+
+                        This bypasses ProgressBar entirely and works reliably.
+                    -->
+                    <DataGridTemplateColumn Header="Progress" Width="150">
+                        <DataGridTemplateColumn.CellTemplate>
+                            <DataTemplate>
+                                <Grid Height="18">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <!-- Background track -->
+                                    <Border Background="#3E3E3E" CornerRadius="2"/>
+                                    <!-- Progress fill - ScaleX bound to ProgressScale (0.0-1.0) -->
+                                    <Border Background="#4CAF50" CornerRadius="2" HorizontalAlignment="Stretch">
+                                        <Border.RenderTransform>
+                                            <ScaleTransform ScaleX="{Binding ProgressScale}" ScaleY="1"/>
+                                        </Border.RenderTransform>
+                                        <Border.RenderTransformOrigin>
+                                            <Point X="0" Y="0.5"/>
+                                        </Border.RenderTransformOrigin>
+                                    </Border>
+                                    <!-- Percentage text overlay -->
+                                    <TextBlock Text="{Binding Progress, StringFormat={}{0}%}"
+                                               HorizontalAlignment="Center" VerticalAlignment="Center"
+                                               Foreground="White" FontWeight="Bold"/>
+                                </Grid>
+                            </DataTemplate>
+                        </DataGridTemplateColumn.CellTemplate>
+                    </DataGridTemplateColumn>
+                    <DataGridTextColumn Header="Speed" Binding="{Binding Speed}" Width="80"/>
+                </DataGrid.Columns>
+            </DataGrid>
         </Grid>
 
         <!-- Status Bar -->
         <TextBlock Grid.Row="3" x:Name="txtStatus" Text="Ready" Foreground="#808080" Margin="0,10,0,5"/>
-
-        <!-- Log Panel -->
-        <Border Grid.Row="4" Background="#1A1A1A" BorderBrush="#3E3E3E" BorderThickness="1" CornerRadius="4">
-            <ScrollViewer x:Name="svLog" VerticalScrollBarVisibility="Auto">
-                <TextBlock x:Name="txtLog" Foreground="#808080" FontFamily="Consolas" FontSize="11"
-                           Padding="10" TextWrapping="Wrap"/>
-            </ScrollViewer>
-        </Border>
     </Grid>
 </Window>

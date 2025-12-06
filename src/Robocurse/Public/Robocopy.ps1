@@ -1,4 +1,4 @@
-# Robocurse Robocopy wrapper Functions
+﻿# Robocurse Robocopy wrapper Functions
 # Script-level bandwidth limit (set from config during replication start)
 $script:BandwidthLimitMbps = 0
 
@@ -73,6 +73,40 @@ function Get-BandwidthThrottleIPG {
     return $ipg
 }
 
+function Format-QuotedPath {
+    <#
+    .SYNOPSIS
+        Properly quotes a path for use in command-line arguments
+    .DESCRIPTION
+        When a path ends with a backslash and is quoted (e.g., "D:\"), the
+        backslash-quote sequence (\" ) is interpreted as an escaped quote by
+        the Windows command-line parser. This causes argument parsing to fail.
+
+        This function doubles trailing backslashes to prevent this issue:
+        - "D:\" becomes "D:\\" (the \\ is parsed as a single \)
+        - "C:\Users\Test\" becomes "C:\Users\Test\\"
+        - "C:\Users\Test" stays "C:\Users\Test" (no trailing backslash)
+    .PARAMETER Path
+        The path to quote
+    .OUTPUTS
+        String - Properly quoted path safe for command-line use
+    .EXAMPLE
+        Format-QuotedPath -Path "D:\"  # Returns "D:\\"
+        Format-QuotedPath -Path "C:\Users\Test"  # Returns "C:\Users\Test"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    # If path ends with backslash, double it to escape the \" problem
+    if ($Path.EndsWith('\')) {
+        return "`"$Path\`""
+    }
+    return "`"$Path`""
+}
+
 function New-RobocopyArguments {
     <#
     .SYNOPSIS
@@ -132,10 +166,20 @@ function New-RobocopyArguments {
 
         [hashtable]$RobocopyOptions = @{},
 
-        [string[]]$ChunkArgs = @(),
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [string[]]$ChunkArgs,
 
-        [switch]$DryRun
+        [switch]$DryRun,
+
+        # If false (default), adds /NFL /NDL to suppress per-file logging for smaller log files
+        [switch]$VerboseFileLogging
     )
+
+    # Handle null ChunkArgs (PS 5.1 unwraps empty arrays to null)
+    if ($null -eq $ChunkArgs) {
+        $ChunkArgs = @()
+    }
 
     # Validate paths for command injection before using them
     $safeSourcePath = Get-SanitizedPath -Path $SourcePath -ParameterName "SourcePath"
@@ -153,20 +197,22 @@ function New-RobocopyArguments {
     # Build argument list
     $argList = [System.Collections.Generic.List[string]]::new()
 
-    # Source and destination (quoted for paths with spaces)
-    $argList.Add("`"$safeSourcePath`"")
-    $argList.Add("`"$safeDestPath`"")
+    # Source and destination (use Format-QuotedPath to handle trailing backslash escaping)
+    $argList.Add((Format-QuotedPath -Path $safeSourcePath))
+    $argList.Add((Format-QuotedPath -Path $safeDestPath))
 
     # Copy mode: /MIR (mirror with delete) or /E (copy subdirs including empty)
     $argList.Add($(if ($noMirror) { "/E" } else { "/MIR" }))
 
     # Profile-specified switches or defaults
     if ($RobocopyOptions.Switches -and $RobocopyOptions.Switches.Count -gt 0) {
-        # Filter out switches we handle separately
-        $customSwitches = $RobocopyOptions.Switches | Where-Object {
+        # Filter out switches we handle separately (case-insensitive)
+        $filteredSwitches = $RobocopyOptions.Switches | Where-Object {
             $_ -notmatch '^/(MT|R|W|LOG|MIR|E|TEE|NP|BYTES)' -and
             $_ -notmatch '^/LOG:'
         }
+        # Validate remaining switches against security whitelist to prevent injection
+        $customSwitches = Get-SanitizedRobocopySwitches -Switches $filteredSwitches
         foreach ($sw in $customSwitches) {
             $argList.Add($sw)
         }
@@ -181,9 +227,16 @@ function New-RobocopyArguments {
     $argList.Add("/MT:$ThreadsPerJob")
     $argList.Add("/R:$retryCount")
     $argList.Add("/W:$retryWait")
-    $argList.Add("/LOG:`"$safeLogPath`"")
+    $argList.Add("/LOG:$(Format-QuotedPath -Path $safeLogPath)")
     $argList.Add("/TEE")
     $argList.Add("/NP")
+
+    # Suppress per-file logging unless verbose mode is enabled
+    # /NFL = No File List, /NDL = No Directory List
+    if (-not $VerboseFileLogging) {
+        $argList.Add("/NFL")
+        $argList.Add("/NDL")
+    }
     $argList.Add("/BYTES")
 
     # Junction handling
@@ -203,7 +256,7 @@ function New-RobocopyArguments {
         if ($safeExcludeFiles.Count -gt 0) {
             $argList.Add("/XF")
             foreach ($pattern in $safeExcludeFiles) {
-                $argList.Add("`"$pattern`"")
+                $argList.Add((Format-QuotedPath -Path $pattern))
             }
         }
     }
@@ -214,7 +267,7 @@ function New-RobocopyArguments {
         if ($safeExcludeDirs.Count -gt 0) {
             $argList.Add("/XD")
             foreach ($dir in $safeExcludeDirs) {
-                $argList.Add("`"$dir`"")
+                $argList.Add((Format-QuotedPath -Path $dir))
             }
         }
     }
@@ -288,7 +341,10 @@ function Start-RobocopyJob {
 
         [hashtable]$RobocopyOptions = @{},
 
-        [switch]$DryRun
+        [switch]$DryRun,
+
+        # If true, log every file copied; if false (default), only log summary
+        [switch]$VerboseFileLogging
     )
 
     # Validate Chunk properties
@@ -308,7 +364,8 @@ function Start-RobocopyJob {
         -ThreadsPerJob $ThreadsPerJob `
         -RobocopyOptions $RobocopyOptions `
         -ChunkArgs $chunkArgs `
-        -DryRun:$DryRun
+        -DryRun:$DryRun `
+        -VerboseFileLogging:$VerboseFileLogging
 
     # Create process start info
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -327,6 +384,7 @@ function Start-RobocopyJob {
     $psi.RedirectStandardError = $false
 
     Write-RobocurseLog -Message "Robocopy args: $($argList -join ' ')" -Level 'Debug' -Component 'Robocopy'
+    Write-Host "[ROBOCOPY CMD] $($psi.FileName) $($psi.Arguments)"
 
     # Start the process
     $process = [System.Diagnostics.Process]::Start($psi)
@@ -456,6 +514,7 @@ function ConvertFrom-RobocopyLog {
         CurrentFile = ""
         ParseSuccess = $false
         ParseWarning = $null
+        ErrorMessage = $null  # Extracted error message(s) from robocopy output
     }
 
     # Check if log file exists
@@ -622,6 +681,32 @@ function ConvertFrom-RobocopyLog {
         }
     }
 
+    # Extract error messages from log content
+    # Robocopy error lines typically contain "ERROR" followed by error code and message
+    # Common patterns:
+    #   - "ERROR 5 (0x00000005) Access is denied."
+    #   - "ERROR 2 (0x00000002) The system cannot find the file specified."
+    #   - "ERROR 3 (0x00000003) The system cannot find the path specified."
+    #   - "ERROR : xxx" (generic error lines)
+    if ($content) {
+        $errorLines = @()
+        $lines = $content -split "`r?`n"
+        foreach ($line in $lines) {
+            # Match ERROR followed by error code or message
+            if ($line -match '\bERROR\s+(\d+|:)\s*(.*)') {
+                $trimmedLine = $line.Trim()
+                if ($trimmedLine -and $trimmedLine.Length -gt 5) {
+                    $errorLines += $trimmedLine
+                }
+            }
+        }
+        # Deduplicate and limit to first few unique errors
+        if ($errorLines.Count -gt 0) {
+            $uniqueErrors = $errorLines | Select-Object -Unique | Select-Object -First 5
+            $result.ErrorMessage = $uniqueErrors -join "; "
+        }
+    }
+
     return $result
 }
 
@@ -663,32 +748,330 @@ function Wait-RobocopyJob {
         [int]$TimeoutSeconds = 0
     )
 
-    # Wait for process to complete
-    if ($TimeoutSeconds -gt 0) {
-        $completed = $Job.Process.WaitForExit($TimeoutSeconds * 1000)
-        if (-not $completed) {
-            $Job.Process.Kill()
-            throw "Robocopy job timed out after $TimeoutSeconds seconds"
+    # Wait for process to complete with proper resource cleanup
+    try {
+        if ($TimeoutSeconds -gt 0) {
+            $completed = $Job.Process.WaitForExit($TimeoutSeconds * 1000)
+            if (-not $completed) {
+                try { $Job.Process.Kill() } catch { }
+                throw "Robocopy job timed out after $TimeoutSeconds seconds"
+            }
+        }
+        else {
+            $Job.Process.WaitForExit()
+        }
+
+        # Calculate duration
+        $duration = [datetime]::Now - $Job.StartTime
+
+        # Get exit code and interpret it
+        $exitCode = $Job.Process.ExitCode
+        $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
+
+        # Parse final statistics from log
+        $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
+
+        return [PSCustomObject]@{
+            ExitCode = $exitCode
+            ExitMeaning = $exitMeaning
+            Duration = $duration
+            Stats = $finalStats
         }
     }
-    else {
-        $Job.Process.WaitForExit()
+    finally {
+        # Always dispose process handle to prevent handle leaks
+        # Critical for long-running operations with many jobs
+        try { $Job.Process.Dispose() } catch { }
+    }
+}
+
+function Test-RobocopyVerification {
+    <#
+    .SYNOPSIS
+        Verifies a copy operation by comparing source and destination
+    .DESCRIPTION
+        Runs robocopy in list mode (/L) to compare source and destination directories.
+        This is useful as a post-copy verification step to detect:
+        - Files that failed to copy silently
+        - Files that were modified during copy
+        - Timestamp mismatches (when using /FFT for FAT file time tolerance)
+
+        The function returns a verification result indicating whether the
+        directories are in sync and details about any discrepancies.
+    .PARAMETER SourcePath
+        Source directory path that was copied from
+    .PARAMETER DestinationPath
+        Destination directory path that was copied to
+    .PARAMETER UseFatTimeTolerance
+        Use FAT file system time tolerance (/FFT - 2 second granularity).
+        Useful when copying to/from FAT32 or network shares with time precision issues.
+    .PARAMETER RobocopyOptions
+        Optional hashtable of robocopy options (ExcludeFiles, ExcludeDirs) to match
+        the original copy operation
+    .OUTPUTS
+        PSCustomObject with:
+        - Verified: $true if source and destination are in sync
+        - MissingFiles: Count of files in source but not destination
+        - ExtraFiles: Count of files in destination but not source
+        - MismatchedFiles: Count of files with different sizes/timestamps
+        - Details: Detailed verification message
+        - LogPath: Path to verification log file
+    .EXAMPLE
+        $result = Test-RobocopyVerification -SourcePath "C:\Source" -DestinationPath "D:\Backup"
+        if ($result.Verified) { "Backup verified successfully" }
+    .EXAMPLE
+        # Verify with FAT time tolerance for network shares
+        $result = Test-RobocopyVerification -SourcePath "C:\Data" -DestinationPath "\\server\share" -UseFatTimeTolerance
+    .NOTES
+        This function is designed for post-copy verification and does NOT modify any files.
+        It uses robocopy /L (list-only) mode exclusively.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$DestinationPath,
+
+        [switch]$UseFatTimeTolerance,
+
+        [hashtable]$RobocopyOptions = @{}
+    )
+
+    # Validate paths
+    $safeSourcePath = Get-SanitizedPath -Path $SourcePath -ParameterName "SourcePath"
+    $safeDestPath = Get-SanitizedPath -Path $DestinationPath -ParameterName "DestinationPath"
+
+    # Create temp log file for verification
+    $tempLogPath = Join-Path ([System.IO.Path]::GetTempPath()) "Robocurse-Verify-$([guid]::NewGuid().ToString('N')).log"
+
+    # Build verification arguments
+    # /L = List only (no copying)
+    # /E = Include subdirectories including empty
+    # /NJH /NJS = No job header/summary (cleaner parsing)
+    # /BYTES = Show sizes in bytes for precision
+    $argList = [System.Collections.Generic.List[string]]::new()
+    $argList.Add((Format-QuotedPath -Path $safeSourcePath))
+    $argList.Add((Format-QuotedPath -Path $safeDestPath))
+    $argList.Add("/L")
+    $argList.Add("/E")
+    $argList.Add("/NJH")
+    $argList.Add("/NJS")
+    $argList.Add("/BYTES")
+    $argList.Add("/R:0")
+    $argList.Add("/W:0")
+    $argList.Add("/LOG:$(Format-QuotedPath -Path $tempLogPath)")
+
+    # Add FAT time tolerance if requested
+    if ($UseFatTimeTolerance) {
+        $argList.Add("/FFT")
     }
 
-    # Calculate duration
-    $duration = [datetime]::Now - $Job.StartTime
-
-    # Get exit code and interpret it
-    $exitCode = $Job.Process.ExitCode
-    $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
-
-    # Parse final statistics from log
-    $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
-
-    return [PSCustomObject]@{
-        ExitCode = $exitCode
-        ExitMeaning = $exitMeaning
-        Duration = $duration
-        Stats = $finalStats
+    # Add exclusions from original copy options
+    if ($RobocopyOptions.ExcludeFiles -and $RobocopyOptions.ExcludeFiles.Count -gt 0) {
+        $safeExcludeFiles = Get-SanitizedExcludePatterns -Patterns $RobocopyOptions.ExcludeFiles -Type 'Files'
+        if ($safeExcludeFiles.Count -gt 0) {
+            $argList.Add("/XF")
+            foreach ($pattern in $safeExcludeFiles) {
+                $argList.Add((Format-QuotedPath -Path $pattern))
+            }
+        }
     }
+
+    if ($RobocopyOptions.ExcludeDirs -and $RobocopyOptions.ExcludeDirs.Count -gt 0) {
+        $safeExcludeDirs = Get-SanitizedExcludePatterns -Patterns $RobocopyOptions.ExcludeDirs -Type 'Dirs'
+        if ($safeExcludeDirs.Count -gt 0) {
+            $argList.Add("/XD")
+            foreach ($dir in $safeExcludeDirs) {
+                $argList.Add((Format-QuotedPath -Path $dir))
+            }
+        }
+    }
+
+    # Run robocopy in verification mode
+    $result = [PSCustomObject]@{
+        Verified = $false
+        MissingFiles = 0
+        ExtraFiles = 0
+        MismatchedFiles = 0
+        Details = ""
+        LogPath = $tempLogPath
+    }
+
+    try {
+        # Require validated robocopy path
+        if (-not $script:RobocopyPath) {
+            throw "Robocopy path not validated. Call Test-RobocopyAvailable before verification."
+        }
+
+        Write-RobocurseLog -Message "Running verification: $safeSourcePath -> $safeDestPath" -Level 'Debug' -Component 'Robocopy'
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $script:RobocopyPath
+        $psi.Arguments = $argList -join ' '
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $false
+        $psi.RedirectStandardError = $false
+
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $process.WaitForExit()
+
+        $exitCode = $process.ExitCode
+        $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
+
+        # Parse the verification log
+        if (Test-Path $tempLogPath) {
+            $logContent = Get-Content -Path $tempLogPath -Raw -ErrorAction SilentlyContinue
+
+            if ($logContent) {
+                # Count files that would be copied (missing from destination)
+                $newFileMatches = [regex]::Matches($logContent, '^\s*New File', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+                $result.MissingFiles = $newFileMatches.Count
+
+                # Count extra files (in destination but not source) - only with /MIR would remove them
+                $extraFileMatches = [regex]::Matches($logContent, '^\s*\*EXTRA File', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+                $result.ExtraFiles = $extraFileMatches.Count
+
+                # Count mismatched files (different size/time)
+                $newerMatches = [regex]::Matches($logContent, '^\s*(Newer|Older|Changed)', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+                $result.MismatchedFiles = $newerMatches.Count
+            }
+        }
+
+        # Determine verification status
+        # Exit codes 0-3 are generally successful states
+        # 0 = No changes needed (perfect sync)
+        # 1 = Files were different (would be copied)
+        # 2 = Extra files detected
+        # 3 = Both 1 and 2
+        $result.Verified = ($result.MissingFiles -eq 0 -and $result.MismatchedFiles -eq 0)
+
+        if ($result.Verified) {
+            $result.Details = "Verification passed: Source and destination are in sync"
+            if ($result.ExtraFiles -gt 0) {
+                $result.Details += " ($($result.ExtraFiles) extra files in destination)"
+            }
+        }
+        else {
+            $issues = @()
+            if ($result.MissingFiles -gt 0) { $issues += "$($result.MissingFiles) missing files" }
+            if ($result.MismatchedFiles -gt 0) { $issues += "$($result.MismatchedFiles) mismatched files" }
+            $result.Details = "Verification failed: " + ($issues -join ", ")
+        }
+
+        Write-RobocurseLog -Message "Verification result: $($result.Details)" -Level 'Info' -Component 'Robocopy'
+    }
+    catch {
+        $result.Details = "Verification error: $($_.Exception.Message)"
+        Write-RobocurseLog -Message "Verification failed: $_" -Level 'Error' -Component 'Robocopy'
+    }
+
+    return $result
+}
+
+function Write-RobocopyCompletionEvent {
+    <#
+    .SYNOPSIS
+        Emits structured SIEM events for robocopy job completion
+    .DESCRIPTION
+        Parses robocopy job results and emits structured SIEM events for:
+        - ChunkComplete: Successful chunk replication with detailed stats
+        - ChunkError: Failed chunks with error details
+
+        This enables enterprise monitoring and alerting on file replication operations.
+    .PARAMETER Job
+        Job object from Start-RobocopyJob
+    .PARAMETER JobResult
+        Result from Wait-RobocopyJob containing ExitCode, ExitMeaning, Duration, Stats
+    .PARAMETER ChunkId
+        Unique identifier for the chunk
+    .PARAMETER ProfileName
+        Name of the profile this chunk belongs to
+    .EXAMPLE
+        $result = Wait-RobocopyJob -Job $job
+        Write-RobocopyCompletionEvent -Job $job -JobResult $result -ChunkId 42 -ProfileName "DailyBackup"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Job,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$JobResult,
+
+        [Parameter(Mandatory)]
+        [int]$ChunkId,
+
+        [string]$ProfileName = "Unknown"
+    )
+
+    $stats = $JobResult.Stats
+    $exitMeaning = $JobResult.ExitMeaning
+
+    # Determine event type based on exit code severity
+    $eventType = if ($exitMeaning.Severity -in @('Fatal', 'Error')) {
+        'ChunkError'
+    } else {
+        'ChunkComplete'
+    }
+
+    # Build structured event data
+    $eventData = @{
+        chunkId = $ChunkId
+        profileName = $ProfileName
+        sourcePath = $Job.Chunk.SourcePath
+        destinationPath = $Job.Chunk.DestinationPath
+        exitCode = $JobResult.ExitCode
+        exitSeverity = $exitMeaning.Severity
+        exitMessage = $exitMeaning.Message
+        durationSeconds = [math]::Round($JobResult.Duration.TotalSeconds, 2)
+        dryRun = $Job.DryRun
+
+        # File statistics
+        filesCopied = if ($stats) { $stats.FilesCopied } else { 0 }
+        filesSkipped = if ($stats) { $stats.FilesSkipped } else { 0 }
+        filesFailed = if ($stats) { $stats.FilesFailed } else { 0 }
+
+        # Directory statistics
+        dirsCopied = if ($stats) { $stats.DirsCopied } else { 0 }
+        dirsSkipped = if ($stats) { $stats.DirsSkipped } else { 0 }
+        dirsFailed = if ($stats) { $stats.DirsFailed } else { 0 }
+
+        # Byte statistics
+        bytesCopied = if ($stats) { $stats.BytesCopied } else { 0 }
+
+        # Throughput calculation
+        bytesPerSecond = if ($JobResult.Duration.TotalSeconds -gt 0 -and $stats.BytesCopied -gt 0) {
+            [math]::Round($stats.BytesCopied / $JobResult.Duration.TotalSeconds, 0)
+        } else { 0 }
+
+        # Exit code flags for detailed analysis
+        flags = @{
+            filesCopied = $exitMeaning.FilesCopied
+            extrasDetected = $exitMeaning.ExtrasDetected
+            mismatchesFound = $exitMeaning.MismatchesFound
+            copyErrors = $exitMeaning.CopyErrors
+            fatalError = $exitMeaning.FatalError
+        }
+    }
+
+    # Add error message if present
+    if ($stats -and $stats.ErrorMessage) {
+        $eventData.errorMessage = $stats.ErrorMessage
+    }
+
+    # Emit the SIEM event
+    Write-SiemEvent -EventType $eventType -Data $eventData
+
+    # Log summary
+    $logLevel = if ($eventType -eq 'ChunkError') { 'Error' } else { 'Info' }
+    $summaryMsg = "Chunk #$ChunkId completed: $($eventData.filesCopied) files, $(Format-FileSize -Bytes $eventData.bytesCopied) in $([math]::Round($JobResult.Duration.TotalSeconds, 1))s"
+    if ($eventData.filesFailed -gt 0) {
+        $summaryMsg += " ($($eventData.filesFailed) failed)"
+    }
+    Write-RobocurseLog -Message $summaryMsg -Level $logLevel -Component 'Robocopy'
 }

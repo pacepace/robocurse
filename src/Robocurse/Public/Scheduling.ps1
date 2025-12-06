@@ -1,4 +1,46 @@
-# Robocurse Scheduling Functions
+﻿# Robocurse Scheduling Functions
+function Get-UniqueTaskName {
+    <#
+    .SYNOPSIS
+        Generates a unique task name based on config path
+    .DESCRIPTION
+        Creates a unique scheduled task name by hashing the config file path.
+        This prevents collisions when multiple Robocurse instances are deployed
+        with different configurations on the same machine.
+    .PARAMETER ConfigPath
+        Path to the configuration file
+    .PARAMETER Prefix
+        Optional prefix for the task name. Default: "Robocurse"
+    .OUTPUTS
+        String - Unique task name like "Robocurse-A1B2C3D4"
+    .EXAMPLE
+        Get-UniqueTaskName -ConfigPath "C:\configs\backup.json"
+        # Returns something like "Robocurse-7F3A2B1C"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ConfigPath,
+
+        [string]$Prefix = "Robocurse"
+    )
+
+    # Normalize path for consistent hashing
+    $normalizedPath = [System.IO.Path]::GetFullPath($ConfigPath).ToLowerInvariant()
+
+    # Create a short hash (first 8 chars of SHA256)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($normalizedPath))
+        $hashString = [BitConverter]::ToString($hashBytes).Replace("-", "").Substring(0, 8)
+    }
+    finally {
+        $sha256.Dispose()
+    }
+
+    return "$Prefix-$hashString"
+}
+
 function Register-RobocurseTask {
     <#
     .SYNOPSIS
@@ -7,11 +49,17 @@ function Register-RobocurseTask {
         Registers a Windows scheduled task to run Robocurse automatically.
         Supports daily, weekly, and hourly schedules with flexible configuration.
 
+        When TaskName is not specified, a unique name is auto-generated based on
+        the config file path hash. This prevents collisions when multiple Robocurse
+        instances are deployed with different configurations on the same machine.
+
         SECURITY NOTE: When using -RunAsSystem, the script path is validated to ensure
         it exists and has a .ps1 extension. For additional security, consider placing
         scripts in protected directories (e.g., Program Files) that require admin to modify.
     .PARAMETER TaskName
-        Name for the scheduled task. Default: "Robocurse-Replication"
+        Name for the scheduled task. If not specified, a unique name is auto-generated
+        based on the config file path (e.g., "Robocurse-7F3A2B1C"). This ensures
+        multiple Robocurse instances can coexist without task name collisions.
     .PARAMETER ConfigPath
         Path to config file (mandatory)
     .PARAMETER Schedule
@@ -54,8 +102,7 @@ function Register-RobocurseTask {
     #>
     [CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'High')]
     param(
-        [ValidateNotNullOrEmpty()]
-        [string]$TaskName = "Robocurse-Replication",
+        [string]$TaskName,  # If not specified, auto-generated from ConfigPath hash
 
         [Parameter(Mandatory)]
         [ValidateNotNullOrEmpty()]
@@ -97,6 +144,13 @@ function Register-RobocurseTask {
         # Validate config path exists (inside function body so mocks can intercept)
         if (-not (Test-Path -Path $ConfigPath -PathType Leaf)) {
             return New-OperationResult -Success $false -ErrorMessage "ConfigPath '$ConfigPath' does not exist or is not a file"
+        }
+
+        # Auto-generate unique task name if not specified
+        # This prevents collisions when multiple Robocurse instances use different configs
+        if ([string]::IsNullOrWhiteSpace($TaskName)) {
+            $TaskName = Get-UniqueTaskName -ConfigPath $ConfigPath
+            Write-RobocurseLog -Message "Auto-generated task name: $TaskName" -Level 'Info' -Component 'Scheduler'
         }
 
         # Get script path - use explicit parameter if provided, otherwise auto-detect
@@ -292,24 +346,29 @@ function Unregister-RobocurseTask {
         Removes the Robocurse scheduled task
     .DESCRIPTION
         Unregisters the specified scheduled task from Windows Task Scheduler.
+        If TaskName is not specified and ConfigPath is provided, derives the
+        task name from the config path hash (same logic as Register-RobocurseTask).
     .PARAMETER TaskName
-        Name of task to remove. Default: "Robocurse-Replication"
+        Name of task to remove. If not specified, must provide ConfigPath.
+    .PARAMETER ConfigPath
+        Path to config file. Used to derive task name if TaskName not specified.
     .OUTPUTS
         OperationResult - Success=$true with Data=$TaskName on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
-        $result = Unregister-RobocurseTask
+        $result = Unregister-RobocurseTask -TaskName "Robocurse-7F3A2B1C"
         if ($result.Success) { "Task removed" }
     .EXAMPLE
-        $result = Unregister-RobocurseTask -TaskName "Custom-Task"
-        if (-not $result.Success) { Write-Error $result.ErrorMessage }
+        $result = Unregister-RobocurseTask -ConfigPath "C:\config.json"
+        # Derives task name from config path, same as Register-RobocurseTask
     .EXAMPLE
-        Unregister-RobocurseTask -WhatIf
+        Unregister-RobocurseTask -TaskName "Custom-Task" -WhatIf
         # Shows what would be removed without actually deleting
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
-        [ValidateNotNullOrEmpty()]
-        [string]$TaskName = "Robocurse-Replication"
+        [string]$TaskName,
+
+        [string]$ConfigPath
     )
 
     try {
@@ -317,6 +376,14 @@ function Unregister-RobocurseTask {
         if (-not (Test-IsWindowsPlatform)) {
             Write-RobocurseLog -Message "Scheduled tasks are only supported on Windows" -Level 'Warning' -Component 'Scheduler'
             return New-OperationResult -Success $false -ErrorMessage "Scheduled tasks are only supported on Windows"
+        }
+
+        # Derive task name from ConfigPath if not specified
+        if ([string]::IsNullOrWhiteSpace($TaskName)) {
+            if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
+                return New-OperationResult -Success $false -ErrorMessage "Either TaskName or ConfigPath must be specified"
+            }
+            $TaskName = Get-UniqueTaskName -ConfigPath $ConfigPath
         }
 
         if ($PSCmdlet.ShouldProcess($TaskName, "Unregister scheduled task")) {

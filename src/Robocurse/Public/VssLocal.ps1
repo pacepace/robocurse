@@ -1,133 +1,6 @@
-# Robocurse Vss Functions
-# Path to track active VSS snapshots (for orphan cleanup)
-# Handle cross-platform: TEMP on Windows, TMPDIR on macOS, /tmp fallback
-$script:VssTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
-$script:VssTrackingFile = Join-Path $script:VssTempDir "Robocurse-VSS-Tracking.json"
-
-function Invoke-WithVssTrackingMutex {
-    <#
-    .SYNOPSIS
-        Executes a scriptblock while holding the VSS tracking file mutex
-    .DESCRIPTION
-        Acquires a named mutex to synchronize access to the VSS tracking file
-        across multiple processes. Releases the mutex in a finally block to
-        ensure cleanup even on errors.
-    .PARAMETER ScriptBlock
-        Code to execute while holding the mutex
-    .PARAMETER TimeoutMs
-        Milliseconds to wait for mutex acquisition (default: 10000)
-    .OUTPUTS
-        Result of the scriptblock, or $null if mutex acquisition times out
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [scriptblock]$ScriptBlock,
-
-        [int]$TimeoutMs = 10000
-    )
-
-    $mutex = $null
-    $mutexAcquired = $false
-    try {
-        # Include session ID in mutex name to isolate different user sessions
-        # This prevents DoS attacks on multi-user systems where another user
-        # could create the mutex first
-        $sessionId = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
-        $mutexName = "Global\RobocurseVssTracking_Session$sessionId"
-        $mutex = [System.Threading.Mutex]::new($false, $mutexName)
-
-        $mutexAcquired = $mutex.WaitOne($TimeoutMs)
-        if (-not $mutexAcquired) {
-            Write-RobocurseLog -Message "Timeout waiting for VSS tracking file lock" -Level 'Warning' -Component 'VSS'
-            return $null
-        }
-
-        return & $ScriptBlock
-    }
-    finally {
-        if ($mutex) {
-            if ($mutexAcquired) {
-                try { $mutex.ReleaseMutex() } catch {
-                    # Log release failures - may indicate logic bugs (releasing unowned mutex)
-                    Write-RobocurseLog -Message "Failed to release VSS tracking mutex: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
-                }
-            }
-            $mutex.Dispose()
-        }
-    }
-}
-
-function Test-VssPrivileges {
-    <#
-    .SYNOPSIS
-        Checks if the current session has privileges required for VSS operations
-    .DESCRIPTION
-        VSS snapshot creation requires Administrator privileges on Windows.
-        This function performs a preflight check to verify privileges before
-        attempting VSS operations that would otherwise fail.
-
-        Also checks that the VSS service is running.
-    .OUTPUTS
-        OperationResult - Success=$true if all checks pass, Success=$false with details on failure
-    .EXAMPLE
-        $check = Test-VssPrivileges
-        if (-not $check.Success) {
-            Write-Warning "VSS not available: $($check.ErrorMessage)"
-        }
-    #>
-    [CmdletBinding()]
-    param()
-
-    # Skip if not Windows
-    if (-not (Test-IsWindowsPlatform)) {
-        return New-OperationResult -Success $false -ErrorMessage "VSS is only available on Windows platforms"
-    }
-
-    $issues = @()
-
-    # Check for Administrator privileges
-    try {
-        $currentPrincipal = [System.Security.Principal.WindowsPrincipal]::new(
-            [System.Security.Principal.WindowsIdentity]::GetCurrent()
-        )
-        $isAdmin = $currentPrincipal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
-
-        if (-not $isAdmin) {
-            $issues += "Administrator privileges required for VSS operations. Run PowerShell as Administrator."
-        }
-    }
-    catch {
-        $issues += "Unable to check administrator privileges: $($_.Exception.Message)"
-    }
-
-    # Check if VSS service is running
-    try {
-        $vssService = Get-Service -Name 'VSS' -ErrorAction SilentlyContinue
-        if ($null -eq $vssService) {
-            $issues += "VSS (Volume Shadow Copy) service not found"
-        }
-        elseif ($vssService.Status -ne 'Running') {
-            # VSS service is demand-start, so not running is OK - it will start when needed
-            # But if it's disabled, that's a problem
-            if ($vssService.StartType -eq 'Disabled') {
-                $issues += "VSS service is disabled. Enable it via services.msc or: Set-Service -Name VSS -StartupType Manual"
-            }
-        }
-    }
-    catch {
-        $issues += "Unable to check VSS service status: $($_.Exception.Message)"
-    }
-
-    if ($issues.Count -gt 0) {
-        $errorMsg = $issues -join "; "
-        Write-RobocurseLog -Message "VSS privilege check failed: $errorMsg" -Level 'Warning' -Component 'VSS'
-        return New-OperationResult -Success $false -ErrorMessage $errorMsg
-    }
-
-    Write-RobocurseLog -Message "VSS privilege check passed" -Level 'Debug' -Component 'VSS'
-    return New-OperationResult -Success $true -Data "All VSS prerequisites met"
-}
+# Robocurse VSS Local Functions
+# Local VSS snapshot and junction operations
+# Requires VssCore.ps1 to be loaded first (handled by Robocurse.psm1)
 
 function Clear-OrphanVssSnapshots {
     <#
@@ -136,6 +9,9 @@ function Clear-OrphanVssSnapshots {
     .DESCRIPTION
         Reads the VSS tracking file and removes any snapshots that are still present.
         This should be called at startup to clean up after unexpected terminations.
+
+        Only successfully deleted snapshots are removed from the tracking file.
+        Failed deletions are retained for retry on the next cleanup attempt.
     .OUTPUTS
         Number of snapshots cleaned up
     .EXAMPLE
@@ -158,8 +34,12 @@ function Clear-OrphanVssSnapshots {
     }
 
     $cleaned = 0
+    $failedSnapshots = @()
+
     try {
         $trackedSnapshots = Get-Content $script:VssTrackingFile -Raw | ConvertFrom-Json
+        # Ensure we have an array even for single items
+        $trackedSnapshots = @($trackedSnapshots)
 
         foreach ($snapshot in $trackedSnapshots) {
             if ($snapshot.ShadowId) {
@@ -169,13 +49,44 @@ function Clear-OrphanVssSnapshots {
                         Write-RobocurseLog -Message "Cleaned up orphan VSS snapshot: $($snapshot.ShadowId)" -Level 'Info' -Component 'VSS'
                         $cleaned++
                     }
+                    else {
+                        # Keep track of failed deletions for retry on next cleanup
+                        Write-RobocurseLog -Message "Failed to clean up orphan VSS snapshot: $($snapshot.ShadowId) - $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+                        $failedSnapshots += $snapshot
+                    }
+                }
+                else {
+                    # WhatIf mode - don't count as cleaned, but don't add to failed either
                 }
             }
         }
 
-        # Clear the tracking file after cleanup
-        if ($PSCmdlet.ShouldProcess($script:VssTrackingFile, "Remove VSS tracking file")) {
-            Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+        # Update tracking file: only clear if all succeeded, otherwise keep failed entries
+        if ($PSCmdlet.ShouldProcess($script:VssTrackingFile, "Update VSS tracking file")) {
+            if ($failedSnapshots.Count -eq 0) {
+                # All snapshots cleaned successfully - remove tracking file
+                Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
+                Write-RobocurseLog -Message "All orphan VSS snapshots cleaned - removed tracking file" -Level 'Debug' -Component 'VSS'
+            }
+            elseif ($cleaned -gt 0) {
+                # Some succeeded, some failed - update tracking file with failed entries only
+                $tempPath = "$($script:VssTrackingFile).tmp"
+                $backupPath = "$($script:VssTrackingFile).bak"
+                ConvertTo-Json -InputObject $failedSnapshots -Depth 5 | Set-Content $tempPath -Encoding UTF8
+
+                # Atomic replace with backup
+                if (Test-Path $backupPath) {
+                    Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                }
+                [System.IO.File]::Move($script:VssTrackingFile, $backupPath)
+                [System.IO.File]::Move($tempPath, $script:VssTrackingFile)
+                if (Test-Path $backupPath) {
+                    Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+                }
+
+                Write-RobocurseLog -Message "Updated tracking file: $($failedSnapshots.Count) snapshots remain for retry" -Level 'Warning' -Component 'VSS'
+            }
+            # If cleaned=0 and failedSnapshots.Count > 0, tracking file unchanged
         }
     }
     catch {
@@ -183,132 +94,6 @@ function Clear-OrphanVssSnapshots {
     }
 
     return $cleaned
-}
-
-function Add-VssToTracking {
-    <#
-    .SYNOPSIS
-        Adds a VSS snapshot to the tracking file
-    .DESCRIPTION
-        Uses a mutex to prevent race conditions when multiple processes
-        access the tracking file concurrently.
-    .PARAMETER SnapshotInfo
-        Snapshot info object with ShadowId
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject]$SnapshotInfo
-    )
-
-    try {
-        Invoke-WithVssTrackingMutex -ScriptBlock {
-            $tracked = @()
-            if (Test-Path $script:VssTrackingFile) {
-                try {
-                    $tracked = @(Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json)
-                }
-                catch {
-                    # File might be corrupted or empty - start fresh
-                    $tracked = @()
-                }
-            }
-
-            $tracked += [PSCustomObject]@{
-                ShadowId = $SnapshotInfo.ShadowId
-                SourceVolume = $SnapshotInfo.SourceVolume
-                CreatedAt = $SnapshotInfo.CreatedAt.ToString('o')
-            }
-
-            $tracked | ConvertTo-Json -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
-        }
-    }
-    catch {
-        Write-RobocurseLog -Message "Failed to add VSS to tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
-    }
-}
-
-function Remove-VssFromTracking {
-    <#
-    .SYNOPSIS
-        Removes a VSS snapshot from the tracking file
-    .DESCRIPTION
-        Uses a mutex to prevent race conditions when multiple processes
-        access the tracking file concurrently.
-    .PARAMETER ShadowId
-        Shadow ID to remove
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$ShadowId
-    )
-
-    try {
-        Invoke-WithVssTrackingMutex -ScriptBlock {
-            if (-not (Test-Path $script:VssTrackingFile)) {
-                return
-            }
-
-            try {
-                $tracked = @(Get-Content $script:VssTrackingFile -Raw -ErrorAction Stop | ConvertFrom-Json)
-            }
-            catch {
-                # File might be corrupted - just remove it
-                Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
-                return
-            }
-
-            $tracked = @($tracked | Where-Object { $_.ShadowId -ne $ShadowId })
-
-            if ($tracked.Count -eq 0) {
-                Remove-Item $script:VssTrackingFile -Force -ErrorAction SilentlyContinue
-            } else {
-                $tracked | ConvertTo-Json -Depth 5 | Set-Content $script:VssTrackingFile -Encoding UTF8
-            }
-        }
-    }
-    catch {
-        Write-RobocurseLog -Message "Failed to remove VSS from tracking: $($_.Exception.Message)" -Level 'Warning' -Component 'VSS'
-    }
-}
-
-function Get-VolumeFromPath {
-    <#
-    .SYNOPSIS
-        Extracts the volume from a path
-    .DESCRIPTION
-        Parses a path and returns the volume (e.g., "C:", "D:").
-        Returns $null for UNC paths as VSS must be created on the file server.
-    .PARAMETER Path
-        Local path (C:\...) or UNC path (\\server\share\...)
-    .OUTPUTS
-        Volume string (C:, D:, etc.) or $null for UNC paths
-    .EXAMPLE
-        Get-VolumeFromPath -Path "C:\Users\John"
-        Returns: "C:"
-    .EXAMPLE
-        Get-VolumeFromPath -Path "\\server\share\folder"
-        Returns: $null
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path
-    )
-
-    # Match drive letter (case-insensitive)
-    if ($Path -match '^([A-Za-z]:)') {
-        return $Matches[1].ToUpper()
-    }
-    elseif ($Path -match '^\\\\') {
-        # UNC path - VSS must be created on the server
-        Write-RobocurseLog -Message "UNC path detected: $Path. VSS not supported for remote paths." -Level 'Debug' -Component 'VSS'
-        return $null
-    }
-
-    Write-RobocurseLog -Message "Unable to determine volume from path: $Path" -Level 'Warning' -Component 'VSS'
-    return $null
 }
 
 function New-VssSnapshot {
@@ -368,6 +153,16 @@ function New-VssSnapshot {
         return New-OperationResult -Success $false -ErrorMessage "VSS privileges not available: $($privCheck.ErrorMessage)"
     }
 
+    # Pre-flight storage quota check - warn if storage is low (but don't block)
+    $volume = Get-VolumeFromPath -Path $SourcePath
+    if ($volume) {
+        $quotaCheck = Test-VssStorageQuota -Volume $volume
+        if (-not $quotaCheck.Success) {
+            # Log warning but proceed - the snapshot may still succeed
+            Write-RobocurseLog -Message "VSS storage warning for $volume`: $($quotaCheck.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+        }
+    }
+
     # Retry loop for transient VSS failures (lock contention, VSS busy, etc.)
     $attempt = 0
     $lastError = $null
@@ -392,28 +187,10 @@ function New-VssSnapshot {
 
         $lastError = $result.ErrorMessage
 
-        # Check if error is retryable (transient failures)
+        # Check if error is retryable using shared function (VssCore.ps1)
         # Non-retryable: invalid path, permissions, VSS not supported
         # Retryable: VSS busy, lock contention, timeout
-        $retryablePatterns = @(
-            'busy',
-            'timeout',
-            'lock',
-            'in use',
-            '0x8004230F',  # Insufficient storage (might clear up)
-            '0x80042316',  # VSS service not running (might start up)
-            'try again'
-        )
-
-        $isRetryable = $false
-        foreach ($pattern in $retryablePatterns) {
-            if ($lastError -match $pattern) {
-                $isRetryable = $true
-                break
-            }
-        }
-
-        if (-not $isRetryable) {
+        if (-not (Test-VssErrorRetryable -ErrorMessage $lastError)) {
             Write-RobocurseLog -Message "VSS snapshot failed with non-retryable error: $lastError" -Level 'Error' -Component 'VSS'
             return $result
         }
@@ -548,90 +325,6 @@ function Remove-VssSnapshot {
     }
 }
 
-function Get-VssPath {
-    <#
-    .SYNOPSIS
-        Converts a regular path to its VSS shadow copy equivalent
-    .DESCRIPTION
-        Translates a path from the original volume to the shadow copy volume.
-        Example: C:\Users\John\Documents -> \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
-
-        Supports two calling conventions:
-        1. With VssSnapshot object (preferred):
-           Get-VssPath -OriginalPath "C:\Users" -VssSnapshot $snapshot
-        2. With individual parameters (legacy/testing):
-           Get-VssPath -OriginalPath "C:\Users" -ShadowPath "\\?\..." -SourceVolume "C:"
-    .PARAMETER OriginalPath
-        Original path (e.g., C:\Users\John\Documents)
-    .PARAMETER VssSnapshot
-        VSS snapshot object from New-VssSnapshot (contains ShadowPath and SourceVolume)
-    .PARAMETER ShadowPath
-        VSS shadow path (e.g., \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1)
-        Only required if VssSnapshot is not provided.
-    .PARAMETER SourceVolume
-        Source volume (e.g., C:)
-        Only required if VssSnapshot is not provided.
-    .OUTPUTS
-        Converted path pointing to shadow copy
-    .EXAMPLE
-        Get-VssPath -OriginalPath "C:\Users\John\Documents" -VssSnapshot $snapshot
-        Returns: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
-    .EXAMPLE
-        Get-VssPath -OriginalPath "C:\Users\John\Documents" `
-                    -ShadowPath "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1" `
-                    -SourceVolume "C:"
-        Returns: \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users\John\Documents
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$OriginalPath,
-
-        [Parameter(Mandatory, ParameterSetName = 'VssSnapshot')]
-        [PSCustomObject]$VssSnapshot,
-
-        [Parameter(Mandatory, ParameterSetName = 'Individual')]
-        [string]$ShadowPath,
-
-        [Parameter(Mandatory, ParameterSetName = 'Individual')]
-        [string]$SourceVolume
-    )
-
-    # Extract values from VssSnapshot if provided
-    if ($PSCmdlet.ParameterSetName -eq 'VssSnapshot') {
-        $ShadowPath = $VssSnapshot.ShadowPath
-        $SourceVolume = $VssSnapshot.SourceVolume
-    }
-
-    # Ensure SourceVolume ends with colon (C:)
-    $volumePrefix = $SourceVolume.TrimEnd('\', '/')
-    if (-not $volumePrefix.EndsWith(':')) {
-        $volumePrefix += ':'
-    }
-
-    # Extract the relative path after the volume
-    # C:\Users\John\Documents -> \Users\John\Documents
-    $relativePath = $OriginalPath.Substring($volumePrefix.Length)
-
-    # Remove leading backslash if present
-    $relativePath = $relativePath.TrimStart('\', '/')
-
-    # Combine shadow path with relative path
-    # Use string concatenation instead of Join-Path for compatibility with \\?\ style paths
-    $shadowPathNormalized = $ShadowPath.TrimEnd('\', '/')
-    if ($relativePath) {
-        $vssPath = "$shadowPathNormalized\$relativePath"
-    }
-    else {
-        # Root directory case (e.g., C:\)
-        $vssPath = $shadowPathNormalized
-    }
-
-    Write-RobocurseLog -Message "Translated path: $OriginalPath -> $vssPath" -Level 'Debug' -Component 'VSS'
-
-    return $vssPath
-}
-
 function Test-VssSupported {
     <#
     .SYNOPSIS
@@ -744,6 +437,255 @@ function Invoke-WithVssSnapshot {
             $removeResult = Remove-VssSnapshot -ShadowId $snapshot.ShadowId
             if (-not $removeResult.Success) {
                 Write-RobocurseLog -Message "Failed to cleanup VSS snapshot: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
+        }
+    }
+}
+
+
+function New-VssJunction {
+    <#
+    .SYNOPSIS
+        Creates an NTFS junction pointing to a VSS shadow path
+    .DESCRIPTION
+        Creates a junction (directory symbolic link) that allows tools like robocopy
+        to access VSS shadow copy paths. Robocopy cannot directly access VSS paths
+        like \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1, but it CAN access
+        junctions that point to them.
+    .PARAMETER VssPath
+        The VSS shadow path (e.g., \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\Users)
+    .PARAMETER JunctionPath
+        Where to create the junction. If not specified, creates in temp directory.
+    .OUTPUTS
+        OperationResult - Success=$true with Data=JunctionPath, Success=$false with ErrorMessage
+    .NOTES
+        Junctions do not require admin privileges to create (unlike symlinks).
+        The junction must be removed before the VSS snapshot is deleted.
+    .EXAMPLE
+        $result = New-VssJunction -VssPath $snapshot.ShadowPath
+        if ($result.Success) { robocopy $result.Data $dest /MIR }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$VssPath,
+
+        [string]$JunctionPath
+    )
+
+    # Generate junction path if not provided
+    if (-not $JunctionPath) {
+        # Use 16-char GUID prefix for better collision resistance in high-concurrency scenarios
+        $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,16))"
+        $JunctionPath = Join-Path $env:TEMP $junctionName
+    }
+
+    # Ensure junction path doesn't already exist
+    if (Test-Path $JunctionPath) {
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Junction path already exists: '$JunctionPath'"
+    }
+
+    try {
+        Write-RobocurseLog -Message "Creating junction '$JunctionPath' -> '$VssPath'" -Level 'Debug' -Component 'VSS'
+
+        # Use cmd mklink /J to create junction
+        # Junctions don't require admin (unlike symlinks with /D)
+        $output = cmd /c "mklink /J `"$JunctionPath`" `"$VssPath`"" 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Failed to create junction: $output"
+        }
+
+        # Verify junction was created and is accessible
+        if (-not (Test-Path $JunctionPath)) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Junction was created but path is not accessible: '$JunctionPath'"
+        }
+
+        Write-RobocurseLog -Message "Created VSS junction: '$JunctionPath'" -Level 'Info' -Component 'VSS'
+
+        return New-OperationResult -Success $true -Data $JunctionPath
+    }
+    catch {
+        Write-RobocurseLog -Message "Error creating VSS junction: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Failed to create VSS junction: $($_.Exception.Message)" `
+            -ErrorRecord $_
+    }
+}
+
+
+function Remove-VssJunction {
+    <#
+    .SYNOPSIS
+        Removes an NTFS junction created for VSS access
+    .DESCRIPTION
+        Safely removes a junction without following it or deleting the target contents.
+        This must be called BEFORE removing the VSS snapshot.
+    .PARAMETER JunctionPath
+        Path to the junction to remove
+    .OUTPUTS
+        OperationResult - Success=$true on success, Success=$false with ErrorMessage on failure
+    .NOTES
+        Uses rmdir to remove junction without following it.
+    .EXAMPLE
+        Remove-VssJunction -JunctionPath "C:\Temp\RobocurseVss_abc123"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$JunctionPath
+    )
+
+    if (-not (Test-Path $JunctionPath)) {
+        Write-RobocurseLog -Message "Junction already removed or doesn't exist: '$JunctionPath'" -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data $JunctionPath
+    }
+
+    try {
+        Write-RobocurseLog -Message "Removing VSS junction: '$JunctionPath'" -Level 'Debug' -Component 'VSS'
+
+        # Use rmdir to remove junction without following it
+        # Do NOT use Remove-Item -Recurse as it would try to delete contents
+        $output = cmd /c "rmdir `"$JunctionPath`"" 2>&1
+
+        if ($LASTEXITCODE -ne 0) {
+            # Try alternative method
+            try {
+                [System.IO.Directory]::Delete($JunctionPath, $false)
+            }
+            catch {
+                return New-OperationResult -Success $false `
+                    -ErrorMessage "Failed to remove junction: $output"
+            }
+        }
+
+        if (Test-Path $JunctionPath) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Junction still exists after removal attempt: '$JunctionPath'"
+        }
+
+        Write-RobocurseLog -Message "Removed VSS junction: '$JunctionPath'" -Level 'Info' -Component 'VSS'
+        return New-OperationResult -Success $true -Data $JunctionPath
+    }
+    catch {
+        Write-RobocurseLog -Message "Error removing VSS junction: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false `
+            -ErrorMessage "Failed to remove VSS junction: $($_.Exception.Message)" `
+            -ErrorRecord $_
+    }
+}
+
+
+function Invoke-WithVssJunction {
+    <#
+    .SYNOPSIS
+        Executes a scriptblock with VSS snapshot accessible via junction for robocopy
+    .DESCRIPTION
+        Creates a VSS snapshot, creates a junction to make it robocopy-accessible,
+        executes the provided scriptblock, and ensures cleanup of both junction and
+        snapshot even if the scriptblock throws an error.
+
+        The scriptblock receives a -SourcePath parameter with the junction path
+        that robocopy can use as a source.
+    .PARAMETER SourcePath
+        Original path to snapshot (e.g., C:\Users\Data)
+    .PARAMETER ScriptBlock
+        Code to execute. Receives $SourcePath parameter with junction path.
+    .PARAMETER JunctionRoot
+        Directory where junction will be created. Defaults to TEMP.
+    .OUTPUTS
+        OperationResult - Success=$true with Data=scriptblock result, Success=$false with ErrorMessage
+    .NOTES
+        Cleanup order is important: junction first, then snapshot.
+    .EXAMPLE
+        $result = Invoke-WithVssJunction -SourcePath "C:\Users\Data" -ScriptBlock {
+            param($SourcePath)
+            robocopy $SourcePath "D:\Backup" /MIR /LOG:backup.log
+            return $LASTEXITCODE
+        }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock,
+
+        [string]$JunctionRoot
+    )
+
+    $snapshot = $null
+    $junctionPath = $null
+
+    try {
+        # Step 1: Create VSS snapshot
+        Write-RobocurseLog -Message "Creating VSS snapshot for '$SourcePath'" -Level 'Info' -Component 'VSS'
+        $snapshotResult = New-VssSnapshot -SourcePath $SourcePath
+
+        if (-not $snapshotResult.Success) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Failed to create VSS snapshot: $($snapshotResult.ErrorMessage)" `
+                -ErrorRecord $snapshotResult.ErrorRecord
+        }
+        $snapshot = $snapshotResult.Data
+
+        # Step 2: Get the VSS path for the source
+        $vssPath = Get-VssPath -OriginalPath $SourcePath -VssSnapshot $snapshot
+        Write-RobocurseLog -Message "VSS path: '$vssPath'" -Level 'Debug' -Component 'VSS'
+
+        # Step 3: Create junction to VSS path
+        $junctionParams = @{ VssPath = $vssPath }
+        if ($JunctionRoot) {
+            # Use 16-char GUID prefix for better collision resistance in high-concurrency scenarios
+        $junctionName = "RobocurseVss_$([Guid]::NewGuid().ToString('N').Substring(0,16))"
+            $junctionParams.JunctionPath = Join-Path $JunctionRoot $junctionName
+        }
+
+        $junctionResult = New-VssJunction @junctionParams
+        if (-not $junctionResult.Success) {
+            return New-OperationResult -Success $false `
+                -ErrorMessage "Failed to create VSS junction: $($junctionResult.ErrorMessage)" `
+                -ErrorRecord $junctionResult.ErrorRecord
+        }
+        $junctionPath = $junctionResult.Data
+        Write-RobocurseLog -Message "Created junction '$junctionPath' for robocopy access" -Level 'Info' -Component 'VSS'
+
+        # Step 4: Execute the scriptblock with junction path
+        $scriptResult = & $ScriptBlock -SourcePath $junctionPath
+
+        return New-OperationResult -Success $true -Data $scriptResult
+    }
+    catch {
+        Write-RobocurseLog -Message "Error during VSS junction operation: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false `
+            -ErrorMessage "VSS junction operation failed: $($_.Exception.Message)" `
+            -ErrorRecord $_
+    }
+    finally {
+        # Cleanup in correct order: junction first, then snapshot
+
+        # Step 5a: Remove junction
+        if ($junctionPath) {
+            Write-RobocurseLog -Message "Cleaning up VSS junction" -Level 'Info' -Component 'VSS'
+            $removeJunctionResult = Remove-VssJunction -JunctionPath $junctionPath
+            if (-not $removeJunctionResult.Success) {
+                Write-RobocurseLog -Message "Failed to cleanup VSS junction: $($removeJunctionResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
+        }
+
+        # Step 5b: Remove snapshot
+        if ($snapshot) {
+            Write-RobocurseLog -Message "Cleaning up VSS snapshot" -Level 'Info' -Component 'VSS'
+            $removeSnapshotResult = Remove-VssSnapshot -ShadowId $snapshot.ShadowId
+            if (-not $removeSnapshotResult.Success) {
+                Write-RobocurseLog -Message "Failed to cleanup VSS snapshot: $($removeSnapshotResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
             }
         }
     }

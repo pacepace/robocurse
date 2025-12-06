@@ -1,4 +1,4 @@
-@{
+﻿@{
     # Module manifest for Robocurse
 
     # Script module file associated with this manifest
@@ -82,13 +82,26 @@
         'Get-BandwidthThrottleIPG'
         'Start-ChunkJob'
 
-        # Orchestration
+        # Orchestration Core
         'Initialize-OrchestrationState'
+        'Initialize-OrchestrationStateType'
+        'Get-OrchestrationState'
+        'Reset-CircuitBreaker'
+        'Test-CircuitBreakerTripped'
+
+        # Job Management
         'Start-ReplicationRun'
         'Invoke-ReplicationTick'
         'Stop-AllJobs'
         'Request-Stop'
+        'Request-Pause'
+        'Request-Resume'
         'Get-OrchestrationStatus'
+
+        # Health Check
+        'Write-HealthCheckStatus'
+        'Get-HealthCheckStatus'
+        'Remove-HealthCheckStatus'
 
         # Checkpoint
         'Save-ReplicationCheckpoint'
@@ -133,6 +146,11 @@
         'Update-GuiProgress'
         'Show-GuiError'
         'Write-GuiLog'
+
+        # GUI Log Window
+        'Show-LogWindow'
+        'Clear-GuiLogBuffer'
+        'Close-LogWindow'
 
         # Main
         'Start-RobocurseMain'

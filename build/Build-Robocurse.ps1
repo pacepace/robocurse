@@ -32,12 +32,24 @@ $ErrorActionPreference = 'Stop'
 
 $scriptRoot = Split-Path -Parent $PSScriptRoot
 $srcRoot = Join-Path $scriptRoot "src\Robocurse"
+$resourcesRoot = Join-Path $srcRoot "Resources"
 
 Write-Host "Building Robocurse monolith..." -ForegroundColor Cyan
 Write-Host "Source: $srcRoot" -ForegroundColor Gray
 
+# Load XAML resources for embedding
+$xamlResources = @{}
+$xamlFiles = Get-ChildItem -Path $resourcesRoot -Filter "*.xaml" -ErrorAction SilentlyContinue
+foreach ($xamlFile in $xamlFiles) {
+    $xamlContent = Get-Content -Path $xamlFile.FullName -Raw
+    # Escape single quotes for PowerShell here-string embedding
+    $xamlResources[$xamlFile.Name] = $xamlContent
+    Write-Host "  Loaded XAML: $($xamlFile.Name)" -ForegroundColor Gray
+}
+
 # Define module load order (dependency order)
 # Checkpoint must be loaded before Orchestration (Orchestration uses checkpoint functions)
+# GUI modules are split into separate files for maintainability
 $moduleOrder = @(
     'Public\Utility.ps1'
     'Public\Configuration.ps1'
@@ -46,12 +58,27 @@ $moduleOrder = @(
     'Public\Chunking.ps1'
     'Public\Robocopy.ps1'
     'Public\Checkpoint.ps1'
-    'Public\Orchestration.ps1'
+    # Orchestration modules (split for maintainability)
+    'Public\OrchestrationCore.ps1'  # C# types, state management, circuit breaker
+    'Public\HealthCheck.ps1'        # Health monitoring (before JobManagement which uses it)
+    'Public\JobManagement.ps1'      # Job execution, profile management
     'Public\Progress.ps1'
-    'Public\VSS.ps1'
+    'Public\VssCore.ps1'
+    'Public\VssLocal.ps1'
+    'Public\VssRemote.ps1'
     'Public\Email.ps1'
     'Public\Scheduling.ps1'
-    'Public\GUI.ps1'
+    # GUI modules (split from GUI.ps1 for maintainability)
+    'Public\GuiResources.ps1'
+    'Public\GuiSettings.ps1'
+    'Public\GuiProfiles.ps1'
+    'Public\GuiDialogs.ps1'
+    'Public\GuiLogWindow.ps1'   # Popup log viewer window
+    'Public\GuiRunspace.ps1'
+    'Public\GuiReplication.ps1'
+    'Public\GuiProgress.ps1'
+    'Public\GuiMain.ps1'
+    # Entry point
     'Public\Main.ps1'
 )
 
@@ -129,7 +156,9 @@ param(
     [string]$SyncProfile,
     [switch]$AllProfiles,
     [switch]$DryRun,
-    [switch]$Help
+    [switch]$Help,
+    # Internal: Load functions only without executing main entry point (for background runspace)
+    [switch]$LoadOnly
 )
 
 '@)
@@ -146,12 +175,16 @@ $psmPath = Join-Path $srcRoot "Robocurse.psm1"
 if (Test-Path $psmPath) {
     $psmContent = Get-Content $psmPath -Raw
 
-    # Extract the CONSTANTS region
-    if ($psmContent -match '#region ==================== CONSTANTS ====================(.+?)#endregion') {
+    # Extract the CONSTANTS region (use [\s\S] to match across newlines)
+    if ($psmContent -match '(?s)#region ==================== CONSTANTS ====================(.*?)#endregion') {
         [void]$output.AppendLine("#region ==================== CONSTANTS ====================")
         [void]$output.AppendLine($matches[1].Trim())
         [void]$output.AppendLine("#endregion")
         [void]$output.AppendLine()
+        Write-Host "  Added CONSTANTS region" -ForegroundColor Gray
+    }
+    else {
+        Write-Warning "CONSTANTS region not found in Robocurse.psm1"
     }
 }
 
@@ -177,6 +210,25 @@ foreach ($modulePath in $moduleOrder) {
         $content = $content -replace '<#[\s\S]*?#>', ''
     }
 
+    # For GUI modules (Gui*.ps1), embed XAML resources as fallback content
+    # XAML calls are in: GuiMain.ps1 (MainWindow.xaml), GuiDialogs.ps1 (CompletionDialog.xaml, ScheduleDialog.xaml)
+    if ($modulePath -match '^Public\\Gui.*\.ps1$') {
+        foreach ($xamlName in $xamlResources.Keys) {
+            # Create escaped XAML content for embedding in a here-string
+            $escapedXaml = $xamlResources[$xamlName] -replace "'", "''"
+
+            # Pattern to find: Get-XamlResource -ResourceName 'FileName.xaml'
+            # Replace with: Get-XamlResource -ResourceName 'FileName.xaml' -FallbackContent @'...'@
+            $pattern = "Get-XamlResource -ResourceName '$xamlName'"
+            $replacement = "Get-XamlResource -ResourceName '$xamlName' -FallbackContent @'`n$($xamlResources[$xamlName])`n'@"
+
+            if ($content -match [regex]::Escape($pattern)) {
+                $content = $content -replace [regex]::Escape($pattern), $replacement
+                Write-Host "    Embedded XAML: $xamlName in $([System.IO.Path]::GetFileName($modulePath))" -ForegroundColor DarkGray
+            }
+        }
+    }
+
     # Add region wrapper
     $regionName = [System.IO.Path]::GetFileNameWithoutExtension($modulePath).ToUpper()
     [void]$output.AppendLine("#region ==================== $regionName ====================")
@@ -190,10 +242,23 @@ foreach ($modulePath in $moduleOrder) {
 # Note: Main.ps1 contains Start-RobocurseMain which is the entry point
 # The entry point code below calls it with the script parameters
 
-# Add main execution block (matches original monolith behavior)
+# Add script path initialization for background runspace loading
 [void]$output.AppendLine(@'
 
+# Store script path for background runspace loading (GUI mode)
+# This is needed because the background runspace needs to know where to load the script from
+$script:RobocurseScriptPath = $PSCommandPath
+
+'@)
+
+# Add main execution block (matches original monolith behavior)
+[void]$output.AppendLine(@'
 # Main entry point - only execute if not being dot-sourced for testing
+# LoadOnly mode: Just load functions without any execution (for background runspace loading)
+if ($LoadOnly) {
+    return
+}
+
 # Check if -Help was passed (always process help)
 if ($Help) {
     Show-RobocurseHelp

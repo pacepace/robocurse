@@ -1,10 +1,78 @@
-# Robocurse Directory profiling Functions
+﻿# Robocurse Directory profiling Functions
 # Script-level cache for directory profiles (thread-safe)
 # Uses OrdinalIgnoreCase comparer for Windows-style case-insensitive path matching
 # This is more correct than ToLowerInvariant() for international characters
 $script:ProfileCache = [System.Collections.Concurrent.ConcurrentDictionary[string, PSCustomObject]]::new(
     [System.StringComparer]::OrdinalIgnoreCase
 )
+
+# Cache statistics tracking (thread-safe via Interlocked operations)
+$script:ProfileCacheHits = 0
+$script:ProfileCacheMisses = 0
+$script:ProfileCacheEvictions = 0
+
+function Get-ProfileCacheStatistics {
+    <#
+    .SYNOPSIS
+        Returns statistics about the directory profile cache
+    .DESCRIPTION
+        Provides cache performance metrics including:
+        - Entry count
+        - Hit/miss counts and hit rate
+        - Eviction count
+        - Estimated memory usage
+    .OUTPUTS
+        PSCustomObject with cache statistics
+    .EXAMPLE
+        $stats = Get-ProfileCacheStatistics
+        Write-Host "Cache hit rate: $($stats.HitRatePercent)%"
+    #>
+    [CmdletBinding()]
+    param()
+
+    $hits = [System.Threading.Interlocked]::CompareExchange([ref]$script:ProfileCacheHits, 0, 0)
+    $misses = [System.Threading.Interlocked]::CompareExchange([ref]$script:ProfileCacheMisses, 0, 0)
+    $evictions = [System.Threading.Interlocked]::CompareExchange([ref]$script:ProfileCacheEvictions, 0, 0)
+    $entryCount = $script:ProfileCache.Count
+
+    $totalRequests = $hits + $misses
+    $hitRate = if ($totalRequests -gt 0) {
+        [math]::Round(($hits / $totalRequests) * 100, 1)
+    } else { 0 }
+
+    # Estimate memory usage (rough approximation)
+    # Each entry has: path string (~100 bytes avg) + profile object (~500 bytes avg)
+    $estimatedBytesPerEntry = 600
+    $estimatedMemoryBytes = $entryCount * $estimatedBytesPerEntry
+
+    return [PSCustomObject]@{
+        EntryCount = $entryCount
+        MaxEntries = $script:ProfileCacheMaxEntries
+        Hits = $hits
+        Misses = $misses
+        HitRatePercent = $hitRate
+        Evictions = $evictions
+        EstimatedMemoryMB = [math]::Round($estimatedMemoryBytes / 1MB, 2)
+    }
+}
+
+function Reset-ProfileCacheStatistics {
+    <#
+    .SYNOPSIS
+        Resets the cache statistics counters
+    .DESCRIPTION
+        Clears hit, miss, and eviction counters. Useful for benchmarking
+        or measuring cache effectiveness over a specific time period.
+    #>
+    [CmdletBinding()]
+    param()
+
+    [System.Threading.Interlocked]::Exchange([ref]$script:ProfileCacheHits, 0) | Out-Null
+    [System.Threading.Interlocked]::Exchange([ref]$script:ProfileCacheMisses, 0) | Out-Null
+    [System.Threading.Interlocked]::Exchange([ref]$script:ProfileCacheEvictions, 0) | Out-Null
+
+    Write-RobocurseLog "Profile cache statistics reset" -Level Debug -Component 'Cache'
+}
 
 function Invoke-RobocopyList {
     <#
@@ -22,8 +90,15 @@ function Invoke-RobocopyList {
     )
 
     # Wrapper so we can mock this in tests
-    $output = & robocopy $Source "\\?\NULL" /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
-    return $output
+    # Use a non-existent temp path as destination - robocopy /L lists without creating it
+    # Note: \\?\NULL doesn't work on all Windows versions, and src=dest doesn't list files
+    $nullDest = Join-Path $env:TEMP "robocurse-null-$(Get-Random)"
+    $output = & robocopy $Source $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
+    # Ensure we always return an array (robocopy can return empty/null for root drives)
+    if ($null -eq $output) {
+        return @()
+    }
+    return @($output)
 }
 
 function ConvertFrom-RobocopyListOutput {
@@ -39,8 +114,20 @@ function ConvertFrom-RobocopyListOutput {
     param(
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
+        [AllowNull()]
+        [AllowEmptyString()]
         [string[]]$Output
     )
+
+    # Handle null or empty output gracefully
+    if ($null -eq $Output -or $Output.Count -eq 0) {
+        return [PSCustomObject]@{
+            TotalSize = 0
+            FileCount = 0
+            DirCount = 0
+            Files = @()
+        }
+    }
 
     $totalSize = 0
     $fileCount = 0
@@ -53,21 +140,31 @@ function ConvertFrom-RobocopyListOutput {
             continue
         }
 
-        # Lines starting with whitespace + number are files or directories
-        # Format: "          123456789    path\to\file.txt"
-        if ($line -match '^\s+(\d+)\s+(.+)$') {
+        # New File format: "    New File           2048    filename"
+        if ($line -match 'New File\s+(\d+)\s+(.+)$') {
             $size = [int64]$matches[1]
             $path = $matches[2].Trim()
-
-            # Lines ending with \ are directories
+            $fileCount++
+            $totalSize += $size
+            $files += [PSCustomObject]@{
+                Path = $path
+                Size = $size
+            }
+        }
+        # New Dir format: "  New Dir          3    D:\path\"
+        elseif ($line -match 'New Dir\s+\d+\s+(.+)$') {
+            $dirCount++
+        }
+        # Fallback: old format "          123456789    path\to\file.txt" (for compatibility)
+        elseif ($line -match '^\s+(\d+)\s+(.+)$') {
+            $size = [int64]$matches[1]
+            $path = $matches[2].Trim()
             if ($path.EndsWith('\')) {
                 $dirCount++
             }
             else {
-                # This is a file
                 $fileCount++
                 $totalSize += $size
-
                 $files += [PSCustomObject]@{
                     Path = $path
                     Size = $size
@@ -235,6 +332,8 @@ function Get-CachedProfile {
     # Thread-safe retrieval from ConcurrentDictionary
     $cachedProfile = $null
     if (-not $script:ProfileCache.TryGetValue($cacheKey, [ref]$cachedProfile)) {
+        # Track cache miss (thread-safe)
+        [System.Threading.Interlocked]::Increment([ref]$script:ProfileCacheMisses) | Out-Null
         return $null
     }
 
@@ -244,9 +343,13 @@ function Get-CachedProfile {
         Write-RobocurseLog "Cache expired for: $Path (age: $([math]::Round($age.TotalHours, 1))h)" -Level Debug
         # Remove expired entry (thread-safe)
         $script:ProfileCache.TryRemove($cacheKey, [ref]$null) | Out-Null
+        # Track as miss (expired entry)
+        [System.Threading.Interlocked]::Increment([ref]$script:ProfileCacheMisses) | Out-Null
         return $null
     }
 
+    # Track cache hit (thread-safe)
+    [System.Threading.Interlocked]::Increment([ref]$script:ProfileCacheHits) | Out-Null
     return $cachedProfile
 }
 
@@ -254,6 +357,15 @@ function Set-CachedProfile {
     <#
     .SYNOPSIS
         Stores directory profile in cache (thread-safe)
+    .DESCRIPTION
+        Adds or updates a profile in the thread-safe cache. When the cache
+        exceeds the maximum entry count, uses approximate LRU eviction
+        (similar to Redis's approach) to remove old entries.
+
+        The eviction logic is designed to be safe under concurrent access:
+        - Uses TryAdd to prevent duplicate evictions
+        - Tolerates slight over-capacity during concurrent adds
+        - Does not require locks (relies on ConcurrentDictionary guarantees)
     .PARAMETER Profile
         Profile object to cache
     #>
@@ -265,28 +377,38 @@ function Set-CachedProfile {
     # Normalize path for cache key
     $cacheKey = Get-NormalizedCacheKey -Path $Profile.Path
 
-    # Enforce cache size limit - if at max, remove oldest entries
-    if ($script:ProfileCache.Count -ge $script:ProfileCacheMaxEntries) {
+    # Thread-safe add or update using ConcurrentDictionary indexer
+    # Do this FIRST to ensure the profile is always cached, even if eviction has issues
+    $script:ProfileCache[$cacheKey] = $Profile
+    Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level Debug
+
+    # Enforce cache size limit - if significantly over max, trigger eviction
+    # Use a 10% buffer to reduce eviction frequency under concurrent load
+    $maxWithBuffer = [int]($script:ProfileCacheMaxEntries * 1.1)
+    $currentCount = $script:ProfileCache.Count
+
+    if ($currentCount -gt $maxWithBuffer) {
         # Use random sampling for approximate LRU eviction (similar to Redis's approach)
         # Instead of O(n log n) full sort, we sample and sort O(k log k) where k << n
         # This provides good-enough LRU behavior with much better performance
-        $currentCount = $script:ProfileCache.Count
-        $entriesToRemove = [math]::Ceiling($currentCount * 0.1)
+        $entriesToRemove = $currentCount - $script:ProfileCacheMaxEntries
 
-        # Only evict if we have entries to remove
+        # Only evict if we have a meaningful number to remove (reduces contention)
         if ($entriesToRemove -gt 0) {
             # Sample size: 5x the entries to remove (gives good statistical coverage)
+            # Clamp to currentCount to handle edge cases
             $sampleSize = [math]::Min($entriesToRemove * 5, $currentCount)
-            $allEntries = $script:ProfileCache.ToArray()
 
-            if ($currentCount -le $sampleSize) {
+            # Take a snapshot for eviction - this is an atomic operation on ConcurrentDictionary
+            $allEntries = $script:ProfileCache.ToArray()
+            $snapshotCount = $allEntries.Count
+
+            if ($snapshotCount -le $sampleSize) {
                 # Small cache - just sort everything (fast enough)
                 $sample = $allEntries
             }
             else {
                 # Large cache - take random sample for approximate LRU
-                # Note: Get-Random uses proper internal seeding on PS 5.1+, no need
-                # to create a System.Random instance
                 $sample = $allEntries | Get-Random -Count $sampleSize
             }
 
@@ -297,17 +419,19 @@ function Set-CachedProfile {
 
             $removed = 0
             foreach ($entry in $oldestEntries) {
+                # TryRemove is atomic - if another thread already removed it, we just skip
                 if ($script:ProfileCache.TryRemove($entry.Key, [ref]$null)) {
                     $removed++
+                    # Track eviction (thread-safe)
+                    [System.Threading.Interlocked]::Increment([ref]$script:ProfileCacheEvictions) | Out-Null
                 }
             }
-            Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $currentCount entries)" -Level Debug
+
+            if ($removed -gt 0) {
+                Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $snapshotCount entries)" -Level Debug
+            }
         }
     }
-
-    # Thread-safe add or update using ConcurrentDictionary indexer
-    $script:ProfileCache[$cacheKey] = $Profile
-    Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level Debug
 }
 
 function Clear-ProfileCache {

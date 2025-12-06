@@ -1,0 +1,10 @@
+# Log directories
+Logs/
+**/Logs/
+
+# Temporary files
+*.tmp
+*.temp
+
+# Null output directory (used for robocopy profiling)
+robocurse-null-*

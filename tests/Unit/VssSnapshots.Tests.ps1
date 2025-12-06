@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 # VssSnapshots.Tests.ps1
 # Unit tests for VSS (Volume Shadow Copy) snapshot functions
@@ -8,6 +8,9 @@ $testRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent (Split-Path -Parent $testRoot)
 $modulePath = Join-Path $projectRoot "src\Robocurse\Robocurse.psm1"
 Import-Module $modulePath -Force -Global -DisableNameChecking
+
+# Initialize the C# OrchestrationState type (required for module isolation when running all tests together)
+Initialize-OrchestrationStateType | Out-Null
 
 InModuleScope 'Robocurse' {
     Describe "VSS Snapshots - Platform Independent Tests" {
@@ -636,6 +639,492 @@ InModuleScope 'Robocurse' {
                 "{ invalid json" | Set-Content $script:VssTrackingFile
 
                 { Clear-OrphanVssSnapshots } | Should -Not -Throw
+            }
+        }
+    }
+
+    Describe "Remote VSS Functions" {
+
+        Context "Get-UncPathComponents" {
+            It "Should parse simple UNC path" {
+                $result = Get-UncPathComponents -UncPath "\\server\share"
+
+                $result.ServerName | Should -Be "server"
+                $result.ShareName | Should -Be "share"
+                $result.RelativePath | Should -Be ""
+            }
+
+            It "Should parse UNC path with subdirectory" {
+                $result = Get-UncPathComponents -UncPath "\\FileServer01\Data\Projects"
+
+                $result.ServerName | Should -Be "FileServer01"
+                $result.ShareName | Should -Be "Data"
+                $result.RelativePath | Should -Be "Projects"
+            }
+
+            It "Should parse UNC path with deep path" {
+                $result = Get-UncPathComponents -UncPath "\\server\share\folder\subfolder\file.txt"
+
+                $result.ServerName | Should -Be "server"
+                $result.ShareName | Should -Be "share"
+                $result.RelativePath | Should -Be "folder\subfolder\file.txt"
+            }
+
+            It "Should parse UNC path with IP address" {
+                $result = Get-UncPathComponents -UncPath "\\192.168.1.100\share\data"
+
+                $result.ServerName | Should -Be "192.168.1.100"
+                $result.ShareName | Should -Be "share"
+                $result.RelativePath | Should -Be "data"
+            }
+
+            It "Should parse UNC path with FQDN" {
+                $result = Get-UncPathComponents -UncPath "\\fileserver.domain.local\backup\archive"
+
+                $result.ServerName | Should -Be "fileserver.domain.local"
+                $result.ShareName | Should -Be "backup"
+                $result.RelativePath | Should -Be "archive"
+            }
+
+            It "Should preserve original UNC path" {
+                $originalPath = "\\server\share\folder"
+                $result = Get-UncPathComponents -UncPath $originalPath
+
+                $result.UncPath | Should -Be $originalPath
+            }
+
+            It "Should throw for invalid UNC path - missing server" {
+                { Get-UncPathComponents -UncPath "\share\folder" } | Should -Throw
+            }
+
+            It "Should throw for invalid UNC path - local path" {
+                { Get-UncPathComponents -UncPath "C:\Users\Data" } | Should -Throw
+            }
+
+            It "Should throw for invalid UNC path - only server" {
+                { Get-UncPathComponents -UncPath "\\server" } | Should -Throw
+            }
+        }
+
+        Context "Get-RemoteVssPath" {
+            It "Should return junction UNC path for share root" {
+                $snapshot = [PSCustomObject]@{
+                    ShadowId       = "{REMOTE-1234-5678-90AB-CDEF12345678}"
+                    ShadowPath     = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy5"
+                    ServerName     = "FileServer01"
+                    ShareName      = "Data"
+                    ShareLocalPath = "D:\SharedData"
+                    SourceVolume   = "D:"
+                    IsRemote       = $true
+                }
+                $junctionInfo = [PSCustomObject]@{
+                    JunctionLocalPath = "D:\SharedData\.robocurse-vss-abc123"
+                    JunctionUncPath   = "\\FileServer01\Data\.robocurse-vss-abc123"
+                    ServerName        = "FileServer01"
+                }
+
+                $result = Get-RemoteVssPath -OriginalUncPath "\\FileServer01\Data" -VssSnapshot $snapshot -JunctionInfo $junctionInfo
+
+                $result | Should -Be "\\FileServer01\Data\.robocurse-vss-abc123"
+            }
+
+            It "Should append relative path to junction UNC path" {
+                $snapshot = [PSCustomObject]@{
+                    ShadowId       = "{REMOTE-1234-5678-90AB-CDEF12345678}"
+                    ShadowPath     = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy5"
+                    ServerName     = "FileServer01"
+                    ShareName      = "Data"
+                    ShareLocalPath = "D:\SharedData"
+                    SourceVolume   = "D:"
+                    IsRemote       = $true
+                }
+                $junctionInfo = [PSCustomObject]@{
+                    JunctionLocalPath = "D:\SharedData\.robocurse-vss-abc123"
+                    JunctionUncPath   = "\\FileServer01\Data\.robocurse-vss-abc123"
+                    ServerName        = "FileServer01"
+                }
+
+                $result = Get-RemoteVssPath -OriginalUncPath "\\FileServer01\Data\Projects\Reports" -VssSnapshot $snapshot -JunctionInfo $junctionInfo
+
+                $result | Should -Be "\\FileServer01\Data\.robocurse-vss-abc123\Projects\Reports"
+            }
+
+            It "Should throw for invalid UNC path" {
+                $snapshot = [PSCustomObject]@{ IsRemote = $true }
+                $junctionInfo = [PSCustomObject]@{ JunctionUncPath = "\\server\share\.vss" }
+
+                # ValidatePattern attribute on OriginalUncPath parameter throws for non-UNC paths
+                { Get-RemoteVssPath -OriginalUncPath "C:\local\path" -VssSnapshot $snapshot -JunctionInfo $junctionInfo } | Should -Throw
+            }
+        }
+
+        Context "New-RemoteVssSnapshot - Function Structure" {
+            It "Should be defined with correct parameters" {
+                $cmd = Get-Command New-RemoteVssSnapshot
+                $cmd | Should -Not -BeNullOrEmpty
+
+                $cmd.Parameters.Keys | Should -Contain 'UncPath'
+                $cmd.Parameters.Keys | Should -Contain 'RetryCount'
+                $cmd.Parameters.Keys | Should -Contain 'RetryDelaySeconds'
+            }
+
+            It "Should require UncPath to match UNC pattern" {
+                $cmd = Get-Command New-RemoteVssSnapshot
+                $validatePattern = $cmd.Parameters['UncPath'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidatePatternAttribute] }
+
+                $validatePattern | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have RetryCount with valid range" {
+                $cmd = Get-Command New-RemoteVssSnapshot
+                $validateRange = $cmd.Parameters['RetryCount'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateRangeAttribute] }
+
+                $validateRange.MinRange | Should -Be 0
+                $validateRange.MaxRange | Should -Be 10
+            }
+        }
+
+        Context "Remove-RemoteVssSnapshot - Function Structure" {
+            It "Should be defined with correct parameters" {
+                $cmd = Get-Command Remove-RemoteVssSnapshot
+                $cmd | Should -Not -BeNullOrEmpty
+
+                $cmd.Parameters.Keys | Should -Contain 'ShadowId'
+                $cmd.Parameters.Keys | Should -Contain 'ServerName'
+            }
+
+            It "Should require ShadowId parameter" {
+                $cmd = Get-Command Remove-RemoteVssSnapshot
+                $cmd.Parameters['ShadowId'].Attributes.Mandatory | Should -Contain $true
+            }
+
+            It "Should require ServerName parameter" {
+                $cmd = Get-Command Remove-RemoteVssSnapshot
+                $cmd.Parameters['ServerName'].Attributes.Mandatory | Should -Contain $true
+            }
+
+            It "Should support ShouldProcess" {
+                $cmd = Get-Command Remove-RemoteVssSnapshot
+                $cmd.Parameters.Keys | Should -Contain 'WhatIf'
+                $cmd.Parameters.Keys | Should -Contain 'Confirm'
+            }
+        }
+
+        Context "New-RemoteVssJunction - Function Structure" {
+            It "Should be defined with correct parameters" {
+                $cmd = Get-Command New-RemoteVssJunction
+                $cmd | Should -Not -BeNullOrEmpty
+
+                $cmd.Parameters.Keys | Should -Contain 'VssSnapshot'
+                $cmd.Parameters.Keys | Should -Contain 'JunctionName'
+            }
+
+            It "Should require VssSnapshot parameter" {
+                $cmd = Get-Command New-RemoteVssJunction
+                $cmd.Parameters['VssSnapshot'].Attributes.Mandatory | Should -Contain $true
+            }
+
+            It "Should have optional JunctionName parameter" {
+                $cmd = Get-Command New-RemoteVssJunction
+                $cmd.Parameters['JunctionName'].Attributes.Mandatory | Should -Not -Contain $true
+            }
+
+            It "Should reject non-remote snapshot" {
+                $localSnapshot = [PSCustomObject]@{
+                    ShadowId       = "{LOCAL-1234-5678-90AB-CDEF12345678}"
+                    ShadowPath     = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1"
+                    SourceVolume   = "C:"
+                    IsRemote       = $false
+                }
+
+                $result = New-RemoteVssJunction -VssSnapshot $localSnapshot
+                $result.Success | Should -Be $false
+                $result.ErrorMessage | Should -Match "not a remote snapshot"
+            }
+        }
+
+        Context "Remove-RemoteVssJunction - Function Structure" {
+            It "Should be defined with correct parameters" {
+                $cmd = Get-Command Remove-RemoteVssJunction
+                $cmd | Should -Not -BeNullOrEmpty
+
+                $cmd.Parameters.Keys | Should -Contain 'JunctionLocalPath'
+                $cmd.Parameters.Keys | Should -Contain 'ServerName'
+            }
+
+            It "Should require both parameters" {
+                $cmd = Get-Command Remove-RemoteVssJunction
+                $cmd.Parameters['JunctionLocalPath'].Attributes.Mandatory | Should -Contain $true
+                $cmd.Parameters['ServerName'].Attributes.Mandatory | Should -Contain $true
+            }
+        }
+
+        Context "Test-RemoteVssSupported - Function Structure" {
+            It "Should be defined with UncPath parameter" {
+                $cmd = Get-Command Test-RemoteVssSupported
+                $cmd | Should -Not -BeNullOrEmpty
+
+                $cmd.Parameters.Keys | Should -Contain 'UncPath'
+            }
+
+            It "Should return OperationResult for invalid UNC path" {
+                # Use a path that will fail the regex validation
+                { Test-RemoteVssSupported -UncPath "C:\local\path" } | Should -Throw
+            }
+        }
+
+        Context "Invoke-WithRemoteVssJunction - Function Structure" {
+            It "Should be defined with correct parameters" {
+                $cmd = Get-Command Invoke-WithRemoteVssJunction
+                $cmd | Should -Not -BeNullOrEmpty
+
+                $cmd.Parameters.Keys | Should -Contain 'UncPath'
+                $cmd.Parameters.Keys | Should -Contain 'ScriptBlock'
+            }
+
+            It "Should require UncPath parameter" {
+                $cmd = Get-Command Invoke-WithRemoteVssJunction
+                $cmd.Parameters['UncPath'].Attributes.Mandatory | Should -Contain $true
+            }
+
+            It "Should require ScriptBlock parameter" {
+                $cmd = Get-Command Invoke-WithRemoteVssJunction
+                $cmd.Parameters['ScriptBlock'].Attributes.Mandatory | Should -Contain $true
+            }
+
+            It "Should validate UncPath pattern" {
+                $cmd = Get-Command Invoke-WithRemoteVssJunction
+                $validatePattern = $cmd.Parameters['UncPath'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidatePatternAttribute] }
+
+                $validatePattern | Should -Not -BeNullOrEmpty
+            }
+        }
+
+        Context "Invoke-WithRemoteVssJunction - Mocked Tests" {
+            BeforeEach {
+                $script:remoteExecuted = $false
+                $script:remoteCleanedUp = $false
+                $script:remoteReceivedPath = $null
+            }
+
+            It "Should execute scriptblock with VSS UNC path" {
+                Mock New-RemoteVssSnapshot {
+                    return New-OperationResult -Success $true -Data ([PSCustomObject]@{
+                        ShadowId       = "{REMOTE-MOCK-1234-5678-90AB}"
+                        ShadowPath     = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy10"
+                        ServerName     = "MockServer"
+                        ShareName      = "TestShare"
+                        ShareLocalPath = "D:\TestShare"
+                        SourceVolume   = "D:"
+                        IsRemote       = $true
+                    })
+                }
+                Mock New-RemoteVssJunction {
+                    return New-OperationResult -Success $true -Data ([PSCustomObject]@{
+                        JunctionLocalPath = "D:\TestShare\.robocurse-vss-mock"
+                        JunctionUncPath   = "\\MockServer\TestShare\.robocurse-vss-mock"
+                        ServerName        = "MockServer"
+                    })
+                }
+                Mock Remove-RemoteVssJunction { New-OperationResult -Success $true }
+                Mock Remove-RemoteVssSnapshot { New-OperationResult -Success $true }
+
+                $result = Invoke-WithRemoteVssJunction -UncPath "\\MockServer\TestShare\Data" -ScriptBlock {
+                    param($SourcePath)
+                    $script:remoteExecuted = $true
+                    $script:remoteReceivedPath = $SourcePath
+                    "Success"
+                }
+
+                $result.Success | Should -Be $true
+                $result.Data | Should -Be "Success"
+                $script:remoteExecuted | Should -Be $true
+                $script:remoteReceivedPath | Should -Match "\.robocurse-vss-mock"
+            }
+
+            It "Should cleanup on successful execution" {
+                Mock New-RemoteVssSnapshot {
+                    return New-OperationResult -Success $true -Data ([PSCustomObject]@{
+                        ShadowId       = "{CLEANUP-TEST-1234-5678}"
+                        ShadowPath     = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy20"
+                        ServerName     = "CleanupServer"
+                        ShareName      = "Share"
+                        ShareLocalPath = "E:\Share"
+                        SourceVolume   = "E:"
+                        IsRemote       = $true
+                    })
+                }
+                Mock New-RemoteVssJunction {
+                    return New-OperationResult -Success $true -Data ([PSCustomObject]@{
+                        JunctionLocalPath = "E:\Share\.robocurse-vss-cleanup"
+                        JunctionUncPath   = "\\CleanupServer\Share\.robocurse-vss-cleanup"
+                        ServerName        = "CleanupServer"
+                    })
+                }
+                Mock Remove-RemoteVssJunction { New-OperationResult -Success $true }
+                Mock Remove-RemoteVssSnapshot { New-OperationResult -Success $true }
+
+                Invoke-WithRemoteVssJunction -UncPath "\\CleanupServer\Share" -ScriptBlock {
+                    param($SourcePath)
+                    "Done"
+                }
+
+                Should -Invoke Remove-RemoteVssJunction -Times 1
+                Should -Invoke Remove-RemoteVssSnapshot -Times 1
+            }
+
+            It "Should cleanup even when scriptblock throws" {
+                Mock New-RemoteVssSnapshot {
+                    return New-OperationResult -Success $true -Data ([PSCustomObject]@{
+                        ShadowId       = "{ERROR-TEST-1234-5678}"
+                        ShadowPath     = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy30"
+                        ServerName     = "ErrorServer"
+                        ShareName      = "Share"
+                        ShareLocalPath = "F:\Share"
+                        SourceVolume   = "F:"
+                        IsRemote       = $true
+                    })
+                }
+                Mock New-RemoteVssJunction {
+                    return New-OperationResult -Success $true -Data ([PSCustomObject]@{
+                        JunctionLocalPath = "F:\Share\.robocurse-vss-error"
+                        JunctionUncPath   = "\\ErrorServer\Share\.robocurse-vss-error"
+                        ServerName        = "ErrorServer"
+                    })
+                }
+                Mock Remove-RemoteVssJunction { New-OperationResult -Success $true }
+                Mock Remove-RemoteVssSnapshot { New-OperationResult -Success $true }
+
+                $result = Invoke-WithRemoteVssJunction -UncPath "\\ErrorServer\Share" -ScriptBlock {
+                    param($SourcePath)
+                    throw "Simulated remote error"
+                } -ErrorAction SilentlyContinue
+
+                $result.Success | Should -Be $false
+                $result.ErrorMessage | Should -Match "Simulated remote error"
+                Should -Invoke Remove-RemoteVssJunction -Times 1
+                Should -Invoke Remove-RemoteVssSnapshot -Times 1
+            }
+
+            It "Should not cleanup if snapshot creation fails" {
+                Mock New-RemoteVssSnapshot {
+                    return New-OperationResult -Success $false -ErrorMessage "Cannot connect to server"
+                }
+                Mock New-RemoteVssJunction { New-OperationResult -Success $true }
+                Mock Remove-RemoteVssJunction { New-OperationResult -Success $true }
+                Mock Remove-RemoteVssSnapshot { New-OperationResult -Success $true }
+
+                $result = Invoke-WithRemoteVssJunction -UncPath "\\FailServer\Share" -ScriptBlock {
+                    param($SourcePath)
+                    $script:remoteExecuted = $true
+                }
+
+                $result.Success | Should -Be $false
+                $result.ErrorMessage | Should -Match "Cannot connect to server"
+                $script:remoteExecuted | Should -Be $false
+                Should -Invoke Remove-RemoteVssJunction -Times 0
+                Should -Invoke Remove-RemoteVssSnapshot -Times 0
+            }
+
+            It "Should not cleanup snapshot if junction creation fails" {
+                Mock New-RemoteVssSnapshot {
+                    return New-OperationResult -Success $true -Data ([PSCustomObject]@{
+                        ShadowId       = "{JUNCTION-FAIL-1234-5678}"
+                        ShadowPath     = "\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy40"
+                        ServerName     = "JunctionFailServer"
+                        ShareName      = "Share"
+                        ShareLocalPath = "G:\Share"
+                        SourceVolume   = "G:"
+                        IsRemote       = $true
+                    })
+                }
+                Mock New-RemoteVssJunction {
+                    return New-OperationResult -Success $false -ErrorMessage "Permission denied creating junction"
+                }
+                Mock Remove-RemoteVssJunction { New-OperationResult -Success $true }
+                Mock Remove-RemoteVssSnapshot { New-OperationResult -Success $true }
+
+                $result = Invoke-WithRemoteVssJunction -UncPath "\\JunctionFailServer\Share" -ScriptBlock {
+                    param($SourcePath)
+                    $script:remoteExecuted = $true
+                }
+
+                $result.Success | Should -Be $false
+                $result.ErrorMessage | Should -Match "Permission denied"
+                $script:remoteExecuted | Should -Be $false
+                # Junction cleanup not attempted since junction wasn't created
+                Should -Invoke Remove-RemoteVssJunction -Times 0
+                # Snapshot should still be cleaned up
+                Should -Invoke Remove-RemoteVssSnapshot -Times 1
+            }
+        }
+    }
+
+    Describe "VSS Storage Quota Functions" {
+        Context "Test-VssStorageQuota - Function Structure" {
+            It "Should be defined with Volume parameter" {
+                $cmd = Get-Command Test-VssStorageQuota
+                $cmd | Should -Not -BeNullOrEmpty
+                $cmd.Parameters.Keys | Should -Contain 'Volume'
+            }
+
+            It "Should have mandatory Volume parameter" {
+                $cmd = Get-Command Test-VssStorageQuota
+                $cmd.Parameters['Volume'].Attributes.Mandatory | Should -Contain $true
+            }
+
+            It "Should have optional MinimumFreePercent parameter" {
+                $cmd = Get-Command Test-VssStorageQuota
+                $cmd.Parameters.Keys | Should -Contain 'MinimumFreePercent'
+                $cmd.Parameters['MinimumFreePercent'].Attributes.Mandatory | Should -Not -Contain $true
+            }
+
+            It "Should validate Volume pattern (drive letter with colon)" {
+                $cmd = Get-Command Test-VssStorageQuota
+                $validatePattern = $cmd.Parameters['Volume'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidatePatternAttribute] }
+                $validatePattern | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should return false on non-Windows platforms" {
+                if ($PSVersionTable.PSVersion.Major -ge 6 -and -not $IsWindows) {
+                    $result = Test-VssStorageQuota -Volume "C:"
+                    $result.Success | Should -Be $false
+                    $result.ErrorMessage | Should -Match "Windows"
+                }
+            }
+        }
+
+        Context "Test-VssStorageQuota - Parameter Validation" {
+            It "Should reject invalid volume format (missing colon)" {
+                { Test-VssStorageQuota -Volume "C" } | Should -Throw
+            }
+
+            It "Should reject invalid volume format (with path)" {
+                { Test-VssStorageQuota -Volume "C:\Users" } | Should -Throw
+            }
+
+            It "Should reject invalid volume format (lowercase)" {
+                # Pattern should allow both upper and lower case
+                { Test-VssStorageQuota -Volume "c:" } | Should -Not -Throw
+            }
+
+            It "Should validate MinimumFreePercent range" {
+                $cmd = Get-Command Test-VssStorageQuota
+                $validateRange = $cmd.Parameters['MinimumFreePercent'].Attributes | Where-Object { $_ -is [System.Management.Automation.ValidateRangeAttribute] }
+                $validateRange | Should -Not -BeNullOrEmpty
+                $validateRange.MinRange | Should -Be 1
+                $validateRange.MaxRange | Should -Be 50
+            }
+        }
+
+        Context "Test-VssStorageQuota - Return Values" {
+            It "Should return OperationResult object" {
+                Mock Get-CimInstance { $null }
+
+                $result = Test-VssStorageQuota -Volume "C:"
+                $result.PSObject.Properties.Name | Should -Contain 'Success'
+                $result.PSObject.Properties.Name | Should -Contain 'Data'
+                $result.PSObject.Properties.Name | Should -Contain 'ErrorMessage'
             }
         }
     }

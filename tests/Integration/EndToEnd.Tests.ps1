@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 # Load module at discovery time for InModuleScope
 $testRoot = $PSScriptRoot
@@ -34,7 +34,7 @@ InModuleScope 'Robocurse' {
             }
         }
 
-        Context "Complete Replication Workflow" -Skip:(-not $IsWindows) {
+        Context "Complete Replication Workflow" -Skip:(-not (Test-IsWindowsPlatform)) {
             BeforeAll {
                 # Mock robocopy for cross-platform testing
                 Mock Test-RobocopyAvailable {
@@ -136,6 +136,7 @@ InModuleScope 'Robocurse' {
 
             It "Should handle chunked replication" {
                 # Create profile object with chunking settings
+                # Note: Even a simple directory should generate at least 1 chunk
                 $profile = [PSCustomObject]@{
                     Name = "TestProfile"
                     Source = $script:SourceDir
@@ -145,6 +146,33 @@ InModuleScope 'Robocurse' {
                     ChunkMaxFiles = 50000
                     ChunkMaxDepth = 5
                     UseVSS = $false
+                }
+
+                # Mock Get-DirectoryProfile to return valid scan data
+                Mock Get-DirectoryProfile {
+                    param($Path)
+                    [PSCustomObject]@{
+                        TotalSize = 1024 * 1024  # 1 MB
+                        FileCount = 15
+                        DirCount = 3
+                        LargestFile = 1000
+                        SmallestFile = 100
+                    }
+                }
+
+                # Mock New-SmartChunks to return actual chunks
+                Mock New-SmartChunks {
+                    param($Path, $DestinationRoot, $MaxChunkSizeBytes, $MaxFiles, $MaxDepth)
+                    $mockProfile = [PSCustomObject]@{
+                        TotalSize = 500000
+                        FileCount = 5
+                        DirCount = 1
+                    }
+                    @(
+                        New-Chunk -SourcePath "$Path\Folder1" -DestinationPath "$DestinationRoot\Folder1" -Profile $mockProfile
+                        New-Chunk -SourcePath "$Path\Folder2" -DestinationPath "$DestinationRoot\Folder2" -Profile $mockProfile
+                        New-Chunk -SourcePath "$Path\Folder3" -DestinationPath "$DestinationRoot\Folder3" -Profile $mockProfile
+                    )
                 }
 
                 { Start-ReplicationRun -Profiles @($profile) -MaxConcurrentJobs 2 } | Should -Not -Throw
@@ -362,7 +390,7 @@ InModuleScope 'Robocurse' {
             }
         }
 
-        Context "Multiple Source Handling" -Skip:(-not $IsWindows) {
+        Context "Multiple Source Handling" -Skip:(-not (Test-IsWindowsPlatform)) {
             BeforeAll {
                 # Mock robocopy for cross-platform testing
                 Mock Test-RobocopyAvailable {

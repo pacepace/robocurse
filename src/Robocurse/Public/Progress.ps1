@@ -1,4 +1,4 @@
-# Robocurse Progress Functions
+﻿# Robocurse Progress Functions
 function Update-ProgressStats {
     <#
     .SYNOPSIS
@@ -31,6 +31,9 @@ function Update-ProgressStats {
     }
 
     $state.BytesComplete = $bytesFromCompleted + $bytesFromActive
+
+    # Debug logging for progress diagnostics (only logs if session initialized)
+    Write-RobocurseLog -Message "BytesComplete=$($state.BytesComplete) (completed=$bytesFromCompleted + active=$bytesFromActive)" -Level 'Debug' -Component 'Progress'
 }
 
 function Get-OrchestrationStatus {
@@ -156,11 +159,19 @@ function Get-ETAEstimate {
 
     $secondsRemaining = $bytesRemaining / $bytesPerSecond
 
-    # Cap at reasonable maximum (30 days = 2,592,000 seconds) to prevent unreasonable ETA
+    # Cap at configurable maximum to prevent unreasonable ETA display
+    # Default is 365 days (configurable via $script:MaxEtaDays)
     # This is well below int32 max (2.1B), so the cast to [int] is always safe
-    $maxSeconds = 30.0 * 24.0 * 60.0 * 60.0
-    if ($secondsRemaining -gt $maxSeconds -or [double]::IsInfinity($secondsRemaining) -or [double]::IsNaN($secondsRemaining)) {
-        $secondsRemaining = $maxSeconds
+    $maxDays = if ($script:MaxEtaDays) { $script:MaxEtaDays } else { 365 }
+    $maxSeconds = $maxDays * 24.0 * 60.0 * 60.0
+
+    if ([double]::IsInfinity($secondsRemaining) -or [double]::IsNaN($secondsRemaining)) {
+        return $null
+    }
+
+    if ($secondsRemaining -gt $maxSeconds) {
+        # Return a special timespan that indicates "capped" - callers can detect via .TotalDays
+        return [timespan]::FromDays($maxDays)
     }
 
     return [timespan]::FromSeconds([int]$secondsRemaining)

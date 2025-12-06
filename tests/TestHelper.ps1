@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Test helper for loading Robocurse functions
 

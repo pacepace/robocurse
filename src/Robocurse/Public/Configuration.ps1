@@ -1,4 +1,58 @@
-# Robocurse Configuration Functions
+﻿# Robocurse Configuration Functions
+
+function Format-Json {
+    <#
+    .SYNOPSIS
+        Formats JSON with proper 2-space indentation
+    .DESCRIPTION
+        PowerShell's ConvertTo-Json produces ugly formatting with 4-space indentation
+        and inconsistent spacing. This function reformats JSON to use 2-space indentation
+        and consistent property spacing.
+    .PARAMETER Json
+        The JSON string to format
+    .PARAMETER Indent
+        Number of spaces per indentation level (default 2)
+    .OUTPUTS
+        Properly formatted JSON string
+    .EXAMPLE
+        $obj | ConvertTo-Json -Depth 10 | Format-Json
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [string]$Json,
+
+        [ValidateRange(1, 8)]
+        [int]$Indent = 2
+    )
+
+    $indentStr = ' ' * $Indent
+    $indentLevel = 0
+
+    $lines = $Json -split "`n"
+    $result = foreach ($line in $lines) {
+        # Decrease indent for closing brackets
+        if ($line -match '^\s*[\}\]]') {
+            $indentLevel--
+        }
+
+        # Build the formatted line
+        $trimmed = $line.TrimStart()
+        # Fix spacing: PowerShell adds extra spaces after colons
+        $trimmed = $trimmed -replace '":  ', '": '
+        $formattedLine = ($indentStr * $indentLevel) + $trimmed
+
+        # Increase indent for opening brackets
+        if ($line -match '[\{\[]\s*$') {
+            $indentLevel++
+        }
+
+        $formattedLine
+    }
+
+    $result -join "`n"
+}
+
 function New-DefaultConfig {
     <#
     .SYNOPSIS
@@ -25,6 +79,9 @@ function New-DefaultConfig {
             LogCompressAfterDays = $script:LogCompressAfterDays
             LogRetentionDays = $script:LogDeleteAfterDays
             MismatchSeverity = $script:DefaultMismatchSeverity  # "Warning", "Error", or "Success"
+            VerboseFileLogging = $false  # If true, log every file copied; if false, only log summary
+            RedactPaths = $false  # If true, redact file paths in logs for security/privacy
+            RedactServerNames = @()  # Array of server names to specifically redact from logs
         }
         Email = [PSCustomObject]@{
             Enabled = $false
@@ -39,6 +96,7 @@ function New-DefaultConfig {
             Enabled = $false
             Time = "02:00"
             Days = @("Daily")
+            TaskName = ""  # Custom task name; empty = auto-generate unique name
         }
         SyncProfiles = @()
     }
@@ -49,6 +107,9 @@ function New-DefaultConfig {
     }
     if ($null -eq $config.SyncProfiles) {
         $config.SyncProfiles = @()
+    }
+    if ($null -eq $config.GlobalSettings.RedactServerNames) {
+        $config.GlobalSettings.RedactServerNames = @()
     }
 
     return $config
@@ -171,13 +232,27 @@ function ConvertFrom-GlobalSettings {
     }
 
     # Logging settings
-    if ($RawGlobal.logging -and $RawGlobal.logging.operationalLog) {
-        if ($RawGlobal.logging.operationalLog.path) {
-            $logPath = Split-Path -Path $RawGlobal.logging.operationalLog.path -Parent
-            $Config.GlobalSettings.LogPath = $logPath
+    if ($RawGlobal.logging) {
+        if ($RawGlobal.logging.operationalLog) {
+            if ($RawGlobal.logging.operationalLog.path) {
+                # Use the log path directly (don't use Split-Path which breaks relative paths like ".\Logs")
+                $Config.GlobalSettings.LogPath = $RawGlobal.logging.operationalLog.path
+            }
+            if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
+                $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays
+            }
         }
-        if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
-            $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays
+        # Verbose file logging - log every file name if true (default: false for smaller logs)
+        if ($null -ne $RawGlobal.logging.verboseFileLogging) {
+            $Config.GlobalSettings.VerboseFileLogging = [bool]$RawGlobal.logging.verboseFileLogging
+        }
+        # Path redaction - redact file paths in logs for security/privacy
+        if ($null -ne $RawGlobal.logging.redactPaths) {
+            $Config.GlobalSettings.RedactPaths = [bool]$RawGlobal.logging.redactPaths
+        }
+        # Server names to specifically redact from logs
+        if ($RawGlobal.logging.redactServerNames) {
+            $Config.GlobalSettings.RedactServerNames = @($RawGlobal.logging.redactServerNames)
         }
     }
 
@@ -197,66 +272,14 @@ function ConvertFrom-GlobalSettings {
     }
 }
 
-function ConvertFrom-ProfileSources {
+
+function ConvertFrom-FriendlyConfig {
     <#
     .SYNOPSIS
-        Expands multi-source profiles into separate sync profiles
-    .PARAMETER ProfileName
-        Name of the parent profile
-    .PARAMETER RawProfile
-        Raw profile object from JSON
-    .OUTPUTS
-        Array of expanded sync profile objects
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$ProfileName,
-
-        [Parameter(Mandatory)]
-        [PSCustomObject]$RawProfile
-    )
-
-    $expandedProfiles = @()
-    $description = if ($RawProfile.description) { $RawProfile.description } else { "" }
-
-    # Handle null or missing sources array
-    if ($null -eq $RawProfile.sources -or $RawProfile.sources.Count -eq 0) {
-        Write-RobocurseLog -Message "Profile '$ProfileName' has no sources defined, skipping" -Level 'Warning' -Component 'Config'
-        return $expandedProfiles
-    }
-
-    for ($i = 0; $i -lt $RawProfile.sources.Count; $i++) {
-        $sourceInfo = $RawProfile.sources[$i]
-        $expandedProfile = [PSCustomObject]@{
-            Name = "$ProfileName-Source$($i + 1)"
-            Description = "$description (Source $($i + 1))"
-            Source = $sourceInfo.path
-            Destination = Get-DestinationPathFromRaw -RawDestination $RawProfile.destination
-            UseVss = [bool]$sourceInfo.useVss
-            ScanMode = "Smart"
-            ChunkMaxSizeGB = 10
-            ChunkMaxFiles = 50000
-            ChunkMaxDepth = 5
-            RobocopyOptions = ConvertTo-RobocopyOptionsInternal -RawRobocopy $RawProfile.robocopy
-            Enabled = $true
-            ParentProfile = $ProfileName
-        }
-
-        ConvertTo-ChunkSettingsInternal -Profile $expandedProfile -RawChunking $RawProfile.chunking
-        $expandedProfiles += $expandedProfile
-    }
-
-    return $expandedProfiles
-}
-
-function ConvertFrom-ConfigFileFormat {
-    <#
-    .SYNOPSIS
-        Converts JSON config file format to internal format
+        Converts user-friendly JSON config format to internal format
     .DESCRIPTION
         The JSON config file uses a user-friendly format with:
-        - "profiles" as an object with profile names as keys
+        - "profiles" as an object with profile names as keys (one source per profile)
         - "global" with nested settings
 
         This function converts to the internal format with:
@@ -273,11 +296,11 @@ function ConvertFrom-ConfigFileFormat {
         [PSCustomObject]$RawConfig
     )
 
-    # Check if already in internal format (has SyncProfiles)
     $props = $RawConfig.PSObject.Properties.Name
-    if ($props -contains 'SyncProfiles') {
-        Write-Verbose "Config already in internal format"
-        return $RawConfig
+
+    # Validate this is the friendly format
+    if ($props -notcontains 'profiles') {
+        throw "Invalid config format: missing 'profiles' property. Config must use the friendly format."
     }
 
     # Start with default config as base
@@ -288,29 +311,20 @@ function ConvertFrom-ConfigFileFormat {
         ConvertFrom-GlobalSettings -RawGlobal $RawConfig.global -Config $config
     }
 
-    # Transform profiles
+    # Transform profiles - each profile has exactly one source
     $syncProfiles = @()
-    if ($props -contains 'profiles' -and $RawConfig.profiles) {
+    if ($RawConfig.profiles) {
         $profileNames = $RawConfig.profiles.PSObject.Properties.Name
         foreach ($profileName in $profileNames) {
             $rawProfile = $RawConfig.profiles.$profileName
 
             # Skip disabled profiles
-            # Explicitly check for $false; profiles without 'enabled' property default to enabled
-            # This explicit check handles: null (enabled), $true (enabled), $false (disabled)
             if ($null -ne $rawProfile.enabled -and $rawProfile.enabled -eq $false) {
                 Write-Verbose "Skipping disabled profile: $profileName"
                 continue
             }
 
-            # Handle multi-source profiles (expand into separate sync profiles)
-            if ($rawProfile.sources -and $rawProfile.sources.Count -gt 1) {
-                Write-Verbose "Profile '$profileName' has $($rawProfile.sources.Count) sources - expanding"
-                $syncProfiles += ConvertFrom-ProfileSources -ProfileName $profileName -RawProfile $rawProfile
-                continue
-            }
-
-            # Build single sync profile
+            # Build sync profile
             $syncProfile = [PSCustomObject]@{
                 Name = $profileName
                 Description = if ($rawProfile.description) { $rawProfile.description } else { "" }
@@ -318,37 +332,41 @@ function ConvertFrom-ConfigFileFormat {
                 Destination = ""
                 UseVss = $false
                 ScanMode = "Smart"
-                ChunkMaxSizeGB = 10
-                ChunkMaxFiles = 50000
-                ChunkMaxDepth = 5
+                ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
+                ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
+                ChunkMaxDepth = $script:DefaultMaxChunkDepth
                 RobocopyOptions = @{}
+                Enabled = $true
             }
 
-            # Handle source - single source from array or direct property
-            if ($rawProfile.sources -and $rawProfile.sources.Count -eq 1) {
-                $syncProfile.Source = $rawProfile.sources[0].path
-                $syncProfile.UseVss = [bool]$rawProfile.sources[0].useVss
-            }
-            elseif ($rawProfile.source) {
-                $syncProfile.Source = $rawProfile.source
+            # Handle source - "source" property (string or object with path/useVss)
+            if ($rawProfile.source) {
+                if ($rawProfile.source -is [string]) {
+                    $syncProfile.Source = $rawProfile.source
+                }
+                elseif ($rawProfile.source.path) {
+                    $syncProfile.Source = $rawProfile.source.path
+                    if ($null -ne $rawProfile.source.useVss) {
+                        $syncProfile.UseVss = [bool]$rawProfile.source.useVss
+                    }
+                }
             }
 
-            # Handle destination using helper
+            # Handle destination
             $syncProfile.Destination = Get-DestinationPathFromRaw -RawDestination $rawProfile.destination
 
-            # Apply chunking settings using helper
+            # Apply chunking settings
             ConvertTo-ChunkSettingsInternal -Profile $syncProfile -RawChunking $rawProfile.chunking
 
-            # Handle robocopy settings using helper
+            # Handle robocopy settings
             $robocopyOptions = ConvertTo-RobocopyOptionsInternal -RawRobocopy $rawProfile.robocopy
 
-            # Handle retry policy (alternative location in config)
+            # Handle retry policy
             if ($rawProfile.retryPolicy) {
                 if ($rawProfile.retryPolicy.maxRetries) {
                     $robocopyOptions.RetryCount = $rawProfile.retryPolicy.maxRetries
                 }
                 if ($rawProfile.retryPolicy.retryDelayMinutes) {
-                    # Convert minutes to seconds for robocopy /W:
                     $robocopyOptions.RetryWait = $rawProfile.retryPolicy.retryDelayMinutes * 60
                 }
             }
@@ -364,13 +382,115 @@ function ConvertFrom-ConfigFileFormat {
     return $config
 }
 
+function ConvertTo-FriendlyConfig {
+    <#
+    .SYNOPSIS
+        Converts internal config format to user-friendly JSON format
+    .DESCRIPTION
+        Converts the internal format (SyncProfiles array, GlobalSettings) back to
+        the user-friendly format (profiles object, global nested settings).
+    .PARAMETER Config
+        Internal config object
+    .OUTPUTS
+        PSCustomObject in friendly format ready for JSON serialization
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    # Build friendly format
+    $friendly = [ordered]@{
+        version = "1.0"
+        profiles = [ordered]@{}
+        global = [ordered]@{
+            performance = [ordered]@{
+                maxConcurrentJobs = $Config.GlobalSettings.MaxConcurrentJobs
+                throttleNetworkMbps = $Config.GlobalSettings.BandwidthLimitMbps
+            }
+            logging = [ordered]@{
+                operationalLog = [ordered]@{
+                    path = $Config.GlobalSettings.LogPath
+                    rotation = [ordered]@{
+                        maxAgeDays = $Config.GlobalSettings.LogRetentionDays
+                    }
+                }
+                verboseFileLogging = $Config.GlobalSettings.VerboseFileLogging
+                redactPaths = $Config.GlobalSettings.RedactPaths
+                redactServerNames = @($Config.GlobalSettings.RedactServerNames)
+            }
+            email = [ordered]@{
+                enabled = $Config.Email.Enabled
+                smtp = [ordered]@{
+                    server = $Config.Email.SmtpServer
+                    port = $Config.Email.Port
+                    useSsl = $Config.Email.UseTls
+                    credentialName = $Config.Email.CredentialTarget
+                }
+                from = $Config.Email.From
+                to = @($Config.Email.To)
+            }
+        }
+    }
+
+    # Convert each sync profile
+    foreach ($profile in $Config.SyncProfiles) {
+        $friendlyProfile = [ordered]@{
+            description = $profile.Description
+            enabled = if ($null -ne $profile.Enabled) { $profile.Enabled } else { $true }
+            source = [ordered]@{
+                path = $profile.Source
+                useVss = $profile.UseVss
+            }
+            destination = [ordered]@{
+                path = $profile.Destination
+            }
+            chunking = [ordered]@{
+                maxChunkSizeGB = $profile.ChunkMaxSizeGB
+                maxFiles = $profile.ChunkMaxFiles
+                maxDepthToScan = $profile.ChunkMaxDepth
+                strategy = switch ($profile.ScanMode) {
+                    'Smart' { 'auto' }
+                    'Flat' { 'flat' }
+                    default { 'auto' }
+                }
+            }
+        }
+
+        # Add robocopy options if present
+        if ($profile.RobocopyOptions) {
+            $robocopy = [ordered]@{}
+            if ($profile.RobocopyOptions.Switches) {
+                $robocopy.switches = @($profile.RobocopyOptions.Switches)
+            }
+            if ($profile.RobocopyOptions.ExcludeFiles) {
+                $robocopy.excludeFiles = @($profile.RobocopyOptions.ExcludeFiles)
+            }
+            if ($profile.RobocopyOptions.ExcludeDirs) {
+                $robocopy.excludeDirs = @($profile.RobocopyOptions.ExcludeDirs)
+            }
+            if ($robocopy.Count -gt 0) {
+                $friendlyProfile.robocopy = $robocopy
+            }
+        }
+
+        $friendly.profiles[$profile.Name] = [PSCustomObject]$friendlyProfile
+    }
+
+    return [PSCustomObject]$friendly
+}
+
 function Get-RobocurseConfig {
     <#
     .SYNOPSIS
         Loads configuration from JSON file
     .DESCRIPTION
         Loads and parses the Robocurse configuration from a JSON file.
-        Automatically detects and converts between JSON file format and internal format.
+        The config file must use the friendly format with:
+        - "profiles" object containing named profiles (one source per profile)
+        - "global" object with nested settings
+
         If the file doesn't exist, returns a default configuration.
         Handles malformed JSON gracefully by returning default config with a verbose message.
     .PARAMETER Path
@@ -380,10 +500,6 @@ function Get-RobocurseConfig {
     .NOTES
         Error Behavior: Returns default configuration on error. Never throws.
         Use -Verbose to see error details.
-
-        Supports two config formats:
-        1. JSON file format: profiles/global structure (user-friendly)
-        2. Internal format: SyncProfiles/GlobalSettings structure
     .EXAMPLE
         $config = Get-RobocurseConfig
         Loads configuration from default path
@@ -412,10 +528,10 @@ function Get-RobocurseConfig {
     # Try to load and parse the JSON file
     try {
         $jsonContent = Get-Content -Path $Path -Raw -ErrorAction Stop
-        $rawConfig = $jsonContent | ConvertFrom-Json -Depth 10 -ErrorAction Stop
+        $rawConfig = $jsonContent | ConvertFrom-Json -ErrorAction Stop
 
-        # Convert to internal format (handles both formats)
-        $config = ConvertFrom-ConfigFileFormat -RawConfig $rawConfig
+        # Convert from friendly format to internal format
+        $config = ConvertFrom-FriendlyConfig -RawConfig $rawConfig
 
         # Validate configuration and log any warnings
         $validation = Test-RobocurseConfig -Config $config
@@ -440,12 +556,16 @@ function Get-RobocurseConfig {
 function Save-RobocurseConfig {
     <#
     .SYNOPSIS
-        Saves configuration to a JSON file
+        Saves configuration to a JSON file in friendly format
     .DESCRIPTION
         Saves the configuration object to a JSON file with pretty formatting.
+        The config is always saved in the user-friendly format with:
+        - "profiles" object containing named profiles
+        - "global" object with nested settings
+
         Creates the parent directory if it doesn't exist.
     .PARAMETER Config
-        Configuration object to save (PSCustomObject)
+        Configuration object to save (PSCustomObject in internal format)
     .PARAMETER Path
         Path to save the configuration file. Defaults to .\Robocurse.config.json
     .OUTPUTS
@@ -482,8 +602,11 @@ function Save-RobocurseConfig {
             Write-Verbose "Created directory: $parentDir"
         }
 
-        # Convert to JSON and save
-        $jsonContent = $Config | ConvertTo-Json -Depth 10
+        # Convert to friendly format before saving
+        $friendlyConfig = ConvertTo-FriendlyConfig -Config $Config
+
+        # Convert to JSON with proper 2-space indentation
+        $jsonContent = $friendlyConfig | ConvertTo-Json -Depth 10 | Format-Json
         $jsonContent | Set-Content -Path $Path -Encoding UTF8 -ErrorAction Stop
 
         Write-Verbose "Configuration saved successfully to '$Path'"
@@ -553,10 +676,16 @@ function Test-RobocurseConfig {
         }
 
         # Validate BandwidthLimitMbps (0 = unlimited, positive = limit in Mbps)
+        # Upper bound of 100,000 Mbps (100 Gbps) covers even the fastest enterprise networks
         if ($gsPropertyNames -contains 'BandwidthLimitMbps') {
             $bandwidthLimit = $gs.BandwidthLimitMbps
-            if ($null -ne $bandwidthLimit -and $bandwidthLimit -lt 0) {
-                $errors += "GlobalSettings.BandwidthLimitMbps must be non-negative (current: $bandwidthLimit)"
+            if ($null -ne $bandwidthLimit) {
+                if ($bandwidthLimit -lt 0) {
+                    $errors += "GlobalSettings.BandwidthLimitMbps must be non-negative (current: $bandwidthLimit)"
+                }
+                elseif ($bandwidthLimit -gt 100000) {
+                    $errors += "GlobalSettings.BandwidthLimitMbps must be at most 100000 (100 Gbps) (current: $bandwidthLimit)"
+                }
             }
         }
     }

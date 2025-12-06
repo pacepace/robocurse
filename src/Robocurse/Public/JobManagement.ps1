@@ -1,445 +1,12 @@
-# Robocurse Orchestration Functions
-# Script variable to track if C# type has been initialized (for lazy loading)
-$script:OrchestrationTypeInitialized = $false
-$script:OrchestrationState = $null
-
-function Initialize-OrchestrationStateType {
-    <#
-    .SYNOPSIS
-        Lazy-loads the C# orchestration state type
-    .DESCRIPTION
-        Compiles and loads the C# OrchestrationState class only when first needed.
-        This defers the Add-Type overhead until orchestration is actually used,
-        improving script startup time for GUI and help commands.
-
-        The type is only compiled once per PowerShell session. Subsequent calls
-        return immediately if the type already exists.
-    .OUTPUTS
-        $true if type is available, $false on compilation failure
-    #>
-    [CmdletBinding()]
-    param()
-
-    # Fast path: already initialized this session
-    if ($script:OrchestrationTypeInitialized -and $script:OrchestrationState) {
-        return $true
-    }
-
-    # Check if type exists from a previous session/import
-    if (([System.Management.Automation.PSTypeName]'Robocurse.OrchestrationState').Type) {
-        $script:OrchestrationTypeInitialized = $true
-        if (-not $script:OrchestrationState) {
-            $script:OrchestrationState = [Robocurse.OrchestrationState]::new()
-        }
-        return $true
-    }
-
-    # Compile the C# type (this is the expensive operation we're deferring)
-    try {
-        Add-Type -TypeDefinition @'
-using System;
-using System.Collections.Concurrent;
-using System.Threading;
-
-namespace Robocurse
-{
-    /// <summary>
-    /// Thread-safe orchestration state for cross-runspace communication.
-    /// Scalar properties use locking, collections use concurrent types.
-    /// </summary>
-    public class OrchestrationState
-    {
-        private readonly object _lock = new object();
-
-        // Session identity (set once, read many - but locked for safety)
-        private string _sessionId;
-        public string SessionId
-        {
-            get { lock (_lock) { return _sessionId; } }
-            set { lock (_lock) { _sessionId = value; } }
-        }
-
-        // Current execution phase: Idle, Scanning, Replicating, Complete, Stopped
-        private string _phase = "Idle";
-        public string Phase
-        {
-            get { lock (_lock) { return _phase; } }
-            set { lock (_lock) { _phase = value; } }
-        }
-
-        // Current profile being processed (PSCustomObject from PowerShell)
-        private object _currentProfile;
-        public object CurrentProfile
-        {
-            get { lock (_lock) { return _currentProfile; } }
-            set { lock (_lock) { _currentProfile = value; } }
-        }
-
-        // Index into Profiles array
-        private int _profileIndex;
-        public int ProfileIndex
-        {
-            get { lock (_lock) { return _profileIndex; } }
-            set { lock (_lock) { _profileIndex = value; } }
-        }
-
-        // Total chunks for current profile
-        private int _totalChunks;
-        public int TotalChunks
-        {
-            get { lock (_lock) { return _totalChunks; } }
-            set { lock (_lock) { _totalChunks = value; } }
-        }
-
-        // Completed chunk count (use Interlocked for atomic increment)
-        private int _completedCount;
-        public int CompletedCount
-        {
-            get { return Interlocked.CompareExchange(ref _completedCount, 0, 0); }
-            set { Interlocked.Exchange(ref _completedCount, value); }
-        }
-
-        /// <summary>Atomically increment CompletedCount and return new value</summary>
-        public int IncrementCompletedCount()
-        {
-            return Interlocked.Increment(ref _completedCount);
-        }
-
-        // Total bytes for current profile
-        private long _totalBytes;
-        public long TotalBytes
-        {
-            get { return Interlocked.Read(ref _totalBytes); }
-            set { Interlocked.Exchange(ref _totalBytes, value); }
-        }
-
-        // Bytes completed (use Interlocked for atomic add)
-        private long _bytesComplete;
-        public long BytesComplete
-        {
-            get { return Interlocked.Read(ref _bytesComplete); }
-            set { Interlocked.Exchange(ref _bytesComplete, value); }
-        }
-
-        /// <summary>Atomically add to BytesComplete and return new value</summary>
-        public long AddBytesComplete(long bytes)
-        {
-            return Interlocked.Add(ref _bytesComplete, bytes);
-        }
-
-        // Cumulative bytes from completed chunks (avoids iterating CompletedChunks queue)
-        // This is the running total of EstimatedSize from all completed chunks
-        private long _completedChunkBytes;
-        public long CompletedChunkBytes
-        {
-            get { return Interlocked.Read(ref _completedChunkBytes); }
-            set { Interlocked.Exchange(ref _completedChunkBytes, value); }
-        }
-
-        /// <summary>Atomically add bytes from a completed chunk</summary>
-        public long AddCompletedChunkBytes(long bytes)
-        {
-            return Interlocked.Add(ref _completedChunkBytes, bytes);
-        }
-
-        // Cumulative files copied from completed chunks
-        private long _completedChunkFiles;
-        public long CompletedChunkFiles
-        {
-            get { return Interlocked.Read(ref _completedChunkFiles); }
-            set { Interlocked.Exchange(ref _completedChunkFiles, value); }
-        }
-
-        /// <summary>Atomically add files from a completed chunk</summary>
-        public long AddCompletedChunkFiles(long files)
-        {
-            return Interlocked.Add(ref _completedChunkFiles, files);
-        }
-
-        // Skipped chunk tracking (for checkpoint resume - not added to CompletedChunks queue)
-        private int _skippedChunkCount;
-        public int SkippedChunkCount
-        {
-            get { return Interlocked.CompareExchange(ref _skippedChunkCount, 0, 0); }
-            set { Interlocked.Exchange(ref _skippedChunkCount, value); }
-        }
-
-        /// <summary>Atomically increment skipped chunk count</summary>
-        public int IncrementSkippedCount()
-        {
-            return Interlocked.Increment(ref _skippedChunkCount);
-        }
-
-        private long _skippedChunkBytes;
-        public long SkippedChunkBytes
-        {
-            get { return Interlocked.Read(ref _skippedChunkBytes); }
-            set { Interlocked.Exchange(ref _skippedChunkBytes, value); }
-        }
-
-        /// <summary>Atomically add bytes from a skipped chunk</summary>
-        public long AddSkippedChunkBytes(long bytes)
-        {
-            return Interlocked.Add(ref _skippedChunkBytes, bytes);
-        }
-
-        // Snapshot of files at profile start (for per-profile file counting)
-        private long _profileStartFiles;
-        public long ProfileStartFiles
-        {
-            get { return Interlocked.Read(ref _profileStartFiles); }
-            set { Interlocked.Exchange(ref _profileStartFiles, value); }
-        }
-
-        // Timing (nullable DateTime via object boxing)
-        private object _startTime;
-        public object StartTime
-        {
-            get { lock (_lock) { return _startTime; } }
-            set { lock (_lock) { _startTime = value; } }
-        }
-
-        private object _profileStartTime;
-        public object ProfileStartTime
-        {
-            get { lock (_lock) { return _profileStartTime; } }
-            set { lock (_lock) { _profileStartTime = value; } }
-        }
-
-        // Control flags (volatile for cross-thread visibility)
-        private volatile bool _stopRequested;
-        public bool StopRequested
-        {
-            get { return _stopRequested; }
-            set { _stopRequested = value; }
-        }
-
-        private volatile bool _pauseRequested;
-        public bool PauseRequested
-        {
-            get { return _pauseRequested; }
-            set { _pauseRequested = value; }
-        }
-
-        // Arrays set once per run (protected by lock for reference safety)
-        private object[] _profiles;
-        public object[] Profiles
-        {
-            get { lock (_lock) { return _profiles; } }
-            set { lock (_lock) { _profiles = value; } }
-        }
-
-        // Per-profile configuration (set once per profile, read during execution)
-        private object _currentRobocopyOptions;
-        public object CurrentRobocopyOptions
-        {
-            get { lock (_lock) { return _currentRobocopyOptions; } }
-            set { lock (_lock) { _currentRobocopyOptions = value; } }
-        }
-
-        private object _currentVssSnapshot;
-        public object CurrentVssSnapshot
-        {
-            get { lock (_lock) { return _currentVssSnapshot; } }
-            set { lock (_lock) { _currentVssSnapshot = value; } }
-        }
-
-        // Thread-safe collections (no additional locking needed)
-        public ConcurrentQueue<object> ChunkQueue { get; private set; }
-        public ConcurrentDictionary<int, object> ActiveJobs { get; private set; }
-        public ConcurrentQueue<object> CompletedChunks { get; private set; }  // Queue for ordering
-        public ConcurrentQueue<object> FailedChunks { get; private set; }     // Queue for consistency
-        public ConcurrentQueue<object> ProfileResults { get; private set; }   // Accumulated results
-        public ConcurrentQueue<string> ErrorMessages { get; private set; }    // Real-time error streaming
-
-        /// <summary>Add an error message to the queue for GUI consumption</summary>
-        public void EnqueueError(string message)
-        {
-            ErrorMessages.Enqueue(message);
-        }
-
-        /// <summary>Dequeue all pending error messages</summary>
-        public string[] DequeueErrors()
-        {
-            var errors = new System.Collections.Generic.List<string>();
-            string error;
-            while (ErrorMessages.TryDequeue(out error))
-            {
-                errors.Add(error);
-            }
-            return errors.ToArray();
-        }
-
-        /// <summary>Create a new orchestration state with fresh collections</summary>
-        public OrchestrationState()
-        {
-            _sessionId = Guid.NewGuid().ToString();
-            ChunkQueue = new ConcurrentQueue<object>();
-            ActiveJobs = new ConcurrentDictionary<int, object>();
-            CompletedChunks = new ConcurrentQueue<object>();
-            FailedChunks = new ConcurrentQueue<object>();
-            ProfileResults = new ConcurrentQueue<object>();
-            ErrorMessages = new ConcurrentQueue<string>();
-        }
-
-        /// <summary>Reset state for a new replication run</summary>
-        public void Reset()
-        {
-            lock (_lock)
-            {
-                _sessionId = Guid.NewGuid().ToString();
-                _phase = "Idle";
-                _currentProfile = null;
-                _profileIndex = 0;
-                _totalChunks = 0;
-                _totalBytes = 0;
-                _startTime = null;
-                _profileStartTime = null;
-                _profiles = null;
-                _currentRobocopyOptions = null;
-                _currentVssSnapshot = null;
-            }
-
-            // Reset atomic counters
-            Interlocked.Exchange(ref _completedCount, 0);
-            Interlocked.Exchange(ref _bytesComplete, 0);
-            Interlocked.Exchange(ref _completedChunkBytes, 0);
-            Interlocked.Exchange(ref _completedChunkFiles, 0);
-            Interlocked.Exchange(ref _profileStartFiles, 0);
-            Interlocked.Exchange(ref _skippedChunkCount, 0);
-            Interlocked.Exchange(ref _skippedChunkBytes, 0);
-
-            // Reset volatile flags
-            _stopRequested = false;
-            _pauseRequested = false;
-
-            // Clear concurrent collections
-            ChunkQueue = new ConcurrentQueue<object>();
-            ActiveJobs.Clear();
-            CompletedChunks = new ConcurrentQueue<object>();
-            FailedChunks = new ConcurrentQueue<object>();
-            ProfileResults = new ConcurrentQueue<object>();
-            ErrorMessages = new ConcurrentQueue<string>();
-        }
-
-        /// <summary>Reset collections for a new profile within the same run</summary>
-        public void ResetForNewProfile()
-        {
-            lock (_lock)
-            {
-                _currentProfile = null;
-                _profileStartTime = null;
-                _totalChunks = 0;
-                _totalBytes = 0;
-                _currentRobocopyOptions = null;
-                _currentVssSnapshot = null;
-            }
-
-            Interlocked.Exchange(ref _completedCount, 0);
-            Interlocked.Exchange(ref _bytesComplete, 0);
-            Interlocked.Exchange(ref _completedChunkBytes, 0);
-            Interlocked.Exchange(ref _completedChunkFiles, 0);
-            Interlocked.Exchange(ref _skippedChunkCount, 0);
-            Interlocked.Exchange(ref _skippedChunkBytes, 0);
-
-            ChunkQueue = new ConcurrentQueue<object>();
-            ActiveJobs.Clear();
-            CompletedChunks = new ConcurrentQueue<object>();
-            FailedChunks = new ConcurrentQueue<object>();
-            // Note: ProfileResults and ErrorMessages are NOT cleared - accumulate across profiles
-        }
-
-        /// <summary>Clear just the chunk collections (used between profiles)</summary>
-        public void ClearChunkCollections()
-        {
-            ChunkQueue = new ConcurrentQueue<object>();
-            ActiveJobs.Clear();
-            CompletedChunks = new ConcurrentQueue<object>();
-            FailedChunks = new ConcurrentQueue<object>();
-        }
-
-        /// <summary>Get ProfileResults as an array for PowerShell enumeration</summary>
-        public object[] GetProfileResultsArray()
-        {
-            return ProfileResults.ToArray();
-        }
-
-        /// <summary>Get CompletedChunks as an array for PowerShell enumeration</summary>
-        public object[] GetCompletedChunksArray()
-        {
-            return CompletedChunks.ToArray();
-        }
-
-        /// <summary>Get FailedChunks as an array for PowerShell enumeration</summary>
-        public object[] GetFailedChunksArray()
-        {
-            return FailedChunks.ToArray();
-        }
-    }
-}
-'@ -ErrorAction Stop
-
-        # Create the singleton instance
-        $script:OrchestrationState = [Robocurse.OrchestrationState]::new()
-        $script:OrchestrationTypeInitialized = $true
-
-        Write-Verbose "OrchestrationState C# type compiled and initialized"
-        return $true
-    }
-    catch {
-        Write-RobocurseLog -Message "Failed to compile OrchestrationState type: $($_.Exception.Message)" `
-            -Level 'Error' -Component 'Orchestration'
-        return $false
-    }
-}
-
-# Script-scoped callback handlers
-$script:OnProgress = $null
-$script:OnChunkComplete = $null
-$script:OnProfileComplete = $null
-
-# Script-scoped replication run settings (preserved across profile transitions)
-$script:CurrentMaxConcurrentJobs = $null
-
-function Initialize-OrchestrationState {
-    <#
-    .SYNOPSIS
-        Resets orchestration state for a new run
-    .DESCRIPTION
-        Resets the thread-safe orchestration state object for a new replication run.
-        Uses the C# class's Reset() method to properly clear all state.
-        Also clears the directory profile cache to prevent memory growth across runs
-        and cleans up any orphaned VSS snapshots from previous crashed runs.
-
-        If this is the first call, lazy-loads the C# OrchestrationState type.
-    #>
-    [CmdletBinding()]
-    param()
-
-    # Ensure the C# type is compiled and instance exists (lazy load)
-    if (-not (Initialize-OrchestrationStateType)) {
-        throw "Failed to initialize OrchestrationState type. Check logs for compilation errors."
-    }
-
-    # Reset the existing state object (don't create a new one - that breaks cross-thread sharing)
-    $script:OrchestrationState.Reset()
-
-    # Clear profile cache to prevent unbounded memory growth across runs
-    Clear-ProfileCache
-
-    # Reset chunk ID counter (plain integer - [ref] applied at Interlocked.Increment call site)
-    $script:ChunkIdCounter = 0
-
-    # Clean up any orphaned VSS snapshots from crashed previous runs
-    $orphansCleared = Clear-OrphanVssSnapshots
-    if ($orphansCleared -gt 0) {
-        Write-RobocurseLog -Message "Cleaned up $orphansCleared orphaned VSS snapshot(s) from previous run" `
-            -Level 'Info' -Component 'VSS'
-    }
-
-    Write-RobocurseLog -Message "Orchestration state initialized: $($script:OrchestrationState.SessionId)" `
-        -Level 'Info' -Component 'Orchestrator'
-}
+# Robocurse Job Management Functions
+# Chunk job execution, retry logic, and profile management
+#
+# This module handles the execution lifecycle:
+# - Starting and stopping replication runs
+# - Profile processing and transitions
+# - Chunk job creation and completion
+# - Retry logic with exponential backoff
+# - Control requests (stop, pause, resume)
 
 function Start-ReplicationRun {
     <#
@@ -506,6 +73,9 @@ function Start-ReplicationRun {
 
         [switch]$DryRun,
 
+        # If true, log every file copied to robocopy log; if false (default), only summary
+        [switch]$VerboseFileLogging,
+
         [scriptblock]$OnProgress,
         [scriptblock]$OnChunkComplete,
         [scriptblock]$OnProfileComplete
@@ -518,12 +88,17 @@ function Start-ReplicationRun {
 
     # Load checkpoint if resuming
     $script:CurrentCheckpoint = $null
+    $script:CompletedPathsHashSet = $null  # HashSet for O(1) lookups during resume
     if (-not $IgnoreCheckpoint) {
         $script:CurrentCheckpoint = Get-ReplicationCheckpoint
         if ($script:CurrentCheckpoint) {
             $skippedCount = $script:CurrentCheckpoint.CompletedChunkPaths.Count
             Write-RobocurseLog -Message "Resuming from checkpoint: $skippedCount chunks will be skipped" `
                 -Level 'Info' -Component 'Checkpoint'
+
+            # Create HashSet for O(1) lookups instead of O(N) linear search per chunk
+            # This significantly improves resume performance with thousands of completed chunks
+            $script:CompletedPathsHashSet = New-CompletedPathsHashSet -Checkpoint $script:CurrentCheckpoint
         }
     }
 
@@ -540,6 +115,9 @@ function Start-ReplicationRun {
         Write-RobocurseLog -Message "DRY-RUN MODE: No files will be copied (robocopy /L)" `
             -Level 'Warning' -Component 'Orchestrator'
     }
+
+    # Set verbose file logging mode for Start-ChunkJob to use
+    $script:VerboseFileLoggingMode = $VerboseFileLogging.IsPresent
 
     # Validate robocopy is available before starting
     $robocopyCheck = Test-RobocopyAvailable
@@ -701,6 +279,9 @@ function Start-ProfileReplication {
     $maxFiles = if ($Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
     $maxDepth = if ($Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
+    Write-RobocurseLog -Message "Chunk settings: MaxSize=$([math]::Round($maxChunkBytes/1GB, 2))GB, MaxFiles=$maxFiles, MaxDepth=$maxDepth, Mode=$($Profile.ScanMode)" `
+        -Level 'Debug' -Component 'Orchestrator'
+
     $chunks = switch ($Profile.ScanMode) {
         'Flat' {
             New-FlatChunks `
@@ -730,6 +311,10 @@ function Start-ProfileReplication {
     # Clear chunk collections for the new profile using the C# class method
     $state.ClearChunkCollections()
 
+    # Force array context to handle PowerShell's single-item unwrapping
+    # Without @(), a single chunk becomes a scalar and .Count returns $null
+    $chunks = @($chunks)
+
     # Enqueue all chunks (RetryCount is now part of New-Chunk)
     foreach ($chunk in $chunks) {
         $state.ChunkQueue.Enqueue($chunk)
@@ -754,11 +339,24 @@ function Start-ChunkJob {
         - Profile-specific robocopy options
         - Dynamic bandwidth throttling (IPG) based on aggregate limit and active jobs
 
-        BANDWIDTH THROTTLING NOTE:
+        BANDWIDTH THROTTLING DESIGN:
         IPG (Inter-Packet Gap) is recalculated fresh for each job start, including retries.
         This ensures new/retried jobs get the correct bandwidth share based on CURRENT active
-        job count. Running jobs keep their original IPG (robocopy limitation - /IPG is set
-        at process start). As jobs complete, new jobs automatically get more bandwidth.
+        job count.
+
+        KNOWN LIMITATION (robocopy architecture):
+        Running jobs keep their original IPG because robocopy's /IPG is set at process start
+        and cannot be modified on a running process. When jobs complete, new jobs automatically
+        get proportionally more bandwidth.
+
+        EXAMPLE: With 100 Mbps limit and 4 jobs:
+        - Initially: Each job gets ~25 Mbps
+        - After 2 jobs complete: New jobs get ~50 Mbps each
+        - Running jobs keep their original ~25 Mbps (robocopy limitation)
+        - Total utilization may be <100 Mbps until all old jobs complete
+
+        MITIGATION: Consider using smaller chunk sizes or higher MaxConcurrentJobs to ensure
+        faster job turnover and better bandwidth utilization.
     .PARAMETER Chunk
         Chunk object to replicate
     .OUTPUTS
@@ -772,6 +370,10 @@ function Start-ChunkJob {
 
     # Get log path for this chunk
     $logPath = Get-LogPath -Type 'ChunkJob' -ChunkId $Chunk.ChunkId
+
+    # Console output for visibility
+    Write-Host "[CHUNK START] Chunk $($Chunk.ChunkId): $($Chunk.SourcePath) -> $($Chunk.DestinationPath)"
+    Write-Host "  Log file: $logPath"
 
     Write-RobocurseLog -Message "Starting chunk $($Chunk.ChunkId): $($Chunk.SourcePath)" `
         -Level 'Debug' -Component 'Orchestrator'
@@ -808,7 +410,8 @@ function Start-ChunkJob {
     $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath `
         -ThreadsPerJob $script:DefaultThreadsPerJob `
         -RobocopyOptions $effectiveOptions `
-        -DryRun:$script:DryRunMode
+        -DryRun:$script:DryRunMode `
+        -VerboseFileLogging:$script:VerboseFileLoggingMode
 
     return $job
 }
@@ -866,6 +469,8 @@ function Invoke-ReplicationTick {
             }
             else {
                 $state.CompletedChunks.Enqueue($removedJob.Chunk)
+                # Reset circuit breaker on success - consecutive failures counter goes back to 0
+                Reset-CircuitBreakerOnSuccess
                 # Track cumulative bytes from completed chunks (avoids O(n) iteration in Update-ProgressStats)
                 if ($removedJob.Chunk.EstimatedSize) {
                     $state.AddCompletedChunkBytes($removedJob.Chunk.EstimatedSize)
@@ -875,16 +480,29 @@ function Invoke-ReplicationTick {
                     $state.AddCompletedChunkFiles($result.Stats.FilesCopied)
                 }
             }
-            $state.IncrementCompletedCount()
+            $newCompletedCount = $state.IncrementCompletedCount()
 
             # Invoke callback
             if ($script:OnChunkComplete) {
                 & $script:OnChunkComplete $removedJob $result
             }
 
-            # Save checkpoint periodically (every N chunks or on failure)
-            # This enables resume after crash without excessive disk I/O
-            if (($state.CompletedCount % $script:CheckpointSaveFrequency -eq 0) -or ($result.ExitMeaning.Severity -in @('Error', 'Fatal'))) {
+            # Save checkpoint strategically to minimize race window while controlling I/O
+            # Checkpoints are saved:
+            # 1. First chunk completion (to establish checkpoint file early)
+            # 2. Every N chunks (controlled by CheckpointSaveFrequency)
+            # 3. On any failure (to preserve progress before potential crash)
+            # 4. Profile completion (handled separately in Complete-Profile)
+            #
+            # NOTE: There is still a small race window between chunk completion and checkpoint save.
+            # If process crashes in this window, the chunk will be re-processed on resume.
+            # This is acceptable as robocopy /MIR is idempotent.
+            $shouldSaveCheckpoint = (
+                ($newCompletedCount -eq 1) -or                                            # First chunk - establish checkpoint early
+                ($newCompletedCount % $script:CheckpointSaveFrequency -eq 0) -or          # Periodic save
+                ($result.ExitMeaning.Severity -in @('Error', 'Fatal'))                    # Save on failure
+            )
+            if ($shouldSaveCheckpoint) {
                 Save-ReplicationCheckpoint | Out-Null
             }
         }
@@ -899,7 +517,8 @@ function Invoke-ReplicationTick {
         $chunk = $null
         if ($state.ChunkQueue.TryDequeue([ref]$chunk)) {
             # Check if chunk was completed in previous run (resume from checkpoint)
-            if ($script:CurrentCheckpoint -and (Test-ChunkAlreadyCompleted -Chunk $chunk -Checkpoint $script:CurrentCheckpoint)) {
+            # Use pre-built HashSet for O(1) lookup instead of O(N) linear search
+            if ($script:CurrentCheckpoint -and (Test-ChunkAlreadyCompleted -Chunk $chunk -Checkpoint $script:CurrentCheckpoint -CompletedPathsHashSet $script:CompletedPathsHashSet)) {
                 # Skip this chunk - DON'T enqueue to CompletedChunks to prevent memory leak
                 # The chunk is already tracked in the checkpoint file, no need to hold in memory
                 # Track separately for accurate reporting (skipped vs actually completed this run)
@@ -930,7 +549,9 @@ function Invoke-ReplicationTick {
                     -Level 'Error' -Component 'Orchestrator'
                 $chunk.RetryCount++
                 if ($chunk.RetryCount -lt $script:MaxChunkRetries) {
-                    $chunk.RetryAfter = [datetime]::Now.AddSeconds(5)
+                    # Use exponential backoff for consistency with Invoke-FailedChunkHandler
+                    $backoffDelay = Get-RetryBackoffDelay -RetryCount $chunk.RetryCount
+                    $chunk.RetryAfter = [datetime]::Now.AddSeconds($backoffDelay)
                     $chunksToRequeue.Add($chunk)
                 }
                 else {
@@ -1003,8 +624,19 @@ function Complete-RobocopyJob {
         'Fatal'   { 'Failed' }
     }
 
-    # Log result
-    Write-RobocurseLog -Message "Chunk $($Job.Chunk.ChunkId) completed: $($exitMeaning.Message)" `
+    # Log result with error details if available
+    $logMessage = "Chunk $($Job.Chunk.ChunkId) completed: $($exitMeaning.Message) (exit code $exitCode)"
+    if ($exitMeaning.FatalError -or $exitMeaning.CopyErrors) {
+        if ($stats.ErrorMessage) {
+            $logMessage += " - Errors: $($stats.ErrorMessage)"
+        }
+        # Also output to console for visibility during GUI mode
+        Write-Host "[ROBOCOPY FAILURE] Chunk $($Job.Chunk.ChunkId): $($stats.ErrorMessage)" -ForegroundColor Red
+        Write-Host "  Source: $($Job.Chunk.SourcePath)" -ForegroundColor Red
+        Write-Host "  Destination: $($Job.Chunk.DestinationPath)" -ForegroundColor Red
+        Write-Host "  Log file: $($Job.LogPath)" -ForegroundColor Red
+    }
+    Write-RobocurseLog -Message $logMessage `
         -Level $(if ($exitMeaning.Severity -eq 'Success') { 'Info' } else { 'Warning' }) `
         -Component 'Orchestrator'
 
@@ -1120,6 +752,9 @@ function Invoke-FailedChunkHandler {
             retryCount = $chunk.RetryCount
             exitCode = $Result.ExitCode
         }
+
+        # Check circuit breaker - trips if too many consecutive permanent failures
+        Invoke-CircuitBreakerCheck -ChunkId $chunk.ChunkId -ErrorMessage $Result.ExitMeaning.Message | Out-Null
     }
 }
 
@@ -1269,7 +904,7 @@ function Stop-AllJobs {
             if (-not $job.Process.HasExited) {
                 $job.Process.Kill()
                 # Wait briefly for process to exit before disposing
-                $job.Process.WaitForExit(5000)
+                $job.Process.WaitForExit($script:ProcessStopTimeoutMs)
                 Write-RobocurseLog -Message "Killed chunk $($job.Chunk.ChunkId)" -Level 'Warning' -Component 'Orchestrator'
             }
         }
@@ -1351,178 +986,3 @@ function Request-Resume {
     Write-RobocurseLog -Message "Resume requested" `
         -Level 'Info' -Component 'Orchestrator'
 }
-
-#region Health Check Functions
-
-# Track last health check update time
-$script:LastHealthCheckUpdate = $null
-
-function Write-HealthCheckStatus {
-    <#
-    .SYNOPSIS
-        Writes current orchestration status to a JSON file for external monitoring
-    .DESCRIPTION
-        Creates a health check file that can be read by external monitoring systems
-        to track the status of running replication jobs. The file includes:
-        - Current phase (Idle, Profiling, Replicating, Complete, Stopped)
-        - Active job count and queue depth
-        - Progress statistics (chunks completed, bytes copied)
-        - Current profile being processed
-        - Last update timestamp
-        - ETA estimate
-
-        The file is written atomically to prevent partial reads.
-    .PARAMETER Force
-        Write immediately regardless of interval setting
-    .OUTPUTS
-        OperationResult - Success=$true if file written, Success=$false with ErrorMessage on failure
-    .EXAMPLE
-        Write-HealthCheckStatus
-        # Updates health file if interval has elapsed
-    .EXAMPLE
-        Write-HealthCheckStatus -Force
-        # Updates health file immediately
-    #>
-    [CmdletBinding()]
-    param(
-        [switch]$Force
-    )
-
-    # Check if enough time has elapsed since last update
-    $now = [datetime]::Now
-    if (-not $Force -and $script:LastHealthCheckUpdate) {
-        $elapsed = ($now - $script:LastHealthCheckUpdate).TotalSeconds
-        if ($elapsed -lt $script:HealthCheckIntervalSeconds) {
-            return New-OperationResult -Success $true -Data "Skipped - interval not elapsed"
-        }
-    }
-
-    try {
-        $state = $script:OrchestrationState
-        if ($null -eq $state) {
-            # No orchestration state - write idle status
-            $healthStatus = [PSCustomObject]@{
-                Timestamp = $now.ToString('o')
-                Phase = 'Idle'
-                CurrentProfile = $null
-                ProfileIndex = 0
-                ProfileCount = 0
-                ChunksCompleted = 0
-                ChunksTotal = 0
-                ChunksPending = 0
-                ChunksFailed = 0
-                ActiveJobs = 0
-                BytesCompleted = 0
-                EtaSeconds = $null
-                SessionId = $null
-                Healthy = $true
-                Message = 'No active replication'
-            }
-        }
-        else {
-            # Get ETA estimate
-            $eta = Get-ETAEstimate
-            $etaSeconds = if ($eta) { [int]$eta.TotalSeconds } else { $null }
-
-            # Calculate health status
-            $failedCount = $state.FailedChunks.Count
-            $isHealthy = $state.Phase -ne 'Stopped' -and $failedCount -eq 0
-
-            $healthStatus = [PSCustomObject]@{
-                Timestamp = $now.ToString('o')
-                Phase = $state.Phase
-                CurrentProfile = if ($state.CurrentProfile) { $state.CurrentProfile.Name } else { $null }
-                ProfileIndex = $state.ProfileIndex
-                ProfileCount = if ($state.Profiles) { $state.Profiles.Count } else { 0 }
-                ChunksCompleted = $state.CompletedCount
-                ChunksTotal = $state.TotalChunks
-                ChunksPending = $state.ChunkQueue.Count
-                ChunksFailed = $failedCount
-                ActiveJobs = $state.ActiveJobs.Count
-                BytesCompleted = $state.BytesComplete
-                EtaSeconds = $etaSeconds
-                SessionId = $state.SessionId
-                Healthy = $isHealthy
-                Message = if (-not $isHealthy) {
-                    if ($state.Phase -eq 'Stopped') { 'Replication stopped' }
-                    elseif ($failedCount -gt 0) { "$failedCount chunks failed" }
-                    else { 'OK' }
-                } else { 'OK' }
-            }
-        }
-
-        # Write atomically by writing to temp file then renaming
-        $tempPath = "$($script:HealthCheckStatusFile).tmp"
-        $healthStatus | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
-
-        # Rename is atomic on most filesystems
-        Move-Item -Path $tempPath -Destination $script:HealthCheckStatusFile -Force
-
-        $script:LastHealthCheckUpdate = $now
-
-        return New-OperationResult -Success $true -Data $script:HealthCheckStatusFile
-    }
-    catch {
-        Write-RobocurseLog -Message "Failed to write health check status: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
-        return New-OperationResult -Success $false -ErrorMessage "Failed to write health check: $($_.Exception.Message)" -ErrorRecord $_
-    }
-}
-
-function Get-HealthCheckStatus {
-    <#
-    .SYNOPSIS
-        Reads the health check status file
-    .DESCRIPTION
-        Reads and returns the current health check status from the JSON file.
-        Useful for external monitoring scripts or GUI status checks.
-    .OUTPUTS
-        PSCustomObject with health status, or $null if file doesn't exist
-    .EXAMPLE
-        $status = Get-HealthCheckStatus
-        if ($status -and -not $status.Healthy) {
-            Send-Alert "Robocurse issue: $($status.Message)"
-        }
-    #>
-    [CmdletBinding()]
-    param()
-
-    if (-not (Test-Path $script:HealthCheckStatusFile)) {
-        return $null
-    }
-
-    try {
-        $content = Get-Content -Path $script:HealthCheckStatusFile -Raw -ErrorAction Stop
-        return $content | ConvertFrom-Json
-    }
-    catch {
-        Write-RobocurseLog -Message "Failed to read health check status: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
-        return $null
-    }
-}
-
-function Remove-HealthCheckStatus {
-    <#
-    .SYNOPSIS
-        Removes the health check status file
-    .DESCRIPTION
-        Cleans up the health check file when replication is complete or on shutdown.
-    .EXAMPLE
-        Remove-HealthCheckStatus
-    #>
-    [CmdletBinding(SupportsShouldProcess)]
-    param()
-
-    if (Test-Path $script:HealthCheckStatusFile) {
-        try {
-            Remove-Item -Path $script:HealthCheckStatusFile -Force -ErrorAction Stop
-            Write-RobocurseLog -Message "Removed health check status file" -Level 'Debug' -Component 'Health'
-        }
-        catch {
-            Write-RobocurseLog -Message "Failed to remove health check status file: $($_.Exception.Message)" -Level 'Warning' -Component 'Health'
-        }
-    }
-
-    $script:LastHealthCheckUpdate = $null
-}
-
-#endregion

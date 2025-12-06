@@ -1,10 +1,13 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 # Load module at discovery time for InModuleScope
 $testRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent (Split-Path -Parent $testRoot)
 $modulePath = Join-Path $projectRoot "src\Robocurse\Robocurse.psm1"
 Import-Module $modulePath -Force -Global -DisableNameChecking
+
+# Initialize the C# OrchestrationState type (required for module isolation when running all tests together)
+Initialize-OrchestrationStateType | Out-Null
 
 InModuleScope 'Robocurse' {
     Describe "Recursive Chunking" {
@@ -79,8 +82,8 @@ InModuleScope 'Robocurse' {
                 }
 
                 # MaxSizeBytes > MinSizeBytes should work
-                $chunks = Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" `
-                    -MaxSizeBytes 1GB -MinSizeBytes 100MB
+                $chunks = @(Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" `
+                    -MaxSizeBytes 1GB -MinSizeBytes 100MB)
 
                 $chunks | Should -Not -BeNullOrEmpty
             }
@@ -101,9 +104,9 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = Get-DirectoryChunks -Path "C:\Small" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+                $chunks = @(Get-DirectoryChunks -Path "C:\Small" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB)
 
-                $chunks.Count | Should -Be 1
+                @($chunks).Count | Should -Be 1
                 $chunks[0].SourcePath | Should -Be "C:\Small"
                 $chunks[0].DestinationPath | Should -Be "D:\Backup"
                 $chunks[0].EstimatedSize | Should -Be 1GB
@@ -144,9 +147,9 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-FilesAtLevel { @() }
 
-                $chunks = Get-DirectoryChunks -Path "C:\Large" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+                $chunks = @(Get-DirectoryChunks -Path "C:\Large" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB)
 
-                $chunks.Count | Should -Be 2
+                @($chunks).Count | Should -Be 2
                 $chunks[0].SourcePath | Should -BeLike "*Child*"
                 $chunks[1].SourcePath | Should -BeLike "*Child*"
             }
@@ -165,9 +168,9 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = Get-DirectoryChunks -Path "C:\NoSubdirs" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+                $chunks = @(Get-DirectoryChunks -Path "C:\NoSubdirs" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB)
 
-                $chunks.Count | Should -Be 1
+                @($chunks).Count | Should -Be 1
                 $chunks[0].SourcePath | Should -Be "C:\NoSubdirs"
             }
         }
@@ -191,10 +194,10 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-FilesAtLevel { @() }
 
-                $chunks = Get-DirectoryChunks -Path "C:\Deep" -DestinationRoot "D:\Backup" -MaxDepth 2 -MaxSizeBytes 10GB
+                $chunks = @(Get-DirectoryChunks -Path "C:\Deep" -DestinationRoot "D:\Backup" -MaxDepth 2 -MaxSizeBytes 10GB)
 
-                $chunks.Count | Should -BeGreaterThan 0
-                $chunks.Count | Should -BeLessOrEqual 10
+                @($chunks).Count | Should -BeGreaterThan 0
+                @($chunks).Count | Should -BeLessOrEqual 10
             }
 
             It "Should accept large directory at max depth" {
@@ -211,9 +214,9 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = Get-DirectoryChunks -Path "C:\AtDepth" -DestinationRoot "D:\Backup" -MaxDepth 0 -MaxSizeBytes 10GB
+                $chunks = @(Get-DirectoryChunks -Path "C:\AtDepth" -DestinationRoot "D:\Backup" -MaxDepth 0 -MaxSizeBytes 10GB)
 
-                $chunks.Count | Should -Be 1
+                @($chunks).Count | Should -Be 1
                 $chunks[0].SourcePath | Should -Be "C:\AtDepth"
             }
         }
@@ -251,12 +254,13 @@ InModuleScope 'Robocurse' {
                 Mock Get-FilesAtLevel {
                     param($Path)
                     if ($Path -eq "C:\Mixed") {
-                        @([PSCustomObject]@{ Name = "file.txt"; Length = 1000; FullName = "C:\Mixed\file.txt" })
+                        # Use Write-Output to preserve array through pipeline
+                        Write-Output @([PSCustomObject]@{ Name = "file.txt"; Length = 1000; FullName = "C:\Mixed\file.txt" }) -NoEnumerate
                     }
-                    else { @() }
+                    else { Write-Output @() -NoEnumerate }
                 }
 
-                $chunks = Get-DirectoryChunks -Path "C:\Mixed" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+                $chunks = @(Get-DirectoryChunks -Path "C:\Mixed" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB)
 
                 $filesOnlyChunk = $chunks | Where-Object { $_.IsFilesOnly -eq $true }
                 $filesOnlyChunk | Should -Not -BeNullOrEmpty
@@ -295,7 +299,7 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-FilesAtLevel { @() }
 
-                $chunks = Get-DirectoryChunks -Path "C:\OnlySubdirs" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+                $chunks = @(Get-DirectoryChunks -Path "C:\OnlySubdirs" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB)
 
                 $filesOnlyChunks = $chunks | Where-Object { $_.IsFilesOnly -eq $true }
                 $filesOnlyChunks.Count | Should -Be 0
@@ -553,9 +557,9 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = New-FlatChunks -Path "C:\TestFlat" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 10GB
+                $chunks = @(New-FlatChunks -Path "C:\TestFlat" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 10GB)
 
-                $chunks.Count | Should -Be 1
+                @($chunks).Count | Should -Be 1
                 $chunks[0].SourcePath | Should -Be "C:\TestFlat"
                 $chunks[0].DestinationPath | Should -Be "D:\Backup"
             }
@@ -574,9 +578,9 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 20GB
+                $chunks = @(New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 20GB)
 
-                $chunks.Count | Should -Be 1
+                @($chunks).Count | Should -Be 1
                 $chunks[0].EstimatedSize | Should -Be 5GB
             }
 
@@ -594,9 +598,9 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxFiles 10000
+                $chunks = @(New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxFiles 10000)
 
-                $chunks.Count | Should -Be 1
+                @($chunks).Count | Should -Be 1
             }
         }
 
@@ -635,9 +639,9 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-FilesAtLevel { @() }
 
-                $chunks = New-SmartChunks -Path "C:\TestSmart" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 10GB
+                $chunks = @(New-SmartChunks -Path "C:\TestSmart" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 10GB)
 
-                $chunks.Count | Should -Be 2
+                @($chunks).Count | Should -Be 2
                 $chunks[0].SourcePath | Should -BeLike "*Child*"
                 $chunks[1].SourcePath | Should -BeLike "*Child*"
             }
@@ -660,9 +664,9 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-FilesAtLevel { @() }
 
-                $chunks = New-SmartChunks -Path "C:\Deep" -DestinationRoot "D:\Backup" -MaxDepth 0 -MaxChunkSizeBytes 10GB
+                $chunks = @(New-SmartChunks -Path "C:\Deep" -DestinationRoot "D:\Backup" -MaxDepth 0 -MaxChunkSizeBytes 10GB)
 
-                $chunks.Count | Should -Be 1
+                @($chunks).Count | Should -Be 1
                 $chunks[0].SourcePath | Should -Be "C:\Deep"
             }
 
@@ -680,9 +684,9 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = New-SmartChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 20GB
+                $chunks = @(New-SmartChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 20GB)
 
-                $chunks.Count | Should -Be 1
+                @($chunks).Count | Should -Be 1
                 $chunks[0].EstimatedSize | Should -Be 15GB
             }
 
@@ -700,9 +704,9 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = New-SmartChunks -Path "C:\Test" -DestinationRoot "D:\Backup"
+                $chunks = @(New-SmartChunks -Path "C:\Test" -DestinationRoot "D:\Backup")
 
-                $chunks.Count | Should -Be 1
+                @($chunks).Count | Should -Be 1
                 $chunks[0].SourcePath | Should -Be "C:\Test"
                 $chunks[0].DestinationPath | Should -Be "D:\Backup"
             }
@@ -756,20 +760,20 @@ InModuleScope 'Robocurse' {
                 Mock Get-FilesAtLevel {
                     param($Path)
                     if ($Path -match "Root$") {
-                        @([PSCustomObject]@{ Name = "root_file.txt"; Length = 5000; FullName = "$Path\root_file.txt" })
+                        Write-Output @([PSCustomObject]@{ Name = "root_file.txt"; Length = 5000; FullName = "$Path\root_file.txt" }) -NoEnumerate
                     }
-                    else { @() }
+                    else { Write-Output @() -NoEnumerate }
                 }
 
-                $chunks = Get-DirectoryChunks -Path "C:\Root" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB
+                $chunks = @(Get-DirectoryChunks -Path "C:\Root" -DestinationRoot "D:\Backup" -MaxSizeBytes 10GB)
 
-                $chunks.Count | Should -Be 4
+                @($chunks).Count | Should -Be 4
 
-                $regularChunks = $chunks | Where-Object { -not $_.IsFilesOnly }
-                $regularChunks.Count | Should -Be 3
+                $regularChunks = @($chunks | Where-Object { -not $_.IsFilesOnly })
+                @($regularChunks).Count | Should -Be 3
 
-                $filesOnlyChunks = $chunks | Where-Object { $_.IsFilesOnly }
-                $filesOnlyChunks.Count | Should -Be 1
+                $filesOnlyChunks = @($chunks | Where-Object { $_.IsFilesOnly })
+                @($filesOnlyChunks).Count | Should -Be 1
                 $filesOnlyChunks[0].SourcePath | Should -Be "C:\Root"
             }
         }
@@ -790,10 +794,10 @@ InModuleScope 'Robocurse' {
                 Mock Get-DirectoryChildren { @("C:\Small\Sub1", "C:\Small\Sub2") }
 
                 # MinSizeBytes = 100MB, so 50MB directory should be accepted as single chunk
-                $chunks = Get-DirectoryChunks -Path "C:\Small" -DestinationRoot "D:\Backup" `
-                    -MaxSizeBytes 1GB -MinSizeBytes 100MB
+                $chunks = @(Get-DirectoryChunks -Path "C:\Small" -DestinationRoot "D:\Backup" `
+                    -MaxSizeBytes 1GB -MinSizeBytes 100MB)
 
-                $chunks.Count | Should -Be 1
+                @($chunks).Count | Should -Be 1
                 $chunks[0].SourcePath | Should -Be "C:\Small"
             }
 
@@ -829,10 +833,10 @@ InModuleScope 'Robocurse' {
                 Mock Get-FilesAtLevel { @() }
 
                 # Size is above MinSizeBytes but FileCount exceeds MaxFiles, so it should recurse
-                $chunks = Get-DirectoryChunks -Path "C:\Medium" -DestinationRoot "D:\Backup" `
-                    -MaxSizeBytes 1GB -MaxFiles 10000 -MinSizeBytes 100MB
+                $chunks = @(Get-DirectoryChunks -Path "C:\Medium" -DestinationRoot "D:\Backup" `
+                    -MaxSizeBytes 1GB -MaxFiles 10000 -MinSizeBytes 100MB)
 
-                $chunks.Count | Should -Be 2  # Two subdirectory chunks
+                @($chunks).Count | Should -Be 2  # Two subdirectory chunks
             }
         }
     }

@@ -1,10 +1,13 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 # Load module at discovery time for InModuleScope
 $testRoot = $PSScriptRoot
 $projectRoot = Split-Path -Parent (Split-Path -Parent $testRoot)
 $modulePath = Join-Path $projectRoot "src\Robocurse\Robocurse.psm1"
 Import-Module $modulePath -Force -Global -DisableNameChecking
+
+# Initialize the C# OrchestrationState type (required for module isolation when running all tests together)
+Initialize-OrchestrationStateType | Out-Null
 
 InModuleScope 'Robocurse' {
     Describe "Utility Functions" {
@@ -15,7 +18,7 @@ InModuleScope 'Robocurse' {
                 $result | Should -BeOfType [bool]
             }
 
-            It "Should return true on Windows" -Skip:(-not $IsWindows) {
+            It "Should return true on Windows" -Skip:(-not (Test-IsWindowsPlatform)) {
                 Test-IsWindowsPlatform | Should -Be $true
             }
         }
@@ -153,7 +156,7 @@ InModuleScope 'Robocurse' {
                 $result.ErrorMessage | Should -Match "parent does not exist"
             }
 
-            It "Should handle estimated size parameter" -Skip:(-not $IsWindows) {
+            It "Should handle estimated size parameter" -Skip:(-not (Test-IsWindowsPlatform)) {
                 # This test needs a real path on Windows to check disk space
                 $result = Test-DestinationDiskSpace -Path $TestDrive -EstimatedSizeBytes 1MB
 

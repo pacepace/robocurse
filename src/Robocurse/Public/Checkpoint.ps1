@@ -1,4 +1,4 @@
-# Robocurse Checkpoint Functions
+﻿# Robocurse Checkpoint Functions
 # Handles checkpoint/resume functionality for crash recovery
 
 $script:CheckpointFileName = "robocurse-checkpoint.json"
@@ -82,10 +82,22 @@ function Save-ReplicationCheckpoint {
         $tempPath = "$checkpointPath.tmp"
         $checkpoint | ConvertTo-Json -Depth 5 | Set-Content -Path $tempPath -Encoding UTF8
 
-        # Use .NET File.Move with overwrite for atomic replacement
-        # This avoids TOCTOU race between Test-Path/Remove-Item/Move-Item
-        # On NTFS, this is an atomic operation
-        [System.IO.File]::Move($tempPath, $checkpointPath, $true)
+        # Use atomic replacement with backup - prevents data loss on crash
+        # Note: .NET Framework (PowerShell 5.1) doesn't support File.Move overwrite parameter
+        $backupPath = "$checkpointPath.bak"
+        if (Test-Path $checkpointPath) {
+            # Move existing to backup first (atomic on same volume)
+            if (Test-Path $backupPath) {
+                Remove-Item -Path $backupPath -Force
+            }
+            [System.IO.File]::Move($checkpointPath, $backupPath)
+        }
+        # Now move temp to final (if this fails, we still have the backup)
+        [System.IO.File]::Move($tempPath, $checkpointPath)
+        # Clean up backup after successful replacement
+        if (Test-Path $backupPath) {
+            Remove-Item -Path $backupPath -Force -ErrorAction SilentlyContinue
+        }
 
         Write-RobocurseLog -Message "Checkpoint saved: $($completedPaths.Count) chunks completed" `
             -Level 'Info' -Component 'Checkpoint'
@@ -171,6 +183,49 @@ function Remove-ReplicationCheckpoint {
     return $false
 }
 
+function New-CompletedPathsHashSet {
+    <#
+    .SYNOPSIS
+        Creates a HashSet from checkpoint completed paths for O(1) lookups
+    .DESCRIPTION
+        Converts the CompletedChunkPaths array from a checkpoint into a case-insensitive
+        HashSet for efficient lookups. This improves resume performance from O(N) to O(1)
+        per chunk lookup, which is critical when resuming with thousands of completed chunks.
+    .PARAMETER Checkpoint
+        Checkpoint object from Get-ReplicationCheckpoint
+    .OUTPUTS
+        HashSet[string] with case-insensitive comparison, or $null if no checkpoint
+    .EXAMPLE
+        $hashSet = New-CompletedPathsHashSet -Checkpoint $checkpoint
+        if ($hashSet -and $hashSet.Contains($path)) { "Already done" }
+    #>
+    [CmdletBinding()]
+    param(
+        [PSCustomObject]$Checkpoint
+    )
+
+    if (-not $Checkpoint -or -not $Checkpoint.CompletedChunkPaths) {
+        return $null
+    }
+
+    # Create case-insensitive HashSet for O(1) lookups
+    # OrdinalIgnoreCase handles international characters correctly (including Turkish 'I')
+    $hashSet = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+
+    foreach ($path in $Checkpoint.CompletedChunkPaths) {
+        if ($path) {
+            $hashSet.Add($path) | Out-Null
+        }
+    }
+
+    Write-RobocurseLog -Message "Created HashSet with $($hashSet.Count) completed chunk paths for O(1) resume lookups" `
+        -Level 'Debug' -Component 'Checkpoint'
+
+    return $hashSet
+}
+
 function Test-ChunkAlreadyCompleted {
     <#
     .SYNOPSIS
@@ -179,15 +234,23 @@ function Test-ChunkAlreadyCompleted {
         Chunk object to check
     .PARAMETER Checkpoint
         Checkpoint object from previous run
+    .PARAMETER CompletedPathsHashSet
+        Optional pre-built HashSet for O(1) lookups. If not provided, falls back to
+        O(N) linear search (for backwards compatibility).
     .OUTPUTS
         $true if chunk should be skipped, $false otherwise
+    .NOTES
+        For best performance when checking many chunks, use New-CompletedPathsHashSet
+        to create the HashSet once, then pass it to each call.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Chunk,
 
-        [PSCustomObject]$Checkpoint
+        [PSCustomObject]$Checkpoint,
+
+        [System.Collections.Generic.HashSet[string]]$CompletedPathsHashSet
     )
 
     if (-not $Checkpoint -or -not $Checkpoint.CompletedChunkPaths) {
@@ -199,12 +262,15 @@ function Test-ChunkAlreadyCompleted {
         return $false
     }
 
-    # Normalize the chunk path for comparison
-    # Use OrdinalIgnoreCase for Windows-style case-insensitivity
-    # This is more reliable than ToLowerInvariant() for international characters
-    # and handles edge cases like Turkish 'I' correctly
     $chunkPath = $Chunk.SourcePath
 
+    # Use HashSet if provided for O(1) lookup
+    if ($CompletedPathsHashSet) {
+        return $CompletedPathsHashSet.Contains($chunkPath)
+    }
+
+    # Fallback to O(N) linear search for backwards compatibility
+    # This path is used when CompletedPathsHashSet is not provided
     foreach ($completedPath in $Checkpoint.CompletedChunkPaths) {
         # Skip null entries in the completed paths array
         if (-not $completedPath) {

@@ -1,4 +1,4 @@
-BeforeAll {
+﻿BeforeAll {
     # Load Robocurse functions using TestHelper
     . "$PSScriptRoot\..\TestHelper.ps1"
     Initialize-RobocurseForTesting
@@ -394,6 +394,13 @@ Describe "Robocopy Wrapper" {
             $cmd.Parameters['RobocopyOptions'].ParameterType.Name | Should -Be 'Hashtable'
         }
 
+        It "Should have VerboseFileLogging parameter" {
+            $cmd = Get-Command Start-RobocopyJob
+
+            $cmd.Parameters.ContainsKey('VerboseFileLogging') | Should -Be $true
+            $cmd.Parameters['VerboseFileLogging'].ParameterType.Name | Should -Be 'SwitchParameter'
+        }
+
         It "Should have InterPacketGapMs documented in function help" {
             # Check the RobocopyOptions parameter description mentions InterPacketGapMs
             $help = Get-Help Start-RobocopyJob -Parameter RobocopyOptions -ErrorAction SilentlyContinue
@@ -587,10 +594,74 @@ Describe "Robocopy Wrapper" {
             $argString | Should -Not -Match ' /L$| /L '  # Match /L at end or followed by space (not /LOG)
         }
 
+        It "Should double trailing backslash on root drive paths" {
+            # This is critical: "D:\" without fix becomes "D:\" which parses as D:" with escaped quote
+            # Fix: "D:\" must become "D:\\" so robocopy sees D:\ as the source path
+            $args = New-RobocopyArguments `
+                -SourcePath "D:\" `
+                -DestinationPath "C:\Backup" `
+                -LogPath "C:\log.txt"
+
+            $argString = $args -join ' '
+            # The source should be "D:\\" not "D:\"
+            $argString | Should -Match '"D:\\\\"'
+        }
+
+        It "Should double trailing backslash on directory paths ending in backslash" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Users\Test\" `
+                -DestinationPath "D:\Backup" `
+                -LogPath "C:\log.txt"
+
+            $argString = $args -join ' '
+            $argString | Should -Match '"C:\\Users\\Test\\\\"'
+        }
+
+        It "Should not double backslash when path does not end with backslash" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Users\Test" `
+                -DestinationPath "D:\Backup" `
+                -LogPath "C:\log.txt"
+
+            $argString = $args -join ' '
+            # Should end with Test" not Test\\"
+            $argString | Should -Match '"C:\\Users\\Test"'
+            $argString | Should -Not -Match 'Test\\\\"'
+        }
+
         It "Should have DryRun parameter" {
             $cmd = Get-Command New-RobocopyArguments
             $cmd.Parameters.ContainsKey('DryRun') | Should -Be $true
             $cmd.Parameters['DryRun'].ParameterType.Name | Should -Be 'SwitchParameter'
+        }
+
+        It "Should include /NFL and /NDL by default (VerboseFileLogging disabled)" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt"
+
+            $argString = $args -join ' '
+            $argString | Should -Match '/NFL'
+            $argString | Should -Match '/NDL'
+        }
+
+        It "Should exclude /NFL and /NDL when VerboseFileLogging is enabled" {
+            $args = New-RobocopyArguments `
+                -SourcePath "C:\Source" `
+                -DestinationPath "D:\Dest" `
+                -LogPath "C:\log.txt" `
+                -VerboseFileLogging
+
+            $argString = $args -join ' '
+            $argString | Should -Not -Match '/NFL'
+            $argString | Should -Not -Match '/NDL'
+        }
+
+        It "Should have VerboseFileLogging parameter" {
+            $cmd = Get-Command New-RobocopyArguments
+            $cmd.Parameters.ContainsKey('VerboseFileLogging') | Should -Be $true
+            $cmd.Parameters['VerboseFileLogging'].ParameterType.Name | Should -Be 'SwitchParameter'
         }
     }
 
@@ -918,6 +989,50 @@ Describe "Robocopy Wrapper" {
         }
     }
 
+    Context "Format-QuotedPath - Trailing Backslash Escaping" {
+        It "Should double trailing backslash to prevent escape sequence" {
+            # When path ends with \, the \" would be interpreted as an escaped quote
+            # Fix: "D:\" becomes "D:\\" so the \\ is parsed as single \
+            $result = Format-QuotedPath -Path "D:\"
+            $result | Should -Be '"D:\\"'
+        }
+
+        It "Should handle root drive path correctly" {
+            $result = Format-QuotedPath -Path "C:\"
+            $result | Should -Be '"C:\\"'
+        }
+
+        It "Should not double backslash when path does not end with backslash" {
+            $result = Format-QuotedPath -Path "C:\Users\Test"
+            $result | Should -Be '"C:\Users\Test"'
+        }
+
+        It "Should handle path ending with trailing backslash" {
+            $result = Format-QuotedPath -Path "C:\Users\Test\"
+            $result | Should -Be '"C:\Users\Test\\"'
+        }
+
+        It "Should handle UNC path without trailing backslash" {
+            $result = Format-QuotedPath -Path "\\server\share\folder"
+            $result | Should -Be '"\\server\share\folder"'
+        }
+
+        It "Should handle UNC path with trailing backslash" {
+            $result = Format-QuotedPath -Path "\\server\share\"
+            $result | Should -Be '"\\server\share\\"'
+        }
+
+        It "Should handle path with spaces" {
+            $result = Format-QuotedPath -Path "C:\Program Files\My App"
+            $result | Should -Be '"C:\Program Files\My App"'
+        }
+
+        It "Should handle path with spaces ending in backslash" {
+            $result = Format-QuotedPath -Path "C:\Program Files\"
+            $result | Should -Be '"C:\Program Files\\"'
+        }
+    }
+
     Context "ConvertFrom-RobocopyLog - Parse Resilience" {
         BeforeEach {
             # Use Join-Path for cross-platform compatibility
@@ -977,6 +1092,156 @@ Describe "Robocopy Wrapper" {
             $result.FilesCopied | Should -Be 50
             $result.FilesSkipped | Should -Be 49
             $result.FilesFailed | Should -Be 1
+        }
+    }
+
+    Context "Write-RobocopyCompletionEvent - Function Structure" {
+        It "Should be defined with correct parameters" {
+            $cmd = Get-Command Write-RobocopyCompletionEvent
+            $cmd | Should -Not -BeNullOrEmpty
+            $cmd.Parameters.Keys | Should -Contain 'Job'
+            $cmd.Parameters.Keys | Should -Contain 'JobResult'
+            $cmd.Parameters.Keys | Should -Contain 'ChunkId'
+            $cmd.Parameters.Keys | Should -Contain 'ProfileName'
+        }
+
+        It "Should have mandatory Job parameter" {
+            $cmd = Get-Command Write-RobocopyCompletionEvent
+            $cmd.Parameters['Job'].Attributes.Mandatory | Should -Contain $true
+        }
+
+        It "Should have mandatory JobResult parameter" {
+            $cmd = Get-Command Write-RobocopyCompletionEvent
+            $cmd.Parameters['JobResult'].Attributes.Mandatory | Should -Contain $true
+        }
+
+        It "Should have mandatory ChunkId parameter" {
+            $cmd = Get-Command Write-RobocopyCompletionEvent
+            $cmd.Parameters['ChunkId'].Attributes.Mandatory | Should -Contain $true
+        }
+    }
+}
+
+# InModuleScope tests for Write-RobocopyCompletionEvent
+$testRoot = $PSScriptRoot
+$projectRoot = Split-Path -Parent (Split-Path -Parent $testRoot)
+$modulePath = Join-Path $projectRoot "src\Robocurse\Robocurse.psm1"
+Import-Module $modulePath -Force -Global -DisableNameChecking
+
+InModuleScope 'Robocurse' {
+    Describe "Write-RobocopyCompletionEvent - SIEM Event Tests" {
+        BeforeEach {
+            Mock Write-SiemEvent { }
+            Mock Write-RobocurseLog { }
+            Mock Format-FileSize { param($Bytes) "$Bytes bytes" }
+        }
+
+        It "Should emit ChunkComplete event for successful job" {
+            $job = [PSCustomObject]@{
+                Chunk = [PSCustomObject]@{
+                    SourcePath = "C:\Source"
+                    DestinationPath = "D:\Dest"
+                }
+                DryRun = $false
+            }
+            $jobResult = [PSCustomObject]@{
+                ExitCode = 1
+                ExitMeaning = [PSCustomObject]@{
+                    Severity = "Success"
+                    Message = "Files copied successfully"
+                    FilesCopied = $true
+                    ExtrasDetected = $false
+                    MismatchesFound = $false
+                    CopyErrors = $false
+                    FatalError = $false
+                }
+                Duration = [timespan]::FromSeconds(30)
+                Stats = [PSCustomObject]@{
+                    FilesCopied = 10
+                    FilesSkipped = 5
+                    FilesFailed = 0
+                    DirsCopied = 2
+                    DirsSkipped = 1
+                    DirsFailed = 0
+                    BytesCopied = 1024000
+                }
+            }
+
+            Write-RobocopyCompletionEvent -Job $job -JobResult $jobResult -ChunkId 42 -ProfileName "TestProfile"
+
+            Should -Invoke Write-SiemEvent -Times 1 -ParameterFilter { $EventType -eq 'ChunkComplete' }
+        }
+
+        It "Should emit ChunkError event for failed job" {
+            $job = [PSCustomObject]@{
+                Chunk = [PSCustomObject]@{
+                    SourcePath = "C:\Source"
+                    DestinationPath = "D:\Dest"
+                }
+                DryRun = $false
+            }
+            $jobResult = [PSCustomObject]@{
+                ExitCode = 16
+                ExitMeaning = [PSCustomObject]@{
+                    Severity = "Fatal"
+                    Message = "Fatal error"
+                    FilesCopied = $false
+                    ExtrasDetected = $false
+                    MismatchesFound = $false
+                    CopyErrors = $false
+                    FatalError = $true
+                }
+                Duration = [timespan]::FromSeconds(5)
+                Stats = [PSCustomObject]@{
+                    FilesCopied = 0
+                    FilesSkipped = 0
+                    FilesFailed = 10
+                    DirsCopied = 0
+                    DirsSkipped = 0
+                    DirsFailed = 0
+                    BytesCopied = 0
+                }
+            }
+
+            Write-RobocopyCompletionEvent -Job $job -JobResult $jobResult -ChunkId 99 -ProfileName "FailProfile"
+
+            Should -Invoke Write-SiemEvent -Times 1 -ParameterFilter { $EventType -eq 'ChunkError' }
+        }
+
+        It "Should log summary message" {
+            $job = [PSCustomObject]@{
+                Chunk = [PSCustomObject]@{
+                    SourcePath = "C:\Source"
+                    DestinationPath = "D:\Dest"
+                }
+                DryRun = $false
+            }
+            $jobResult = [PSCustomObject]@{
+                ExitCode = 0
+                ExitMeaning = [PSCustomObject]@{
+                    Severity = "Success"
+                    Message = "No changes needed"
+                    FilesCopied = $false
+                    ExtrasDetected = $false
+                    MismatchesFound = $false
+                    CopyErrors = $false
+                    FatalError = $false
+                }
+                Duration = [timespan]::FromSeconds(10)
+                Stats = [PSCustomObject]@{
+                    FilesCopied = 0
+                    FilesSkipped = 100
+                    FilesFailed = 0
+                    DirsCopied = 0
+                    DirsSkipped = 10
+                    DirsFailed = 0
+                    BytesCopied = 0
+                }
+            }
+
+            Write-RobocopyCompletionEvent -Job $job -JobResult $jobResult -ChunkId 1 -ProfileName "TestProfile"
+
+            Should -Invoke Write-RobocurseLog -Times 1
         }
     }
 }

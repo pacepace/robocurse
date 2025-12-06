@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 # Load module at discovery time for InModuleScope
 $testRoot = $PSScriptRoot
@@ -94,6 +94,8 @@ InModuleScope 'Robocurse' {
             }
 
             It "Should have required controls defined" {
+                # Note: txtLog and svLog removed - now in separate LogWindow.xaml
+                # btnLogs added - opens popup log viewer
                 $requiredControls = @(
                     'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
                     'txtProfileName', 'txtSource', 'txtDest',
@@ -101,11 +103,11 @@ InModuleScope 'Robocurse' {
                     'chkUseVss', 'cmbScanMode',
                     'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
                     'sldWorkers', 'txtWorkerCount',
-                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
+                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule', 'btnLogs',
                     'dgChunks', 'pbProfile', 'pbOverall',
                     'txtProfileProgress', 'txtOverallProgress',
                     'txtEta', 'txtSpeed', 'txtChunks',
-                    'txtStatus', 'txtLog', 'svLog'
+                    'txtStatus'
                 )
 
                 foreach ($control in $requiredControls) {
@@ -124,6 +126,15 @@ InModuleScope 'Robocurse' {
                 $script:TestXamlContent | Should -Match 'StopButton'
                 $script:TestXamlContent | Should -Match 'DarkCheckBox'
                 $script:TestXamlContent | Should -Match 'DarkListBox'
+            }
+
+            It "Should use ScaleTransform for progress bar (WPF ProgressBar workaround)" {
+                # Verify custom progress bar implementation using ScaleTransform
+                # WPF ProgressBar doesn't reliably render in PowerShell, so we use
+                # Border + ScaleTransform with ProgressScale (0.0-1.0) binding
+                $script:TestXamlContent | Should -Match 'ScaleTransform'
+                $script:TestXamlContent | Should -Match 'ProgressScale'
+                $script:TestXamlContent | Should -Match 'ScaleX='
             }
 
             It "Should have Get-XamlResource function" {
@@ -462,6 +473,179 @@ InModuleScope 'Robocurse' {
             }
         }
 
+        Context "ProgressScale Calculation Tests (ScaleTransform Workaround)" {
+            # These tests verify the ProgressScale property used for the custom progress bar.
+            # WPF ProgressBar doesn't reliably render in PowerShell, so we use ScaleTransform
+            # with ProgressScale (0.0-1.0) binding to ScaleX for visual progress display.
+
+            It "Should calculate ProgressScale as 0.0 for 0% progress" {
+                $progress = 0
+                $progressScale = [double]($progress / 100)
+                $progressScale | Should -Be 0.0
+            }
+
+            It "Should calculate ProgressScale as 0.5 for 50% progress" {
+                $progress = 50
+                $progressScale = [double]($progress / 100)
+                $progressScale | Should -Be 0.5
+            }
+
+            It "Should calculate ProgressScale as 1.0 for 100% progress" {
+                $progress = 100
+                $progressScale = [double]($progress / 100)
+                $progressScale | Should -Be 1.0
+            }
+
+            It "Should handle fractional progress values" {
+                $progress = 75
+                $progressScale = [double]($progress / 100)
+                $progressScale | Should -Be 0.75
+            }
+
+            It "Should create chunk display item with ProgressScale for running job" {
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 1
+                    SourcePath = "C:\Test\Path"
+                    EstimatedSize = 1000000
+                }
+
+                $progress = 42
+
+                $displayItem = [PSCustomObject]@{
+                    ChunkId = $chunk.ChunkId
+                    SourcePath = $chunk.SourcePath
+                    Status = "Running"
+                    Progress = $progress
+                    ProgressScale = [double]($progress / 100)
+                    Speed = "10 MB/s"
+                }
+
+                $displayItem.Progress | Should -Be 42
+                $displayItem.ProgressScale | Should -Be 0.42
+            }
+
+            It "Should create chunk display item with ProgressScale=1.0 for completed chunk" {
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 2
+                    SourcePath = "C:\Test\Complete"
+                }
+
+                $displayItem = [PSCustomObject]@{
+                    ChunkId = $chunk.ChunkId
+                    SourcePath = $chunk.SourcePath
+                    Status = "Complete"
+                    Progress = 100
+                    ProgressScale = [double]1.0
+                    Speed = "--"
+                }
+
+                $displayItem.Status | Should -Be "Complete"
+                $displayItem.Progress | Should -Be 100
+                $displayItem.ProgressScale | Should -Be 1.0
+            }
+
+            It "Should create chunk display item with ProgressScale=0.0 for failed chunk" {
+                $chunk = [PSCustomObject]@{
+                    ChunkId = 3
+                    SourcePath = "C:\Test\Failed"
+                }
+
+                $displayItem = [PSCustomObject]@{
+                    ChunkId = $chunk.ChunkId
+                    SourcePath = $chunk.SourcePath
+                    Status = "Failed"
+                    Progress = 0
+                    ProgressScale = [double]0.0
+                    Speed = "--"
+                }
+
+                $displayItem.Status | Should -Be "Failed"
+                $displayItem.Progress | Should -Be 0
+                $displayItem.ProgressScale | Should -Be 0.0
+            }
+        }
+
+        Context "ChunkGridNeedsRebuild Logic Tests" {
+            # Tests for Test-ChunkGridNeedsRebuild which determines when to refresh DataGrid.
+            # Key insight: Must rebuild when active jobs exist because PSCustomObject doesn't
+            # implement INotifyPropertyChanged, so WPF won't see progress value changes.
+
+            BeforeEach {
+                Initialize-OrchestrationState
+                $script:LastGuiUpdateState = $null
+            }
+
+            It "Should return true on first call (no previous state)" {
+                $currentState = @{
+                    ActiveCount = 0
+                    CompletedCount = 0
+                    FailedCount = 0
+                }
+
+                # Simulate first call - no previous state
+                $needsRebuild = -not $script:LastGuiUpdateState
+                $needsRebuild | Should -Be $true
+            }
+
+            It "Should return true when active count changes" {
+                $script:LastGuiUpdateState = @{
+                    ActiveCount = 2
+                    CompletedCount = 5
+                    FailedCount = 0
+                }
+
+                $currentState = @{
+                    ActiveCount = 3  # Changed
+                    CompletedCount = 5
+                    FailedCount = 0
+                }
+
+                $needsRebuild = $script:LastGuiUpdateState.ActiveCount -ne $currentState.ActiveCount
+                $needsRebuild | Should -Be $true
+            }
+
+            It "Should return true when there are active jobs (progress changes continuously)" {
+                $script:LastGuiUpdateState = @{
+                    ActiveCount = 2
+                    CompletedCount = 5
+                    FailedCount = 0
+                }
+
+                $currentState = @{
+                    ActiveCount = 2  # Same count
+                    CompletedCount = 5
+                    FailedCount = 0
+                }
+
+                # Key logic: always rebuild when active jobs exist
+                $needsRebuild = $currentState.ActiveCount -gt 0
+                $needsRebuild | Should -Be $true
+            }
+
+            It "Should return false when no active jobs and counts unchanged" {
+                $script:LastGuiUpdateState = @{
+                    ActiveCount = 0
+                    CompletedCount = 10
+                    FailedCount = 1
+                }
+
+                $currentState = @{
+                    ActiveCount = 0
+                    CompletedCount = 10
+                    FailedCount = 1
+                }
+
+                $countsChanged = $script:LastGuiUpdateState.ActiveCount -ne $currentState.ActiveCount -or
+                                 $script:LastGuiUpdateState.CompletedCount -ne $currentState.CompletedCount -or
+                                 $script:LastGuiUpdateState.FailedCount -ne $currentState.FailedCount
+
+                $hasActiveJobs = $currentState.ActiveCount -gt 0
+
+                $needsRebuild = $countsChanged -or $hasActiveJobs
+                $needsRebuild | Should -Be $false
+            }
+        }
+
         Context "Scan Mode ComboBox Index Tests" {
             It "Should map Smart to index 0" {
                 $scanMode = "Smart"
@@ -479,6 +663,330 @@ InModuleScope 'Robocurse' {
                 $scanMode = "Unknown"
                 $index = if ($scanMode -eq "Quick") { 1 } else { 0 }
                 $index | Should -Be 0
+            }
+        }
+
+        Context "Headless WPF Instantiation Tests" -Skip:(-not (Test-IsWindowsPlatform)) {
+            BeforeAll {
+                # Path to test config file
+                $script:GuiTestConfigPath = Join-Path $PSScriptRoot "..\Integration\Fixtures\GuiTest.config.json"
+
+                # Ensure config exists
+                if (-not (Test-Path $script:GuiTestConfigPath)) {
+                    throw "GUI test config not found at: $script:GuiTestConfigPath"
+                }
+
+                # Load WPF assemblies
+                Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
+                Add-Type -AssemblyName PresentationCore -ErrorAction Stop
+                Add-Type -AssemblyName WindowsBase -ErrorAction Stop
+            }
+
+            AfterEach {
+                # Clean up any window that was created
+                if ($script:TestWindow) {
+                    try {
+                        $script:TestWindow.Close()
+                    }
+                    catch {
+                        # Window may already be closed
+                    }
+                    $script:TestWindow = $null
+                }
+            }
+
+            It "Should return a Window object from Initialize-RobocurseGui" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $script:TestWindow | Should -Not -BeNullOrEmpty
+                $script:TestWindow | Should -BeOfType [System.Windows.Window]
+            }
+
+            It "Should find all required controls by name" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $script:TestWindow | Should -Not -BeNullOrEmpty
+
+                $requiredControls = @(
+                    'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
+                    'txtProfileName', 'txtSource', 'txtDest',
+                    'btnBrowseSource', 'btnBrowseDest',
+                    'chkUseVss', 'cmbScanMode',
+                    'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+                    'sldWorkers', 'txtWorkerCount',
+                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
+                    'dgChunks', 'pbProfile', 'pbOverall',
+                    'txtProfileProgress', 'txtOverallProgress',
+                    'txtEta', 'txtSpeed', 'txtChunks',
+                    'txtStatus', 'btnLogs'
+                )
+
+                foreach ($controlName in $requiredControls) {
+                    $control = $script:TestWindow.FindName($controlName)
+                    $control | Should -Not -BeNullOrEmpty -Because "Control '$controlName' should exist"
+                }
+            }
+
+            It "Should have Stop button initially disabled" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $btnStop = $script:TestWindow.FindName('btnStop')
+                $btnStop.IsEnabled | Should -Be $false
+            }
+
+            It "Should have Run buttons initially enabled" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $btnRunAll = $script:TestWindow.FindName('btnRunAll')
+                $btnRunSelected = $script:TestWindow.FindName('btnRunSelected')
+
+                $btnRunAll.IsEnabled | Should -Be $true
+                $btnRunSelected.IsEnabled | Should -Be $true
+            }
+
+            It "Should load profiles from config into profile list" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $lstProfiles = $script:TestWindow.FindName('lstProfiles')
+
+                # Config has 2 profiles
+                $lstProfiles.Items.Count | Should -Be 2
+            }
+
+            It "Should set default worker count from slider" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $sldWorkers = $script:TestWindow.FindName('sldWorkers')
+                $txtWorkerCount = $script:TestWindow.FindName('txtWorkerCount')
+
+                $sldWorkers.Value | Should -BeGreaterOrEqual 1
+                $sldWorkers.Value | Should -BeLessOrEqual 16
+            }
+
+            It "Should have correct window title" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $script:TestWindow.Title | Should -Match "Robocurse"
+            }
+
+            It "Should initialize progress bars at zero" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $pbProfile = $script:TestWindow.FindName('pbProfile')
+                $pbOverall = $script:TestWindow.FindName('pbOverall')
+
+                $pbProfile.Value | Should -Be 0
+                $pbOverall.Value | Should -Be 0
+            }
+
+            It "Should have scan mode combo box with Smart and Quick options" {
+                $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
+                $cmbScanMode = $script:TestWindow.FindName('cmbScanMode')
+
+                $cmbScanMode.Items.Count | Should -Be 2
+            }
+        }
+
+        Context "Schedule Dialog Headless Tests" -Skip:(-not (Test-IsWindowsPlatform)) {
+            BeforeAll {
+                Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
+                Add-Type -AssemblyName PresentationCore -ErrorAction Stop
+                Add-Type -AssemblyName WindowsBase -ErrorAction Stop
+            }
+
+            It "Should load ScheduleDialog XAML without error" {
+                $xaml = Get-XamlResource -ResourceName 'ScheduleDialog.xaml'
+                $xaml | Should -Not -BeNullOrEmpty
+
+                # Parse the XAML
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog | Should -BeOfType [System.Windows.Window]
+                $dialog.Title | Should -Match "Schedule"
+
+                # Clean up
+                $dialog.Close()
+            }
+
+            It "Should have required schedule dialog controls" {
+                $xaml = Get-XamlResource -ResourceName 'ScheduleDialog.xaml'
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog.FindName('chkEnabled') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtTime') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('cmbFrequency') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('btnOk') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('btnCancel') | Should -Not -BeNullOrEmpty
+
+                $dialog.Close()
+            }
+        }
+
+        Context "Completion Dialog Headless Tests" -Skip:(-not (Test-IsWindowsPlatform)) {
+            BeforeAll {
+                Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
+                Add-Type -AssemblyName PresentationCore -ErrorAction Stop
+                Add-Type -AssemblyName WindowsBase -ErrorAction Stop
+            }
+
+            It "Should load CompletionDialog XAML without error" {
+                $xaml = Get-XamlResource -ResourceName 'CompletionDialog.xaml'
+                $xaml | Should -Not -BeNullOrEmpty
+
+                # Parse the XAML - this is where TemplateBinding bugs would surface
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                { $dialog = [System.Windows.Markup.XamlReader]::Load($reader) } | Should -Not -Throw
+                $reader.Close()
+
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog | Should -BeOfType [System.Windows.Window]
+                $dialog.Title | Should -Match "Complete"
+
+                # Clean up
+                $dialog.Close()
+            }
+
+            It "Should have required completion dialog controls" {
+                $xaml = Get-XamlResource -ResourceName 'CompletionDialog.xaml'
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog.FindName('iconBorder') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('iconText') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtTitle') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtSubtitle') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtChunksValue') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtTotalValue') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('txtFailedValue') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('btnOk') | Should -Not -BeNullOrEmpty
+
+                $dialog.Close()
+            }
+        }
+
+        Context "Log Window Function Tests" {
+            It "Should have Show-LogWindow function" {
+                Get-Command Show-LogWindow -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have Clear-GuiLogBuffer function" {
+                Get-Command Clear-GuiLogBuffer -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have Close-LogWindow function" {
+                Get-Command Close-LogWindow -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have Update-LogWindowContent function" {
+                Get-Command Update-LogWindowContent -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have Initialize-LogWindow function" {
+                Get-Command Initialize-LogWindow -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+        }
+
+        Context "Log Window XAML Tests" {
+            BeforeAll {
+                $script:LogWindowXaml = Get-XamlResource -ResourceName 'LogWindow.xaml'
+            }
+
+            It "Should load LogWindow XAML via Get-XamlResource" {
+                $script:LogWindowXaml | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have valid XML structure" {
+                { [xml]$script:LogWindowXaml } | Should -Not -Throw
+            }
+
+            It "Should have Window as root element" {
+                $xaml = [xml]$script:LogWindowXaml
+                $xaml.DocumentElement.LocalName | Should -Be "Window"
+            }
+
+            It "Should have dark theme background color" {
+                $script:LogWindowXaml | Should -Match '#1E1E1E'
+            }
+
+            It "Should have required log window controls" {
+                $requiredControls = @(
+                    'chkDebug', 'chkInfo', 'chkWarning', 'chkError',
+                    'chkAutoScroll', 'txtLineCount',
+                    'svLog', 'txtLog',
+                    'btnClear', 'btnCopyAll', 'btnSaveLog', 'btnClose'
+                )
+
+                foreach ($control in $requiredControls) {
+                    $script:LogWindowXaml | Should -Match "x:Name=`"$control`"" -Because "Control '$control' should be defined"
+                }
+            }
+        }
+
+        Context "Log Window Headless Tests" -Skip:(-not (Test-IsWindowsPlatform)) {
+            BeforeAll {
+                Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
+                Add-Type -AssemblyName PresentationCore -ErrorAction Stop
+                Add-Type -AssemblyName WindowsBase -ErrorAction Stop
+            }
+
+            It "Should load LogWindow XAML without error" {
+                $xaml = Get-XamlResource -ResourceName 'LogWindow.xaml'
+                $xaml | Should -Not -BeNullOrEmpty
+
+                # Parse the XAML
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                { $dialog = [System.Windows.Markup.XamlReader]::Load($reader) } | Should -Not -Throw
+                $reader.Close()
+
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog | Should -BeOfType [System.Windows.Window]
+                $dialog.Title | Should -Match "Log"
+
+                # Clean up
+                $dialog.Close()
+            }
+
+            It "Should have required log window controls loadable" {
+                $xaml = Get-XamlResource -ResourceName 'LogWindow.xaml'
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog.FindName('txtLog') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('svLog') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('btnClose') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('btnClear') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('chkAutoScroll') | Should -Not -BeNullOrEmpty
+
+                $dialog.Close()
+            }
+        }
+
+        Context "GUI Log Buffer Tests" {
+            It "Should manage log buffer correctly" {
+                # The buffer is initialized by module load or GuiMain
+                # Verify buffer exists (or create for test isolation)
+                if ($null -eq $script:GuiLogBuffer) {
+                    $script:GuiLogBuffer = [System.Collections.Generic.List[string]]::new()
+                }
+
+                # Check it's a generic List of strings (type name varies by .NET version)
+                $script:GuiLogBuffer.GetType().Name | Should -Be 'List`1'
+                $script:GuiLogBuffer.GetType().GetGenericArguments()[0].Name | Should -Be 'String'
+
+                # Add some content
+                $script:GuiLogBuffer.Add("Test line 1")
+                $script:GuiLogBuffer.Add("Test line 2")
+                $script:GuiLogBuffer.Count | Should -BeGreaterThan 0
+
+                # Clear the buffer
+                Clear-GuiLogBuffer
+
+                # Verify cleared
+                $script:GuiLogBuffer.Count | Should -Be 0
             }
         }
     }

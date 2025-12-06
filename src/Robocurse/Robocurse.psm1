@@ -1,4 +1,4 @@
-# Robocurse PowerShell Module
+﻿# Robocurse PowerShell Module
 # Multi-share parallel robocopy orchestrator for Windows environments.
 
 #region ==================== MODULE CONFIGURATION ====================
@@ -116,10 +116,29 @@ $script:HeadlessProgressIntervalSeconds = 10
 # 10 chunks balances disk I/O with recovery granularity.
 $script:CheckpointSaveFrequency = 10
 
+# ETA calculation settings
+# Maximum ETA in days before capping. For very large replication jobs (petabyte scale),
+# ETAs can become unreasonably long. This cap provides a sensible upper bound.
+# Default is 365 days (1 year). Values beyond this display as "365+ days".
+$script:MaxEtaDays = 365
+
 # Health check settings
 # Interval in seconds between health status file updates during replication.
 # 30 seconds provides good monitoring granularity without excessive I/O.
 $script:HealthCheckIntervalSeconds = 30
+
+# Remote operation timeout in milliseconds for Invoke-Command calls.
+# 30 seconds is sufficient for most remote operations while preventing indefinite hangs
+# on slow or unreachable servers.
+$script:RemoteOperationTimeoutMs = 30000
+
+# Log mutex timeout in milliseconds for thread-safe log writes.
+# 5 seconds is sufficient for mutex acquisition without excessive blocking.
+$script:LogMutexTimeoutMs = 5000
+
+# Minimum log level for filtering (Debug, Info, Warning, Error)
+# Set to 'Debug' to capture all messages, 'Info' to skip debug messages, etc.
+$script:MinLogLevel = 'Debug'
 
 # Path to health check status file. Uses temp directory for cross-platform compatibility.
 $script:HealthCheckTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TMPDIR } else { "/tmp" }
@@ -127,12 +146,30 @@ $script:HealthCheckStatusFile = Join-Path $script:HealthCheckTempDir "Robocurse-
 
 # Dry-run mode state (set during replication, used by Start-ChunkJob)
 $script:DryRunMode = $false
+
+# Timeout in milliseconds for VSS tracking file mutex acquisition.
+# VSS operations are less frequent, so 10 seconds is acceptable.
+$script:VssMutexTimeoutMs = 10000
+
+# GUI update intervals
+# Timer interval in milliseconds for GUI progress updates.
+# 250ms provides smooth visual updates without excessive CPU usage.
+$script:GuiProgressUpdateIntervalMs = 250
+
+# Process termination
+# Timeout in milliseconds when waiting for robocopy processes to exit during stop.
+# 5 seconds allows graceful shutdown before force-killing.
+$script:ProcessStopTimeoutMs = 5000
 #endregion
 
 #region ==================== MODULE LOADING ====================
 
 # Get the module's root directory
 $PSModuleRoot = $PSScriptRoot
+
+# Store the module path for background runspace loading
+# This will be used by New-ReplicationRunspace to load the module in the background thread
+$script:RobocurseModulePath = $PSModuleRoot
 
 # Load public functions (in dependency order)
 $publicFunctionOrder = @(
@@ -143,12 +180,26 @@ $publicFunctionOrder = @(
     'Chunking.ps1'
     'Robocopy.ps1'
     'Checkpoint.ps1'       # Checkpoint/resume (before Orchestration)
-    'Orchestration.ps1'
+    # Orchestration modules (split for maintainability)
+    'OrchestrationCore.ps1'  # C# types, state management, circuit breaker
+    'HealthCheck.ps1'        # Health monitoring (before JobManagement which uses it)
+    'JobManagement.ps1'      # Job execution, profile management
     'Progress.ps1'
-    'VSS.ps1'
+    'VssCore.ps1'
+    'VssLocal.ps1'
+    'VssRemote.ps1'
     'Email.ps1'
     'Scheduling.ps1'
-    'GUI.ps1'
+    # GUI modules (split for maintainability)
+    'GuiResources.ps1'
+    'GuiSettings.ps1'
+    'GuiProfiles.ps1'
+    'GuiDialogs.ps1'
+    'GuiLogWindow.ps1'     # Popup log viewer window
+    'GuiRunspace.ps1'      # Background runspace management (before GuiReplication)
+    'GuiReplication.ps1'
+    'GuiProgress.ps1'
+    'GuiMain.ps1'
     'Main.ps1'
 )
 

@@ -1,4 +1,4 @@
-# Robocurse Main Entry Point Functions
+﻿# Robocurse Main Entry Point Functions
 
 function Show-RobocurseHelp {
     <#
@@ -291,7 +291,7 @@ function Start-RobocurseMain {
     if ($Headless) {
         # Phase 3a: Validate headless parameters
         if (-not $ProfileName -and -not $AllProfiles) {
-            Write-Error "Headless mode requires either -Profile <name> or -AllProfiles parameter."
+            Write-Error 'Headless mode requires either -Profile <name> or -AllProfiles parameter.'
             return 1
         }
 
@@ -301,11 +301,22 @@ function Start-RobocurseMain {
 
         # Phase 3b: Initialize logging
         try {
-            $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { ".\Logs" }
+            $logRoot = if ($config.GlobalSettings.LogPath) { $config.GlobalSettings.LogPath } else { '.\Logs' }
+            # Resolve relative paths based on config file directory (same as GUI mode)
+            if (-not [System.IO.Path]::IsPathRooted($logRoot)) {
+                $configDir = Split-Path -Parent $ConfigPath
+                $logRoot = [System.IO.Path]::GetFullPath((Join-Path $configDir $logRoot))
+            }
             $compressDays = if ($config.GlobalSettings.LogCompressAfterDays) { $config.GlobalSettings.LogCompressAfterDays } else { $script:LogCompressAfterDays }
             $deleteDays = if ($config.GlobalSettings.LogRetentionDays) { $config.GlobalSettings.LogRetentionDays } else { $script:LogDeleteAfterDays }
             Initialize-LogSession -LogRoot $logRoot -CompressAfterDays $compressDays -DeleteAfterDays $deleteDays
             $logSessionInitialized = $true
+
+            # Enable path redaction if configured (for security/privacy)
+            if ($config.GlobalSettings.RedactPaths) {
+                $serverNames = if ($config.GlobalSettings.RedactServerNames) { @($config.GlobalSettings.RedactServerNames) } else { @() }
+                Enable-PathRedaction -ServerNames $serverNames
+            }
         }
         catch {
             Write-Error "Failed to initialize logging: $($_.Exception.Message)"
@@ -337,6 +348,19 @@ function Start-RobocurseMain {
         catch {
             Write-Error "Failed to resolve profiles: $($_.Exception.Message)"
             return 1
+        }
+
+        # Phase 3c.5: Early VSS privilege check for profiles that require VSS
+        # Fail fast before starting replication if VSS prerequisites are not met
+        $vssProfiles = @($profilesToRun | Where-Object { $_.UseVSS -eq $true })
+        if ($vssProfiles.Count -gt 0) {
+            $vssCheck = Test-VssPrivileges
+            if (-not $vssCheck.Success) {
+                $vssProfileNames = ($vssProfiles | ForEach-Object { $_.Name }) -join ", "
+                Write-Error "VSS is required for profile(s) '$vssProfileNames' but VSS prerequisites are not met: $($vssCheck.ErrorMessage)"
+                return 1
+            }
+            Write-Host "VSS privileges verified for $($vssProfiles.Count) profile(s)"
         }
 
         # Phase 3d: Run headless replication
@@ -382,6 +406,8 @@ function Start-RobocurseMain {
         try {
             $window = Initialize-RobocurseGui -ConfigPath $ConfigPath
             if ($window) {
+                # Use ShowDialog() for modal window - Forms.Timer works reliably with this
+                # (unlike DispatcherTimer which got starved in the modal loop)
                 $window.ShowDialog() | Out-Null
                 return 0
             }
