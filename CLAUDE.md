@@ -30,8 +30,8 @@ Output format is `New File [size] [name]` and `New Dir [count] [path]` - parse a
 ## Build Commands
 
 ```powershell
-# Run all tests
-Invoke-Pester -Path tests -PassThru -Output Detailed
+# Run all tests (USE THIS - writes to temp files to avoid truncation)
+.\scripts\run-tests.ps1
 
 # Run specific test file
 Invoke-Pester -Path tests\Unit\Configuration.Tests.ps1 -Output Detailed
@@ -47,6 +47,19 @@ $r = Invoke-Pester -Path tests -PassThru -Output None; $r.Skipped.ExpandedPath
 
 # Build monolith
 .\build\Build-Robocurse.ps1
+```
+
+## Avoiding Test Output Truncation
+
+**IMPORTANT:** When running tests, use `.\scripts\run-tests.ps1` instead of `Invoke-Pester` directly. This script writes results to temp files to avoid truncation issues that cause infinite retry loops.
+
+Output files:
+- `$env:TEMP\pester-summary.txt` - Pass/fail counts
+- `$env:TEMP\pester-failures.txt` - Failed test names and error messages
+
+To read failure details after running tests:
+```powershell
+Get-Content $env:TEMP\pester-failures.txt
 ```
 
 **Note:** Some tests skip based on environment:
