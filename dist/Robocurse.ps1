@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-05 17:44:59
+    Built: 2025-12-05 18:06:59
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -11723,6 +11723,379 @@ function Show-ScheduleDialog {
 
 #endregion
 
+#region ==================== GUILOGWINDOW ====================
+
+# Separate popup window for log viewing.
+
+# Log window instance and controls
+$script:LogWindow = $null
+$script:LogControls = @{}
+
+function Show-LogWindow {
+    <#
+    .SYNOPSIS
+        Shows the log viewer window, creating it if needed
+    .DESCRIPTION
+        Opens the log viewer as a non-modal window that can stay open
+        while the main GUI operates. If already open, brings it to front.
+        The window displays log messages from the ring buffer.
+    #>
+    [CmdletBinding()]
+    param()
+
+    # If window exists and is loaded, just bring to front
+    if ($script:LogWindow -and $script:LogWindow.IsLoaded) {
+        $script:LogWindow.Activate()
+        return
+    }
+
+    # Create new window
+    try {
+        $script:LogWindow = Initialize-LogWindow
+        if ($script:LogWindow) {
+            # Set owner to main window so it stays on top of it
+            $script:LogWindow.Owner = $script:Window
+
+            # Show non-modal
+            $script:LogWindow.Show()
+
+            # Populate with current buffer contents
+            Update-LogWindowContent
+        }
+    }
+    catch {
+        Write-GuiLog "Error showing log window: $($_.Exception.Message)"
+        Show-GuiError -Message "Failed to open log window" -Details $_.Exception.Message
+    }
+}
+
+function Initialize-LogWindow {
+    <#
+    .SYNOPSIS
+        Creates and initializes the log viewer window from XAML
+    .OUTPUTS
+        Window object if successful, $null on failure
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'LogWindow.xaml' -FallbackContent @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Robocurse - Log Viewer"
+        Height="500" Width="800"
+        MinHeight="300" MinWidth="500"
+        WindowStartupLocation="CenterOwner"
+        Background="#1E1E1E">
+
+    <Window.Resources>
+        <!-- Button style matching main window theme -->
+        <Style x:Key="LogButton" TargetType="Button">
+            <Setter Property="Background" Value="#0078D4"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="#0078D4" CornerRadius="3" Padding="12,6">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#1084D8"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#006CBD"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="border" Property="Background" Value="#4A4A4A"/>
+                                <Setter Property="Foreground" Value="#808080"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="SecondaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#3E3E3E"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="#3E3E3E" CornerRadius="3" Padding="12,6">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#4E4E4E"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#2E2E2E"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="DarkCheckBox" TargetType="CheckBox">
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="10">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header with filter options -->
+        <Border Grid.Row="0" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                    <TextBlock Text="Log Level:" Foreground="#E0E0E0" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <CheckBox x:Name="chkDebug" Content="Debug" Style="{StaticResource DarkCheckBox}" Margin="0,0,15,0"/>
+                    <CheckBox x:Name="chkInfo" Content="Info" Style="{StaticResource DarkCheckBox}" IsChecked="True" Margin="0,0,15,0"/>
+                    <CheckBox x:Name="chkWarning" Content="Warning" Style="{StaticResource DarkCheckBox}" IsChecked="True" Margin="0,0,15,0"/>
+                    <CheckBox x:Name="chkError" Content="Error" Style="{StaticResource DarkCheckBox}" IsChecked="True"/>
+                </StackPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <CheckBox x:Name="chkAutoScroll" Content="Auto-scroll" Style="{StaticResource DarkCheckBox}" IsChecked="True" Margin="0,0,15,0"/>
+                    <TextBlock x:Name="txtLineCount" Text="0 lines" Foreground="#808080" VerticalAlignment="Center"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- Log content area -->
+        <Border Grid.Row="1" Background="#1A1A1A" BorderBrush="#3E3E3E" BorderThickness="1" CornerRadius="4">
+            <ScrollViewer x:Name="svLog" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto">
+                <TextBlock x:Name="txtLog" Foreground="#E0E0E0" FontFamily="Consolas" FontSize="12"
+                           Padding="10" TextWrapping="NoWrap"/>
+            </ScrollViewer>
+        </Border>
+
+        <!-- Bottom button bar -->
+        <Border Grid.Row="2" Margin="0,10,0,0">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                    <Button x:Name="btnClear" Content="Clear Log" Style="{StaticResource SecondaryButton}" Width="90" Margin="0,0,10,0"/>
+                    <Button x:Name="btnCopyAll" Content="Copy All" Style="{StaticResource SecondaryButton}" Width="90" Margin="0,0,10,0"/>
+                    <Button x:Name="btnSaveLog" Content="Save to File" Style="{StaticResource SecondaryButton}" Width="100"/>
+                </StackPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button x:Name="btnClose" Content="Close" Style="{StaticResource LogButton}" Width="80"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>
+
+'@
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $window = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get control references
+        $script:LogControls = @{}
+        @(
+            'chkDebug', 'chkInfo', 'chkWarning', 'chkError',
+            'chkAutoScroll', 'txtLineCount',
+            'svLog', 'txtLog',
+            'btnClear', 'btnCopyAll', 'btnSaveLog', 'btnClose'
+        ) | ForEach-Object {
+            $script:LogControls[$_] = $window.FindName($_)
+        }
+
+        # Wire up event handlers
+        Initialize-LogWindowEventHandlers -Window $window
+
+        return $window
+    }
+    catch {
+        Write-Warning "Failed to initialize log window: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Initialize-LogWindowEventHandlers {
+    <#
+    .SYNOPSIS
+        Wires up event handlers for the log window
+    .PARAMETER Window
+        The log window object
+    #>
+    [CmdletBinding()]
+    param([System.Windows.Window]$Window)
+
+    # Close button
+    $script:LogControls.btnClose.Add_Click({
+        $script:LogWindow.Hide()
+    })
+
+    # Clear log button
+    $script:LogControls.btnClear.Add_Click({
+        Clear-GuiLogBuffer
+        Update-LogWindowContent
+    })
+
+    # Copy all button
+    $script:LogControls.btnCopyAll.Add_Click({
+        $logText = $script:LogControls.txtLog.Text
+        if ($logText) {
+            [System.Windows.Clipboard]::SetText($logText)
+            # Brief visual feedback
+            $originalContent = $script:LogControls.btnCopyAll.Content
+            $script:LogControls.btnCopyAll.Content = "Copied!"
+            $timer = New-Object System.Windows.Threading.DispatcherTimer
+            $timer.Interval = [TimeSpan]::FromSeconds(1)
+            $timer.Add_Tick({
+                $script:LogControls.btnCopyAll.Content = $originalContent
+                $timer.Stop()
+            }.GetNewClosure())
+            $timer.Start()
+        }
+    })
+
+    # Save to file button
+    $script:LogControls.btnSaveLog.Add_Click({
+        try {
+            $saveDialog = New-Object Microsoft.Win32.SaveFileDialog
+            $saveDialog.Filter = "Log files (*.log)|*.log|Text files (*.txt)|*.txt|All files (*.*)|*.*"
+            $saveDialog.DefaultExt = ".log"
+            $saveDialog.FileName = "robocurse-$(Get-Date -Format 'yyyyMMdd-HHmmss').log"
+
+            if ($saveDialog.ShowDialog() -eq $true) {
+                $script:LogControls.txtLog.Text | Set-Content -Path $saveDialog.FileName -Encoding UTF8
+                Write-GuiLog "Log saved to: $($saveDialog.FileName)"
+            }
+        }
+        catch {
+            Show-GuiError -Message "Failed to save log file" -Details $_.Exception.Message
+        }
+    })
+
+    # Filter checkboxes - refresh display when changed
+    @('chkDebug', 'chkInfo', 'chkWarning', 'chkError') | ForEach-Object {
+        $script:LogControls[$_].Add_Checked({ Update-LogWindowContent })
+        $script:LogControls[$_].Add_Unchecked({ Update-LogWindowContent })
+    }
+
+    # Handle window closing - hide instead of close to preserve state
+    $Window.Add_Closing({
+        param($sender, $e)
+        $e.Cancel = $true
+        $sender.Hide()
+    })
+}
+
+function Update-LogWindowContent {
+    <#
+    .SYNOPSIS
+        Updates the log window text from the ring buffer
+    .DESCRIPTION
+        Refreshes the log window content, applying any active filters.
+        Called when the window is shown and when log entries are added.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not $script:LogWindow -or -not $script:LogWindow.IsVisible) {
+        return
+    }
+
+    # Get filter settings
+    $showDebug = $script:LogControls.chkDebug.IsChecked
+    $showInfo = $script:LogControls.chkInfo.IsChecked
+    $showWarning = $script:LogControls.chkWarning.IsChecked
+    $showError = $script:LogControls.chkError.IsChecked
+
+    # Thread-safe buffer read
+    $lines = @()
+    [System.Threading.Monitor]::Enter($script:GuiLogBuffer)
+    try {
+        $lines = @($script:GuiLogBuffer)
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:GuiLogBuffer)
+    }
+
+    # Apply filters if any checkbox is unchecked (otherwise show all)
+    $filteredLines = $lines | Where-Object {
+        $line = $_
+        # Parse log level from line format: [HH:mm:ss] [LEVEL] Message
+        # Or simpler format: [HH:mm:ss] Message (treat as INFO)
+        $isDebug = $line -match '\[DEBUG\]'
+        $isWarning = $line -match '\[WARNING\]' -or $line -match '\[WARN\]'
+        $isError = $line -match '\[ERROR\]' -or $line -match '\[ERR\]'
+        $isInfo = -not $isDebug -and -not $isWarning -and -not $isError
+
+        ($showDebug -and $isDebug) -or
+        ($showInfo -and $isInfo) -or
+        ($showWarning -and $isWarning) -or
+        ($showError -and $isError)
+    }
+
+    # Update display
+    $script:LogControls.txtLog.Text = $filteredLines -join "`n"
+    $script:LogControls.txtLineCount.Text = "$($filteredLines.Count) lines"
+
+    # Auto-scroll if enabled
+    if ($script:LogControls.chkAutoScroll.IsChecked) {
+        $script:LogControls.svLog.ScrollToEnd()
+    }
+}
+
+function Clear-GuiLogBuffer {
+    <#
+    .SYNOPSIS
+        Clears the GUI log buffer
+    #>
+    [CmdletBinding()]
+    param()
+
+    [System.Threading.Monitor]::Enter($script:GuiLogBuffer)
+    try {
+        $script:GuiLogBuffer.Clear()
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:GuiLogBuffer)
+    }
+}
+
+function Close-LogWindow {
+    <#
+    .SYNOPSIS
+        Closes and disposes the log window
+    .DESCRIPTION
+        Called during application cleanup to properly dispose the window.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if ($script:LogWindow) {
+        try {
+            $script:LogWindow.Close()
+        }
+        catch {
+            # Window may already be closed
+        }
+        $script:LogWindow = $null
+        $script:LogControls = @{}
+    }
+}
+
+#endregion
+
 #region ==================== GUIRUNSPACE ====================
 
 # Background PowerShell runspace creation and cleanup for replication.
@@ -12760,14 +13133,14 @@ function Initialize-RobocurseGui {
     </Window.Resources>
 
     <!-- ==================== LAYOUT: Main Grid ==================== -->
-    <!-- Row 0: Header, Row 1: Profile/Settings, Row 2: Progress, Row 3: Action Buttons, Row 4: Log -->
+    <!-- Row 0: Header, Row 1: Profile/Settings, Row 2: Progress Area, Row 3: Status Bar -->
+    <!-- Note: Log panel removed - now in separate popup window via "Logs" button -->
     <Grid Margin="10">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="120"/>
         </Grid.RowDefinitions>
 
         <!-- ==================== ROW 0: Header ==================== -->
@@ -12872,31 +13245,68 @@ function Initialize-RobocurseGui {
         <Grid Grid.Row="2">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
 
-            <!-- Control Bar -->
+            <!-- Control Bar with Logs button pinned right -->
             <Border Grid.Row="0" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
-                <StackPanel Orientation="Horizontal">
-                    <Label Content="Workers:" Style="{StaticResource DarkLabel}"
-                           ToolTip="Number of simultaneous robocopy processes.&#x0a;More = faster but uses more resources.&#x0a;Recommended: 2-8"/>
-                    <Slider x:Name="sldWorkers" Width="100" Minimum="1" Maximum="16" Value="4" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="txtWorkerCount" Text="4" Foreground="#E0E0E0" Width="25" Margin="5,0,20,0" VerticalAlignment="Center"/>
+                <DockPanel>
+                    <!-- Left side: Workers and action buttons -->
+                    <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                        <Label Content="Workers:" Style="{StaticResource DarkLabel}"
+                               ToolTip="Number of simultaneous robocopy processes.&#x0a;More = faster but uses more resources.&#x0a;Recommended: 2-8"/>
+                        <Slider x:Name="sldWorkers" Width="100" Minimum="1" Maximum="16" Value="4" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="txtWorkerCount" Text="4" Foreground="#E0E0E0" Width="25" Margin="5,0,20,0" VerticalAlignment="Center"/>
 
-                    <Button x:Name="btnRunAll" Content="&#x25B6; Run All" Style="{StaticResource DarkButton}" Width="100" Margin="0,0,10,0"
-                            ToolTip="Start syncing all enabled profiles in sequence"/>
-                    <Button x:Name="btnRunSelected" Content="&#x25B6; Run Selected" Style="{StaticResource DarkButton}" Width="120" Margin="0,0,10,0"
-                            ToolTip="Run only the currently selected profile"/>
-                    <Button x:Name="btnStop" Content="&#x23F9; Stop" Style="{StaticResource StopButton}" Width="80" Margin="0,0,10,0" IsEnabled="False"
-                            ToolTip="Stop all running robocopy jobs"/>
-                    <Button x:Name="btnSchedule" Content="&#x2699; Schedule" Style="{StaticResource DarkButton}" Width="100"
-                            ToolTip="Configure automated scheduled runs"/>
-                </StackPanel>
+                        <Button x:Name="btnRunAll" Content="&#x25B6; Run All" Style="{StaticResource DarkButton}" Width="100" Margin="0,0,10,0"
+                                ToolTip="Start syncing all enabled profiles in sequence"/>
+                        <Button x:Name="btnRunSelected" Content="&#x25B6; Run Selected" Style="{StaticResource DarkButton}" Width="120" Margin="0,0,10,0"
+                                ToolTip="Run only the currently selected profile"/>
+                        <Button x:Name="btnStop" Content="&#x23F9; Stop" Style="{StaticResource StopButton}" Width="80" Margin="0,0,10,0" IsEnabled="False"
+                                ToolTip="Stop all running robocopy jobs"/>
+                        <Button x:Name="btnSchedule" Content="&#x2699; Schedule" Style="{StaticResource DarkButton}" Width="100"
+                                ToolTip="Configure automated scheduled runs"/>
+                    </StackPanel>
+                    <!-- Right side: Logs button -->
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button x:Name="btnLogs" Content="&#x1F4CB; Logs" Style="{StaticResource DarkButton}" Width="90"
+                                ToolTip="Open log viewer window"/>
+                    </StackPanel>
+                </DockPanel>
             </Border>
 
-            <!-- Chunk DataGrid -->
-            <DataGrid Grid.Row="1" x:Name="dgChunks" AutoGenerateColumns="False"
+            <!-- Progress Summary - NOW ABOVE chunk grid -->
+            <Border Grid.Row="1" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="200"/>
+                    </Grid.ColumnDefinitions>
+
+                    <StackPanel Grid.Column="0">
+                        <TextBlock x:Name="txtProfileProgress" Text="Profile: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
+                        <ProgressBar x:Name="pbProfile" Height="20" Minimum="0" Maximum="100" Value="0"
+                                     Background="#1A1A1A" Foreground="#00BFFF" BorderBrush="#555555" BorderThickness="1"/>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="1" Margin="20,0,0,0">
+                        <TextBlock x:Name="txtOverallProgress" Text="Overall: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
+                        <ProgressBar x:Name="pbOverall" Height="20" Minimum="0" Maximum="100" Value="0"
+                                     Background="#1A1A1A" Foreground="#00FF7F" BorderBrush="#555555" BorderThickness="1"/>
+                    </StackPanel>
+
+                    <StackPanel Grid.Column="2" Margin="20,0,0,0">
+                        <TextBlock x:Name="txtEta" Text="ETA: --:--:--" Foreground="#808080"/>
+                        <TextBlock x:Name="txtSpeed" Text="Speed: -- MB/s" Foreground="#808080"/>
+                        <TextBlock x:Name="txtChunks" Text="Chunks: 0/0" Foreground="#808080"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Chunk DataGrid - NOW BELOW progress summary, takes remaining space -->
+            <DataGrid Grid.Row="2" x:Name="dgChunks" AutoGenerateColumns="False"
                       Style="{StaticResource DarkDataGrid}"
                       CellStyle="{StaticResource DarkDataGridCell}"
                       RowStyle="{StaticResource DarkDataGridRow}"
@@ -12951,47 +13361,10 @@ function Initialize-RobocurseGui {
                     <DataGridTextColumn Header="Speed" Binding="{Binding Speed}" Width="80"/>
                 </DataGrid.Columns>
             </DataGrid>
-
-            <!-- Progress Summary -->
-            <Border Grid.Row="2" Background="#252525" CornerRadius="4" Padding="10" Margin="0,10,0,0">
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="200"/>
-                    </Grid.ColumnDefinitions>
-
-                    <StackPanel Grid.Column="0">
-                        <TextBlock x:Name="txtProfileProgress" Text="Profile: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                        <ProgressBar x:Name="pbProfile" Height="20" Minimum="0" Maximum="100" Value="0"
-                                     Background="#1A1A1A" Foreground="#00BFFF" BorderBrush="#555555" BorderThickness="1"/>
-                    </StackPanel>
-
-                    <StackPanel Grid.Column="1" Margin="20,0,0,0">
-                        <TextBlock x:Name="txtOverallProgress" Text="Overall: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                        <ProgressBar x:Name="pbOverall" Height="20" Minimum="0" Maximum="100" Value="0"
-                                     Background="#1A1A1A" Foreground="#00FF7F" BorderBrush="#555555" BorderThickness="1"/>
-                    </StackPanel>
-
-                    <StackPanel Grid.Column="2" Margin="20,0,0,0">
-                        <TextBlock x:Name="txtEta" Text="ETA: --:--:--" Foreground="#808080"/>
-                        <TextBlock x:Name="txtSpeed" Text="Speed: -- MB/s" Foreground="#808080"/>
-                        <TextBlock x:Name="txtChunks" Text="Chunks: 0/0" Foreground="#808080"/>
-                    </StackPanel>
-                </Grid>
-            </Border>
         </Grid>
 
         <!-- Status Bar -->
         <TextBlock Grid.Row="3" x:Name="txtStatus" Text="Ready" Foreground="#808080" Margin="0,10,0,5"/>
-
-        <!-- Log Panel -->
-        <Border Grid.Row="4" Background="#1A1A1A" BorderBrush="#3E3E3E" BorderThickness="1" CornerRadius="4">
-            <ScrollViewer x:Name="svLog" VerticalScrollBarVisibility="Auto">
-                <TextBlock x:Name="txtLog" Foreground="#808080" FontFamily="Consolas" FontSize="11"
-                           Padding="10" TextWrapping="Wrap"/>
-            </ScrollViewer>
-        </Border>
     </Grid>
 </Window>
 
@@ -13006,14 +13379,15 @@ function Initialize-RobocurseGui {
     }
 
     # Get control references
+    # Note: txtLog and svLog removed - now in separate log window (see GuiLogWindow.ps1)
     $script:Controls = @{}
     @(
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
         'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
-        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
+        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule', 'btnLogs',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
-        'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus', 'txtLog', 'svLog'
+        'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus'
     ) | ForEach-Object {
         $script:Controls[$_] = $script:Window.FindName($_)
     }
@@ -13155,6 +13529,11 @@ function Initialize-EventHandlers {
         Invoke-SafeEventHandler -HandlerName "Schedule" -ScriptBlock { Show-ScheduleDialog }
     })
 
+    # Logs button - opens popup log viewer window
+    $script:Controls.btnLogs.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "Logs" -ScriptBlock { Show-LogWindow }
+    })
+
     # Form field changes - save to profile
     @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
         $script:Controls[$_].Add_LostFocus({
@@ -13237,6 +13616,9 @@ function Invoke-WindowClosingHandler {
         $script:ProgressTimer = $null
     }
 
+    # Close the log window if open
+    Close-LogWindow
+
     # Clean up background runspace to prevent memory leaks
     Close-ReplicationRunspace
 
@@ -13250,21 +13632,19 @@ function Invoke-WindowClosingHandler {
 function Write-GuiLog {
     <#
     .SYNOPSIS
-        Writes a message to the GUI log panel and console
+        Writes a message to the GUI log buffer and console
     .DESCRIPTION
         Uses a fixed-size ring buffer to prevent O(nÂ²) string concatenation
         performance issues. When the buffer exceeds GuiLogMaxLines, oldest
         entries are removed. This keeps the GUI responsive during long runs.
         Also writes to console for debugging visibility with caller info.
+
+        The log is displayed in a separate popup log window (see GuiLogWindow.ps1).
     .PARAMETER Message
         Message to log
     .NOTES
-        WPF RENDERING QUIRK: Originally used Dispatcher.BeginInvoke for thread safety,
-        but this didn't reliably update the TextBox visual in PowerShell WPF.
-
-        SOLUTION: Use direct property assignment + Window.UpdateLayout().
-        All Write-GuiLog calls originate from the GUI thread (event handlers and
-        Forms.Timer tick which uses WM_TIMER), so Dispatcher isn't needed anyway.
+        Log content is stored in $script:GuiLogBuffer and displayed in the
+        separate log window when opened via the "Logs" button.
     #>
     [CmdletBinding()]
     param([string]$Message)
@@ -13290,14 +13670,10 @@ function Write-GuiLog {
     $consoleLine = "${timestamp} [INFO] ${callerInfo} ${Message}"
     Write-Host $consoleLine
 
-    # GUI panel gets shorter format (no caller info - too verbose for UI)
+    # GUI log gets shorter format (no caller info - too verbose for UI)
     $guiLine = "[$shortTimestamp] $Message"
 
-    if (-not $script:Controls.txtLog) { return }
-
     # Thread-safe buffer update using lock
-    # Capture logText inside the lock to avoid race between buffer modification and join
-    $logText = $null
     [System.Threading.Monitor]::Enter($script:GuiLogBuffer)
     try {
         # Add to ring buffer
@@ -13307,21 +13683,13 @@ function Write-GuiLog {
         while ($script:GuiLogBuffer.Count -gt $script:GuiLogMaxLines) {
             $script:GuiLogBuffer.RemoveAt(0)
         }
-
-        # Capture text while still holding the lock
-        $logText = $script:GuiLogBuffer -join "`n"
     }
     finally {
         [System.Threading.Monitor]::Exit($script:GuiLogBuffer)
     }
 
-    # Direct assignment - all Write-GuiLog calls are from GUI thread
-    # (event handlers and timer tick which uses WM_TIMER on UI thread)
-    $script:Controls.txtLog.Text = $logText
-    $script:Controls.svLog.ScrollToEnd()
-
-    # Force complete window layout update for immediate visual refresh
-    $script:Window.UpdateLayout()
+    # Update the log window if it's visible
+    Update-LogWindowContent
 }
 
 function Show-GuiError {

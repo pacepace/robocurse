@@ -73,6 +73,7 @@ $moduleOrder = @(
     'Public\GuiSettings.ps1'
     'Public\GuiProfiles.ps1'
     'Public\GuiDialogs.ps1'
+    'Public\GuiLogWindow.ps1'   # Popup log viewer window
     'Public\GuiRunspace.ps1'
     'Public\GuiReplication.ps1'
     'Public\GuiProgress.ps1'

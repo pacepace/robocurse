@@ -65,14 +65,15 @@ function Initialize-RobocurseGui {
     }
 
     # Get control references
+    # Note: txtLog and svLog removed - now in separate log window (see GuiLogWindow.ps1)
     $script:Controls = @{}
     @(
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
         'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
-        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
+        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule', 'btnLogs',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
-        'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus', 'txtLog', 'svLog'
+        'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus'
     ) | ForEach-Object {
         $script:Controls[$_] = $script:Window.FindName($_)
     }
@@ -214,6 +215,11 @@ function Initialize-EventHandlers {
         Invoke-SafeEventHandler -HandlerName "Schedule" -ScriptBlock { Show-ScheduleDialog }
     })
 
+    # Logs button - opens popup log viewer window
+    $script:Controls.btnLogs.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "Logs" -ScriptBlock { Show-LogWindow }
+    })
+
     # Form field changes - save to profile
     @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
         $script:Controls[$_].Add_LostFocus({
@@ -296,6 +302,9 @@ function Invoke-WindowClosingHandler {
         $script:ProgressTimer = $null
     }
 
+    # Close the log window if open
+    Close-LogWindow
+
     # Clean up background runspace to prevent memory leaks
     Close-ReplicationRunspace
 
@@ -309,21 +318,19 @@ function Invoke-WindowClosingHandler {
 function Write-GuiLog {
     <#
     .SYNOPSIS
-        Writes a message to the GUI log panel and console
+        Writes a message to the GUI log buffer and console
     .DESCRIPTION
         Uses a fixed-size ring buffer to prevent O(n²) string concatenation
         performance issues. When the buffer exceeds GuiLogMaxLines, oldest
         entries are removed. This keeps the GUI responsive during long runs.
         Also writes to console for debugging visibility with caller info.
+
+        The log is displayed in a separate popup log window (see GuiLogWindow.ps1).
     .PARAMETER Message
         Message to log
     .NOTES
-        WPF RENDERING QUIRK: Originally used Dispatcher.BeginInvoke for thread safety,
-        but this didn't reliably update the TextBox visual in PowerShell WPF.
-
-        SOLUTION: Use direct property assignment + Window.UpdateLayout().
-        All Write-GuiLog calls originate from the GUI thread (event handlers and
-        Forms.Timer tick which uses WM_TIMER), so Dispatcher isn't needed anyway.
+        Log content is stored in $script:GuiLogBuffer and displayed in the
+        separate log window when opened via the "Logs" button.
     #>
     [CmdletBinding()]
     param([string]$Message)
@@ -349,14 +356,10 @@ function Write-GuiLog {
     $consoleLine = "${timestamp} [INFO] ${callerInfo} ${Message}"
     Write-Host $consoleLine
 
-    # GUI panel gets shorter format (no caller info - too verbose for UI)
+    # GUI log gets shorter format (no caller info - too verbose for UI)
     $guiLine = "[$shortTimestamp] $Message"
 
-    if (-not $script:Controls.txtLog) { return }
-
     # Thread-safe buffer update using lock
-    # Capture logText inside the lock to avoid race between buffer modification and join
-    $logText = $null
     [System.Threading.Monitor]::Enter($script:GuiLogBuffer)
     try {
         # Add to ring buffer
@@ -366,21 +369,13 @@ function Write-GuiLog {
         while ($script:GuiLogBuffer.Count -gt $script:GuiLogMaxLines) {
             $script:GuiLogBuffer.RemoveAt(0)
         }
-
-        # Capture text while still holding the lock
-        $logText = $script:GuiLogBuffer -join "`n"
     }
     finally {
         [System.Threading.Monitor]::Exit($script:GuiLogBuffer)
     }
 
-    # Direct assignment - all Write-GuiLog calls are from GUI thread
-    # (event handlers and timer tick which uses WM_TIMER on UI thread)
-    $script:Controls.txtLog.Text = $logText
-    $script:Controls.svLog.ScrollToEnd()
-
-    # Force complete window layout update for immediate visual refresh
-    $script:Window.UpdateLayout()
+    # Update the log window if it's visible
+    Update-LogWindowContent
 }
 
 function Show-GuiError {

@@ -195,6 +195,7 @@ $publicFunctionOrder = @(
     'GuiSettings.ps1'
     'GuiProfiles.ps1'
     'GuiDialogs.ps1'
+    'GuiLogWindow.ps1'     # Popup log viewer window
     'GuiRunspace.ps1'      # Background runspace management (before GuiReplication)
     'GuiReplication.ps1'
     'GuiProgress.ps1'

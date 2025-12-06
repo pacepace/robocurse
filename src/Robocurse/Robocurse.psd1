@@ -147,6 +147,11 @@
         'Show-GuiError'
         'Write-GuiLog'
 
+        # GUI Log Window
+        'Show-LogWindow'
+        'Clear-GuiLogBuffer'
+        'Close-LogWindow'
+
         # Main
         'Start-RobocurseMain'
         'Show-RobocurseHelp'

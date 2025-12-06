@@ -24,11 +24,14 @@ Describe "Robocurse Main Script" {
             $publicPath = Join-Path (Join-Path (Join-Path (Join-Path $PSScriptRoot "..") "src") "Robocurse") "Public"
             $requiredFiles = @(
                 'Utility.ps1', 'Configuration.ps1', 'Logging.ps1', 'DirectoryProfiling.ps1',
-                'Chunking.ps1', 'Robocopy.ps1', 'Orchestration.ps1', 'Progress.ps1',
+                'Chunking.ps1', 'Robocopy.ps1', 'Checkpoint.ps1',
+                # Orchestration modules (split for maintainability)
+                'OrchestrationCore.ps1', 'HealthCheck.ps1', 'JobManagement.ps1',
+                'Progress.ps1',
                 'VssCore.ps1', 'VssLocal.ps1', 'VssRemote.ps1', 'Email.ps1', 'Scheduling.ps1',
                 # GUI modules (split for maintainability)
                 'GuiResources.ps1', 'GuiSettings.ps1', 'GuiProfiles.ps1', 'GuiDialogs.ps1',
-                'GuiReplication.ps1', 'GuiProgress.ps1', 'GuiMain.ps1',
+                'GuiLogWindow.ps1', 'GuiRunspace.ps1', 'GuiReplication.ps1', 'GuiProgress.ps1', 'GuiMain.ps1',
                 'Main.ps1'
             )
             foreach ($file in $requiredFiles) {

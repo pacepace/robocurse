@@ -94,6 +94,8 @@ InModuleScope 'Robocurse' {
             }
 
             It "Should have required controls defined" {
+                # Note: txtLog and svLog removed - now in separate LogWindow.xaml
+                # btnLogs added - opens popup log viewer
                 $requiredControls = @(
                     'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
                     'txtProfileName', 'txtSource', 'txtDest',
@@ -101,11 +103,11 @@ InModuleScope 'Robocurse' {
                     'chkUseVss', 'cmbScanMode',
                     'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
                     'sldWorkers', 'txtWorkerCount',
-                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
+                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule', 'btnLogs',
                     'dgChunks', 'pbProfile', 'pbOverall',
                     'txtProfileProgress', 'txtOverallProgress',
                     'txtEta', 'txtSpeed', 'txtChunks',
-                    'txtStatus', 'txtLog', 'svLog'
+                    'txtStatus'
                 )
 
                 foreach ($control in $requiredControls) {
@@ -714,7 +716,7 @@ InModuleScope 'Robocurse' {
                     'dgChunks', 'pbProfile', 'pbOverall',
                     'txtProfileProgress', 'txtOverallProgress',
                     'txtEta', 'txtSpeed', 'txtChunks',
-                    'txtStatus', 'txtLog', 'svLog'
+                    'txtStatus', 'btnLogs'
                 )
 
                 foreach ($controlName in $requiredControls) {
@@ -859,6 +861,132 @@ InModuleScope 'Robocurse' {
                 $dialog.FindName('btnOk') | Should -Not -BeNullOrEmpty
 
                 $dialog.Close()
+            }
+        }
+
+        Context "Log Window Function Tests" {
+            It "Should have Show-LogWindow function" {
+                Get-Command Show-LogWindow -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have Clear-GuiLogBuffer function" {
+                Get-Command Clear-GuiLogBuffer -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have Close-LogWindow function" {
+                Get-Command Close-LogWindow -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have Update-LogWindowContent function" {
+                Get-Command Update-LogWindowContent -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have Initialize-LogWindow function" {
+                Get-Command Initialize-LogWindow -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
+            }
+        }
+
+        Context "Log Window XAML Tests" {
+            BeforeAll {
+                $script:LogWindowXaml = Get-XamlResource -ResourceName 'LogWindow.xaml'
+            }
+
+            It "Should load LogWindow XAML via Get-XamlResource" {
+                $script:LogWindowXaml | Should -Not -BeNullOrEmpty
+            }
+
+            It "Should have valid XML structure" {
+                { [xml]$script:LogWindowXaml } | Should -Not -Throw
+            }
+
+            It "Should have Window as root element" {
+                $xaml = [xml]$script:LogWindowXaml
+                $xaml.DocumentElement.LocalName | Should -Be "Window"
+            }
+
+            It "Should have dark theme background color" {
+                $script:LogWindowXaml | Should -Match '#1E1E1E'
+            }
+
+            It "Should have required log window controls" {
+                $requiredControls = @(
+                    'chkDebug', 'chkInfo', 'chkWarning', 'chkError',
+                    'chkAutoScroll', 'txtLineCount',
+                    'svLog', 'txtLog',
+                    'btnClear', 'btnCopyAll', 'btnSaveLog', 'btnClose'
+                )
+
+                foreach ($control in $requiredControls) {
+                    $script:LogWindowXaml | Should -Match "x:Name=`"$control`"" -Because "Control '$control' should be defined"
+                }
+            }
+        }
+
+        Context "Log Window Headless Tests" -Skip:(-not (Test-IsWindowsPlatform)) {
+            BeforeAll {
+                Add-Type -AssemblyName PresentationFramework -ErrorAction Stop
+                Add-Type -AssemblyName PresentationCore -ErrorAction Stop
+                Add-Type -AssemblyName WindowsBase -ErrorAction Stop
+            }
+
+            It "Should load LogWindow XAML without error" {
+                $xaml = Get-XamlResource -ResourceName 'LogWindow.xaml'
+                $xaml | Should -Not -BeNullOrEmpty
+
+                # Parse the XAML
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                { $dialog = [System.Windows.Markup.XamlReader]::Load($reader) } | Should -Not -Throw
+                $reader.Close()
+
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog | Should -BeOfType [System.Windows.Window]
+                $dialog.Title | Should -Match "Log"
+
+                # Clean up
+                $dialog.Close()
+            }
+
+            It "Should have required log window controls loadable" {
+                $xaml = Get-XamlResource -ResourceName 'LogWindow.xaml'
+                $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+                $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+                $reader.Close()
+
+                $dialog.FindName('txtLog') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('svLog') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('btnClose') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('btnClear') | Should -Not -BeNullOrEmpty
+                $dialog.FindName('chkAutoScroll') | Should -Not -BeNullOrEmpty
+
+                $dialog.Close()
+            }
+        }
+
+        Context "GUI Log Buffer Tests" {
+            It "Should manage log buffer correctly" {
+                # The buffer is initialized by module load or GuiMain
+                # Verify buffer exists (or create for test isolation)
+                if ($null -eq $script:GuiLogBuffer) {
+                    $script:GuiLogBuffer = [System.Collections.Generic.List[string]]::new()
+                }
+
+                # Check it's a generic List of strings (type name varies by .NET version)
+                $script:GuiLogBuffer.GetType().Name | Should -Be 'List`1'
+                $script:GuiLogBuffer.GetType().GetGenericArguments()[0].Name | Should -Be 'String'
+
+                # Add some content
+                $script:GuiLogBuffer.Add("Test line 1")
+                $script:GuiLogBuffer.Add("Test line 2")
+                $script:GuiLogBuffer.Count | Should -BeGreaterThan 0
+
+                # Clear the buffer
+                Clear-GuiLogBuffer
+
+                # Verify cleared
+                $script:GuiLogBuffer.Count | Should -Be 0
             }
         }
     }
