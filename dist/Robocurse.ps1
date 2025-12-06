@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-05 18:06:59
+    Built: 2025-12-05 18:38:26
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -13046,26 +13046,87 @@ function Initialize-RobocurseGui {
 
         <Style x:Key="DarkButton" TargetType="Button">
             <Setter Property="Background" Value="#0078D4"/>
-            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Foreground" Value="#1E1E1E"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Padding" Value="12,6"/>
             <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="3"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
                     <Setter Property="Background" Value="#1084D8"/>
                 </Trigger>
                 <Trigger Property="IsEnabled" Value="False">
                     <Setter Property="Background" Value="#4A4A4A"/>
-                    <Setter Property="Foreground" Value="#808080"/>
+                    <Setter Property="Foreground" Value="#707070"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
-        <Style x:Key="StopButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
-            <Setter Property="Background" Value="#D32F2F"/>
+        <!-- Soft Green Run button style (Apple-inspired) -->
+        <Style x:Key="RunButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
+            <Setter Property="Background" Value="#34C759"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#E53935"/>
+                    <Setter Property="Background" Value="#4CD964"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#3D5A45"/>
+                    <Setter Property="Foreground" Value="#6A8A72"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Soft Red Stop button style (Apple-inspired) -->
+        <Style x:Key="StopButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
+            <Setter Property="Background" Value="#FF6B6B"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#FF8787"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#703030"/>
+                    <Setter Property="Foreground" Value="#995050"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Soft Purple Schedule button style (Apple-inspired) -->
+        <Style x:Key="ScheduleButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
+            <Setter Property="Background" Value="#AF52DE"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#BF6AE8"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#4A3A5A"/>
+                    <Setter Property="Foreground" Value="#7A6A8A"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Soft Amber Logs button style (Apple-inspired) -->
+        <Style x:Key="LogsButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
+            <Setter Property="Background" Value="#FFB340"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#FFC266"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#5A4A30"/>
+                    <Setter Property="Foreground" Value="#8A7A5A"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
@@ -13195,47 +13256,50 @@ function Initialize-RobocurseGui {
                         <ColumnDefinition Width="80"/>
                     </Grid.ColumnDefinitions>
 
-                    <Label Grid.Row="0" Content="Name:" Style="{StaticResource DarkLabel}"/>
+                    <Label Grid.Row="0" Content="Name:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                     <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtProfileName"
                              Style="{StaticResource DarkTextBox}" Margin="0,0,0,8"
                              ToolTip="Display name for this sync profile"/>
 
-                    <Label Grid.Row="1" Content="Source:" Style="{StaticResource DarkLabel}"/>
+                    <Label Grid.Row="1" Content="Source:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                     <TextBox Grid.Row="1" Grid.Column="1" x:Name="txtSource" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
                              ToolTip="The network share or local path to copy FROM.&#x0a;Example: \\fileserver\users$ or D:\SourceData"/>
                     <Button Grid.Row="1" Grid.Column="2" x:Name="btnBrowseSource" Content="Browse"
-                            Style="{StaticResource DarkButton}"/>
+                            Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                    <Label Grid.Row="2" Content="Destination:" Style="{StaticResource DarkLabel}"/>
+                    <Label Grid.Row="2" Content="Destination:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                     <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtDest" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
                              ToolTip="Where files will be copied TO. Directory will be created if needed."/>
                     <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
-                            Style="{StaticResource DarkButton}"/>
+                            Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                    <StackPanel Grid.Row="3" Grid.ColumnSpan="3" Orientation="Horizontal" Margin="0,5,0,8">
-                        <CheckBox x:Name="chkUseVss" Content="Use VSS" Style="{StaticResource DarkCheckBox}" Margin="0,0,20,0"
+                    <!-- VSS and Scan Mode - aligned with column layout -->
+                    <Label Grid.Row="3" Grid.Column="0" Content="Options:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,4,0,8"/>
+                    <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,0,8">
+                        <CheckBox x:Name="chkUseVss" Content="Use VSS" Style="{StaticResource DarkCheckBox}" VerticalAlignment="Center"
                                   ToolTip="Create a shadow copy snapshot before syncing.&#x0a;Allows copying locked files (like Outlook PST).&#x0a;Requires admin rights."/>
-                        <Label Content="Scan Mode:" Style="{StaticResource DarkLabel}"/>
-                        <ComboBox x:Name="cmbScanMode" Width="100" Margin="5,0,0,0"
+                        <Label Content="Scan Mode:" Style="{StaticResource DarkLabel}" Margin="20,0,0,0" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="cmbScanMode" Width="100" Margin="5,0,0,0" VerticalAlignment="Center"
                                   ToolTip="Smart: Scans and splits based on size (recommended).&#x0a;Quick: Fixed depth split, faster startup.">
                             <ComboBoxItem Content="Smart" IsSelected="True"/>
                             <ComboBoxItem Content="Quick"/>
                         </ComboBox>
                     </StackPanel>
 
-                    <StackPanel Grid.Row="4" Grid.ColumnSpan="3" Orientation="Horizontal">
-                        <Label Content="Max Size:" Style="{StaticResource DarkLabel}"/>
+                    <!-- Chunking options - consistent spacing -->
+                    <Label Grid.Row="4" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                    <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center">
                         <TextBox x:Name="txtMaxSize" Width="50" Style="{StaticResource DarkTextBox}" Text="10"
                                  ToolTip="Split directories larger than this (GB).&#x0a;Smaller = more parallel jobs.&#x0a;Recommended: 5-20 GB"/>
-                        <Label Content="GB" Style="{StaticResource DarkLabel}" Margin="0,0,15,0"/>
+                        <Label Content="GB max" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
 
-                        <Label Content="Max Files:" Style="{StaticResource DarkLabel}"/>
-                        <TextBox x:Name="txtMaxFiles" Width="60" Style="{StaticResource DarkTextBox}" Text="50000"
+                        <TextBox x:Name="txtMaxFiles" Width="60" Style="{StaticResource DarkTextBox}" Text="50000" Margin="15,0,0,0"
                                  ToolTip="Split directories with more files than this.&#x0a;Recommended: 20,000-100,000"/>
+                        <Label Content="files max" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
 
-                        <Label Content="Max Depth:" Style="{StaticResource DarkLabel}" Margin="15,0,0,0"/>
-                        <TextBox x:Name="txtMaxDepth" Width="40" Style="{StaticResource DarkTextBox}" Text="5"
+                        <TextBox x:Name="txtMaxDepth" Width="40" Style="{StaticResource DarkTextBox}" Text="5" Margin="15,0,0,0"
                                  ToolTip="How deep to split directories.&#x0a;Higher = more granular but slower scan.&#x0a;Recommended: 3-6"/>
+                        <Label Content="depth" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Grid>
             </Border>
@@ -13249,31 +13313,41 @@ function Initialize-RobocurseGui {
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
 
-            <!-- Control Bar with Logs button pinned right -->
+            <!-- Control Bar with buttons aligned to config panel -->
             <Border Grid.Row="0" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
-                <DockPanel>
-                    <!-- Left side: Workers and action buttons -->
-                    <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="250"/>  <!-- Match profile sidebar width -->
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- Workers slider - centered under profile sidebar -->
+                    <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                         <Label Content="Workers:" Style="{StaticResource DarkLabel}"
                                ToolTip="Number of simultaneous robocopy processes.&#x0a;More = faster but uses more resources.&#x0a;Recommended: 2-8"/>
                         <Slider x:Name="sldWorkers" Width="100" Minimum="1" Maximum="16" Value="4" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="txtWorkerCount" Text="4" Foreground="#E0E0E0" Width="25" Margin="5,0,20,0" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="txtWorkerCount" Text="4" Foreground="#E0E0E0" Width="25" Margin="5,0,0,0" VerticalAlignment="Center"/>
+                    </StackPanel>
 
-                        <Button x:Name="btnRunAll" Content="&#x25B6; Run All" Style="{StaticResource DarkButton}" Width="100" Margin="0,0,10,0"
-                                ToolTip="Start syncing all enabled profiles in sequence"/>
-                        <Button x:Name="btnRunSelected" Content="&#x25B6; Run Selected" Style="{StaticResource DarkButton}" Width="120" Margin="0,0,10,0"
-                                ToolTip="Run only the currently selected profile"/>
-                        <Button x:Name="btnStop" Content="&#x23F9; Stop" Style="{StaticResource StopButton}" Width="80" Margin="0,0,10,0" IsEnabled="False"
-                                ToolTip="Stop all running robocopy jobs"/>
-                        <Button x:Name="btnSchedule" Content="&#x2699; Schedule" Style="{StaticResource DarkButton}" Width="100"
-                                ToolTip="Configure automated scheduled runs"/>
-                    </StackPanel>
-                    <!-- Right side: Logs button -->
-                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
-                        <Button x:Name="btnLogs" Content="&#x1F4CB; Logs" Style="{StaticResource DarkButton}" Width="90"
-                                ToolTip="Open log viewer window"/>
-                    </StackPanel>
-                </DockPanel>
+                    <!-- Action buttons - left aligned with config panel, uniform width -->
+                    <DockPanel Grid.Column="1" Margin="10,0,0,0">
+                        <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                            <Button x:Name="btnRunAll" Content="&#x25B6; Run All" Style="{StaticResource RunButton}" Width="100" Margin="0,0,8,0"
+                                    ToolTip="Start syncing all enabled profiles in sequence"/>
+                            <Button x:Name="btnRunSelected" Content="&#x25B6; Run Sel" Style="{StaticResource RunButton}" Width="100" Margin="0,0,8,0"
+                                    ToolTip="Run only the currently selected profile"/>
+                            <Button x:Name="btnStop" Content="&#x23F9; Stop" Style="{StaticResource StopButton}" Width="100" Margin="0,0,8,0" IsEnabled="False"
+                                    ToolTip="Stop all running robocopy jobs"/>
+                            <Button x:Name="btnSchedule" Content="&#x1F4C5; Schedule" Style="{StaticResource ScheduleButton}" Width="100"
+                                    ToolTip="Configure automated scheduled runs"/>
+                        </StackPanel>
+                        <!-- Logs button pinned right -->
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button x:Name="btnLogs" Content="&#x1F4CB; Logs" Style="{StaticResource LogsButton}" Width="100"
+                                    ToolTip="Open log viewer window"/>
+                        </StackPanel>
+                    </DockPanel>
+                </Grid>
             </Border>
 
             <!-- Progress Summary - NOW ABOVE chunk grid -->
