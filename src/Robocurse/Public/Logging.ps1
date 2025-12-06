@@ -214,7 +214,29 @@ function Invoke-PathRedaction {
         }
     }
 
-    # Redact UNC paths: \\server\share\path\file.txt -> [UNC]\file.txt or [UNC]
+    # ====================================================================================
+    # UNC PATH REDACTION PATTERNS
+    # ====================================================================================
+    # UNC paths have format: \\server\share[\path\to\file]
+    # We want to redact the server/share/path but optionally preserve the filename
+    #
+    # Pattern breakdown for: '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*\\([^\\]+)(?=\s|$|"|''|])'
+    #   \\\\           - Literal \\ (UNC prefix, escaped as \\\\ in regex)
+    #   [^\\]+         - Server name: one or more chars that aren't backslashes
+    #   \\             - Literal \ separator
+    #   [^\\]+         - Share name: one or more chars that aren't backslashes
+    #   (?:\\[^\\]+)*  - Zero or more path segments (non-capturing group)
+    #                    Each segment is: \ followed by non-backslash chars
+    #   \\             - Literal \ before the final filename
+    #   ([^\\]+)       - CAPTURE GROUP 1: The filename (chars without backslash)
+    #   (?=\s|$|"|'|]) - LOOKAHEAD: Must be followed by whitespace, end-of-string,
+    #                    quote, or bracket (prevents partial matches mid-word)
+    #
+    # Examples:
+    #   "\\server\share\path\file.txt" -> "[UNC]\file.txt"
+    #   "\\server\share\file.txt"      -> "[UNC]\file.txt"
+    #   "\\server\share"               -> "[UNC]" (no filename to preserve)
+    # ====================================================================================
     if ($script:PathRedactionPreserveFilenames) {
         # Preserve filename: \\server\share\path\file.txt -> [UNC]\file.txt
         $result = $result -replace '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*\\([^\\]+)(?=\s|$|"|''|])', '[UNC]\$1'
@@ -225,7 +247,36 @@ function Invoke-PathRedaction {
         $result = $result -replace '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*', '[UNC]'
     }
 
-    # Redact Windows paths: C:\path\to\file.txt -> [PATH]\file.txt or [PATH]
+    # ====================================================================================
+    # WINDOWS PATH REDACTION PATTERNS
+    # ====================================================================================
+    # Windows paths have format: C:\path\to\file.ext
+    # We want to redact the path but optionally preserve the filename
+    #
+    # Pattern breakdown for: '([A-Za-z]:(?:\\[^\\:*?"<>|]+)+)\\([^\\:*?"<>|\s]+)(?=\s|$|"|''|])'
+    #   [A-Za-z]:            - Drive letter followed by colon (C:, D:, etc.)
+    #   (?:\\[^\\:*?"<>|]+)+ - One or more directory segments (non-capturing group):
+    #                          Each segment is: \ followed by valid path chars
+    #                          [^\\:*?"<>|] excludes invalid Windows filename chars
+    #   \\                   - Literal \ before the final filename
+    #   ([^\\:*?"<>|\s]+)    - CAPTURE GROUP: The filename (valid chars, no whitespace)
+    #   (?=\s|$|"|'|])       - LOOKAHEAD: Must be followed by boundary character
+    #
+    # Pattern breakdown for: '[A-Za-z]:(?:\\[^\\:*?"<>|]+)+(?=\s|$|"|''|]|\\)'
+    #   This pattern matches paths WITHOUT a final filename (directories)
+    #   The lookahead includes \\ to handle paths ending in backslash
+    #
+    # Pattern breakdown for: '[A-Za-z]:\\(?=\s|$|"|'')'
+    #   Matches drive root only (e.g., "C:\") - rare but handled for completeness
+    #
+    # Invalid Windows filename characters excluded: \ : * ? " < > |
+    # These are reserved by Windows and cannot appear in filenames
+    #
+    # Examples:
+    #   "C:\Users\john\file.txt"    -> "[PATH]\file.txt"
+    #   "C:\Projects\secret\data"   -> "[PATH]"
+    #   "Error in D:\Backup\file"   -> "Error in [PATH]\file"
+    # ====================================================================================
     if ($script:PathRedactionPreserveFilenames) {
         # Preserve filename: C:\Users\john\file.txt -> [PATH]\file.txt
         $result = $result -replace '([A-Za-z]:(?:\\[^\\:*?"<>|]+)+)\\([^\\:*?"<>|\s]+)(?=\s|$|"|''|])', '[PATH]\$2'

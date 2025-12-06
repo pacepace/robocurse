@@ -58,7 +58,10 @@ $moduleOrder = @(
     'Public\Chunking.ps1'
     'Public\Robocopy.ps1'
     'Public\Checkpoint.ps1'
-    'Public\Orchestration.ps1'
+    # Orchestration modules (split for maintainability)
+    'Public\OrchestrationCore.ps1'  # C# types, state management, circuit breaker
+    'Public\HealthCheck.ps1'        # Health monitoring (before JobManagement which uses it)
+    'Public\JobManagement.ps1'      # Job execution, profile management
     'Public\Progress.ps1'
     'Public\VssCore.ps1'
     'Public\VssLocal.ps1'

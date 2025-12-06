@@ -180,7 +180,10 @@ $publicFunctionOrder = @(
     'Chunking.ps1'
     'Robocopy.ps1'
     'Checkpoint.ps1'       # Checkpoint/resume (before Orchestration)
-    'Orchestration.ps1'
+    # Orchestration modules (split for maintainability)
+    'OrchestrationCore.ps1'  # C# types, state management, circuit breaker
+    'HealthCheck.ps1'        # Health monitoring (before JobManagement which uses it)
+    'JobManagement.ps1'      # Job execution, profile management
     'Progress.ps1'
     'VssCore.ps1'
     'VssLocal.ps1'

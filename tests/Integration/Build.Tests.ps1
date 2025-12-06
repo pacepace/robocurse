@@ -38,8 +38,11 @@ Describe "Build Script Configuration" {
             'DirectoryProfiling.ps1',
             'Chunking.ps1',
             'Robocopy.ps1',
-            'Checkpoint.ps1',  # Must be before Orchestration
-            'Orchestration.ps1',
+            'Checkpoint.ps1',  # Must be before Orchestration modules
+            # Orchestration modules (split for maintainability)
+            'OrchestrationCore.ps1',
+            'HealthCheck.ps1',
+            'JobManagement.ps1',
             'Progress.ps1',
             'VssCore.ps1',
             'VssLocal.ps1',
@@ -62,14 +65,14 @@ Describe "Build Script Configuration" {
         }
     }
 
-    It "Should have Checkpoint.ps1 before Orchestration.ps1" {
+    It "Should have Checkpoint.ps1 before OrchestrationCore.ps1" {
         $buildContent = Get-Content $script:buildScript -Raw
 
         # Find positions of both modules in the content
         $checkpointPos = $buildContent.IndexOf('Checkpoint.ps1')
-        $orchestrationPos = $buildContent.IndexOf('Orchestration.ps1')
+        $orchestrationPos = $buildContent.IndexOf('OrchestrationCore.ps1')
 
-        $checkpointPos | Should -BeLessThan $orchestrationPos -Because "Checkpoint must load before Orchestration"
+        $checkpointPos | Should -BeLessThan $orchestrationPos -Because "Checkpoint must load before Orchestration modules"
     }
 }
 
@@ -179,7 +182,10 @@ Describe "Source Module Validation" {
             'Chunking.ps1',
             'Robocopy.ps1',
             'Checkpoint.ps1',
-            'Orchestration.ps1',
+            # Orchestration modules (split for maintainability)
+            'OrchestrationCore.ps1',
+            'HealthCheck.ps1',
+            'JobManagement.ps1',
             'Progress.ps1',
             'VssCore.ps1',
             'VssLocal.ps1',

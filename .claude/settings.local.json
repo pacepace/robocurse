@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(del \"C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\debug-array.ps1\")",
-      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"(Invoke-Pester -Path ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\tests\\Integration\\Main.Tests.ps1'' -PassThru -Output Detailed *>&1) | Select-Object -Last 100\")"
+      "Bash(powershell.exe -ExecutionPolicy Bypass -Command \"(Invoke-Pester -Path ''C:\\Users\\pace\\pub\\dev-wsl\\vscode\\robocurse\\tests\\Integration\\Main.Tests.ps1'' -PassThru -Output Detailed *>&1) | Select-Object -Last 100\")",
+      "Bash(tree:*)",
+      "Bash(grep:*)",
+      "Bash(wc:*)",
+      "Bash(cat:*)",
+      "Bash(xargs:*)",
+      "Bash(powershell.exe:*)"
     ],
     "deny": [],
     "ask": []

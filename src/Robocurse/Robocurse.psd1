@@ -82,13 +82,26 @@
         'Get-BandwidthThrottleIPG'
         'Start-ChunkJob'
 
-        # Orchestration
+        # Orchestration Core
         'Initialize-OrchestrationState'
+        'Initialize-OrchestrationStateType'
+        'Get-OrchestrationState'
+        'Reset-CircuitBreaker'
+        'Test-CircuitBreakerTripped'
+
+        # Job Management
         'Start-ReplicationRun'
         'Invoke-ReplicationTick'
         'Stop-AllJobs'
         'Request-Stop'
+        'Request-Pause'
+        'Request-Resume'
         'Get-OrchestrationStatus'
+
+        # Health Check
+        'Write-HealthCheckStatus'
+        'Get-HealthCheckStatus'
+        'Remove-HealthCheckStatus'
 
         # Checkpoint
         'Save-ReplicationCheckpoint'
