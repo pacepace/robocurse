@@ -250,6 +250,8 @@ DEBUG logs contain full file paths. Restrict access to log directories.
 - Credential access is logged to SIEM for auditing
 - Use dedicated service accounts with minimal permissions
 
+**Note**: The Windows Credential Manager API requires passwords to briefly exist as plaintext in memory before conversion to `SecureString`. Mitigations: byte arrays are explicitly zeroed via `[Array]::Clear()` immediately after use, and credentials are only retrieved at send time (not cached).
+
 ### Pre-flight Validations
 
 Before replication, Robocurse checks:
