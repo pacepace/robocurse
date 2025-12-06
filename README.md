@@ -358,9 +358,9 @@ Initialize-RobocurseForTesting -UseBuiltMonolith
 ```
 robocurse/
 ├── src/Robocurse/             # SOURCE OF TRUTH - Module files
-│   ├── Robocurse.psd1         # Module manifest (141 exported functions)
+│   ├── Robocurse.psd1         # Module manifest (exported functions)
 │   ├── Robocurse.psm1         # Module loader + constants
-│   ├── Public/                # Exported functions (24 .ps1 files)
+│   ├── Public/                # Exported functions (26 .ps1 files)
 │   │   ├── Utility.ps1        # Platform detection, validation, pre-flight checks
 │   │   ├── Configuration.ps1  # Config loading/validation
 │   │   ├── Logging.ps1        # Operational & SIEM logging (with timeout-protected rotation)
@@ -368,23 +368,28 @@ robocurse/
 │   │   ├── Chunking.ps1       # Directory chunking algorithms
 │   │   ├── Robocopy.ps1       # Robocopy wrapper (process handle cleanup)
 │   │   ├── Checkpoint.ps1     # Crash recovery
-│   │   ├── Orchestration.ps1  # Job orchestration (C# interop for thread safety)
+│   │   ├── OrchestrationCore.ps1  # C# types, state management, circuit breaker
+│   │   ├── HealthCheck.ps1    # Health monitoring for external systems
+│   │   ├── JobManagement.ps1  # Job execution, retry logic, profile management
 │   │   ├── Progress.ps1       # Progress tracking
 │   │   ├── VssCore.ps1        # VSS core infrastructure (shared retry logic)
 │   │   ├── VssLocal.ps1       # Local VSS snapshot operations
 │   │   ├── VssRemote.ps1      # Remote VSS via PowerShell remoting
 │   │   ├── Email.ps1          # SMTP notifications
 │   │   ├── Scheduling.ps1     # Task Scheduler integration
-│   │   ├── GuiMain.ps1        # WPF window initialization
-│   │   ├── GuiProgress.ps1    # Progress display and updates
-│   │   ├── GuiReplication.ps1 # Background runspace management
-│   │   ├── GuiProfiles.ps1    # Profile management UI
-│   │   ├── GuiDialogs.ps1     # Dialog helpers
-│   │   ├── GuiSettings.ps1    # Window state persistence
 │   │   ├── GuiResources.ps1   # XAML resource loading
+│   │   ├── GuiSettings.ps1    # Window state persistence
+│   │   ├── GuiProfiles.ps1    # Profile management UI
+│   │   ├── GuiDialogs.ps1     # Dialog helpers (schedule, completion)
+│   │   ├── GuiLogWindow.ps1   # Popup log viewer window
+│   │   ├── GuiRunspace.ps1    # Background runspace management
+│   │   ├── GuiReplication.ps1 # Replication control and monitoring
+│   │   ├── GuiProgress.ps1    # Progress display and updates
+│   │   ├── GuiMain.ps1        # WPF window initialization
 │   │   └── Main.ps1           # Entry point dispatcher
 │   └── Resources/             # XAML resources
-│       ├── MainWindow.xaml
+│       ├── MainWindow.xaml    # Main application window
+│       ├── LogWindow.xaml     # Popup log viewer
 │       ├── ScheduleDialog.xaml
 │       └── CompletionDialog.xaml
 ├── build/                     # Build tools
