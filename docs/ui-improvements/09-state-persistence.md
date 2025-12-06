@@ -318,6 +318,279 @@ if (-not $defaultState.ActivePanel) {
 }
 ```
 
+## Tests to Write
+
+**File**: `tests/Unit/GuiStatePersistence.Tests.ps1` (new file)
+
+### Test: Get-GuiState Function
+
+```powershell
+Describe 'Get-GuiState' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiSettings.ps1')
+    }
+
+    BeforeEach {
+        $script:TestSettingsPath = Join-Path $TestDrive 'test-settings.json'
+        Mock Get-GuiSettingsPath { return $script:TestSettingsPath }
+    }
+
+    Context 'when settings file does not exist' {
+        It 'should return default values' {
+            $state = Get-GuiState
+
+            $state.WindowWidth | Should -Be 650
+            $state.WindowHeight | Should -Be 550
+            $state.ActivePanel | Should -Be 'Profiles'
+            $state.WorkerCount | Should -Be 4
+        }
+
+        It 'should have null LastRun by default' {
+            $state = Get-GuiState
+
+            $state.LastRun | Should -BeNullOrEmpty
+        }
+    }
+
+    Context 'when settings file exists' {
+        BeforeEach {
+            @{
+                WindowWidth = 800
+                WindowHeight = 600
+                ActivePanel = 'Progress'
+                WorkerCount = 8
+                LastRun = @{ Status = 'Success' }
+            } | ConvertTo-Json -Depth 5 | Out-File $script:TestSettingsPath
+        }
+
+        It 'should load saved values' {
+            $state = Get-GuiState
+
+            $state.WindowWidth | Should -Be 800
+            $state.WindowHeight | Should -Be 600
+            $state.ActivePanel | Should -Be 'Progress'
+            $state.WorkerCount | Should -Be 8
+        }
+
+        It 'should load LastRun data' {
+            $state = Get-GuiState
+
+            $state.LastRun.Status | Should -Be 'Success'
+        }
+    }
+
+    Context 'when migrating from old settings' {
+        BeforeEach {
+            # Old format without new properties
+            @{
+                WindowWidth = 1100
+                WindowHeight = 800
+                WorkerCount = 4
+            } | ConvertTo-Json | Out-File $script:TestSettingsPath
+        }
+
+        It 'should add missing ActivePanel with default' {
+            $state = Get-GuiState
+
+            $state.ActivePanel | Should -Be 'Profiles'
+        }
+
+        It 'should migrate old window size to new defaults' {
+            $state = Get-GuiState
+
+            # Old 1100x800 should be detected and migrated
+            $state.WindowWidth | Should -Be 650
+            $state.WindowHeight | Should -Be 550
+        }
+    }
+
+    Context 'when settings file is corrupted' {
+        BeforeEach {
+            'not valid json { broken' | Out-File $script:TestSettingsPath
+        }
+
+        It 'should return defaults without throwing' {
+            { Get-GuiState } | Should -Not -Throw
+            $state = Get-GuiState
+            $state.WindowWidth | Should -Be 650
+        }
+    }
+}
+```
+
+### Test: Save-GuiState Function
+
+```powershell
+Describe 'Save-GuiState' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiSettings.ps1')
+    }
+
+    BeforeEach {
+        $script:TestSettingsPath = Join-Path $TestDrive 'test-settings.json'
+        Mock Get-GuiSettingsPath { return $script:TestSettingsPath }
+    }
+
+    It 'should save all properties' {
+        $state = @{
+            WindowLeft = 100
+            WindowTop = 200
+            WindowWidth = 700
+            WindowHeight = 500
+            WindowState = 'Normal'
+            SelectedProfile = 'TestProfile'
+            WorkerCount = 6
+            ActivePanel = 'Settings'
+            LastRun = @{
+                Timestamp = '2024-01-15T10:00:00'
+                Status = 'Success'
+            }
+        }
+
+        Save-GuiState -State $state
+
+        $saved = Get-Content $script:TestSettingsPath -Raw | ConvertFrom-Json
+        $saved.WindowWidth | Should -Be 700
+        $saved.ActivePanel | Should -Be 'Settings'
+        $saved.LastRun.Status | Should -Be 'Success'
+    }
+
+    It 'should handle LastRun with nested data' {
+        $state = @{
+            WindowWidth = 650
+            WindowHeight = 550
+            ActivePanel = 'Profiles'
+            LastRun = @{
+                ProfilesRun = @('Profile1', 'Profile2')
+                ChunksTotal = 10
+                ChunksCompleted = 8
+            }
+        }
+
+        Save-GuiState -State $state
+
+        $saved = Get-Content $script:TestSettingsPath -Raw | ConvertFrom-Json
+        $saved.LastRun.ProfilesRun.Count | Should -Be 2
+        $saved.LastRun.ChunksTotal | Should -Be 10
+    }
+}
+```
+
+### Test: Active Panel Validation
+
+```powershell
+Describe 'Active Panel Restoration' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiSettings.ps1')
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiMain.ps1')
+
+        Mock Set-ActivePanel { param($PanelName) $script:RestoredPanel = $PanelName }
+    }
+
+    BeforeEach {
+        $script:TestSettingsPath = Join-Path $TestDrive 'test-settings.json'
+        Mock Get-GuiSettingsPath { return $script:TestSettingsPath }
+        $script:RestoredPanel = $null
+    }
+
+    It 'should restore valid panel names' {
+        @{ ActivePanel = 'Progress' } | ConvertTo-Json | Out-File $script:TestSettingsPath
+
+        Restore-ActivePanel
+
+        $script:RestoredPanel | Should -Be 'Progress'
+    }
+
+    It 'should default to Profiles for invalid panel name' {
+        @{ ActivePanel = 'InvalidPanel' } | ConvertTo-Json | Out-File $script:TestSettingsPath
+
+        Restore-ActivePanel
+
+        $script:RestoredPanel | Should -Be 'Profiles'
+    }
+
+    It 'should default to Profiles when ActivePanel is null' {
+        @{ WindowWidth = 650 } | ConvertTo-Json | Out-File $script:TestSettingsPath
+
+        Restore-ActivePanel
+
+        $script:RestoredPanel | Should -Be 'Profiles'
+    }
+}
+```
+
+### Test: Window Bounds Checking
+
+```powershell
+Describe 'Window Bounds Validation' {
+    It 'should enforce minimum width of 500' {
+        $state = @{ WindowWidth = 300; WindowHeight = 400 }
+
+        $validated = Get-ValidatedWindowSize -State $state
+
+        $validated.WindowWidth | Should -BeGreaterOrEqual 500
+    }
+
+    It 'should enforce minimum height of 400' {
+        $state = @{ WindowWidth = 600; WindowHeight = 200 }
+
+        $validated = Get-ValidatedWindowSize -State $state
+
+        $validated.WindowHeight | Should -BeGreaterOrEqual 400
+    }
+
+    It 'should preserve valid sizes' {
+        $state = @{ WindowWidth = 800; WindowHeight = 600 }
+
+        $validated = Get-ValidatedWindowSize -State $state
+
+        $validated.WindowWidth | Should -Be 800
+        $validated.WindowHeight | Should -Be 600
+    }
+}
+```
+
+### Test: Round-Trip Persistence
+
+```powershell
+Describe 'State Persistence Round-Trip' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiSettings.ps1')
+    }
+
+    BeforeEach {
+        $script:TestSettingsPath = Join-Path $TestDrive 'test-settings.json'
+        Mock Get-GuiSettingsPath { return $script:TestSettingsPath }
+    }
+
+    It 'should survive save and load cycle' {
+        $original = @{
+            WindowLeft = 150
+            WindowTop = 250
+            WindowWidth = 720
+            WindowHeight = 580
+            WindowState = 'Maximized'
+            SelectedProfile = 'MyProfile'
+            WorkerCount = 3
+            ActivePanel = 'Logs'
+            LastRun = @{
+                Timestamp = '2024-01-20T15:30:00'
+                ProfilesRun = @('A', 'B')
+                Status = 'PartialFailure'
+            }
+        }
+
+        Save-GuiState -State $original
+        $loaded = Get-GuiState
+
+        $loaded.WindowWidth | Should -Be 720
+        $loaded.ActivePanel | Should -Be 'Logs'
+        $loaded.LastRun.Status | Should -Be 'PartialFailure'
+        $loaded.LastRun.ProfilesRun | Should -Contain 'A'
+    }
+}
+```
+
 ## Success Criteria
 
 1. **Panel persists**: Closing on Progress panel, reopening shows Progress
@@ -327,6 +600,7 @@ if (-not $defaultState.ActivePanel) {
 5. **Bounds checking**: Window positioned correctly on multi-monitor
 6. **Minimum size**: Window can't be restored smaller than 500x400
 7. **No data loss**: Existing settings (profile, workers) still persist
+8. **All unit tests pass**: GuiStatePersistence.Tests.ps1 passes completely
 
 ## Testing
 

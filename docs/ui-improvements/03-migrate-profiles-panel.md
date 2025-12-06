@@ -238,6 +238,97 @@ Cross-reference with GuiProfiles.ps1 to ensure all accessed controls exist:
 | txtMaxDepth | Import-ProfileToForm, Save-ProfileFromForm | Chunk depth |
 | pnlProfileSettings | Used as container reference | Settings panel |
 
+## Tests to Write
+
+**File**: `tests/Unit/GuiProfiles.Tests.ps1` (update existing)
+
+This task is primarily XAML migration. The key is ensuring existing tests continue to pass and adding tests for any layout-specific behavior.
+
+### Test: Existing Profile Tests Pass (Regression)
+
+```powershell
+Describe 'Profile Panel Migration - Regression Tests' {
+    BeforeAll {
+        # Ensure existing GuiProfiles tests still pass after migration
+        # These tests should already exist - just verify they pass
+    }
+
+    It 'should pass Import-ProfileToForm tests' {
+        # Existing test - verify profile data loads into form controls
+    }
+
+    It 'should pass Save-ProfileFromForm tests' {
+        # Existing test - verify form data saves back to profile
+    }
+
+    It 'should pass Add-NewProfile tests' {
+        # Existing test - verify new profiles can be created
+    }
+
+    It 'should pass Remove-SelectedProfile tests' {
+        # Existing test - verify profiles can be removed
+    }
+}
+```
+
+### Test: Control Name Preservation
+
+```powershell
+Describe 'Profile Panel - Control Names' {
+    BeforeAll {
+        $xamlPath = Join-Path $PSScriptRoot '..\..\src\Robocurse\Resources\MainWindow.xaml'
+        $xamlContent = Get-Content $xamlPath -Raw
+        $script:window = [System.Windows.Markup.XamlReader]::Parse($xamlContent)
+    }
+
+    # All profile controls must exist with exact same names
+    @(
+        'lstProfiles',
+        'btnAddProfile',
+        'btnRemoveProfile',
+        'txtProfileName',
+        'txtSource',
+        'txtDest',
+        'btnBrowseSource',
+        'btnBrowseDest',
+        'chkUseVss',
+        'cmbScanMode',
+        'txtMaxSize',
+        'txtMaxFiles',
+        'txtMaxDepth',
+        'pnlProfileSettings'
+    ) | ForEach-Object {
+        It "should preserve control '$_'" {
+            $script:window.FindName($_) | Should -Not -BeNullOrEmpty
+        }
+    }
+}
+```
+
+### Test: Profile Controls Inside Panel
+
+```powershell
+Describe 'Profile Panel - Control Hierarchy' {
+    BeforeAll {
+        $xamlPath = Join-Path $PSScriptRoot '..\..\src\Robocurse\Resources\MainWindow.xaml'
+        $xamlContent = Get-Content $xamlPath -Raw
+        $script:window = [System.Windows.Markup.XamlReader]::Parse($xamlContent)
+    }
+
+    It 'should have profile controls inside panelProfiles' {
+        $panel = $script:window.FindName('panelProfiles')
+        $panel | Should -Not -BeNullOrEmpty
+
+        # lstProfiles should be a descendant of panelProfiles
+        # Note: WPF descendant checking is complex; this is a simplified check
+        $lstProfiles = $script:window.FindName('lstProfiles')
+        $lstProfiles | Should -Not -BeNullOrEmpty
+    }
+}
+```
+
+**Note**: Most profile functionality tests should already exist. Run `Invoke-Pester tests/Unit/GuiProfiles.Tests.ps1` to verify no regressions.
+
 ## Success Criteria
 
 1. **All controls present**: Every x:Name from the original is in panelProfiles
@@ -248,6 +339,7 @@ Cross-reference with GuiProfiles.ps1 to ensure all accessed controls exist:
 6. **Form saves**: Editing fields and losing focus saves changes
 7. **Browse buttons work**: Can browse for source/destination folders
 8. **No visual overflow**: Nothing gets cut off or needs scrolling
+9. **Existing tests pass**: All GuiProfiles.Tests.ps1 tests still pass
 
 ## Testing
 

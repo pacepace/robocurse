@@ -266,6 +266,191 @@ if ($PanelName -eq 'Progress') {
 }
 ```
 
+## Tests to Write
+
+**File**: `tests/Unit/GuiProgressEmptyState.Tests.ps1` (new file)
+
+### Test: Show-ProgressEmptyState Function
+
+```powershell
+Describe 'Show-ProgressEmptyState' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiProgress.ps1')
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiSettings.ps1')
+
+        # Mock controls
+        $script:Controls = @{
+            'txtProfileProgress' = [PSCustomObject]@{ Text = '' }
+            'txtOverallProgress' = [PSCustomObject]@{ Text = ''; Foreground = '' }
+            'pbProfile' = [PSCustomObject]@{ Value = 0 }
+            'pbOverall' = [PSCustomObject]@{ Value = 0 }
+            'txtEta' = [PSCustomObject]@{ Text = '' }
+            'txtSpeed' = [PSCustomObject]@{ Text = '' }
+            'txtChunks' = [PSCustomObject]@{ Text = ''; Foreground = '' }
+            'dgChunks' = [PSCustomObject]@{ ItemsSource = @() }
+        }
+    }
+
+    Context 'when no previous run exists' {
+        BeforeEach {
+            Mock Get-LastRunSummary { return $null }
+            Show-ProgressEmptyState
+        }
+
+        It 'should show "No previous runs" message' {
+            $script:Controls['txtProfileProgress'].Text | Should -Be "No previous runs"
+        }
+
+        It 'should show ready message' {
+            $script:Controls['txtOverallProgress'].Text | Should -Be "Select profiles and click Run"
+        }
+
+        It 'should set progress bars to zero' {
+            $script:Controls['pbProfile'].Value | Should -Be 0
+            $script:Controls['pbOverall'].Value | Should -Be 0
+        }
+
+        It 'should show Ready in chunks text' {
+            $script:Controls['txtChunks'].Text | Should -Be "Ready"
+        }
+    }
+
+    Context 'when previous run exists with success' {
+        BeforeEach {
+            Mock Get-LastRunSummary {
+                return @{
+                    Timestamp = (Get-Date).AddHours(-2)
+                    ProfilesRun = @('DailyBackup', 'WeeklySync')
+                    ChunksTotal = 10
+                    ChunksCompleted = 10
+                    ChunksFailed = 0
+                    BytesCopied = 1073741824
+                    Duration = '00:15:30'
+                    Status = 'Success'
+                }
+            }
+            Mock Format-ByteSize { return '1.0 GB' }
+            Show-ProgressEmptyState
+        }
+
+        It 'should show profile names' {
+            $script:Controls['txtProfileProgress'].Text | Should -Match 'DailyBackup'
+            $script:Controls['txtProfileProgress'].Text | Should -Match 'WeeklySync'
+        }
+
+        It 'should show success status' {
+            $script:Controls['txtOverallProgress'].Text | Should -Match 'Success'
+        }
+
+        It 'should set progress bars to 100%' {
+            $script:Controls['pbProfile'].Value | Should -Be 100
+            $script:Controls['pbOverall'].Value | Should -Be 100
+        }
+
+        It 'should show chunk counts' {
+            $script:Controls['txtChunks'].Text | Should -Match '10/10'
+        }
+    }
+
+    Context 'when previous run has failures' {
+        BeforeEach {
+            Mock Get-LastRunSummary {
+                return @{
+                    Timestamp = (Get-Date).AddMinutes(-30)
+                    ProfilesRun = @('Backup')
+                    ChunksTotal = 10
+                    ChunksCompleted = 7
+                    ChunksFailed = 3
+                    BytesCopied = 500000000
+                    Duration = '00:10:00'
+                    Status = 'PartialFailure'
+                }
+            }
+            Mock Format-ByteSize { return '500 MB' }
+            Show-ProgressEmptyState
+        }
+
+        It 'should show partial failure status' {
+            $script:Controls['txtOverallProgress'].Text | Should -Match 'PartialFailure'
+        }
+
+        It 'should show 70% completion in progress bars' {
+            $script:Controls['pbProfile'].Value | Should -Be 70
+            $script:Controls['pbOverall'].Value | Should -Be 70
+        }
+
+        It 'should show failed count' {
+            $script:Controls['txtChunks'].Text | Should -Match '3 failed'
+        }
+    }
+}
+```
+
+### Test: Time Ago Formatting
+
+```powershell
+Describe 'Time Ago Formatting' {
+    It 'should format days ago correctly' {
+        $timestamp = (Get-Date).AddDays(-3)
+        $timeAgo = (Get-Date) - $timestamp
+        $result = if ($timeAgo.TotalDays -ge 1) { "{0:N0} days ago" -f $timeAgo.TotalDays } else { "recent" }
+        $result | Should -Be "3 days ago"
+    }
+
+    It 'should format hours ago correctly' {
+        $timestamp = (Get-Date).AddHours(-5)
+        $timeAgo = (Get-Date) - $timestamp
+        $result = if ($timeAgo.TotalDays -ge 1) { "days" }
+                 elseif ($timeAgo.TotalHours -ge 1) { "{0:N0} hours ago" -f $timeAgo.TotalHours }
+                 else { "minutes" }
+        $result | Should -Be "5 hours ago"
+    }
+}
+```
+
+### Test: Last Run Persistence Functions
+
+```powershell
+Describe 'Last Run Persistence' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiSettings.ps1')
+    }
+
+    BeforeEach {
+        $script:TestSettingsPath = Join-Path $TestDrive 'test-settings.json'
+        Mock Get-GuiSettingsPath { return $script:TestSettingsPath }
+    }
+
+    It 'should save last run summary' {
+        $summary = @{
+            Timestamp = Get-Date
+            ProfilesRun = @('Test')
+            ChunksTotal = 5
+            ChunksCompleted = 5
+            ChunksFailed = 0
+            Status = 'Success'
+        }
+
+        Save-LastRunSummary -Summary $summary
+
+        $saved = Get-Content $script:TestSettingsPath -Raw | ConvertFrom-Json
+        $saved.LastRun.Status | Should -Be 'Success'
+    }
+
+    It 'should retrieve saved last run summary' {
+        $summary = @{
+            Timestamp = Get-Date
+            ProfilesRun = @('TestProfile')
+            Status = 'Success'
+        }
+        Save-LastRunSummary -Summary $summary
+
+        $retrieved = Get-LastRunSummary
+        $retrieved.ProfilesRun | Should -Contain 'TestProfile'
+    }
+}
+```
+
 ## Success Criteria
 
 1. **First launch**: Progress panel shows "No previous runs" message
@@ -275,6 +460,7 @@ if ($PanelName -eq 'Progress') {
 5. **Persists restart**: Last run info survives app restart
 6. **Clear distinction**: Easy to tell "showing history" vs "actively running"
 7. **Running takes over**: When replication starts, live progress replaces history
+8. **All unit tests pass**: GuiProgressEmptyState.Tests.ps1 passes completely
 
 ## Testing
 

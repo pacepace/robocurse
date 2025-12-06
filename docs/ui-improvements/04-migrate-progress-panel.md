@@ -234,6 +234,94 @@ New widths (for ~600px):
 | txtChunks | Chunk counter |
 | dgChunks | Chunk DataGrid |
 
+## Tests to Write
+
+**File**: `tests/Unit/GuiProgress.Tests.ps1` (update existing)
+
+This task is primarily XAML migration. Ensure existing progress update tests still pass.
+
+### Test: Progress Control Names Preserved
+
+```powershell
+Describe 'Progress Panel - Control Names' {
+    BeforeAll {
+        $xamlPath = Join-Path $PSScriptRoot '..\..\src\Robocurse\Resources\MainWindow.xaml'
+        $xamlContent = Get-Content $xamlPath -Raw
+        $script:window = [System.Windows.Markup.XamlReader]::Parse($xamlContent)
+    }
+
+    # All progress controls must exist with exact same names
+    @(
+        'txtProfileProgress',
+        'pbProfile',
+        'txtOverallProgress',
+        'pbOverall',
+        'txtEta',
+        'txtSpeed',
+        'txtChunks',
+        'dgChunks'
+    ) | ForEach-Object {
+        It "should preserve control '$_'" {
+            $script:window.FindName($_) | Should -Not -BeNullOrEmpty
+        }
+    }
+}
+```
+
+### Test: DataGrid Has Required Columns
+
+```powershell
+Describe 'Progress Panel - DataGrid Structure' {
+    BeforeAll {
+        $xamlPath = Join-Path $PSScriptRoot '..\..\src\Robocurse\Resources\MainWindow.xaml'
+        $xamlContent = Get-Content $xamlPath -Raw
+        $script:window = [System.Windows.Markup.XamlReader]::Parse($xamlContent)
+        $script:dgChunks = $script:window.FindName('dgChunks')
+    }
+
+    It 'should have dgChunks DataGrid' {
+        $script:dgChunks | Should -Not -BeNullOrEmpty
+    }
+
+    It 'should have 5 columns' {
+        $script:dgChunks.Columns.Count | Should -Be 5
+    }
+
+    It 'should have ID column' {
+        $script:dgChunks.Columns[0].Header | Should -Be 'ID'
+    }
+
+    It 'should have Path column' {
+        $script:dgChunks.Columns[1].Header | Should -Be 'Path'
+    }
+
+    It 'should have Status column' {
+        $script:dgChunks.Columns[2].Header | Should -Be 'Status'
+    }
+
+    It 'should have Progress column' {
+        $script:dgChunks.Columns[3].Header | Should -Be 'Progress'
+    }
+
+    It 'should have Speed column' {
+        $script:dgChunks.Columns[4].Header | Should -Be 'Speed'
+    }
+}
+```
+
+### Test: Existing Progress Tests Pass (Regression)
+
+```powershell
+Describe 'Progress Panel Migration - Regression Tests' {
+    It 'should pass all existing GuiProgress tests' {
+        $result = Invoke-Pester -Path 'tests/Unit/GuiProgress.Tests.ps1' -PassThru -Output None
+        $result.FailedCount | Should -Be 0
+    }
+}
+```
+
+**Note**: The custom ScaleTransform progress bar is in the XAML template - verify visually that it renders correctly during manual testing.
+
 ## Success Criteria
 
 1. **All controls present**: Every progress-related x:Name exists
@@ -243,6 +331,7 @@ New widths (for ~600px):
 5. **Layout fits**: No horizontal scrolling needed in normal use
 6. **Path column flexible**: Long paths truncate gracefully
 7. **Styles applied**: Dark theme colors consistent
+8. **Existing tests pass**: All GuiProgress.Tests.ps1 tests still pass
 
 ## Testing
 

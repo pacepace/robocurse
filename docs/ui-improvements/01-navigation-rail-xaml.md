@@ -282,6 +282,147 @@ Preserve these control names for backward compatibility:
 - btnNavProfiles, btnNavSettings, btnNavProgress, btnNavLogs (rail buttons)
 - panelProfiles, panelSettings, panelProgress, panelLogs (content panels)
 
+## Tests to Write
+
+**File**: `tests/Unit/GuiXaml.Tests.ps1` (new file)
+
+XAML is primarily declarative, but we can test that it loads correctly and all expected controls exist.
+
+### Test: XAML Loads Without Parse Errors
+
+```powershell
+Describe 'MainWindow.xaml' {
+    BeforeAll {
+        # Load the XAML content
+        $xamlPath = Join-Path $PSScriptRoot '..\..\src\Robocurse\Resources\MainWindow.xaml'
+        $xamlContent = Get-Content $xamlPath -Raw
+    }
+
+    It 'should parse without errors' {
+        {
+            [System.Windows.Markup.XamlReader]::Parse($xamlContent)
+        } | Should -Not -Throw
+    }
+
+    It 'should create a Window object' {
+        $window = [System.Windows.Markup.XamlReader]::Parse($xamlContent)
+        $window | Should -BeOfType [System.Windows.Window]
+    }
+}
+```
+
+### Test: Required Controls Exist
+
+```powershell
+Describe 'MainWindow.xaml Control Names' {
+    BeforeAll {
+        $xamlPath = Join-Path $PSScriptRoot '..\..\src\Robocurse\Resources\MainWindow.xaml'
+        $xamlContent = Get-Content $xamlPath -Raw
+        $script:window = [System.Windows.Markup.XamlReader]::Parse($xamlContent)
+    }
+
+    AfterAll {
+        if ($script:window) { $script:window.Close() }
+    }
+
+    # Navigation rail buttons
+    It 'should have btnNavProfiles control' {
+        $script:window.FindName('btnNavProfiles') | Should -Not -BeNullOrEmpty
+    }
+
+    It 'should have btnNavSettings control' {
+        $script:window.FindName('btnNavSettings') | Should -Not -BeNullOrEmpty
+    }
+
+    It 'should have btnNavProgress control' {
+        $script:window.FindName('btnNavProgress') | Should -Not -BeNullOrEmpty
+    }
+
+    It 'should have btnNavLogs control' {
+        $script:window.FindName('btnNavLogs') | Should -Not -BeNullOrEmpty
+    }
+
+    # Content panels
+    It 'should have panelProfiles control' {
+        $script:window.FindName('panelProfiles') | Should -Not -BeNullOrEmpty
+    }
+
+    It 'should have panelSettings control' {
+        $script:window.FindName('panelSettings') | Should -Not -BeNullOrEmpty
+    }
+
+    It 'should have panelProgress control' {
+        $script:window.FindName('panelProgress') | Should -Not -BeNullOrEmpty
+    }
+
+    It 'should have panelLogs control' {
+        $script:window.FindName('panelLogs') | Should -Not -BeNullOrEmpty
+    }
+
+    # Preserved controls from original XAML
+    @('lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
+      'txtProfileName', 'txtSource', 'txtDest',
+      'btnRunAll', 'btnRunSelected', 'btnStop',
+      'dgChunks', 'pbProfile', 'pbOverall',
+      'txtStatus', 'sldWorkers', 'txtWorkerCount') | ForEach-Object {
+        It "should have preserved control '$_'" {
+            $script:window.FindName($_) | Should -Not -BeNullOrEmpty
+        }
+    }
+}
+```
+
+### Test: Window Properties
+
+```powershell
+Describe 'MainWindow.xaml Properties' {
+    BeforeAll {
+        $xamlPath = Join-Path $PSScriptRoot '..\..\src\Robocurse\Resources\MainWindow.xaml'
+        $xamlContent = Get-Content $xamlPath -Raw
+        $script:window = [System.Windows.Markup.XamlReader]::Parse($xamlContent)
+    }
+
+    AfterAll {
+        if ($script:window) { $script:window.Close() }
+    }
+
+    It 'should have correct default width' {
+        $script:window.Width | Should -Be 650
+    }
+
+    It 'should have correct default height' {
+        $script:window.Height | Should -Be 550
+    }
+
+    It 'should have MinWidth set' {
+        $script:window.MinWidth | Should -BeGreaterOrEqual 500
+    }
+
+    It 'should have MinHeight set' {
+        $script:window.MinHeight | Should -BeGreaterOrEqual 400
+    }
+}
+```
+
+### Test: Existing Tests Still Pass
+
+```powershell
+# Run existing GUI tests to ensure no regressions
+Describe 'GUI Regression Tests' {
+    It 'should pass all existing GuiProfiles tests' {
+        $result = Invoke-Pester -Path 'tests/Unit/GuiProfiles.Tests.ps1' -PassThru
+        $result.FailedCount | Should -Be 0
+    }
+
+    It 'should pass all existing GuiProgress tests' {
+        $result = Invoke-Pester -Path 'tests/Unit/GuiProgress.Tests.ps1' -PassThru
+        $result.FailedCount | Should -Be 0
+    }
+}
+```
+
+**Note**: WPF tests require STA thread. Run with: `Invoke-Pester -Path tests/Unit/GuiXaml.Tests.ps1`
+
 ## Success Criteria
 
 1. **Window opens** at 650x550 with dark theme
@@ -291,6 +432,8 @@ Preserve these control names for backward compatibility:
 5. **Bottom control bar** shows Run/Stop buttons and Workers slider
 6. **All existing styles preserved** - colors match current design
 7. **No XAML parse errors** - window loads without exceptions
+8. **All XAML tests pass** - new test file passes completely
+9. **No regressions** - existing GUI tests still pass
 
 ## Testing
 

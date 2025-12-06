@@ -214,6 +214,180 @@ switch ($e.Key) {
 | `Ctrl+R` | Run selected profiles | When not running |
 | `Escape` | Stop replication | When running (with confirm) |
 
+## Tests to Write
+
+**File**: `tests/Unit/GuiKeyboardShortcuts.Tests.ps1` (new file)
+
+The keyboard handler logic can be extracted into a testable function. Test the decision logic without requiring a live WPF window.
+
+### Test: Keyboard Handler Logic
+
+```powershell
+Describe 'Invoke-KeyboardShortcut' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiMain.ps1')
+
+        # Mock controls
+        $script:Controls = @{
+            'btnRunSelected' = [PSCustomObject]@{ IsEnabled = $true }
+            'btnStop' = [PSCustomObject]@{ IsEnabled = $false }
+        }
+
+        # Track function calls
+        $script:CalledFunctions = @()
+
+        Mock Show-LogWindow { $script:CalledFunctions += 'Show-LogWindow' }
+        Mock Start-GuiReplication { $script:CalledFunctions += 'Start-GuiReplication' }
+        Mock Stop-GuiReplication { $script:CalledFunctions += 'Stop-GuiReplication' }
+        Mock Set-ActivePanel { param($PanelName) $script:CalledFunctions += "Set-ActivePanel:$PanelName" }
+        Mock Show-ConfirmDialog { return $true }
+    }
+
+    BeforeEach {
+        $script:CalledFunctions = @()
+    }
+
+    Context 'Ctrl+L shortcut' {
+        It 'should open log window' {
+            Invoke-KeyboardShortcut -Key 'L' -Ctrl $true -IsTextBoxFocused $false
+
+            $script:CalledFunctions | Should -Contain 'Show-LogWindow'
+        }
+
+        It 'should work even when in TextBox' {
+            Invoke-KeyboardShortcut -Key 'L' -Ctrl $true -IsTextBoxFocused $true
+
+            $script:CalledFunctions | Should -Contain 'Show-LogWindow'
+        }
+    }
+
+    Context 'Ctrl+R shortcut' {
+        It 'should start replication when not running' {
+            $script:Controls['btnRunSelected'].IsEnabled = $true
+
+            Invoke-KeyboardShortcut -Key 'R' -Ctrl $true -IsTextBoxFocused $false
+
+            $script:CalledFunctions | Should -Contain 'Start-GuiReplication'
+        }
+
+        It 'should not start replication when already running' {
+            $script:Controls['btnRunSelected'].IsEnabled = $false
+
+            Invoke-KeyboardShortcut -Key 'R' -Ctrl $true -IsTextBoxFocused $false
+
+            $script:CalledFunctions | Should -Not -Contain 'Start-GuiReplication'
+        }
+    }
+
+    Context 'Escape shortcut' {
+        It 'should stop replication when running' {
+            $script:Controls['btnStop'].IsEnabled = $true
+
+            Invoke-KeyboardShortcut -Key 'Escape' -Ctrl $false -IsTextBoxFocused $false
+
+            $script:CalledFunctions | Should -Contain 'Stop-GuiReplication'
+        }
+
+        It 'should not stop when not running' {
+            $script:Controls['btnStop'].IsEnabled = $false
+
+            Invoke-KeyboardShortcut -Key 'Escape' -Ctrl $false -IsTextBoxFocused $false
+
+            $script:CalledFunctions | Should -Not -Contain 'Stop-GuiReplication'
+        }
+    }
+
+    Context 'Number key panel switching' {
+        It 'should switch to Profiles on key 1' {
+            Invoke-KeyboardShortcut -Key 'D1' -Ctrl $false -IsTextBoxFocused $false
+
+            $script:CalledFunctions | Should -Contain 'Set-ActivePanel:Profiles'
+        }
+
+        It 'should switch to Settings on key 2' {
+            Invoke-KeyboardShortcut -Key 'D2' -Ctrl $false -IsTextBoxFocused $false
+
+            $script:CalledFunctions | Should -Contain 'Set-ActivePanel:Settings'
+        }
+
+        It 'should switch to Progress on key 3' {
+            Invoke-KeyboardShortcut -Key 'D3' -Ctrl $false -IsTextBoxFocused $false
+
+            $script:CalledFunctions | Should -Contain 'Set-ActivePanel:Progress'
+        }
+
+        It 'should switch to Logs on key 4' {
+            Invoke-KeyboardShortcut -Key 'D4' -Ctrl $false -IsTextBoxFocused $false
+
+            $script:CalledFunctions | Should -Contain 'Set-ActivePanel:Logs'
+        }
+
+        It 'should NOT switch panels when TextBox is focused' {
+            Invoke-KeyboardShortcut -Key 'D1' -Ctrl $false -IsTextBoxFocused $true
+
+            $script:CalledFunctions | Should -Not -Match 'Set-ActivePanel'
+        }
+
+        It 'should handle NumPad keys' {
+            Invoke-KeyboardShortcut -Key 'NumPad1' -Ctrl $false -IsTextBoxFocused $false
+
+            $script:CalledFunctions | Should -Contain 'Set-ActivePanel:Profiles'
+        }
+    }
+}
+```
+
+### Test: Key Mapping
+
+```powershell
+Describe 'Keyboard Shortcut Key Mapping' {
+    It 'should map D1 and NumPad1 to same action' {
+        $d1Panel = Get-PanelForKey -Key 'D1'
+        $np1Panel = Get-PanelForKey -Key 'NumPad1'
+
+        $d1Panel | Should -Be $np1Panel
+        $d1Panel | Should -Be 'Profiles'
+    }
+
+    It 'should map all number keys correctly' {
+        Get-PanelForKey -Key 'D1' | Should -Be 'Profiles'
+        Get-PanelForKey -Key 'D2' | Should -Be 'Settings'
+        Get-PanelForKey -Key 'D3' | Should -Be 'Progress'
+        Get-PanelForKey -Key 'D4' | Should -Be 'Logs'
+    }
+
+    It 'should return $null for unmapped keys' {
+        Get-PanelForKey -Key 'D5' | Should -BeNullOrEmpty
+        Get-PanelForKey -Key 'A' | Should -BeNullOrEmpty
+    }
+}
+```
+
+### Test: Tooltip Updates
+
+```powershell
+Describe 'Keyboard Shortcut Tooltips' {
+    BeforeAll {
+        $xamlPath = Join-Path $PSScriptRoot '..\..\src\Robocurse\Resources\MainWindow.xaml'
+        $xamlContent = Get-Content $xamlPath -Raw
+    }
+
+    It 'should have Ctrl+R hint on run button' {
+        # Check XAML or post-load tooltip
+        $xamlContent | Should -Match 'btnRunSelected.*ToolTip.*Ctrl\+R'
+    }
+
+    It 'should have Escape hint on stop button' {
+        $xamlContent | Should -Match 'btnStop.*ToolTip.*Escape'
+    }
+
+    It 'should have number hints on nav buttons' {
+        $xamlContent | Should -Match 'btnNavProfiles.*ToolTip.*\(1\)'
+        $xamlContent | Should -Match 'btnNavSettings.*ToolTip.*\(2\)'
+    }
+}
+```
+
 ## Success Criteria
 
 1. **Ctrl+L opens logs**: From any panel, Ctrl+L opens log popup
@@ -224,6 +398,7 @@ switch ($e.Key) {
 6. **Tooltips updated**: Shortcuts shown in button tooltips
 7. **No conflicts**: Shortcuts don't interfere with normal typing
 8. **NumPad works**: Both main number row and numpad work
+9. **All unit tests pass**: GuiKeyboardShortcuts.Tests.ps1 passes completely
 
 ## Testing
 

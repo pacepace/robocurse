@@ -203,6 +203,169 @@ if ($script:Controls['btnNavProfiles']) {
 
 **Initialization order**: Ensure Set-ActivePanel isn't called before controls are loaded.
 
+## Tests to Write
+
+**File**: `tests/Unit/GuiPanelSwitching.Tests.ps1` (new file)
+
+The `Set-ActivePanel` function contains testable logic that doesn't require a live window.
+
+### Test: Set-ActivePanel Function
+
+```powershell
+Describe 'Set-ActivePanel' {
+    BeforeAll {
+        # Load the module
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiMain.ps1')
+
+        # Mock the controls with test doubles
+        $script:Controls = @{
+            'panelProfiles' = [PSCustomObject]@{ Visibility = 'Collapsed' }
+            'panelSettings' = [PSCustomObject]@{ Visibility = 'Collapsed' }
+            'panelProgress' = [PSCustomObject]@{ Visibility = 'Collapsed' }
+            'panelLogs'     = [PSCustomObject]@{ Visibility = 'Collapsed' }
+            'btnNavProfiles' = [PSCustomObject]@{ IsChecked = $false }
+            'btnNavSettings' = [PSCustomObject]@{ IsChecked = $false }
+            'btnNavProgress' = [PSCustomObject]@{ IsChecked = $false }
+            'btnNavLogs'     = [PSCustomObject]@{ IsChecked = $false }
+        }
+
+        # Mock logging
+        Mock Write-RobocurseLog { }
+    }
+
+    Context 'when switching to Profiles panel' {
+        BeforeEach {
+            Set-ActivePanel -PanelName 'Profiles'
+        }
+
+        It 'should show Profiles panel' {
+            $script:Controls['panelProfiles'].Visibility | Should -Be 'Visible'
+        }
+
+        It 'should hide Settings panel' {
+            $script:Controls['panelSettings'].Visibility | Should -Be 'Collapsed'
+        }
+
+        It 'should hide Progress panel' {
+            $script:Controls['panelProgress'].Visibility | Should -Be 'Collapsed'
+        }
+
+        It 'should hide Logs panel' {
+            $script:Controls['panelLogs'].Visibility | Should -Be 'Collapsed'
+        }
+
+        It 'should check Profiles nav button' {
+            $script:Controls['btnNavProfiles'].IsChecked | Should -BeTrue
+        }
+
+        It 'should uncheck other nav buttons' {
+            $script:Controls['btnNavSettings'].IsChecked | Should -BeFalse
+            $script:Controls['btnNavProgress'].IsChecked | Should -BeFalse
+            $script:Controls['btnNavLogs'].IsChecked | Should -BeFalse
+        }
+
+        It 'should set ActivePanel script variable' {
+            $script:ActivePanel | Should -Be 'Profiles'
+        }
+    }
+
+    Context 'when switching to Settings panel' {
+        BeforeEach {
+            Set-ActivePanel -PanelName 'Settings'
+        }
+
+        It 'should show only Settings panel' {
+            $script:Controls['panelSettings'].Visibility | Should -Be 'Visible'
+            $script:Controls['panelProfiles'].Visibility | Should -Be 'Collapsed'
+            $script:Controls['panelProgress'].Visibility | Should -Be 'Collapsed'
+            $script:Controls['panelLogs'].Visibility | Should -Be 'Collapsed'
+        }
+    }
+
+    Context 'when switching to Progress panel' {
+        BeforeEach {
+            Set-ActivePanel -PanelName 'Progress'
+        }
+
+        It 'should show only Progress panel' {
+            $script:Controls['panelProgress'].Visibility | Should -Be 'Visible'
+            $script:Controls['panelProfiles'].Visibility | Should -Be 'Collapsed'
+            $script:Controls['panelSettings'].Visibility | Should -Be 'Collapsed'
+            $script:Controls['panelLogs'].Visibility | Should -Be 'Collapsed'
+        }
+    }
+
+    Context 'when switching to Logs panel' {
+        BeforeEach {
+            Set-ActivePanel -PanelName 'Logs'
+        }
+
+        It 'should show only Logs panel' {
+            $script:Controls['panelLogs'].Visibility | Should -Be 'Visible'
+            $script:Controls['panelProfiles'].Visibility | Should -Be 'Collapsed'
+            $script:Controls['panelSettings'].Visibility | Should -Be 'Collapsed'
+            $script:Controls['panelProgress'].Visibility | Should -Be 'Collapsed'
+        }
+    }
+
+    Context 'with invalid panel name' {
+        It 'should throw for invalid panel name' {
+            { Set-ActivePanel -PanelName 'InvalidPanel' } | Should -Throw
+        }
+    }
+
+    Context 'with missing controls' {
+        BeforeEach {
+            $script:Controls['panelProfiles'] = $null
+        }
+
+        It 'should handle missing controls gracefully' {
+            { Set-ActivePanel -PanelName 'Settings' } | Should -Not -Throw
+        }
+    }
+}
+```
+
+### Test: Panel State Consistency
+
+```powershell
+Describe 'Panel State Consistency' {
+    BeforeAll {
+        # Setup mocks as above
+    }
+
+    It 'should always have exactly one panel visible' {
+        foreach ($panel in @('Profiles', 'Settings', 'Progress', 'Logs')) {
+            Set-ActivePanel -PanelName $panel
+
+            $visibleCount = @(
+                $script:Controls['panelProfiles'].Visibility,
+                $script:Controls['panelSettings'].Visibility,
+                $script:Controls['panelProgress'].Visibility,
+                $script:Controls['panelLogs'].Visibility
+            ) | Where-Object { $_ -eq 'Visible' } | Measure-Object | Select-Object -ExpandProperty Count
+
+            $visibleCount | Should -Be 1 -Because "switching to $panel should leave exactly one panel visible"
+        }
+    }
+
+    It 'should always have exactly one nav button checked' {
+        foreach ($panel in @('Profiles', 'Settings', 'Progress', 'Logs')) {
+            Set-ActivePanel -PanelName $panel
+
+            $checkedCount = @(
+                $script:Controls['btnNavProfiles'].IsChecked,
+                $script:Controls['btnNavSettings'].IsChecked,
+                $script:Controls['btnNavProgress'].IsChecked,
+                $script:Controls['btnNavLogs'].IsChecked
+            ) | Where-Object { $_ -eq $true } | Measure-Object | Select-Object -ExpandProperty Count
+
+            $checkedCount | Should -Be 1 -Because "switching to $panel should leave exactly one button checked"
+        }
+    }
+}
+```
+
 ## Success Criteria
 
 1. **Rail buttons work**: Clicking each rail button shows only that panel
@@ -212,6 +375,7 @@ if ($script:Controls['btnNavProfiles']) {
 5. **Auto-switch**: When Run is clicked, switches to Progress panel
 6. **No errors**: No exceptions when switching panels
 7. **Logging**: Panel switches are logged at Debug level
+8. **All unit tests pass**: GuiPanelSwitching.Tests.ps1 passes completely
 
 ## Testing
 

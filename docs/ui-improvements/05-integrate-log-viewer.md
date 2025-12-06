@@ -282,6 +282,174 @@ if ($script:ActivePanel -eq 'Logs') {
 }
 ```
 
+## Tests to Write
+
+**File**: `tests/Unit/GuiLogViewer.Tests.ps1` (new file)
+
+The `Update-InlineLogContent` function contains testable filtering logic.
+
+### Test: Log Filtering Logic
+
+```powershell
+Describe 'Update-InlineLogContent' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiLogWindow.ps1')
+
+        # Mock controls
+        $script:Controls = @{
+            'chkLogDebug'    = [PSCustomObject]@{ IsChecked = $true }
+            'chkLogInfo'     = [PSCustomObject]@{ IsChecked = $true }
+            'chkLogWarning'  = [PSCustomObject]@{ IsChecked = $true }
+            'chkLogError'    = [PSCustomObject]@{ IsChecked = $true }
+            'chkLogAutoScroll' = [PSCustomObject]@{ IsChecked = $true }
+            'txtLogContent'  = [PSCustomObject]@{ Text = '' }
+            'txtLogLineCount' = [PSCustomObject]@{ Text = '' }
+        }
+
+        # Add ScrollToEnd method mock
+        $script:Controls['txtLogContent'] | Add-Member -MemberType ScriptMethod -Name 'ScrollToEnd' -Value { } -Force
+
+        # Setup log buffer with test data
+        $script:GuiLogBuffer = @(
+            '2024-01-15 10:00:00 [DEBUG] Debug message 1',
+            '2024-01-15 10:00:01 [INFO] Info message 1',
+            '2024-01-15 10:00:02 [WARNING] Warning message 1',
+            '2024-01-15 10:00:03 [ERROR] Error message 1',
+            '2024-01-15 10:00:04 [INFO] Info message 2'
+        )
+    }
+
+    Context 'with all filters enabled' {
+        BeforeEach {
+            $script:Controls['chkLogDebug'].IsChecked = $true
+            $script:Controls['chkLogInfo'].IsChecked = $true
+            $script:Controls['chkLogWarning'].IsChecked = $true
+            $script:Controls['chkLogError'].IsChecked = $true
+            Update-InlineLogContent
+        }
+
+        It 'should include all log entries' {
+            $script:Controls['txtLogContent'].Text | Should -Match 'Debug message 1'
+            $script:Controls['txtLogContent'].Text | Should -Match 'Info message 1'
+            $script:Controls['txtLogContent'].Text | Should -Match 'Warning message 1'
+            $script:Controls['txtLogContent'].Text | Should -Match 'Error message 1'
+        }
+
+        It 'should show correct line count' {
+            $script:Controls['txtLogLineCount'].Text | Should -Be 'Lines: 5'
+        }
+    }
+
+    Context 'with DEBUG filter disabled' {
+        BeforeEach {
+            $script:Controls['chkLogDebug'].IsChecked = $false
+            $script:Controls['chkLogInfo'].IsChecked = $true
+            $script:Controls['chkLogWarning'].IsChecked = $true
+            $script:Controls['chkLogError'].IsChecked = $true
+            Update-InlineLogContent
+        }
+
+        It 'should exclude DEBUG messages' {
+            $script:Controls['txtLogContent'].Text | Should -Not -Match 'Debug message'
+        }
+
+        It 'should include other levels' {
+            $script:Controls['txtLogContent'].Text | Should -Match 'Info message'
+            $script:Controls['txtLogContent'].Text | Should -Match 'Warning message'
+            $script:Controls['txtLogContent'].Text | Should -Match 'Error message'
+        }
+
+        It 'should show correct filtered line count' {
+            $script:Controls['txtLogLineCount'].Text | Should -Be 'Lines: 4'
+        }
+    }
+
+    Context 'with only ERROR filter enabled' {
+        BeforeEach {
+            $script:Controls['chkLogDebug'].IsChecked = $false
+            $script:Controls['chkLogInfo'].IsChecked = $false
+            $script:Controls['chkLogWarning'].IsChecked = $false
+            $script:Controls['chkLogError'].IsChecked = $true
+            Update-InlineLogContent
+        }
+
+        It 'should only include ERROR messages' {
+            $script:Controls['txtLogContent'].Text | Should -Match 'Error message'
+            $script:Controls['txtLogContent'].Text | Should -Not -Match 'Debug message'
+            $script:Controls['txtLogContent'].Text | Should -Not -Match 'Info message'
+            $script:Controls['txtLogContent'].Text | Should -Not -Match 'Warning message'
+        }
+
+        It 'should show correct line count' {
+            $script:Controls['txtLogLineCount'].Text | Should -Be 'Lines: 1'
+        }
+    }
+
+    Context 'with empty log buffer' {
+        BeforeEach {
+            $script:GuiLogBuffer = @()
+            Update-InlineLogContent
+        }
+
+        It 'should show empty content' {
+            $script:Controls['txtLogContent'].Text | Should -BeNullOrEmpty
+        }
+
+        It 'should show zero lines' {
+            $script:Controls['txtLogLineCount'].Text | Should -Be 'Lines: 0'
+        }
+    }
+
+    Context 'with missing controls' {
+        BeforeEach {
+            $script:Controls['txtLogContent'] = $null
+        }
+
+        It 'should handle missing controls gracefully' {
+            { Update-InlineLogContent } | Should -Not -Throw
+        }
+    }
+}
+```
+
+### Test: Log Panel Control Names
+
+```powershell
+Describe 'Log Panel - Control Names' {
+    BeforeAll {
+        $xamlPath = Join-Path $PSScriptRoot '..\..\src\Robocurse\Resources\MainWindow.xaml'
+        $xamlContent = Get-Content $xamlPath -Raw
+        $script:window = [System.Windows.Markup.XamlReader]::Parse($xamlContent)
+    }
+
+    @(
+        'chkLogDebug', 'chkLogInfo', 'chkLogWarning', 'chkLogError',
+        'chkLogAutoScroll', 'txtLogLineCount', 'txtLogContent',
+        'btnLogClear', 'btnLogCopy', 'btnLogSave', 'btnLogPopOut'
+    ) | ForEach-Object {
+        It "should have control '$_'" {
+            $script:window.FindName($_) | Should -Not -BeNullOrEmpty
+        }
+    }
+}
+```
+
+### Test: Clear-GuiLogBuffer Function
+
+```powershell
+Describe 'Clear-GuiLogBuffer' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiLogWindow.ps1')
+    }
+
+    It 'should clear the log buffer' {
+        $script:GuiLogBuffer = @('entry1', 'entry2', 'entry3')
+        Clear-GuiLogBuffer
+        $script:GuiLogBuffer.Count | Should -Be 0
+    }
+}
+```
+
 ## Success Criteria
 
 1. **Log panel displays**: Switching to Logs rail button shows log content
@@ -293,6 +461,7 @@ if ($script:ActivePanel -eq 'Logs') {
 7. **Save works**: Opens save dialog and writes file
 8. **Pop Out works**: Opens separate log window
 9. **Real-time updates**: New log entries appear as they're generated
+10. **All unit tests pass**: GuiLogViewer.Tests.ps1 passes completely
 
 ## Testing
 

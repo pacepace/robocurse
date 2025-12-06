@@ -435,6 +435,214 @@ if ($PanelName -eq 'Settings') {
 }
 ```
 
+## Tests to Write
+
+**File**: `tests/Unit/GuiSettingsPanel.Tests.ps1` (new file)
+
+The `Import-SettingsToForm` and `Save-SettingsFromForm` functions contain testable logic.
+
+### Test: Import-SettingsToForm
+
+```powershell
+Describe 'Import-SettingsToForm' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiMain.ps1')
+
+        # Mock Get-RobocurseConfig
+        Mock Get-RobocurseConfig {
+            return @{
+                GlobalSettings = @{
+                    MaxConcurrentJobs = 6
+                    ThreadsPerJob = 12
+                    BandwidthLimitMbps = 100
+                    LogPath = 'C:\Logs'
+                    SiemLogEnabled = $true
+                    SiemLogPath = 'C:\Logs\siem.jsonl'
+                    EmailSettings = @{
+                        Enabled = $true
+                        SmtpServer = 'smtp.test.com'
+                        SmtpPort = 465
+                        UseTls = $false
+                        CredentialName = 'TestCred'
+                        From = 'test@test.com'
+                        To = @('admin1@test.com', 'admin2@test.com')
+                    }
+                }
+            }
+        }
+
+        # Mock controls
+        $script:Controls = @{
+            'sldSettingsJobs'       = [PSCustomObject]@{ Value = 0 }
+            'txtSettingsJobs'       = [PSCustomObject]@{ Text = '' }
+            'sldSettingsThreads'    = [PSCustomObject]@{ Value = 0 }
+            'txtSettingsThreads'    = [PSCustomObject]@{ Text = '' }
+            'txtSettingsBandwidth'  = [PSCustomObject]@{ Text = '' }
+            'txtSettingsLogPath'    = [PSCustomObject]@{ Text = '' }
+            'chkSettingsSiem'       = [PSCustomObject]@{ IsChecked = $false }
+            'txtSettingsSiemPath'   = [PSCustomObject]@{ Text = '' }
+            'chkSettingsEmailEnabled' = [PSCustomObject]@{ IsChecked = $false }
+            'txtSettingsSmtp'       = [PSCustomObject]@{ Text = '' }
+            'txtSettingsSmtpPort'   = [PSCustomObject]@{ Text = '' }
+            'chkSettingsTls'        = [PSCustomObject]@{ IsChecked = $false }
+            'txtSettingsCredential' = [PSCustomObject]@{ Text = '' }
+            'txtSettingsEmailFrom'  = [PSCustomObject]@{ Text = '' }
+            'txtSettingsEmailTo'    = [PSCustomObject]@{ Text = '' }
+        }
+
+        $script:ConfigPath = 'test.json'
+    }
+
+    BeforeEach {
+        Import-SettingsToForm
+    }
+
+    It 'should load MaxConcurrentJobs to slider' {
+        $script:Controls['sldSettingsJobs'].Value | Should -Be 6
+    }
+
+    It 'should load MaxConcurrentJobs to text' {
+        $script:Controls['txtSettingsJobs'].Text | Should -Be '6'
+    }
+
+    It 'should load ThreadsPerJob' {
+        $script:Controls['sldSettingsThreads'].Value | Should -Be 12
+    }
+
+    It 'should load BandwidthLimitMbps' {
+        $script:Controls['txtSettingsBandwidth'].Text | Should -Be '100'
+    }
+
+    It 'should load LogPath' {
+        $script:Controls['txtSettingsLogPath'].Text | Should -Be 'C:\Logs'
+    }
+
+    It 'should load SiemLogEnabled' {
+        $script:Controls['chkSettingsSiem'].IsChecked | Should -BeTrue
+    }
+
+    It 'should load email settings' {
+        $script:Controls['chkSettingsEmailEnabled'].IsChecked | Should -BeTrue
+        $script:Controls['txtSettingsSmtp'].Text | Should -Be 'smtp.test.com'
+        $script:Controls['txtSettingsSmtpPort'].Text | Should -Be '465'
+        $script:Controls['chkSettingsTls'].IsChecked | Should -BeFalse
+    }
+
+    It 'should format email To as comma-separated' {
+        $script:Controls['txtSettingsEmailTo'].Text | Should -Be 'admin1@test.com, admin2@test.com'
+    }
+}
+```
+
+### Test: Save-SettingsFromForm
+
+```powershell
+Describe 'Save-SettingsFromForm' {
+    BeforeAll {
+        . (Join-Path $PSScriptRoot '..\..\src\Robocurse\Public\GuiMain.ps1')
+
+        $script:savedConfig = $null
+
+        # Mock Get-RobocurseConfig
+        Mock Get-RobocurseConfig {
+            return @{
+                GlobalSettings = @{
+                    MaxConcurrentJobs = 4
+                    EmailSettings = @{}
+                }
+                SyncProfiles = @()
+            }
+        }
+
+        # Mock Save-RobocurseConfig to capture what's saved
+        Mock Save-RobocurseConfig {
+            param($Config, $Path)
+            $script:savedConfig = $Config
+        }
+
+        # Setup controls with test values
+        $script:Controls = @{
+            'sldSettingsJobs'       = [PSCustomObject]@{ Value = 8 }
+            'sldSettingsThreads'    = [PSCustomObject]@{ Value = 16 }
+            'txtSettingsBandwidth'  = [PSCustomObject]@{ Text = '50' }
+            'txtSettingsLogPath'    = [PSCustomObject]@{ Text = 'D:\Logs' }
+            'chkSettingsSiem'       = [PSCustomObject]@{ IsChecked = $true }
+            'txtSettingsSiemPath'   = [PSCustomObject]@{ Text = 'D:\Logs\siem.log' }
+            'chkSettingsEmailEnabled' = [PSCustomObject]@{ IsChecked = $true }
+            'txtSettingsSmtp'       = [PSCustomObject]@{ Text = 'mail.example.com' }
+            'txtSettingsSmtpPort'   = [PSCustomObject]@{ Text = '587' }
+            'chkSettingsTls'        = [PSCustomObject]@{ IsChecked = $true }
+            'txtSettingsCredential' = [PSCustomObject]@{ Text = 'MyCred' }
+            'txtSettingsEmailFrom'  = [PSCustomObject]@{ Text = 'noreply@example.com' }
+            'txtSettingsEmailTo'    = [PSCustomObject]@{ Text = 'user1@example.com, user2@example.com' }
+            'txtStatus'             = [PSCustomObject]@{ Text = '' }
+        }
+
+        $script:ConfigPath = 'test.json'
+    }
+
+    BeforeEach {
+        Save-SettingsFromForm
+    }
+
+    It 'should save MaxConcurrentJobs' {
+        $script:savedConfig.GlobalSettings.MaxConcurrentJobs | Should -Be 8
+    }
+
+    It 'should save ThreadsPerJob' {
+        $script:savedConfig.GlobalSettings.ThreadsPerJob | Should -Be 16
+    }
+
+    It 'should save BandwidthLimitMbps as integer' {
+        $script:savedConfig.GlobalSettings.BandwidthLimitMbps | Should -Be 50
+        $script:savedConfig.GlobalSettings.BandwidthLimitMbps | Should -BeOfType [int]
+    }
+
+    It 'should save LogPath' {
+        $script:savedConfig.GlobalSettings.LogPath | Should -Be 'D:\Logs'
+    }
+
+    It 'should parse email To as array' {
+        $script:savedConfig.GlobalSettings.EmailSettings.To | Should -HaveCount 2
+        $script:savedConfig.GlobalSettings.EmailSettings.To[0] | Should -Be 'user1@example.com'
+        $script:savedConfig.GlobalSettings.EmailSettings.To[1] | Should -Be 'user2@example.com'
+    }
+
+    It 'should update status text' {
+        $script:Controls['txtStatus'].Text | Should -Be 'Settings saved'
+    }
+}
+```
+
+### Test: Settings Panel Control Names
+
+```powershell
+Describe 'Settings Panel - Control Names' {
+    BeforeAll {
+        $xamlPath = Join-Path $PSScriptRoot '..\..\src\Robocurse\Resources\MainWindow.xaml'
+        $xamlContent = Get-Content $xamlPath -Raw
+        $script:window = [System.Windows.Markup.XamlReader]::Parse($xamlContent)
+    }
+
+    @(
+        'sldSettingsJobs', 'txtSettingsJobs',
+        'sldSettingsThreads', 'txtSettingsThreads',
+        'txtSettingsBandwidth', 'txtSettingsLogPath',
+        'btnSettingsLogBrowse', 'chkSettingsSiem',
+        'txtSettingsSiemPath', 'chkSettingsEmailEnabled',
+        'txtSettingsSmtp', 'txtSettingsSmtpPort',
+        'chkSettingsTls', 'txtSettingsCredential',
+        'txtSettingsEmailFrom', 'txtSettingsEmailTo',
+        'btnSettingsSchedule', 'txtSettingsScheduleStatus',
+        'btnSettingsRevert', 'btnSettingsSave'
+    ) | ForEach-Object {
+        It "should have control '$_'" {
+            $script:window.FindName($_) | Should -Not -BeNullOrEmpty
+        }
+    }
+}
+```
+
 ## Success Criteria
 
 1. **Settings panel displays**: All controls render correctly
@@ -445,6 +653,7 @@ if ($PanelName -eq 'Settings') {
 6. **Revert works**: Clicking Revert reloads from file
 7. **Schedule status shows**: Displays current schedule status
 8. **Schedule button works**: Opens schedule configuration dialog
+9. **All unit tests pass**: GuiSettingsPanel.Tests.ps1 passes completely
 
 ## Testing
 
