@@ -245,7 +245,29 @@ $result = Invoke-WithRemoteVssJunction -UncPath "\\FileServer\Share" -ScriptBloc
 }
 ```
 
-**Requirements**: Admin rights on remote server, PowerShell remoting enabled.
+**Remote Server Setup** (run these on the file server):
+
+```powershell
+# 1. Enable PowerShell remoting (requires admin)
+Enable-PSRemoting -Force
+
+# 2. Verify WinRM service is running
+Get-Service WinRM
+
+# 3. If firewalled, allow WinRM (TCP 5985 for HTTP, 5986 for HTTPS)
+Enable-NetFirewallRule -DisplayGroup "Windows Remote Management"
+```
+
+**Requirements**:
+- Administrator rights on the remote file server
+- WinRM service running (`Enable-PSRemoting` starts it)
+- Firewall allows WinRM (TCP 5985/5986)
+- Your account must be in the Administrators group on the remote server
+
+**Test connectivity before use**:
+```powershell
+Test-RemoteVssSupported -UncPath "\\FileServer\Share"
+```
 
 ### Retry Behavior
 
