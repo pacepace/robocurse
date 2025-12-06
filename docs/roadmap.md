@@ -69,6 +69,30 @@ if ($siemEventCount -gt $script:SiemRateLimitThreshold) {
 
 ### Code Quality
 
+#### Debounce Config Saves
+**Priority:** Medium
+**Effort:** Low
+
+Every LostFocus triggers disk write. Add dirty flag + debounce, or save only on window close.
+
+---
+
+#### Unified Logging Levels
+**Priority:** Medium
+**Effort:** Medium
+
+Consolidate `Write-Host`, `Write-Verbose`, `Write-GuiLog`, `Write-RobocurseLog` into single path with DEBUG/INFO/WARN/ERROR levels.
+
+---
+
+#### Document GUI Initialization Order
+**Priority:** Low
+**Effort:** Low
+
+Add comment block in `Initialize-RobocurseGui` showing sequence: handler wiring → config load → profile list → state restore → `GuiInitializing = $false`.
+
+---
+
 #### Pipeline Support for Functions
 **Priority:** Low
 **Effort:** Low
@@ -102,6 +126,14 @@ Add JSON schema validation for config to prevent malformed input:
 ---
 
 ### Testing
+
+#### GUI Config Save/Load Integration Test
+**Priority:** Medium
+**Effort:** Low
+
+Test that simulates: load config → modify values → save → reload → verify values match. Would have caught the initialization bug.
+
+---
 
 #### Mutation Testing
 **Priority:** Low
