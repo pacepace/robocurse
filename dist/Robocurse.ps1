@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-05 19:33:04
+    Built: 2025-12-05 20:49:54
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -1713,7 +1713,9 @@ function Save-RobocurseConfig {
 
         # Convert to JSON with proper 2-space indentation
         $jsonContent = $friendlyConfig | ConvertTo-Json -Depth 10 | Format-Json
-        $jsonContent | Set-Content -Path $Path -Encoding UTF8 -ErrorAction Stop
+
+        # Write file using .NET for reliable, synchronous write
+        [System.IO.File]::WriteAllText($Path, $jsonContent, [System.Text.Encoding]::UTF8)
 
         Write-Verbose "Configuration saved successfully to '$Path'"
         return New-OperationResult -Success $true -Data $Path
@@ -11129,6 +11131,9 @@ function Import-ProfileToForm {
     $maxFiles = if ($null -ne $Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
     $maxDepth = if ($null -ne $Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
+    # Debug: log what we're loading
+    Write-GuiLog "Loading profile '$($Profile.Name)': ChunkMaxSizeGB=$($Profile.ChunkMaxSizeGB) (display: $maxSize), ChunkMaxFiles=$($Profile.ChunkMaxFiles), ChunkMaxDepth=$($Profile.ChunkMaxDepth)"
+
     $script:Controls.txtMaxSize.Text = $maxSize.ToString()
     $script:Controls.txtMaxFiles.Text = $maxFiles.ToString()
     $script:Controls.txtMaxDepth.Text = $maxDepth.ToString()
@@ -11141,6 +11146,11 @@ function Save-ProfileFromForm {
     #>
     [CmdletBinding()]
     param()
+
+    # Skip saving during GUI initialization (checkbox/combo events fire when setting values)
+    if ($script:GuiInitializing) {
+        return
+    }
 
     $selected = $script:Controls.lstProfiles.SelectedItem
     if (-not $selected) { return }
@@ -13169,6 +13179,9 @@ $script:GuiLogDirty = $false  # Track if buffer needs to be flushed to UI
 # Error tracking for visual indicator
 $script:GuiErrorCount = 0  # Count of errors encountered during current run
 
+# Flag to suppress save during initialization (prevents checkbox/combo events from saving)
+$script:GuiInitializing = $true
+
 function Initialize-RobocurseGui {
     <#
     .SYNOPSIS
@@ -13686,6 +13699,9 @@ function Initialize-RobocurseGui {
     $script:ProgressTimer = New-Object System.Windows.Forms.Timer
     $script:ProgressTimer.Interval = $script:GuiProgressUpdateIntervalMs
     $script:ProgressTimer.Add_Tick({ Update-GuiProgress })
+
+    # Mark initialization complete - event handlers can now save
+    $script:GuiInitializing = $false
 
     Write-GuiLog "Robocurse GUI initialized"
 

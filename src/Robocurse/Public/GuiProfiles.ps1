@@ -51,6 +51,9 @@ function Import-ProfileToForm {
     $maxFiles = if ($null -ne $Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
     $maxDepth = if ($null -ne $Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
+    # Debug: log what we're loading
+    Write-GuiLog "Loading profile '$($Profile.Name)': ChunkMaxSizeGB=$($Profile.ChunkMaxSizeGB) (display: $maxSize), ChunkMaxFiles=$($Profile.ChunkMaxFiles), ChunkMaxDepth=$($Profile.ChunkMaxDepth)"
+
     $script:Controls.txtMaxSize.Text = $maxSize.ToString()
     $script:Controls.txtMaxFiles.Text = $maxFiles.ToString()
     $script:Controls.txtMaxDepth.Text = $maxDepth.ToString()
@@ -63,6 +66,11 @@ function Save-ProfileFromForm {
     #>
     [CmdletBinding()]
     param()
+
+    # Skip saving during GUI initialization (checkbox/combo events fire when setting values)
+    if ($script:GuiInitializing) {
+        return
+    }
 
     $selected = $script:Controls.lstProfiles.SelectedItem
     if (-not $selected) { return }

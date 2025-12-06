@@ -611,7 +611,9 @@ function Save-RobocurseConfig {
 
         # Convert to JSON with proper 2-space indentation
         $jsonContent = $friendlyConfig | ConvertTo-Json -Depth 10 | Format-Json
-        $jsonContent | Set-Content -Path $Path -Encoding UTF8 -ErrorAction Stop
+
+        # Write file using .NET for reliable, synchronous write
+        [System.IO.File]::WriteAllText($Path, $jsonContent, [System.Text.Encoding]::UTF8)
 
         Write-Verbose "Configuration saved successfully to '$Path'"
         return New-OperationResult -Success $true -Data $Path

@@ -8,6 +8,9 @@ $script:GuiLogDirty = $false  # Track if buffer needs to be flushed to UI
 # Error tracking for visual indicator
 $script:GuiErrorCount = 0  # Count of errors encountered during current run
 
+# Flag to suppress save during initialization (prevents checkbox/combo events from saving)
+$script:GuiInitializing = $true
+
 function Initialize-RobocurseGui {
     <#
     .SYNOPSIS
@@ -103,6 +106,9 @@ function Initialize-RobocurseGui {
     $script:ProgressTimer = New-Object System.Windows.Forms.Timer
     $script:ProgressTimer.Interval = $script:GuiProgressUpdateIntervalMs
     $script:ProgressTimer.Add_Tick({ Update-GuiProgress })
+
+    # Mark initialization complete - event handlers can now save
+    $script:GuiInitializing = $false
 
     Write-GuiLog "Robocurse GUI initialized"
 
