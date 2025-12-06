@@ -560,6 +560,13 @@ function Initialize-EventHandlers {
         })
     }
 
+    # Set Credentials button
+    if ($script:Controls['btnSettingsSetCredential']) {
+        $script:Controls.btnSettingsSetCredential.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsSetCredential" -ScriptBlock { Show-CredentialInputDialog }
+        })
+    }
+
     # Window closing
     $script:Window.Add_Closing({
         Invoke-SafeEventHandler -HandlerName "WindowClosing" -ScriptBlock {

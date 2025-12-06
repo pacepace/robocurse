@@ -467,9 +467,12 @@
 
                                         <!-- Credential -->
                                         <Label Grid.Row="3" Content="Credential:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                                        <TextBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtSettingsCredential" Text="Robocurse-SMTP"
-                                                 Style="{StaticResource DarkTextBox}" Margin="0,0,0,10"
+                                        <TextBox Grid.Row="3" Grid.Column="1" x:Name="txtSettingsCredential" Text="Robocurse-SMTP"
+                                                 Style="{StaticResource DarkTextBox}" Margin="0,0,5,10"
                                                  ToolTip="Windows Credential Manager target name"/>
+                                        <Button Grid.Row="3" Grid.Column="2" x:Name="btnSettingsSetCredential" Content="Set..."
+                                                Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,10"
+                                                ToolTip="Set SMTP username and password"/>
 
                                         <!-- From -->
                                         <Label Grid.Row="4" Content="From:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>

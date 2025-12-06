@@ -372,3 +372,159 @@ function Show-ScheduleDialog {
         Show-GuiError -Message "Failed to show schedule dialog" -Details $_.Exception.Message
     }
 }
+
+function Show-CredentialInputDialog {
+    <#
+    .SYNOPSIS
+        Shows a dialog to input SMTP credentials and save them to Windows Credential Manager
+    .DESCRIPTION
+        Displays a modal dialog with username and password fields. When saved, the credentials
+        are stored in Windows Credential Manager using the specified target name.
+    .PARAMETER CredentialTarget
+        The target name for the credential in Windows Credential Manager (default: from settings)
+    .OUTPUTS
+        $true if credentials were saved successfully, $false if cancelled or failed
+    .EXAMPLE
+        $result = Show-CredentialInputDialog -CredentialTarget "Robocurse-SMTP"
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$CredentialTarget
+    )
+
+    # Get target from settings if not provided
+    if (-not $CredentialTarget -and $script:Controls -and $script:Controls['txtSettingsCredential']) {
+        $CredentialTarget = $script:Controls.txtSettingsCredential.Text.Trim()
+    }
+    if (-not $CredentialTarget) {
+        $CredentialTarget = "Robocurse-SMTP"
+    }
+
+    try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'CredentialInputDialog.xaml'
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $txtTitle = $dialog.FindName("txtTitle")
+        $txtSubtitle = $dialog.FindName("txtSubtitle")
+        $txtUsername = $dialog.FindName("txtUsername")
+        $pwdPassword = $dialog.FindName("pwdPassword")
+        $btnSave = $dialog.FindName("btnSave")
+        $btnCancel = $dialog.FindName("btnCancel")
+
+        # Set title with target name
+        $txtTitle.Text = "Set SMTP Credentials"
+        $txtSubtitle.Text = "Target: $CredentialTarget"
+
+        # Track result
+        $script:CredentialDialogResult = $false
+
+        # Save button handler
+        $btnSave.Add_Click({
+            $username = $txtUsername.Text.Trim()
+            $password = $pwdPassword.Password
+
+            if ([string]::IsNullOrWhiteSpace($username)) {
+                [System.Windows.MessageBox]::Show("Username is required", "Validation Error", "OK", "Warning")
+                return
+            }
+
+            if ([string]::IsNullOrWhiteSpace($password)) {
+                [System.Windows.MessageBox]::Show("Password is required", "Validation Error", "OK", "Warning")
+                return
+            }
+
+            try {
+                # Create PSCredential
+                $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
+                $credential = New-Object System.Management.Automation.PSCredential($username, $securePassword)
+
+                # Save to Credential Manager
+                $result = Save-SmtpCredential -Target $CredentialTarget -Credential $credential
+
+                if ($result.Success) {
+                    Write-GuiLog "SMTP credentials saved to Credential Manager: $CredentialTarget"
+                    $script:CredentialDialogResult = $true
+                    [System.Windows.MessageBox]::Show(
+                        "Credentials saved successfully to Windows Credential Manager.",
+                        "Success",
+                        "OK",
+                        "Information"
+                    )
+                    $dialog.Close()
+                }
+                else {
+                    Write-GuiLog "Failed to save SMTP credentials: $($result.ErrorMessage)"
+                    [System.Windows.MessageBox]::Show(
+                        "Failed to save credentials:`n$($result.ErrorMessage)",
+                        "Error",
+                        "OK",
+                        "Error"
+                    )
+                }
+            }
+            catch {
+                Write-GuiLog "Error saving credentials: $($_.Exception.Message)"
+                [System.Windows.MessageBox]::Show(
+                    "Error saving credentials:`n$($_.Exception.Message)",
+                    "Error",
+                    "OK",
+                    "Error"
+                )
+            }
+        })
+
+        # Cancel button handler
+        $btnCancel.Add_Click({
+            $script:CredentialDialogResult = $false
+            $dialog.Close()
+        })
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+                $dialog.DragMove()
+            }
+        })
+
+        # Escape key to cancel
+        $dialog.Add_KeyDown({
+            param($sender, $e)
+            if ($e.Key -eq [System.Windows.Input.Key]::Escape) {
+                $script:CredentialDialogResult = $false
+                $dialog.Close()
+            }
+        })
+
+        # Enter key to save (when in password field)
+        $pwdPassword.Add_KeyDown({
+            param($sender, $e)
+            if ($e.Key -eq [System.Windows.Input.Key]::Enter) {
+                $btnSave.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
+            }
+        })
+
+        # Set owner to main window for proper modal behavior
+        if ($script:Window) {
+            $dialog.Owner = $script:Window
+        }
+        $dialog.ShowDialog() | Out-Null
+
+        return $script:CredentialDialogResult
+    }
+    catch {
+        Write-GuiLog "Error showing credential dialog: $($_.Exception.Message)"
+        # Fallback to error message
+        [System.Windows.MessageBox]::Show(
+            "Failed to show credential dialog:`n$($_.Exception.Message)",
+            "Error",
+            "OK",
+            "Error"
+        )
+        return $false
+    }
+}

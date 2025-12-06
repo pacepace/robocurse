@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-06 14:36:35
+    Built: 2025-12-06 15:13:22
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -12276,6 +12276,304 @@ function Show-ScheduleDialog {
     }
 }
 
+function Show-CredentialInputDialog {
+    <#
+    .SYNOPSIS
+        Shows a dialog to input SMTP credentials and save them to Windows Credential Manager
+    .DESCRIPTION
+        Displays a modal dialog with username and password fields. When saved, the credentials
+        are stored in Windows Credential Manager using the specified target name.
+    .PARAMETER CredentialTarget
+        The target name for the credential in Windows Credential Manager (default: from settings)
+    .OUTPUTS
+        $true if credentials were saved successfully, $false if cancelled or failed
+    .EXAMPLE
+        $result = Show-CredentialInputDialog -CredentialTarget "Robocurse-SMTP"
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$CredentialTarget
+    )
+
+    # Get target from settings if not provided
+    if (-not $CredentialTarget -and $script:Controls -and $script:Controls['txtSettingsCredential']) {
+        $CredentialTarget = $script:Controls.txtSettingsCredential.Text.Trim()
+    }
+    if (-not $CredentialTarget) {
+        $CredentialTarget = "Robocurse-SMTP"
+    }
+
+    try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'CredentialInputDialog.xaml' -FallbackContent @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Set SMTP Credentials"
+        Height="240" Width="400"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize">
+
+    <Window.Resources>
+        <!-- Save button (green) -->
+        <Style x:Key="SaveButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#1E1E1E"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="#34C759" CornerRadius="4" Padding="20,8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#4CD964"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#28A745"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Cancel button (subtle) -->
+        <Style x:Key="CancelButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="#3E3E3E" CornerRadius="4" Padding="20,8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#4E4E4E"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#2E2E2E"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Dark TextBox -->
+        <Style x:Key="DarkTextBox" TargetType="TextBox">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="CaretBrush" Value="#E0E0E0"/>
+            <Setter Property="FontSize" Value="13"/>
+        </Style>
+
+        <!-- Dark PasswordBox -->
+        <Style x:Key="DarkPasswordBox" TargetType="PasswordBox">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="CaretBrush" Value="#E0E0E0"/>
+            <Setter Property="FontSize" Value="13"/>
+        </Style>
+    </Window.Resources>
+
+    <Border Background="#1E1E1E" CornerRadius="8" BorderBrush="#3E3E3E" BorderThickness="1">
+        <Grid Margin="24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header with icon and title -->
+            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,20">
+                <!-- Key icon -->
+                <Border Width="40" Height="40" CornerRadius="20" Background="#0078D4" Margin="0,0,14,0">
+                    <TextBlock Text="&#x1F511;" FontSize="20" Foreground="White"
+                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock x:Name="txtTitle" Text="Set SMTP Credentials" FontSize="16" FontWeight="SemiBold"
+                               Foreground="#E0E0E0"/>
+                    <TextBlock x:Name="txtSubtitle" Text="Stored securely in Windows Credential Manager" FontSize="11"
+                               Foreground="#808080" Margin="0,2,0,0"/>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Username -->
+            <Grid Grid.Row="1" Margin="0,0,0,12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="80"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Username:" Foreground="#B0B0B0" VerticalAlignment="Center" FontSize="13"/>
+                <TextBox Grid.Column="1" x:Name="txtUsername" Style="{StaticResource DarkTextBox}"
+                         ToolTip="Email address or username for SMTP authentication"/>
+            </Grid>
+
+            <!-- Password -->
+            <Grid Grid.Row="2" Margin="0,0,0,12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="80"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Password:" Foreground="#B0B0B0" VerticalAlignment="Center" FontSize="13"/>
+                <PasswordBox Grid.Column="1" x:Name="pwdPassword" Style="{StaticResource DarkPasswordBox}"
+                             ToolTip="Password or app-specific password for SMTP"/>
+            </Grid>
+
+            <!-- Spacer -->
+            <Grid Grid.Row="3"/>
+
+            <!-- Buttons -->
+            <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="btnCancel" Content="Cancel" Style="{StaticResource CancelButton}" Margin="0,0,10,0"/>
+                <Button x:Name="btnSave" Content="Save" Style="{StaticResource SaveButton}"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>
+
+'@
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $txtTitle = $dialog.FindName("txtTitle")
+        $txtSubtitle = $dialog.FindName("txtSubtitle")
+        $txtUsername = $dialog.FindName("txtUsername")
+        $pwdPassword = $dialog.FindName("pwdPassword")
+        $btnSave = $dialog.FindName("btnSave")
+        $btnCancel = $dialog.FindName("btnCancel")
+
+        # Set title with target name
+        $txtTitle.Text = "Set SMTP Credentials"
+        $txtSubtitle.Text = "Target: $CredentialTarget"
+
+        # Track result
+        $script:CredentialDialogResult = $false
+
+        # Save button handler
+        $btnSave.Add_Click({
+            $username = $txtUsername.Text.Trim()
+            $password = $pwdPassword.Password
+
+            if ([string]::IsNullOrWhiteSpace($username)) {
+                [System.Windows.MessageBox]::Show("Username is required", "Validation Error", "OK", "Warning")
+                return
+            }
+
+            if ([string]::IsNullOrWhiteSpace($password)) {
+                [System.Windows.MessageBox]::Show("Password is required", "Validation Error", "OK", "Warning")
+                return
+            }
+
+            try {
+                # Create PSCredential
+                $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
+                $credential = New-Object System.Management.Automation.PSCredential($username, $securePassword)
+
+                # Save to Credential Manager
+                $result = Save-SmtpCredential -Target $CredentialTarget -Credential $credential
+
+                if ($result.Success) {
+                    Write-GuiLog "SMTP credentials saved to Credential Manager: $CredentialTarget"
+                    $script:CredentialDialogResult = $true
+                    [System.Windows.MessageBox]::Show(
+                        "Credentials saved successfully to Windows Credential Manager.",
+                        "Success",
+                        "OK",
+                        "Information"
+                    )
+                    $dialog.Close()
+                }
+                else {
+                    Write-GuiLog "Failed to save SMTP credentials: $($result.ErrorMessage)"
+                    [System.Windows.MessageBox]::Show(
+                        "Failed to save credentials:`n$($result.ErrorMessage)",
+                        "Error",
+                        "OK",
+                        "Error"
+                    )
+                }
+            }
+            catch {
+                Write-GuiLog "Error saving credentials: $($_.Exception.Message)"
+                [System.Windows.MessageBox]::Show(
+                    "Error saving credentials:`n$($_.Exception.Message)",
+                    "Error",
+                    "OK",
+                    "Error"
+                )
+            }
+        })
+
+        # Cancel button handler
+        $btnCancel.Add_Click({
+            $script:CredentialDialogResult = $false
+            $dialog.Close()
+        })
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+                $dialog.DragMove()
+            }
+        })
+
+        # Escape key to cancel
+        $dialog.Add_KeyDown({
+            param($sender, $e)
+            if ($e.Key -eq [System.Windows.Input.Key]::Escape) {
+                $script:CredentialDialogResult = $false
+                $dialog.Close()
+            }
+        })
+
+        # Enter key to save (when in password field)
+        $pwdPassword.Add_KeyDown({
+            param($sender, $e)
+            if ($e.Key -eq [System.Windows.Input.Key]::Enter) {
+                $btnSave.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
+            }
+        })
+
+        # Set owner to main window for proper modal behavior
+        if ($script:Window) {
+            $dialog.Owner = $script:Window
+        }
+        $dialog.ShowDialog() | Out-Null
+
+        return $script:CredentialDialogResult
+    }
+    catch {
+        Write-GuiLog "Error showing credential dialog: $($_.Exception.Message)"
+        # Fallback to error message
+        [System.Windows.MessageBox]::Show(
+            "Failed to show credential dialog:`n$($_.Exception.Message)",
+            "Error",
+            "OK",
+            "Error"
+        )
+        return $false
+    }
+}
+
 #endregion
 
 #region ==================== GUILOGWINDOW ====================
@@ -14290,9 +14588,12 @@ function Initialize-RobocurseGui {
 
                                         <!-- Credential -->
                                         <Label Grid.Row="3" Content="Credential:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
-                                        <TextBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtSettingsCredential" Text="Robocurse-SMTP"
-                                                 Style="{StaticResource DarkTextBox}" Margin="0,0,0,10"
+                                        <TextBox Grid.Row="3" Grid.Column="1" x:Name="txtSettingsCredential" Text="Robocurse-SMTP"
+                                                 Style="{StaticResource DarkTextBox}" Margin="0,0,5,10"
                                                  ToolTip="Windows Credential Manager target name"/>
+                                        <Button Grid.Row="3" Grid.Column="2" x:Name="btnSettingsSetCredential" Content="Set..."
+                                                Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,10"
+                                                ToolTip="Set SMTP username and password"/>
 
                                         <!-- From -->
                                         <Label Grid.Row="4" Content="From:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
@@ -15035,6 +15336,13 @@ function Initialize-EventHandlers {
     if ($script:Controls['btnSettingsSchedule']) {
         $script:Controls.btnSettingsSchedule.Add_Click({
             Invoke-SafeEventHandler -HandlerName "SettingsSchedule" -ScriptBlock { Show-ScheduleDialog }
+        })
+    }
+
+    # Set Credentials button
+    if ($script:Controls['btnSettingsSetCredential']) {
+        $script:Controls.btnSettingsSetCredential.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SettingsSetCredential" -ScriptBlock { Show-CredentialInputDialog }
         })
     }
 
