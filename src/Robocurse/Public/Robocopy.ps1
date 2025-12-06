@@ -206,11 +206,13 @@ function New-RobocopyArguments {
 
     # Profile-specified switches or defaults
     if ($RobocopyOptions.Switches -and $RobocopyOptions.Switches.Count -gt 0) {
-        # Filter out switches we handle separately
-        $customSwitches = $RobocopyOptions.Switches | Where-Object {
+        # Filter out switches we handle separately (case-insensitive)
+        $filteredSwitches = $RobocopyOptions.Switches | Where-Object {
             $_ -notmatch '^/(MT|R|W|LOG|MIR|E|TEE|NP|BYTES)' -and
             $_ -notmatch '^/LOG:'
         }
+        # Validate remaining switches against security whitelist to prevent injection
+        $customSwitches = Get-SanitizedRobocopySwitches -Switches $filteredSwitches
         foreach ($sw in $customSwitches) {
             $argList.Add($sw)
         }

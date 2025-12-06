@@ -15,6 +15,9 @@ InModuleScope 'Robocurse' {
     Describe "Orchestration Stress Tests" -Skip:(-not (Test-IsWindowsPlatform)) {
 
         BeforeAll {
+            # Ensure OrchestrationState is initialized before any tests run
+            Initialize-OrchestrationStateType | Out-Null
+
             # Create test directory structure
             $script:TestRoot = Join-Path $env:TEMP "RobocurseStressTest_$([Guid]::NewGuid().ToString('N').Substring(0,16))"
             $script:SourceDir = Join-Path $script:TestRoot "Source"
@@ -565,6 +568,7 @@ InModuleScope 'Robocurse' {
                         ChunkId = $i
                         SourcePath = "C:\Source\Dir$([int]($i / 100))\Subdir$([int]($i / 10) % 10)\file$($i % 10).txt"
                         EstimatedSize = 1000000 + ($i * 100)
+                        Status = 'Pending'
                     }
                     $script:OrchestrationState.ChunkQueue.Enqueue($chunk)
                 }

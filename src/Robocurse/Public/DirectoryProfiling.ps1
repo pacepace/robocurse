@@ -6,6 +6,74 @@ $script:ProfileCache = [System.Collections.Concurrent.ConcurrentDictionary[strin
     [System.StringComparer]::OrdinalIgnoreCase
 )
 
+# Cache statistics tracking (thread-safe via Interlocked operations)
+$script:ProfileCacheHits = 0
+$script:ProfileCacheMisses = 0
+$script:ProfileCacheEvictions = 0
+
+function Get-ProfileCacheStatistics {
+    <#
+    .SYNOPSIS
+        Returns statistics about the directory profile cache
+    .DESCRIPTION
+        Provides cache performance metrics including:
+        - Entry count
+        - Hit/miss counts and hit rate
+        - Eviction count
+        - Estimated memory usage
+    .OUTPUTS
+        PSCustomObject with cache statistics
+    .EXAMPLE
+        $stats = Get-ProfileCacheStatistics
+        Write-Host "Cache hit rate: $($stats.HitRatePercent)%"
+    #>
+    [CmdletBinding()]
+    param()
+
+    $hits = [System.Threading.Interlocked]::CompareExchange([ref]$script:ProfileCacheHits, 0, 0)
+    $misses = [System.Threading.Interlocked]::CompareExchange([ref]$script:ProfileCacheMisses, 0, 0)
+    $evictions = [System.Threading.Interlocked]::CompareExchange([ref]$script:ProfileCacheEvictions, 0, 0)
+    $entryCount = $script:ProfileCache.Count
+
+    $totalRequests = $hits + $misses
+    $hitRate = if ($totalRequests -gt 0) {
+        [math]::Round(($hits / $totalRequests) * 100, 1)
+    } else { 0 }
+
+    # Estimate memory usage (rough approximation)
+    # Each entry has: path string (~100 bytes avg) + profile object (~500 bytes avg)
+    $estimatedBytesPerEntry = 600
+    $estimatedMemoryBytes = $entryCount * $estimatedBytesPerEntry
+
+    return [PSCustomObject]@{
+        EntryCount = $entryCount
+        MaxEntries = $script:ProfileCacheMaxEntries
+        Hits = $hits
+        Misses = $misses
+        HitRatePercent = $hitRate
+        Evictions = $evictions
+        EstimatedMemoryMB = [math]::Round($estimatedMemoryBytes / 1MB, 2)
+    }
+}
+
+function Reset-ProfileCacheStatistics {
+    <#
+    .SYNOPSIS
+        Resets the cache statistics counters
+    .DESCRIPTION
+        Clears hit, miss, and eviction counters. Useful for benchmarking
+        or measuring cache effectiveness over a specific time period.
+    #>
+    [CmdletBinding()]
+    param()
+
+    [System.Threading.Interlocked]::Exchange([ref]$script:ProfileCacheHits, 0) | Out-Null
+    [System.Threading.Interlocked]::Exchange([ref]$script:ProfileCacheMisses, 0) | Out-Null
+    [System.Threading.Interlocked]::Exchange([ref]$script:ProfileCacheEvictions, 0) | Out-Null
+
+    Write-RobocurseLog "Profile cache statistics reset" -Level Debug -Component 'Cache'
+}
+
 function Invoke-RobocopyList {
     <#
     .SYNOPSIS
@@ -264,6 +332,8 @@ function Get-CachedProfile {
     # Thread-safe retrieval from ConcurrentDictionary
     $cachedProfile = $null
     if (-not $script:ProfileCache.TryGetValue($cacheKey, [ref]$cachedProfile)) {
+        # Track cache miss (thread-safe)
+        [System.Threading.Interlocked]::Increment([ref]$script:ProfileCacheMisses) | Out-Null
         return $null
     }
 
@@ -273,9 +343,13 @@ function Get-CachedProfile {
         Write-RobocurseLog "Cache expired for: $Path (age: $([math]::Round($age.TotalHours, 1))h)" -Level Debug
         # Remove expired entry (thread-safe)
         $script:ProfileCache.TryRemove($cacheKey, [ref]$null) | Out-Null
+        # Track as miss (expired entry)
+        [System.Threading.Interlocked]::Increment([ref]$script:ProfileCacheMisses) | Out-Null
         return $null
     }
 
+    # Track cache hit (thread-safe)
+    [System.Threading.Interlocked]::Increment([ref]$script:ProfileCacheHits) | Out-Null
     return $cachedProfile
 }
 
@@ -348,6 +422,8 @@ function Set-CachedProfile {
                 # TryRemove is atomic - if another thread already removed it, we just skip
                 if ($script:ProfileCache.TryRemove($entry.Key, [ref]$null)) {
                     $removed++
+                    # Track eviction (thread-safe)
+                    [System.Threading.Interlocked]::Increment([ref]$script:ProfileCacheEvictions) | Out-Null
                 }
             }
 

@@ -350,6 +350,19 @@ function Start-RobocurseMain {
             return 1
         }
 
+        # Phase 3c.5: Early VSS privilege check for profiles that require VSS
+        # Fail fast before starting replication if VSS prerequisites are not met
+        $vssProfiles = @($profilesToRun | Where-Object { $_.UseVSS -eq $true })
+        if ($vssProfiles.Count -gt 0) {
+            $vssCheck = Test-VssPrivileges
+            if (-not $vssCheck.Success) {
+                $vssProfileNames = ($vssProfiles | ForEach-Object { $_.Name }) -join ", "
+                Write-Error "VSS is required for profile(s) '$vssProfileNames' but VSS prerequisites are not met: $($vssCheck.ErrorMessage)"
+                return 1
+            }
+            Write-Host "VSS privileges verified for $($vssProfiles.Count) profile(s)"
+        }
+
         # Phase 3d: Run headless replication
         try {
             $maxJobs = if ($config.GlobalSettings.MaxConcurrentJobs) {

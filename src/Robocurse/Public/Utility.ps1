@@ -428,6 +428,145 @@ function Get-SanitizedChunkArgs {
     return $safeArgs
 }
 
+function Get-SanitizedRobocopySwitches {
+    <#
+    .SYNOPSIS
+        Validates and returns only safe robocopy switches from profile configuration
+    .DESCRIPTION
+        Profile configurations can specify custom robocopy switches. This function
+        validates each switch against a whitelist of known-safe robocopy options
+        to prevent command injection attacks via malicious config files.
+
+        Switches that are managed by Robocurse (MT, R, W, LOG, etc.) are filtered
+        out separately by the caller.
+    .PARAMETER Switches
+        Array of robocopy switches from profile configuration
+    .OUTPUTS
+        Array of validated, safe switches
+    .EXAMPLE
+        $safeSwitches = Get-SanitizedRobocopySwitches -Switches @("/COPY:DAT", "/DCOPY:T", "/Z")
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [AllowNull()]
+        [string[]]$Switches
+    )
+
+    if ($null -eq $Switches) {
+        return @()
+    }
+
+    $safeSwitches = @()
+
+    # Whitelist of safe robocopy switch patterns
+    # These are legitimate switches users might configure in profiles
+    # Patterns use regex and are case-insensitive
+    $safePatterns = @(
+        # Copy attribute switches
+        '^/COPY:(D|A|T|S|O|U)+$',     # Copy attributes (Data, Attrs, Timestamps, Security, Owner, aUditing)
+        '^/DCOPY:(D|A|T)+$',          # Directory copy attributes
+        '^/SEC$',                      # Copy with security (equiv to /COPY:DATS)
+        '^/COPYALL$',                  # Copy all attributes
+        '^/NOCOPY$',                   # Copy no attributes
+
+        # File selection switches
+        '^/A$',                        # Copy only files with archive attribute
+        '^/M$',                        # Copy files with archive, then clear archive attr
+        '^/IA:[RASHCNETO]+$',          # Include files with given attributes
+        '^/XA:[RASHCNETO]+$',          # Exclude files with given attributes
+        '^/XO$',                       # Exclude older files
+        '^/XC$',                       # Exclude changed files
+        '^/XN$',                       # Exclude newer files
+        '^/XX$',                       # Exclude extra files/dirs
+        '^/XL$',                       # Exclude lonely files/dirs
+        '^/IS$',                       # Include same files
+        '^/IT$',                       # Include tweaked files
+        '^/MAX:\d+$',                  # Maximum file size
+        '^/MIN:\d+$',                  # Minimum file size
+        '^/MAXAGE:\d+$',               # Maximum file age (days or date)
+        '^/MINAGE:\d+$',               # Minimum file age
+        '^/MAXLAD:\d+$',               # Maximum last access date
+        '^/MINLAD:\d+$',               # Minimum last access date
+        '^/FFT$',                      # FAT file time (2-second granularity)
+        '^/DST$',                      # Compensate for DST time differences
+
+        # Retry/wait switches (informational only - Robocurse manages these)
+        # Not included here as they're handled separately
+
+        # Copy mode switches
+        '^/Z$',                        # Restartable mode
+        '^/B$',                        # Backup mode
+        '^/ZB$',                       # Restartable with backup fallback
+        '^/J$',                        # Unbuffered I/O (large files)
+        '^/EFSRAW$',                   # Copy encrypted files in RAW mode
+        '^/NOOFFLOAD$',                # Disable offload copy mechanism
+
+        # Junction/symlink handling
+        '^/XJ$',                       # Exclude junctions
+        '^/XJD$',                      # Exclude junction directories
+        '^/XJF$',                      # Exclude junction files
+        '^/SL$',                       # Copy symbolic links
+        '^/SJ$',                       # Copy junctions as junctions
+
+        # Throttling
+        '^/IPG:\d+$',                  # Inter-packet gap (managed by Robocurse but safe)
+
+        # Structure options
+        '^/S$',                        # Copy subdirectories (non-empty)
+        '^/E$',                        # Copy subdirectories (including empty)
+        '^/LEV:\d+$',                  # Level depth
+        '^/CREATE$',                   # Create directory tree only
+
+        # Attribute handling
+        '^/A\+:[RASHCNET]+$',          # Add attributes
+        '^/A-:[RASHCNET]+$',           # Remove attributes
+
+        # Miscellaneous safe options
+        '^/256$',                      # Disable long path support (>256 chars)
+        '^/SPARSE$',                   # Enable sparse file handling
+        '^/COMPRESS$',                 # Request network compression
+        '^/LFSM(:\d+[KMG]?)?$',        # Low free space mode
+        '^/RH:\d{4}-\d{4}$'            # Run hours (e.g., /RH:2100-0500)
+    )
+
+    foreach ($switch in $Switches) {
+        if ([string]::IsNullOrWhiteSpace($switch)) {
+            continue
+        }
+
+        # Normalize switch (uppercase for consistent matching)
+        $normalizedSwitch = $switch.Trim().ToUpper()
+
+        # First check for dangerous patterns
+        if (-not (Test-SafeRobocopyArgument -Value $switch)) {
+            Write-RobocurseLog -Message "Rejected switch with unsafe characters: $switch" `
+                -Level 'Warning' -Component 'Security'
+            continue
+        }
+
+        $isSafe = $false
+        foreach ($pattern in $safePatterns) {
+            if ($normalizedSwitch -match $pattern) {
+                $isSafe = $true
+                break
+            }
+        }
+
+        if ($isSafe) {
+            # Return the original switch (preserving original case)
+            $safeSwitches += $switch
+        }
+        else {
+            Write-RobocurseLog -Message "Rejected unrecognized robocopy switch: $switch (not in whitelist)" `
+                -Level 'Warning' -Component 'Security'
+        }
+    }
+
+    return $safeSwitches
+}
+
 function Test-SourcePathAccessible {
     <#
     .SYNOPSIS

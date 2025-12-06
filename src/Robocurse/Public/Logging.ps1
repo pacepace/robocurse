@@ -553,6 +553,8 @@ function Write-SiemEvent {
             'VssSnapshotCreated', 'VssSnapshotRemoved', 'VssError', 'VssWarning',
             # Checkpoint events
             'CheckpointError', 'CheckpointWarning',
+            # Security events (injection attempts, validation failures)
+            'SecurityWarning', 'SecurityError',
             # General catch-all events
             'GeneralError', 'GeneralWarning'
         )]

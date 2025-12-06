@@ -45,6 +45,19 @@ function Get-ProfilesToRun {
         }
     }
 
+    # Early VSS privilege check - verify before starting replication
+    # This prevents wasted time if VSS is required but privileges are missing
+    $vssProfiles = @($profilesToRun | Where-Object { $_.UseVSS -eq $true })
+    if ($vssProfiles.Count -gt 0) {
+        $vssCheck = Test-VssPrivileges
+        if (-not $vssCheck.Success) {
+            $vssProfileNames = ($vssProfiles | ForEach-Object { $_.Name }) -join ", "
+            Show-GuiError -Message "VSS is required for profile(s) '$vssProfileNames' but VSS prerequisites are not met: $($vssCheck.ErrorMessage)"
+            return $null
+        }
+        Write-GuiLog "VSS privileges verified for $($vssProfiles.Count) profile(s)"
+    }
+
     return $profilesToRun
 }
 
@@ -131,6 +144,10 @@ function Complete-GuiReplication {
     .DESCRIPTION
         Handles GUI cleanup after replication: stops timer, re-enables buttons,
         disposes of background runspace resources, and shows completion message.
+
+        THREAD SAFETY: Delegates runspace cleanup to Close-ReplicationRunspace
+        which uses Interlocked.Exchange for atomic capture-and-clear. This prevents
+        race conditions if window close and completion handler fire simultaneously.
     #>
     [CmdletBinding()]
     param()
@@ -138,48 +155,21 @@ function Complete-GuiReplication {
     # Stop timer
     $script:ProgressTimer.Stop()
 
-    # Dispose of background runspace resources to prevent memory leaks
-    if ($script:ReplicationPowerShell) {
-        try {
-            # End the async invocation if still running
-            if ($script:ReplicationHandle -and -not $script:ReplicationHandle.IsCompleted) {
-                $script:ReplicationPowerShell.Stop()
-            }
-            elseif ($script:ReplicationHandle) {
-                # Collect any remaining output
-                $script:ReplicationPowerShell.EndInvoke($script:ReplicationHandle) | Out-Null
-            }
-
-            # Check for errors from the background runspace and surface them
-            # Note: HadErrors can be true even with empty Error stream, so check count
-            if ($script:ReplicationPowerShell.Streams.Error.Count -gt 0) {
-                Write-GuiLog "Background replication encountered errors:"
-                foreach ($err in $script:ReplicationPowerShell.Streams.Error) {
-                    $errorLocation = if ($err.InvocationInfo) {
-                        "$($err.InvocationInfo.ScriptName):$($err.InvocationInfo.ScriptLineNumber)"
-                    } else { "Unknown" }
-                    Write-GuiLog "  [$errorLocation] $($err.Exception.Message)"
-                }
-            }
-
-            # Dispose the runspace
-            if ($script:ReplicationPowerShell.Runspace) {
-                $script:ReplicationPowerShell.Runspace.Close()
-                $script:ReplicationPowerShell.Runspace.Dispose()
-            }
-
-            # Dispose the PowerShell instance
-            $script:ReplicationPowerShell.Dispose()
-        }
-        catch {
-            Write-GuiLog "Warning: Error disposing runspace: $($_.Exception.Message)"
-        }
-        finally {
-            $script:ReplicationPowerShell = $null
-            $script:ReplicationHandle = $null
-            $script:ReplicationRunspace = $null  # Clear runspace reference for GC
+    # Capture error info from background runspace BEFORE cleanup disposes it
+    # (Close-ReplicationRunspace will dispose the PowerShell instance)
+    if ($script:ReplicationPowerShell -and $script:ReplicationPowerShell.Streams.Error.Count -gt 0) {
+        Write-GuiLog "Background replication encountered errors:"
+        foreach ($err in $script:ReplicationPowerShell.Streams.Error) {
+            $errorLocation = if ($err.InvocationInfo) {
+                "$($err.InvocationInfo.ScriptName):$($err.InvocationInfo.ScriptLineNumber)"
+            } else { "Unknown" }
+            Write-GuiLog "  [$errorLocation] $($err.Exception.Message)"
         }
     }
+
+    # Delegate to the thread-safe cleanup function (uses Interlocked.Exchange)
+    # This prevents race conditions with window close handler
+    Close-ReplicationRunspace
 
     # Re-enable buttons
     $script:Controls.btnRunAll.IsEnabled = $true

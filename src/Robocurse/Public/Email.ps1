@@ -29,6 +29,87 @@ $script:EmailStatusColors = @{
     Failed  = '#F44336'  # Red
 }
 
+function Get-SanitizedEmailHeader {
+    <#
+    .SYNOPSIS
+        Sanitizes a string for use in email headers to prevent CRLF injection
+    .DESCRIPTION
+        Email header injection attacks exploit CRLF (Carriage Return Line Feed)
+        sequences in header values to inject additional headers or email content.
+        This function removes/replaces dangerous characters.
+    .PARAMETER Value
+        The header value to sanitize
+    .PARAMETER FieldName
+        Name of the field (for logging)
+    .OUTPUTS
+        Sanitized string safe for use in email headers
+    .EXAMPLE
+        $safeFrom = Get-SanitizedEmailHeader -Value $config.From -FieldName "From"
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Value,
+
+        [string]$FieldName = "Header"
+    )
+
+    if ([string]::IsNullOrEmpty($Value)) {
+        return $Value
+    }
+
+    $original = $Value
+
+    # Remove carriage return and line feed characters (CRLF injection prevention)
+    # Also remove null bytes and other control characters
+    $sanitized = $Value -replace '[\r\n\x00-\x1F]', ''
+
+    # Log if sanitization changed the value (potential attack attempt)
+    if ($sanitized -ne $original) {
+        Write-RobocurseLog -Message "Sanitized potential CRLF injection in $FieldName header" `
+            -Level 'Warning' -Component 'Security'
+        Write-SiemEvent -EventType 'SecurityWarning' -Data @{
+            type = 'CRLFInjectionAttempt'
+            field = $FieldName
+        }
+    }
+
+    return $sanitized
+}
+
+function Get-SanitizedEmailAddress {
+    <#
+    .SYNOPSIS
+        Validates and sanitizes an email address
+    .DESCRIPTION
+        Validates email format and removes dangerous characters.
+        Returns the sanitized email or $null if invalid.
+    .PARAMETER Email
+        The email address to validate and sanitize
+    .OUTPUTS
+        Sanitized email address or $null if invalid
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Email
+    )
+
+    # First sanitize for CRLF
+    $sanitized = Get-SanitizedEmailHeader -Value $Email -FieldName "Email"
+
+    # Basic email format validation (not exhaustive, but catches obvious issues)
+    # Allows standard email format: local@domain
+    if ($sanitized -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+        Write-RobocurseLog -Message "Invalid email address format rejected: $sanitized" `
+            -Level 'Warning' -Component 'Email'
+        return $null
+    }
+
+    return $sanitized
+}
+
 function Initialize-CredentialManager {
     <#
     .SYNOPSIS
@@ -130,14 +211,15 @@ function Get-SmtpCredential {
     if ($envUser -and $envPass) {
         try {
             $securePass = ConvertTo-SecureString -String $envPass -AsPlainText -Force
-            # AUDIT: Log credential retrieval from environment
-            Write-RobocurseLog -Message "SMTP credential retrieved from environment variables (user: $envUser)" `
+            # AUDIT: Log credential retrieval from environment (redact username for security)
+            $redactedUser = if ($envUser.Length -gt 3) { $envUser.Substring(0, 3) + "***" } else { "***" }
+            Write-RobocurseLog -Message "SMTP credential retrieved from environment variables (user: $redactedUser)" `
                 -Level 'Info' -Component 'Email'
             Write-SiemEvent -EventType 'ConfigChange' -Data @{
                 action = 'CredentialRetrieved'
                 source = 'EnvironmentVariable'
                 target = $Target
-                user = $envUser
+                # Don't log actual username in SIEM events
             }
             return New-Object System.Management.Automation.PSCredential($envUser, $securePass)
         }
@@ -185,14 +267,15 @@ function Get-SmtpCredential {
                             [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
                         }
 
-                        # AUDIT: Log credential retrieval from Windows Credential Manager
-                        Write-RobocurseLog -Message "SMTP credential retrieved from Windows Credential Manager (target: $Target, user: $($credential.UserName))" `
+                        # AUDIT: Log credential retrieval from Windows Credential Manager (redact username)
+                        $redactedUser = if ($credential.UserName.Length -gt 3) { $credential.UserName.Substring(0, 3) + "***" } else { "***" }
+                        Write-RobocurseLog -Message "SMTP credential retrieved from Windows Credential Manager (target: $Target, user: $redactedUser)" `
                             -Level 'Info' -Component 'Email'
                         Write-SiemEvent -EventType 'ConfigChange' -Data @{
                             action = 'CredentialRetrieved'
                             source = 'WindowsCredentialManager'
                             target = $Target
-                            user = $credential.UserName
+                            # Don't log actual username in SIEM events
                         }
 
                         return New-Object System.Management.Automation.PSCredential($credential.UserName, $securePassword)
@@ -654,7 +737,24 @@ function Send-CompletionEmail {
         return New-OperationResult -Success $false -ErrorMessage "SMTP credential not found: $($Config.CredentialTarget)"
     }
 
-    # Build email
+    # Sanitize email addresses to prevent CRLF header injection
+    $safeFrom = Get-SanitizedEmailAddress -Email $Config.From
+    if (-not $safeFrom) {
+        return New-OperationResult -Success $false -ErrorMessage "Invalid From email address: $($Config.From)"
+    }
+
+    $safeTo = @()
+    foreach ($toAddr in $Config.To) {
+        $sanitized = Get-SanitizedEmailAddress -Email $toAddr
+        if ($sanitized) {
+            $safeTo += $sanitized
+        }
+    }
+    if ($safeTo.Count -eq 0) {
+        return New-OperationResult -Success $false -ErrorMessage "No valid To email addresses after sanitization"
+    }
+
+    # Build email (subject uses ValidateSet-constrained $Status, so safe from injection)
     $subject = "Robocurse: Replication $Status - $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
     $body = New-CompletionEmailBody -Results $Results -Status $Status
 
@@ -667,12 +767,12 @@ function Send-CompletionEmail {
 
     try {
         $mailParams = @{
-            SmtpServer = $Config.SmtpServer
+            SmtpServer = Get-SanitizedEmailHeader -Value $Config.SmtpServer -FieldName "SmtpServer"
             Port = $Config.Port
             UseSsl = $Config.UseTls
             Credential = $credential
-            From = $Config.From
-            To = $Config.To
+            From = $safeFrom
+            To = $safeTo
             Subject = $subject
             Body = $body
             BodyAsHtml = $true

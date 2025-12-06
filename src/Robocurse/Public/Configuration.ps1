@@ -108,6 +108,9 @@ function New-DefaultConfig {
     if ($null -eq $config.SyncProfiles) {
         $config.SyncProfiles = @()
     }
+    if ($null -eq $config.GlobalSettings.RedactServerNames) {
+        $config.GlobalSettings.RedactServerNames = @()
+    }
 
     return $config
 }

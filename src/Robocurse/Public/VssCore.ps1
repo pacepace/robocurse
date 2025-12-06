@@ -7,13 +7,35 @@ $script:VssTempDir = if ($env:TEMP) { $env:TEMP } elseif ($env:TMPDIR) { $env:TM
 $script:VssTrackingFile = Join-Path $script:VssTempDir "Robocurse-VSS-Tracking.json"
 
 # Shared retryable HRESULT codes for VSS operations (language-independent)
+# These represent transient failures that may succeed on retry
 $script:VssRetryableHResults = @(
-    0x8004230F,  # VSS_E_INSUFFICIENT_STORAGE - Insufficient storage (might clear up)
+    # Storage-related (may clear up after cleanup or time)
+    0x8004230F,  # VSS_E_INSUFFICIENT_STORAGE - Insufficient storage space
+    0x80042317,  # VSS_E_MAXIMUM_NUMBER_OF_VOLUMES_REACHED - Max volumes exceeded
+
+    # Concurrent operation conflicts
     0x80042316,  # VSS_E_SNAPSHOT_SET_IN_PROGRESS - Another snapshot operation in progress
     0x80042302,  # VSS_E_OBJECT_NOT_FOUND - Object not found (transient state)
-    0x80042317,  # VSS_E_MAXIMUM_NUMBER_OF_VOLUMES_REACHED - Might clear after cleanup
+
+    # Timeout errors (often succeed on retry)
     0x8004231F,  # VSS_E_WRITERERROR_TIMEOUT - Writer timeout
-    0x80042325   # VSS_E_FLUSH_WRITES_TIMEOUT - Flush timeout
+    0x80042325,  # VSS_E_FLUSH_WRITES_TIMEOUT - Flush timeout
+    0x80042308,  # VSS_E_PROVIDER_VETO - Provider vetoed operation (often transient)
+    0x8004232B,  # VSS_E_HOLD_WRITES_TIMEOUT - Hold writes timeout
+
+    # Writer-related transient issues
+    0x80042318,  # VSS_E_WRITER_STATUS_NOT_AVAILABLE - Writer status unavailable
+    0x80042319,  # VSS_E_WRITER_INFRASTRUCTURE - Writer infrastructure issue
+    0x8004231A,  # VSS_E_ASRERROR_UNEXPECTED - ASR error (may be transient)
+
+    # RPC/communication errors (network hiccups)
+    0x800706BE,  # RPC_S_CALL_FAILED - RPC call failed
+    0x800706BA,  # RPC_S_SERVER_UNAVAILABLE - RPC server unavailable
+    0x800706BF,  # RPC_S_CALL_FAILED_DNE - RPC call did not execute
+
+    # Generic transient errors
+    0x80070005,  # E_ACCESSDENIED - Access denied (may be transient lock)
+    0x80070020   # ERROR_SHARING_VIOLATION - File/resource in use
 )
 
 # Shared retryable patterns for VSS errors (English fallback for errors without HRESULT)

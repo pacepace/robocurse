@@ -15,6 +15,9 @@ $projectRoot = Split-Path -Parent (Split-Path -Parent $testRoot)
 $modulePath = Join-Path $projectRoot "src\Robocurse\Robocurse.psm1"
 Import-Module $modulePath -Force -Global -DisableNameChecking
 
+# Initialize the C# OrchestrationState type (required for module isolation when running all tests together)
+Initialize-OrchestrationStateType | Out-Null
+
 Describe "Config JSON Schema Tests" -Tag "Schema", "Unit" {
 
     BeforeAll {

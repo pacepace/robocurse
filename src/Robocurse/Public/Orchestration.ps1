@@ -409,6 +409,104 @@ $script:OnProfileComplete = $null
 # Script-scoped replication run settings (preserved across profile transitions)
 $script:CurrentMaxConcurrentJobs = $null
 
+# Circuit breaker configuration and state
+# Trips after consecutive failures to prevent wasted effort on persistent issues
+$script:CircuitBreakerThreshold = 10       # Consecutive failures before tripping
+$script:CircuitBreakerConsecutiveFailures = 0
+$script:CircuitBreakerTripped = $false
+$script:CircuitBreakerReason = $null
+
+function Reset-CircuitBreaker {
+    <#
+    .SYNOPSIS
+        Resets the circuit breaker state for a new run
+    #>
+    [CmdletBinding()]
+    param()
+    $script:CircuitBreakerConsecutiveFailures = 0
+    $script:CircuitBreakerTripped = $false
+    $script:CircuitBreakerReason = $null
+}
+
+function Test-CircuitBreakerTripped {
+    <#
+    .SYNOPSIS
+        Checks if the circuit breaker has tripped
+    .OUTPUTS
+        $true if circuit breaker has tripped, $false otherwise
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+    return $script:CircuitBreakerTripped
+}
+
+function Invoke-CircuitBreakerCheck {
+    <#
+    .SYNOPSIS
+        Checks if circuit breaker should trip after a failure
+    .DESCRIPTION
+        Increments the consecutive failure counter and trips the circuit breaker
+        if the threshold is reached. When tripped, the orchestrator will stop
+        processing and mark the run as stopped.
+    .PARAMETER ChunkId
+        The chunk that failed (for logging)
+    .PARAMETER ErrorMessage
+        The error message from the failure
+    .OUTPUTS
+        $true if circuit breaker was just tripped, $false otherwise
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [string]$ChunkId,
+        [string]$ErrorMessage
+    )
+
+    $script:CircuitBreakerConsecutiveFailures++
+
+    if ($script:CircuitBreakerConsecutiveFailures -ge $script:CircuitBreakerThreshold -and -not $script:CircuitBreakerTripped) {
+        $script:CircuitBreakerTripped = $true
+        $script:CircuitBreakerReason = "Circuit breaker tripped after $($script:CircuitBreakerThreshold) consecutive chunk failures. Last error: $ErrorMessage"
+
+        Write-RobocurseLog -Message $script:CircuitBreakerReason -Level 'Error' -Component 'CircuitBreaker'
+        Write-SiemEvent -EventType 'ChunkError' -Data @{
+            type = 'CircuitBreakerTripped'
+            consecutiveFailures = $script:CircuitBreakerConsecutiveFailures
+            lastChunkId = $ChunkId
+            lastError = $ErrorMessage
+        }
+
+        # Signal orchestrator to stop
+        if ($script:OrchestrationState) {
+            $script:OrchestrationState.StopRequested = $true
+            $script:OrchestrationState.EnqueueError($script:CircuitBreakerReason)
+        }
+
+        return $true
+    }
+
+    return $false
+}
+
+function Reset-CircuitBreakerOnSuccess {
+    <#
+    .SYNOPSIS
+        Resets the consecutive failure counter after a successful chunk
+    .DESCRIPTION
+        Called when a chunk completes successfully to reset the circuit breaker
+        failure counter. This allows the system to recover from transient failures.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if ($script:CircuitBreakerConsecutiveFailures -gt 0) {
+        Write-RobocurseLog -Message "Circuit breaker reset after successful chunk (was at $($script:CircuitBreakerConsecutiveFailures) consecutive failures)" `
+            -Level 'Debug' -Component 'CircuitBreaker'
+        $script:CircuitBreakerConsecutiveFailures = 0
+    }
+}
+
 function Initialize-OrchestrationState {
     <#
     .SYNOPSIS
@@ -431,6 +529,9 @@ function Initialize-OrchestrationState {
 
     # Reset the existing state object (don't create a new one - that breaks cross-thread sharing)
     $script:OrchestrationState.Reset()
+
+    # Reset circuit breaker state for new run
+    Reset-CircuitBreaker
 
     # Clear profile cache to prevent unbounded memory growth across runs
     Clear-ProfileCache
@@ -910,6 +1011,8 @@ function Invoke-ReplicationTick {
             }
             else {
                 $state.CompletedChunks.Enqueue($removedJob.Chunk)
+                # Reset circuit breaker on success - consecutive failures counter goes back to 0
+                Reset-CircuitBreakerOnSuccess
                 # Track cumulative bytes from completed chunks (avoids O(n) iteration in Update-ProgressStats)
                 if ($removedJob.Chunk.EstimatedSize) {
                     $state.AddCompletedChunkBytes($removedJob.Chunk.EstimatedSize)
@@ -1191,6 +1294,9 @@ function Invoke-FailedChunkHandler {
             retryCount = $chunk.RetryCount
             exitCode = $Result.ExitCode
         }
+
+        # Check circuit breaker - trips if too many consecutive permanent failures
+        Invoke-CircuitBreakerCheck -ChunkId $chunk.ChunkId -ErrorMessage $Result.ExitMeaning.Message | Out-Null
     }
 }
 

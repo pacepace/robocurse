@@ -42,6 +42,8 @@ Describe "Error Recovery Tests" -Tag "ErrorRecovery" {
 
         BeforeEach {
             InModuleScope 'Robocurse' {
+                # Ensure OrchestrationState is initialized before use
+                Initialize-OrchestrationStateType | Out-Null
                 $script:OrchestrationState.Reset()
                 Mock Write-RobocurseLog { }
                 Mock Write-SiemEvent { }
@@ -153,6 +155,8 @@ Describe "Error Recovery Tests" -Tag "ErrorRecovery" {
 
         BeforeEach {
             InModuleScope 'Robocurse' {
+                # Ensure OrchestrationState is initialized before use
+                Initialize-OrchestrationStateType | Out-Null
                 $script:OrchestrationState.Reset()
                 Mock Write-RobocurseLog { }
                 Mock Write-SiemEvent { }
@@ -262,6 +266,8 @@ Describe "Error Recovery Tests" -Tag "ErrorRecovery" {
 
         BeforeEach {
             InModuleScope 'Robocurse' {
+                # Ensure OrchestrationState is initialized before use
+                Initialize-OrchestrationStateType | Out-Null
                 $script:OrchestrationState.Reset()
                 Mock Write-RobocurseLog { }
                 Mock Write-SiemEvent { }
@@ -412,6 +418,8 @@ Describe "Error Recovery Tests" -Tag "ErrorRecovery" {
 
         BeforeEach {
             InModuleScope 'Robocurse' {
+                # Ensure OrchestrationState is initialized before use
+                Initialize-OrchestrationStateType | Out-Null
                 $script:OrchestrationState.Reset()
                 Mock Write-RobocurseLog { }
                 Mock Write-SiemEvent { }
@@ -510,6 +518,8 @@ Describe "Error Recovery Tests" -Tag "ErrorRecovery" {
 
         BeforeEach {
             InModuleScope 'Robocurse' {
+                # Ensure OrchestrationState is initialized before use
+                Initialize-OrchestrationStateType | Out-Null
                 $script:OrchestrationState.Reset()
                 Mock Write-RobocurseLog { }
                 Mock Write-SiemEvent { }
@@ -590,6 +600,8 @@ Describe "Error Recovery Tests" -Tag "ErrorRecovery" {
 
         BeforeEach {
             InModuleScope 'Robocurse' {
+                # Ensure OrchestrationState is initialized before use
+                Initialize-OrchestrationStateType | Out-Null
                 $script:OrchestrationState.Reset()
                 Mock Write-RobocurseLog { }
                 Mock Write-SiemEvent { }
@@ -684,6 +696,8 @@ Describe "Error Recovery Tests" -Tag "ErrorRecovery" {
 
         BeforeEach {
             InModuleScope 'Robocurse' {
+                # Ensure OrchestrationState is initialized before use
+                Initialize-OrchestrationStateType | Out-Null
                 $script:OrchestrationState.Reset()
                 Mock Write-RobocurseLog { }
                 Mock Write-SiemEvent { }

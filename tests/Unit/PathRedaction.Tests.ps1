@@ -15,10 +15,15 @@ $projectRoot = Split-Path -Parent (Split-Path -Parent $testRoot)
 $modulePath = Join-Path $projectRoot "src\Robocurse\Robocurse.psm1"
 Import-Module $modulePath -Force -Global -DisableNameChecking
 
+# Initialize the C# OrchestrationState type (required for module isolation when running all tests together)
+Initialize-OrchestrationStateType | Out-Null
+
 Describe "Path Redaction Tests" -Tag "PathRedaction", "Unit" {
 
     BeforeEach {
         InModuleScope 'Robocurse' {
+            # Ensure OrchestrationState is initialized
+            Initialize-OrchestrationStateType | Out-Null
             # Ensure redaction is disabled before each test
             Disable-PathRedaction
         }
@@ -448,7 +453,8 @@ Describe "Path Redaction Tests" -Tag "PathRedaction", "Unit" {
                 $config = New-DefaultConfig
 
                 $config.GlobalSettings.PSObject.Properties.Name | Should -Contain 'RedactServerNames'
-                $config.GlobalSettings.RedactServerNames | Should -BeOfType [array]
+                # Use direct type check - piping empty array to Should loses it in pipeline unrolling
+                ($config.GlobalSettings.RedactServerNames -is [array]) | Should -Be $true
             }
         }
 

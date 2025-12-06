@@ -19,9 +19,17 @@ $projectRoot = Split-Path -Parent (Split-Path -Parent $testRoot)
 $modulePath = Join-Path $projectRoot "src\Robocurse\Robocurse.psm1"
 Import-Module $modulePath -Force -Global -DisableNameChecking
 
+# Initialize the C# OrchestrationState type (required for module isolation when running all tests together)
+Initialize-OrchestrationStateType | Out-Null
+
 Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
 
     BeforeAll {
+        # Ensure OrchestrationState is initialized before any tests run
+        InModuleScope 'Robocurse' {
+            Initialize-OrchestrationStateType | Out-Null
+        }
+
         # Create test directory
         $script:TestDir = Join-Path ([System.IO.Path]::GetTempPath()) "Robocurse-Main-Test-$([Guid]::NewGuid().ToString('N').Substring(0,8))"
         New-Item -ItemType Directory -Path $script:TestDir -Force | Out-Null
@@ -65,6 +73,13 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
         }
     }
 
+    BeforeEach {
+        # Ensure OrchestrationState is initialized before each test
+        InModuleScope 'Robocurse' {
+            Initialize-OrchestrationStateType | Out-Null
+        }
+    }
+
     Context "Show-RobocurseHelp" {
 
         It "Should display help text without errors" {
@@ -95,11 +110,14 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
-                # Suppress error output for cleaner test
+                # Temporarily allow Continue so Write-Error doesn't terminate
+                $oldEAP = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
                 $result = Start-RobocurseMain -Headless -ConfigPath $ConfigPath 2>&1
+                $ErrorActionPreference = $oldEAP
 
-                # Should return error exit code
-                $result | Should -Match "requires either -Profile|AllProfiles"
+                # Should return error exit code - convert ErrorRecord to string
+                ($result | Out-String) | Should -Match "requires either -Profile|AllProfiles"
             }
         }
 
@@ -107,10 +125,11 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
+                Initialize-OrchestrationStateType | Out-Null
                 Mock Write-Warning { $script:WarningCalled = $true }
                 Mock Start-ReplicationRun { }
                 Mock Invoke-ReplicationTick { }
-                Mock Get-OrchestrationStatus { @{ Phase = 'Complete' } }
+                Mock Get-OrchestrationStatus { @{ Phase = 'Complete'; ChunksTotal = 1; ChunksComplete = 1; ChunksFailed = 0; Elapsed = [timespan]::FromSeconds(10); FilesCopied = 1; BytesComplete = 1000 } }
                 Mock Initialize-LogSession { @{ SessionId = "test" } }
 
                 # Set state to complete to exit loop
@@ -127,9 +146,12 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
                 # Path with shell injection attempt
                 $unsafePath = "C:\Config; malicious-command"
 
+                $oldEAP = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
                 $result = Start-RobocurseMain -Headless -ConfigPath $unsafePath -AllProfiles 2>&1
+                $ErrorActionPreference = $oldEAP
 
-                $result | Should -Match "unsafe"
+                ($result | Out-String) | Should -Match "unsafe"
             }
         }
 
@@ -137,22 +159,32 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' {
                 $unsafePath = 'C:\Config\$(whoami).json'
 
+                $oldEAP = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
                 $result = Start-RobocurseMain -Headless -ConfigPath $unsafePath -AllProfiles 2>&1
+                $ErrorActionPreference = $oldEAP
 
-                $result | Should -Match "unsafe"
+                ($result | Out-String) | Should -Match "unsafe"
             }
         }
     }
 
     Context "Configuration Loading" {
 
+        BeforeEach {
+            InModuleScope 'Robocurse' {
+                Initialize-OrchestrationStateType | Out-Null
+            }
+        }
+
         It "Should load valid configuration file" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
+                Initialize-OrchestrationStateType | Out-Null
                 Mock Start-ReplicationRun { }
                 Mock Invoke-ReplicationTick { }
-                Mock Get-OrchestrationStatus { @{ Phase = 'Complete'; ChunksTotal = 0; ChunksComplete = 0 } }
+                Mock Get-OrchestrationStatus { @{ Phase = 'Complete'; ChunksTotal = 1; ChunksComplete = 1; ChunksFailed = 0; Elapsed = [timespan]::FromSeconds(10); FilesCopied = 1; BytesComplete = 1000 } }
                 Mock Initialize-LogSession { @{ SessionId = "test" } }
                 Mock Send-CompletionEmail { @{ Success = $true } }
 
@@ -168,9 +200,12 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' {
                 $missingPath = Join-Path $TestDrive "nonexistent.json"
 
+                $oldEAP = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
                 $result = Start-RobocurseMain -Headless -ConfigPath $missingPath -AllProfiles 2>&1
+                $ErrorActionPreference = $oldEAP
 
-                $result | Should -Match "Configuration file required|not found"
+                ($result | Out-String) | Should -Match "Configuration file required|not found"
             }
         }
 
@@ -183,25 +218,37 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
 
                 Mock Initialize-LogSession { @{ SessionId = "test" } }
 
-                # Get-RobocurseConfig returns default on parse error
-                # but Start-RobocurseMain should still proceed
-                { Start-RobocurseMain -Headless -ConfigPath $ConfigPath -AllProfiles 2>&1 } | Should -Not -Throw
+                $oldEAP = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
+                # Get-RobocurseConfig returns default on parse error with no profiles
+                # so Start-RobocurseMain should fail with "no enabled profiles"
+                $result = Start-RobocurseMain -Headless -ConfigPath $ConfigPath -AllProfiles 2>&1
+                $ErrorActionPreference = $oldEAP
+
+                ($result | Out-String) | Should -Match "No enabled profiles|parse error"
             }
         }
     }
 
     Context "Profile Resolution" {
 
+        BeforeEach {
+            InModuleScope 'Robocurse' {
+                Initialize-OrchestrationStateType | Out-Null
+            }
+        }
+
         It "Should find profile by name" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
+                Initialize-OrchestrationStateType | Out-Null
                 Mock Start-ReplicationRun {
                     param($Profiles)
                     $script:ResolvedProfiles = $Profiles
                 }
                 Mock Invoke-ReplicationTick { }
-                Mock Get-OrchestrationStatus { @{ Phase = 'Complete' } }
+                Mock Get-OrchestrationStatus { @{ Phase = 'Complete'; ChunksTotal = 1; ChunksComplete = 1; ChunksFailed = 0; Elapsed = [timespan]::FromSeconds(10); FilesCopied = 1; BytesComplete = 1000 } }
                 Mock Initialize-LogSession { @{ SessionId = "test" } }
 
                 $script:OrchestrationState.Reset()
@@ -220,9 +267,12 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
 
                 Mock Initialize-LogSession { @{ SessionId = "test" } }
 
+                $oldEAP = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
                 $result = Start-RobocurseMain -Headless -ConfigPath $ConfigPath -ProfileName "NonExistent" 2>&1
+                $ErrorActionPreference = $oldEAP
 
-                $result | Should -Match "not found|Available profiles"
+                ($result | Out-String) | Should -Match "not found|Available profiles"
             }
         }
 
@@ -232,9 +282,12 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
 
                 Mock Initialize-LogSession { @{ SessionId = "test" } }
 
+                $oldEAP = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
                 $result = Start-RobocurseMain -Headless -ConfigPath $ConfigPath -ProfileName "NonExistent" 2>&1
+                $ErrorActionPreference = $oldEAP
 
-                $result | Should -Match "TestProfile"
+                ($result | Out-String) | Should -Match "TestProfile"
             }
         }
 
@@ -242,12 +295,13 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
+                Initialize-OrchestrationStateType | Out-Null
                 Mock Start-ReplicationRun {
                     param($Profiles)
                     $script:AllResolvedProfiles = $Profiles
                 }
                 Mock Invoke-ReplicationTick { }
-                Mock Get-OrchestrationStatus { @{ Phase = 'Complete' } }
+                Mock Get-OrchestrationStatus { @{ Phase = 'Complete'; ChunksTotal = 1; ChunksComplete = 1; ChunksFailed = 0; Elapsed = [timespan]::FromSeconds(10); FilesCopied = 1; BytesComplete = 1000 } }
                 Mock Initialize-LogSession { @{ SessionId = "test" } }
 
                 $script:OrchestrationState.Reset()
@@ -281,9 +335,12 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
 
                 Mock Initialize-LogSession { @{ SessionId = "test" } }
 
+                $oldEAP = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
                 $result = Start-RobocurseMain -Headless -ConfigPath $ConfigPath -AllProfiles 2>&1
+                $ErrorActionPreference = $oldEAP
 
-                $result | Should -Match "No enabled profiles"
+                ($result | Out-String) | Should -Match "No enabled profiles"
             }
         }
     }
@@ -292,6 +349,7 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
 
         BeforeEach {
             InModuleScope 'Robocurse' {
+                Initialize-OrchestrationStateType | Out-Null
                 $script:OrchestrationState.Reset()
                 Mock Write-RobocurseLog { }
                 Mock Write-SiemEvent { }
@@ -302,12 +360,13 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
+                Initialize-OrchestrationStateType | Out-Null
                 Mock Start-ReplicationRun {
                     param($Profiles, $MaxConcurrentJobs, $BandwidthLimitMbps, $DryRun)
                     $script:DryRunPassed = $DryRun
                 }
                 Mock Invoke-ReplicationTick { }
-                Mock Get-OrchestrationStatus { @{ Phase = 'Complete' } }
+                Mock Get-OrchestrationStatus { @{ Phase = 'Complete'; ChunksTotal = 1; ChunksComplete = 1; ChunksFailed = 0; Elapsed = [timespan]::FromSeconds(10); FilesCopied = 1; BytesComplete = 1000 } }
                 Mock Initialize-LogSession { @{ SessionId = "test" } }
 
                 $script:OrchestrationState.Phase = "Complete"
@@ -322,12 +381,13 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
+                Initialize-OrchestrationStateType | Out-Null
                 Mock Start-ReplicationRun {
                     param($Profiles, $MaxConcurrentJobs)
                     $script:MaxJobsPassed = $MaxConcurrentJobs
                 }
                 Mock Invoke-ReplicationTick { }
-                Mock Get-OrchestrationStatus { @{ Phase = 'Complete' } }
+                Mock Get-OrchestrationStatus { @{ Phase = 'Complete'; ChunksTotal = 1; ChunksComplete = 1; ChunksFailed = 0; Elapsed = [timespan]::FromSeconds(10); FilesCopied = 1; BytesComplete = 1000 } }
                 Mock Initialize-LogSession { @{ SessionId = "test" } }
 
                 $script:OrchestrationState.Phase = "Complete"
@@ -343,6 +403,7 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
+                Initialize-OrchestrationStateType | Out-Null
                 Mock Start-ReplicationRun { }
                 Mock Invoke-ReplicationTick { }
                 Mock Get-OrchestrationStatus {
@@ -373,6 +434,7 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
+                Initialize-OrchestrationStateType | Out-Null
                 Mock Start-ReplicationRun { }
                 Mock Invoke-ReplicationTick { }
                 Mock Get-OrchestrationStatus {
@@ -402,6 +464,7 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
+                Initialize-OrchestrationStateType | Out-Null
                 Mock Start-ReplicationRun { }
                 Mock Invoke-ReplicationTick { }
                 Mock Get-OrchestrationStatus {
@@ -432,6 +495,7 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
 
         BeforeEach {
             InModuleScope 'Robocurse' {
+                Initialize-OrchestrationStateType | Out-Null
                 $script:OrchestrationState.Reset()
                 Mock Write-RobocurseLog { }
                 Mock Write-SiemEvent { }
@@ -440,6 +504,8 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
 
         It "Should output progress during replication" {
             InModuleScope 'Robocurse' {
+                Initialize-OrchestrationStateType | Out-Null
+                $script:OrchestrationState.Reset()
                 $config = [PSCustomObject]@{
                     Email = @{ Enabled = $false }
                 }
@@ -459,11 +525,14 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
                 }
                 Mock Get-OrchestrationStatus {
                     @{
+                        Phase = 'Complete'
                         CurrentProfile = "TestProfile"
                         ChunksTotal = 10
                         ChunksComplete = 5
+                        ChunksFailed = 0
                         Elapsed = [timespan]::FromMinutes(1)
                         ETA = [timespan]::FromMinutes(1)
+                        FilesCopied = 50
                         BytesComplete = 500000
                     }
                 }
@@ -599,17 +668,24 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
 
     Context "Logging Initialization" {
 
+        BeforeEach {
+            InModuleScope 'Robocurse' {
+                Initialize-OrchestrationStateType | Out-Null
+            }
+        }
+
         It "Should initialize logging before replication" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
+                Initialize-OrchestrationStateType | Out-Null
                 Mock Initialize-LogSession {
                     $script:LogSessionCalled = $true
                     @{ SessionId = "test-session" }
                 }
                 Mock Start-ReplicationRun { }
                 Mock Invoke-ReplicationTick { }
-                Mock Get-OrchestrationStatus { @{ Phase = 'Complete' } }
+                Mock Get-OrchestrationStatus { @{ Phase = 'Complete'; ChunksTotal = 1; ChunksComplete = 1; ChunksFailed = 0; Elapsed = [timespan]::FromSeconds(10); FilesCopied = 1; BytesComplete = 1000 } }
 
                 $script:OrchestrationState.Reset()
                 $script:OrchestrationState.Phase = "Complete"
@@ -625,6 +701,7 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
 
+                Initialize-OrchestrationStateType | Out-Null
                 Mock Initialize-LogSession {
                     param($LogRoot, $CompressAfterDays, $DeleteAfterDays)
                     $script:ResolvedLogRoot = $LogRoot
@@ -632,7 +709,7 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
                 }
                 Mock Start-ReplicationRun { }
                 Mock Invoke-ReplicationTick { }
-                Mock Get-OrchestrationStatus { @{ Phase = 'Complete' } }
+                Mock Get-OrchestrationStatus { @{ Phase = 'Complete'; ChunksTotal = 1; ChunksComplete = 1; ChunksFailed = 0; Elapsed = [timespan]::FromSeconds(10); FilesCopied = 1; BytesComplete = 1000 } }
 
                 $script:OrchestrationState.Reset()
                 $script:OrchestrationState.Phase = "Complete"
@@ -648,6 +725,12 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
 
     Context "Error Handling" {
 
+        BeforeEach {
+            InModuleScope 'Robocurse' {
+                Initialize-OrchestrationStateType | Out-Null
+            }
+        }
+
         It "Should handle exception during replication" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
                 param($ConfigPath)
@@ -657,9 +740,12 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
                     throw "Simulated replication failure"
                 }
 
+                $oldEAP = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
                 $result = Start-RobocurseMain -Headless -ConfigPath $ConfigPath -ProfileName "TestProfile" 2>&1
+                $ErrorActionPreference = $oldEAP
 
-                $result | Should -Match "Replication failed|Simulated"
+                ($result | Out-String) | Should -Match "Replication failed|Simulated"
             }
         }
 
@@ -667,6 +753,7 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
             InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath, $script:TestDir {
                 param($ConfigPath, $TestDir)
 
+                Initialize-OrchestrationStateType | Out-Null
                 $healthFile = Join-Path $TestDir "health-test.json"
                 $script:HealthCheckStatusFile = $healthFile
 
@@ -676,7 +763,7 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
                 Mock Initialize-LogSession { @{ SessionId = "test" } }
                 Mock Start-ReplicationRun { }
                 Mock Invoke-ReplicationTick { }
-                Mock Get-OrchestrationStatus { @{ Phase = 'Complete' } }
+                Mock Get-OrchestrationStatus { @{ Phase = 'Complete'; ChunksTotal = 1; ChunksComplete = 1; ChunksFailed = 0; Elapsed = [timespan]::FromSeconds(10); FilesCopied = 1; BytesComplete = 1000 } }
 
                 $script:OrchestrationState.Reset()
                 $script:OrchestrationState.Phase = "Complete"
