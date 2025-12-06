@@ -94,6 +94,74 @@ No external dependencies. No modules to install. One file.
 
 ---
 
+## Installation
+
+### Step 1: Enable Script Execution
+
+PowerShell's default execution policy blocks scripts. Choose one of these approaches:
+
+**Option A: User-level policy (recommended)**
+
+Sets policy for your user account only, doesn't affect system-wide settings:
+
+```powershell
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+**Option B: Per-session bypass**
+
+Run Robocurse without changing any policies:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\Robocurse.ps1
+```
+
+For scheduled tasks, use Option B in the task action to avoid policy dependencies.
+
+### Step 2: Deploy Files
+
+Copy to your server:
+```
+Robocurse.ps1           # From dist/ folder (~550KB)
+Robocurse.config.json   # Your configuration (customize from template)
+```
+
+### Step 3: Configure SMTP Credentials (Optional)
+
+If using email notifications, store SMTP credentials in Windows Credential Manager:
+
+```powershell
+# Interactive prompt for password
+cmdkey /add:Robocurse-SMTP /user:smtp-user@example.com /pass
+
+# Or specify password directly (less secure - visible in history)
+cmdkey /add:Robocurse-SMTP /user:smtp-user@example.com /pass:YourPassword
+```
+
+Then reference in your config:
+```json
+"EmailSettings": {
+  "SmtpServer": "smtp.example.com",
+  "SmtpPort": 587,
+  "UseTls": true,
+  "CredentialName": "Robocurse-SMTP",
+  "From": "robocurse@example.com",
+  "To": ["admin@example.com"]
+}
+```
+
+To verify stored credentials:
+```powershell
+cmdkey /list:Robocurse-SMTP
+```
+
+To remove credentials:
+```powershell
+cmdkey /delete:Robocurse-SMTP
+```
+
+---
+
 ## Configuration Reference
 
 ### Chunk Settings
