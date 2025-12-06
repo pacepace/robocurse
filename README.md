@@ -266,6 +266,10 @@ Enable-NetFirewallRule -DisplayGroup "Windows Remote Management"
 
 **Test connectivity before use**:
 ```powershell
+# Dot-source the script to load functions without running
+. .\Robocurse.ps1
+
+# Then test remote VSS connectivity
 Test-RemoteVssSupported -UncPath "\\FileServer\Share"
 ```
 
