@@ -6,18 +6,18 @@
     "WindowState":  "Normal",
     "WorkerCount":  4,
     "SelectedProfile":  "Test",
-    "ActivePanel":  "Logs",
+    "ActivePanel":  "Progress",
     "LastRun":  {
                     "ChunksCompleted":  21,
-                    "Timestamp":  "2025-12-06T21:59:18.6518966-08:00",
+                    "Timestamp":  "2025-12-06T22:04:27.4314222-08:00",
                     "ProfilesRun":  [
                                         "Test"
                                     ],
                     "BytesCopied":  5262835484,
                     "Status":  "Success",
-                    "Duration":  "00:00:10",
+                    "Duration":  "00:00:03",
                     "ChunksTotal":  21,
                     "ChunksFailed":  0
                 },
-    "SavedAt":  "2025-12-06T21:59:35.1023347-08:00"
+    "SavedAt":  "2025-12-06T22:06:40.9416091-08:00"
 }
