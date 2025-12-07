@@ -1,11 +1,68 @@
 # Robocurse Development Notes
 
-## PowerShell Runspace Object Passing
+## EAD (Enforcement-Accelerated Development)
 
-PSCustomObject NoteProperties DO survive `AddArgument()`. However, for cleaner code, the background runspace re-reads profiles from config file by name:
+**Three Pillars:**
+1. **Context Sharding** - ~500 LOC per task, fits in one AI context window
+2. **Enforcement Tests** - AST-based, verify patterns not behavior, <15s, catch drift early
+3. **Evidence-Based Debugging** - Logs have file:line:function. No guessing.
+
+**Task Files** (`docs/` subdirectories):
+- Self-contained, subagent finishes without questions
+- Name = WHAT it does (`ChunkErrorTooltip` not `Phase1Task1`)
+- TDD: test code in task, written first
+- Sections: Objective, Success Criteria, Research (file:line refs), Implementation, Test Plan, Files to Modify, Verification
+
+**Enforcement Test Pattern:**
+```powershell
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$null)
+$violations = $ast.FindAll({ param($node) <# pattern check #> }, $true)
+```
+
+## Troubleshooting
+
+**No speculation. Evidence only.**
+
+1. Reproduce it
+2. Check logs (`Write-RobocurseLog` with `-Level` and `-Component`)
+3. Find file:line
+4. Fix it
+
+**Logs unclear? Add better logging, not guesses.**
+
+Log locations:
+- GUI: `LogPath` from config (default `.\Logs`)
+- Tests: `$env:TEMP\pester-failures.txt`
+
+## Build & Test
 
 ```powershell
-# Pass profile names (strings), not objects
+.\scripts\run-tests.ps1                    # USE THIS - avoids truncation
+Invoke-Pester -Path tests\Unit\Configuration.Tests.ps1 -Output Detailed
+Invoke-Pester -Path tests\Unit -Output Detailed
+Invoke-Pester -Path tests -CodeCoverage src\Robocurse\Public\*.ps1
+$r = Invoke-Pester -Path tests -PassThru -Output None; $r.Skipped.ExpandedPath
+.\build\Build-Robocurse.ps1
+```
+
+**Use `.\scripts\run-tests.ps1`** - writes to temp files, avoids truncation that causes infinite retry loops.
+
+Output files:
+- `$env:TEMP\pester-summary.txt` - pass/fail counts
+- `$env:TEMP\pester-failures.txt` - failed test names and errors
+
+Read failures: `Get-Content $env:TEMP\pester-failures.txt`
+
+**Skipped tests:**
+- Remote VSS tests need `$env:ROBOCURSE_TEST_REMOTE_SHARE` set to UNC path
+- Platform-specific tests skip on non-Windows (scheduling, VSS, robocopy)
+
+## PowerShell Runspace Object Passing
+
+PSCustomObject NoteProperties survive `AddArgument()`. For cleaner code, background runspace re-reads profiles by name:
+
+```powershell
+# Pass names, not objects
 $profileNames = @($profilesToRun | ForEach-Object { $_.Name })
 $powershell.AddArgument($profileNames)
 
@@ -14,83 +71,33 @@ $bgConfig = Get-RobocurseConfig -Path $ConfigPath
 $profiles = @($bgConfig.SyncProfiles | Where-Object { $ProfileNames -contains $_.Name })
 ```
 
-For mutable shared state (progress updates), use C# class with locking - see `OrchestrationState` in Orchestration.ps1.
+For mutable shared state (progress updates), use C# class with locking. See `OrchestrationState` in Orchestration.ps1.
 
 ## Robocopy /L List Mode
 
-For directory profiling, use a random temp path as destination (not `\\?\NULL` which doesn't work on all Windows versions, and not src=dest which doesn't list files):
+Use random temp path as destination. `\\?\NULL` breaks on some Windows. src=dest doesn't list files.
 
 ```powershell
 $nullDest = Join-Path $env:TEMP "robocurse-null-$(Get-Random)"
 $output = & robocopy $Source $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
 ```
 
-Output format is `New File [size] [name]` and `New Dir [count] [path]` - parse accordingly.
-
-## Build Commands
-
-```powershell
-# Run all tests (USE THIS - writes to temp files to avoid truncation)
-.\scripts\run-tests.ps1
-
-# Run specific test file
-Invoke-Pester -Path tests\Unit\Configuration.Tests.ps1 -Output Detailed
-
-# Run only unit tests (faster)
-Invoke-Pester -Path tests\Unit -Output Detailed
-
-# Run with code coverage
-Invoke-Pester -Path tests -CodeCoverage src\Robocurse\Public\*.ps1
-
-# List skipped tests only
-$r = Invoke-Pester -Path tests -PassThru -Output None; $r.Skipped.ExpandedPath
-
-# Build monolith
-.\build\Build-Robocurse.ps1
-```
-
-## Avoiding Test Output Truncation
-
-**IMPORTANT:** When running tests, use `.\scripts\run-tests.ps1` instead of `Invoke-Pester` directly. This script writes results to temp files to avoid truncation issues that cause infinite retry loops.
-
-Output files:
-- `$env:TEMP\pester-summary.txt` - Pass/fail counts
-- `$env:TEMP\pester-failures.txt` - Failed test names and error messages
-
-To read failure details after running tests:
-```powershell
-Get-Content $env:TEMP\pester-failures.txt
-```
-
-**Note:** Some tests skip based on environment:
-- Remote VSS tests require `$env:ROBOCURSE_TEST_REMOTE_SHARE` set to a UNC path
-- Platform-specific tests skip on non-Windows (scheduling, VSS, robocopy)
-
-## Logging Security Considerations
-
-**DEBUG logs contain sensitive path information** and should be treated as confidential:
-- Full file paths including project/directory names are logged at DEBUG level
-- Robocopy command lines with source/destination paths are logged
-- VSS junction paths and shadow copy IDs are logged
-
-**Recommendations:**
-- Keep DEBUG-level logs secure and restrict access
-- Consider redacting paths in production environments if logs are shared
-- SIEM logs (JSON Lines format) contain structured path data for auditing
+Output format: `New File [size] [name]` and `New Dir [count] [path]`
 
 ## VSS Retry Logic
 
-Both local and remote VSS operations use the same retry pattern for transient errors:
+Local and remote VSS use same retry pattern. See `Test-VssErrorRetryable` in VssCore.ps1.
 
 **Retryable HRESULT codes:**
-- `0x8004230F` - VSS_E_INSUFFICIENT_STORAGE (might clear up)
-- `0x80042316` - VSS_E_SNAPSHOT_SET_IN_PROGRESS (another snapshot in progress)
-- `0x80042302` - VSS_E_OBJECT_NOT_FOUND (transient state)
-- `0x80042317` - VSS_E_MAXIMUM_NUMBER_OF_VOLUMES_REACHED (might clear after cleanup)
-- `0x8004231F` - VSS_E_WRITERERROR_TIMEOUT (writer timeout)
-- `0x80042325` - VSS_E_FLUSH_WRITES_TIMEOUT (flush timeout)
+- `0x8004230F` - VSS_E_INSUFFICIENT_STORAGE
+- `0x80042316` - VSS_E_SNAPSHOT_SET_IN_PROGRESS
+- `0x80042302` - VSS_E_OBJECT_NOT_FOUND
+- `0x80042317` - VSS_E_MAXIMUM_NUMBER_OF_VOLUMES_REACHED
+- `0x8004231F` - VSS_E_WRITERERROR_TIMEOUT
+- `0x80042325` - VSS_E_FLUSH_WRITES_TIMEOUT
 
-**English fallback patterns** (for errors without HRESULT):
-- `busy`, `timeout`, `lock`, `in use`, `try again`
+**Fallback patterns** (errors without HRESULT): `busy`, `timeout`, `lock`, `in use`, `try again`
 
-See `Test-VssErrorRetryable` in VssCore.ps1 for the shared implementation.
+## Security
+
+DEBUG logs contain full paths (project names, robocopy commands, VSS junctions). Keep secure or redact in production. SIEM logs (JSON Lines) have structured path data.
