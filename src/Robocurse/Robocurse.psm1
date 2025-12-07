@@ -196,9 +196,11 @@ $publicFunctionOrder = @(
     'GuiProfiles.ps1'
     'GuiDialogs.ps1'
     'GuiLogWindow.ps1'     # Popup log viewer window
+    'GuiValidation.ps1'    # Pre-flight validation UI
     'GuiRunspace.ps1'      # Background runspace management (before GuiReplication)
     'GuiReplication.ps1'
     'GuiProgress.ps1'
+    'GuiChunkActions.ps1'  # Chunk context menu actions
     'GuiMain.ps1'
     'Main.ps1'
 )

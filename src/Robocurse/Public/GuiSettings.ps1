@@ -75,6 +75,11 @@ function Save-GuiState {
     <#
     .SYNOPSIS
         Saves GUI state to settings file
+    .DESCRIPTION
+        Persists GUI state to JSON settings file including window position/size, worker count,
+        selected profile, and panel selection. Supports both direct state object saving and
+        building state from Window parameters. Preserves existing LastRun and ActivePanel
+        values when saving from Window. Used for restoring user preferences on next launch.
     .PARAMETER Window
         WPF Window object (optional - for saving window position/size)
     .PARAMETER WorkerCount

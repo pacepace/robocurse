@@ -472,26 +472,26 @@ function New-RemoteVssJunction {
 
             # Check if junction already exists
             if (Test-Path $JunctionPath) {
-                return @{ Success = $false; Error = "Junction path already exists: $JunctionPath" }
+                return @{ Success = $false; ErrorMessage = "Junction path already exists: $JunctionPath" }
             }
 
             # Create junction using cmd mklink /J
             $output = cmd /c "mklink /J `"$JunctionPath`" `"$TargetPath`"" 2>&1
 
             if ($LASTEXITCODE -ne 0) {
-                return @{ Success = $false; Error = "mklink failed: $output" }
+                return @{ Success = $false; ErrorMessage = "mklink failed: $output" }
             }
 
             # Verify
             if (-not (Test-Path $JunctionPath)) {
-                return @{ Success = $false; Error = "Junction created but not accessible" }
+                return @{ Success = $false; ErrorMessage = "Junction created but not accessible" }
             }
 
             return @{ Success = $true; JunctionPath = $JunctionPath }
         } -ArgumentList $junctionLocalPath, $vssTargetPath -ErrorAction Stop
 
         if (-not $result.Success) {
-            return New-OperationResult -Success $false -ErrorMessage "Failed to create remote junction: $($result.Error)"
+            return New-OperationResult -Success $false -ErrorMessage "Failed to create remote junction: $($result.ErrorMessage)"
         }
 
         # Verify we can access it via UNC
@@ -560,19 +560,19 @@ function Remove-RemoteVssJunction {
                     [System.IO.Directory]::Delete($JunctionPath, $false)
                 }
                 catch {
-                    return @{ Success = $false; Error = "rmdir failed: $output" }
+                    return @{ Success = $false; ErrorMessage = "rmdir failed: $output" }
                 }
             }
 
             if (Test-Path $JunctionPath) {
-                return @{ Success = $false; Error = "Junction still exists after removal" }
+                return @{ Success = $false; ErrorMessage = "Junction still exists after removal" }
             }
 
             return @{ Success = $true }
         } -ArgumentList $JunctionLocalPath -ErrorAction Stop
 
         if (-not $result.Success) {
-            return New-OperationResult -Success $false -ErrorMessage "Failed to remove remote junction: $($result.Error)"
+            return New-OperationResult -Success $false -ErrorMessage "Failed to remove remote junction: $($result.ErrorMessage)"
         }
 
         Write-RobocurseLog -Message "Removed remote VSS junction from '$ServerName'" -Level 'Info' -Component 'VSS'

@@ -91,7 +91,24 @@ function Start-GuiReplication {
     $script:Controls.btnStop.IsEnabled = $true
     $script:Controls.txtStatus.Text = "Replication in progress..."
     $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::Gray  # Reset error color
+    $script:Controls.txtStatus.Cursor = [System.Windows.Input.Cursors]::Arrow  # Reset cursor
+    $script:Controls.txtStatus.TextDecorations = $null  # Clear underline
     $script:GuiErrorCount = 0  # Reset error count for new run
+
+    # Clear error history for new run
+    if ($script:ErrorHistoryBuffer) {
+        [System.Threading.Monitor]::Enter($script:ErrorHistoryBuffer)
+        try {
+            $script:ErrorHistoryBuffer.Clear()
+        }
+        finally {
+            [System.Threading.Monitor]::Exit($script:ErrorHistoryBuffer)
+        }
+    }
+
+    # Reset per-profile error tracking
+    Reset-ProfileErrorTracking
+
     $script:LastGuiUpdateState = $null
     $script:Controls.dgChunks.ItemsSource = $null
 
@@ -298,8 +315,14 @@ function Complete-GuiReplication {
         Write-GuiLog "ERROR: Exception sending completion email: $($_.Exception.Message)"
     }
 
+    # Gather failed chunk details for the completion dialog
+    $failedDetails = @()
+    if ($script:OrchestrationState.FailedChunks.Count -gt 0) {
+        $failedDetails = @($script:OrchestrationState.FailedChunks.ToArray())
+    }
+
     # Show completion dialog (modal - blocks until user clicks OK)
-    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
+    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -FailedChunkDetails $failedDetails
 
     # Clean up config snapshot if it was created
     if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {

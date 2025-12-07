@@ -568,6 +568,11 @@ function Write-SiemEvent {
     <#
     .SYNOPSIS
         Writes a SIEM-compatible JSON event
+    .DESCRIPTION
+        Emits structured JSON Lines events for SIEM integration. Each event includes timestamp,
+        machine name, session ID, event type, and custom data fields. Events are written to
+        the SIEM log path with atomic appends. Used for security monitoring, auditing, and
+        correlation of replication events across distributed systems.
     .PARAMETER EventType
         Event type for SIEM categorization. Types are organized by severity and component:
         - Session: SessionStart, SessionEnd
@@ -701,6 +706,12 @@ function Invoke-LogRotation {
     <#
     .SYNOPSIS
         Compresses old logs and deletes ancient ones
+    .DESCRIPTION
+        Performs log rotation by compressing date-based log directories older than the compression
+        threshold and deleting compressed archives older than the deletion threshold. Uses timeout
+        protection to prevent hanging on locked files or network shares. Skips today's and
+        yesterday's logs to avoid interference with active sessions. Automatically validates
+        thresholds to ensure compress-before-delete ordering.
     .PARAMETER LogRoot
         Root directory for logs
     .PARAMETER CompressAfterDays

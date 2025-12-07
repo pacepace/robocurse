@@ -291,6 +291,12 @@ function Start-RobocopyJob {
     <#
     .SYNOPSIS
         Starts a robocopy process for a chunk
+    .DESCRIPTION
+        Launches a robocopy background process for chunk replication with comprehensive argument
+        building, validation, and logging. Supports mirror/non-mirror modes, bandwidth throttling,
+        exclusions, dry-run preview, and custom robocopy switches. Constructs argument list via
+        New-RobocopyArguments, validates chunk paths, and returns job tracking object for
+        orchestration. Core execution primitive for parallel chunk processing.
     .PARAMETER Chunk
         Chunk object with SourcePath, DestinationPath, RobocopyArgs
     .PARAMETER LogPath
