@@ -86,7 +86,7 @@ function Initialize-RobocurseGui {
         'txtSettingsBandwidth', 'txtSettingsLogPath', 'btnSettingsLogBrowse',
         'chkSettingsSiem', 'txtSettingsSiemPath', 'btnSettingsSiemBrowse',
         'chkSettingsEmailEnabled', 'txtSettingsSmtp', 'txtSettingsSmtpPort',
-        'chkSettingsTls', 'txtSettingsCredential', 'txtSettingsEmailFrom', 'txtSettingsEmailTo',
+        'chkSettingsTls', 'txtSettingsCredential', 'btnSettingsSetCredential', 'txtSettingsEmailFrom', 'txtSettingsEmailTo',
         'btnSettingsSchedule', 'txtSettingsScheduleStatus', 'btnSettingsRevert', 'btnSettingsSave'
     ) | ForEach-Object {
         $script:Controls[$_] = $script:Window.FindName($_)

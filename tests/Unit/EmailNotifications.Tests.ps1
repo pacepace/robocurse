@@ -245,69 +245,70 @@ InModuleScope 'Robocurse' {
             }
 
             It "Should not send when disabled" {
-                Mock Send-MailMessage { }
+                Mock Send-MultipartEmail { }
 
                 $config = [PSCustomObject]@{ Enabled = $false }
                 Send-CompletionEmail -Config $config -Results $script:mockResults -Status 'Success'
 
-                Should -Not -Invoke Send-MailMessage
+                Should -Not -Invoke Send-MultipartEmail
             }
 
             It "Should return error on missing credential" {
                 Mock Get-SmtpCredential { $null }
-                Mock Send-MailMessage { }
+                Mock Send-MultipartEmail { }
 
                 $result = Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Success'
 
                 $result.Success | Should -Be $false
                 $result.ErrorMessage | Should -Match "credential"
-                Should -Not -Invoke Send-MailMessage
+                Should -Not -Invoke Send-MultipartEmail
             }
 
             It "Should send email with correct parameters when enabled" {
                 $mockCred = New-Object System.Management.Automation.PSCredential("user", (ConvertTo-SecureString "pass" -AsPlainText -Force))
                 Mock Get-SmtpCredential { $mockCred }
-                Mock Send-MailMessage { }
+                Mock Send-MultipartEmail { }
 
                 Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Success'
 
-                Should -Invoke Send-MailMessage -Times 1 -ParameterFilter {
+                Should -Invoke Send-MultipartEmail -Times 1 -ParameterFilter {
                     $SmtpServer -eq "smtp.example.com" -and
                     $Port -eq 587 -and
                     $UseSsl -eq $true -and
                     $From -eq "test@example.com" -and
-                    $BodyAsHtml -eq $true
+                    $TextBody -ne $null -and
+                    $HtmlBody -ne $null
                 }
             }
 
             It "Should set priority to High for Failed status" {
                 $mockCred = New-Object System.Management.Automation.PSCredential("user", (ConvertTo-SecureString "pass" -AsPlainText -Force))
                 Mock Get-SmtpCredential { $mockCred }
-                Mock Send-MailMessage { }
+                Mock Send-MultipartEmail { }
 
                 Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Failed'
 
-                Should -Invoke Send-MailMessage -Times 1 -ParameterFilter {
-                    $Priority -eq 'High'
+                Should -Invoke Send-MultipartEmail -Times 1 -ParameterFilter {
+                    $Priority -eq [System.Net.Mail.MailPriority]::High
                 }
             }
 
             It "Should set priority to Normal for Success status" {
                 $mockCred = New-Object System.Management.Automation.PSCredential("user", (ConvertTo-SecureString "pass" -AsPlainText -Force))
                 Mock Get-SmtpCredential { $mockCred }
-                Mock Send-MailMessage { }
+                Mock Send-MultipartEmail { }
 
                 Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Success'
 
-                Should -Invoke Send-MailMessage -Times 1 -ParameterFilter {
-                    $Priority -eq 'Normal'
+                Should -Invoke Send-MultipartEmail -Times 1 -ParameterFilter {
+                    $Priority -eq [System.Net.Mail.MailPriority]::Normal
                 }
             }
 
             It "Should return error on send failure" {
                 $mockCred = New-Object System.Management.Automation.PSCredential("user", (ConvertTo-SecureString "pass" -AsPlainText -Force))
                 Mock Get-SmtpCredential { $mockCred }
-                Mock Send-MailMessage { throw "SMTP connection failed" }
+                Mock Send-MultipartEmail { throw "SMTP connection failed" }
 
                 # Use -ErrorAction SilentlyContinue to suppress Write-Error output from Write-RobocurseLog
                 $result = Send-CompletionEmail -Config $script:mockConfig -Results $script:mockResults -Status 'Success' -ErrorAction SilentlyContinue
@@ -318,7 +319,7 @@ InModuleScope 'Robocurse' {
 
             It "Should return error with incomplete configuration (empty SmtpServer)" {
                 Mock Get-SmtpCredential { }
-                Mock Send-MailMessage { }
+                Mock Send-MultipartEmail { }
 
                 $incompleteConfig = [PSCustomObject]@{
                     Enabled = $true
@@ -372,17 +373,17 @@ InModuleScope 'Robocurse' {
             It "Should return success on successful send" {
                 $mockCred = New-Object System.Management.Automation.PSCredential("user", (ConvertTo-SecureString "pass" -AsPlainText -Force))
                 Mock Get-SmtpCredential { $mockCred }
-                Mock Send-MailMessage { }
+                Mock Send-MultipartEmail { }
 
                 $result = Test-EmailConfiguration -Config $script:testConfig
 
                 $result.Success | Should -Be $true
             }
 
-            It "Should return error when Send-MailMessage fails" {
+            It "Should return error when Send-MultipartEmail fails" {
                 $mockCred = New-Object System.Management.Automation.PSCredential("user", (ConvertTo-SecureString "pass" -AsPlainText -Force))
                 Mock Get-SmtpCredential { $mockCred }
-                Mock Send-MailMessage { throw "Connection refused" }
+                Mock Send-MultipartEmail { throw "Connection refused" }
 
                 # Use -ErrorAction SilentlyContinue to suppress Write-Error output from Write-RobocurseLog
                 $result = Test-EmailConfiguration -Config $script:testConfig -ErrorAction SilentlyContinue
@@ -394,13 +395,14 @@ InModuleScope 'Robocurse' {
             It "Should send test email with dummy results" {
                 $mockCred = New-Object System.Management.Automation.PSCredential("user", (ConvertTo-SecureString "pass" -AsPlainText -Force))
                 Mock Get-SmtpCredential { $mockCred }
-                Mock Send-MailMessage { }
+                Mock Send-MultipartEmail { }
 
                 Test-EmailConfiguration -Config $script:testConfig
 
-                Should -Invoke Send-MailMessage -Times 1 -ParameterFilter {
+                Should -Invoke Send-MultipartEmail -Times 1 -ParameterFilter {
                     $Subject -match "Success" -and
-                    $BodyAsHtml -eq $true
+                    $TextBody -ne $null -and
+                    $HtmlBody -ne $null
                 }
             }
         }

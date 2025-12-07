@@ -240,9 +240,9 @@ InModuleScope 'Robocurse' {
                 $script:Controls.txtSettingsEmailFrom.Text | Should -Be "test@test.com"
             }
 
-            It "Should convert email To array to comma-separated string" {
+            It "Should convert email To array to newline-separated string" {
                 Import-SettingsToForm
-                $script:Controls.txtSettingsEmailTo.Text | Should -Be "user1@test.com, user2@test.com"
+                $script:Controls.txtSettingsEmailTo.Text | Should -Be "user1@test.com`r`nuser2@test.com"
             }
 
             It "Should format schedule status when enabled" {

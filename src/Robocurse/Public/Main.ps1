@@ -179,7 +179,8 @@ function Invoke-HeadlessReplication {
     # Send email notification if configured
     if ($Config.Email -and $Config.Email.Enabled) {
         Write-Host "Sending completion email..."
-        $emailResult = Send-CompletionEmail -Config $Config.Email -Results $results -Status $emailStatus
+        $emailSessionId = if ($script:OrchestrationState) { $script:OrchestrationState.SessionId } else { $null }
+        $emailResult = Send-CompletionEmail -Config $Config.Email -Results $results -Status $emailStatus -SessionId $emailSessionId
         if ($emailResult.Success) {
             Write-Host "Email sent successfully." -ForegroundColor Green
         }

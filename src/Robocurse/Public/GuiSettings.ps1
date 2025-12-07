@@ -306,9 +306,9 @@ function Import-SettingsToForm {
     }
 
     if ($script:Controls['txtSettingsEmailTo']) {
-        # Convert array to comma-separated string
+        # Convert array to newline-separated string (one email per line)
         $to = if ($config.Email.To -and $config.Email.To.Count -gt 0) {
-            $config.Email.To -join ", "
+            $config.Email.To -join "`r`n"
         } else {
             ""
         }
@@ -405,12 +405,12 @@ function Save-SettingsFromForm {
         }
 
         if ($script:Controls['txtSettingsEmailTo']) {
-            # Convert comma-separated string to array, trimming whitespace
+            # Convert newline-separated string to array (also supports commas for backward compatibility)
             $toText = $script:Controls.txtSettingsEmailTo.Text
             if ([string]::IsNullOrWhiteSpace($toText)) {
                 $script:Config.Email.To = @()
             } else {
-                $script:Config.Email.To = @($toText -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+                $script:Config.Email.To = @($toText -split '[\r\n,]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
             }
         }
 

@@ -188,10 +188,8 @@ function Complete-GuiReplication {
         $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::LimeGreen
     }
 
-    # Show completion message
+    # Get final status
     $status = Get-OrchestrationStatus
-    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
-
     Write-GuiLog "Replication completed: $($status.ChunksComplete)/$($status.ChunksTotal) chunks, $($status.ChunksFailed) failed"
 
     # Save last run summary for empty state display
@@ -234,6 +232,74 @@ function Complete-GuiReplication {
     catch {
         Write-GuiLog "Warning: Failed to save last run summary: $_"
     }
+
+    # Send email notification if configured
+    try {
+        if ($script:Config.Email -and $script:Config.Email.Enabled) {
+            Write-GuiLog "Email notifications enabled, attempting to send..."
+
+            # Recalculate values for email (in case previous try block had issues)
+            $emailElapsed = if ($script:OrchestrationState -and $script:OrchestrationState.StartTime) {
+                [datetime]::Now - $script:OrchestrationState.StartTime
+            } else {
+                [timespan]::Zero
+            }
+
+            $emailProfileNames = @()
+            if ($script:OrchestrationState -and $script:OrchestrationState.Profiles) {
+                $emailProfileNames = @($script:OrchestrationState.Profiles | ForEach-Object { $_.Name })
+            }
+
+            $emailStatus = if ($status.ChunksFailed -eq 0) {
+                'Success'
+            } elseif ($status.ChunksComplete -gt 0) {
+                'PartialFailure'
+            } else {
+                'Failed'
+            }
+
+            # Build results object matching what Send-CompletionEmail expects
+            $emailResults = [PSCustomObject]@{
+                Duration = $emailElapsed
+                TotalBytesCopied = if ($status.BytesComplete) { $status.BytesComplete } else { 0 }
+                TotalFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
+                TotalErrors = if ($status.ChunksFailed) { $status.ChunksFailed } else { 0 }
+                Profiles = @($emailProfileNames | ForEach-Object {
+                    [PSCustomObject]@{
+                        Name = $_
+                        Status = $emailStatus
+                        ChunksComplete = if ($status.ChunksComplete) { $status.ChunksComplete } else { 0 }
+                        ChunksTotal = if ($status.ChunksTotal) { $status.ChunksTotal } else { 0 }
+                        ChunksFailed = if ($status.ChunksFailed) { $status.ChunksFailed } else { 0 }
+                        FilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
+                        BytesCopied = if ($status.BytesComplete) { $status.BytesComplete } else { 0 }
+                        Errors = @()
+                    }
+                })
+                Errors = @()
+            }
+
+            # Get session ID from orchestration state for Message-Id header
+            $emailSessionId = if ($script:OrchestrationState) { $script:OrchestrationState.SessionId } else { $null }
+            $emailResult = Send-CompletionEmail -Config $script:Config.Email -Results $emailResults -Status $emailStatus -SessionId $emailSessionId
+
+            if ($emailResult.Success) {
+                Write-GuiLog "Completion email sent successfully"
+            }
+            else {
+                Write-GuiLog "ERROR: Failed to send completion email: $($emailResult.ErrorMessage)"
+            }
+        }
+        else {
+            Write-GuiLog "Email notifications not enabled, skipping"
+        }
+    }
+    catch {
+        Write-GuiLog "ERROR: Exception sending completion email: $($_.Exception.Message)"
+    }
+
+    # Show completion dialog (modal - blocks until user clicks OK)
+    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
 
     # Clean up config snapshot if it was created
     if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {

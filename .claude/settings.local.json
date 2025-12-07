@@ -24,7 +24,8 @@
       "Bash(pwsh -Command \"Invoke-Pester -Path tests\\Unit\\GuiProgressEmptyState.Tests.ps1 -Output Detailed\")",
       "Bash(Select-Object -First 150)",
       "Bash(pwsh:*)",
-      "Bash(Select-Object -First 80)"
+      "Bash(Select-Object -First 80)",
+      "Bash(Select-Object -Last 10)"
     ],
     "deny": [],
     "ask": []
