@@ -718,6 +718,11 @@ function Invoke-FailedChunkHandler {
 
     $chunk = $Job.Chunk
 
+    # Store error details on chunk for tooltip display
+    $chunk | Add-Member -NotePropertyName 'LastExitCode' -NotePropertyValue $Result.ExitCode -Force
+    $chunk | Add-Member -NotePropertyName 'LastErrorMessage' -NotePropertyValue $Result.ExitMeaning.Message -Force
+    $chunk | Add-Member -NotePropertyName 'DestinationPath' -NotePropertyValue $chunk.DestinationPath -Force
+
     # Increment retry count (RetryCount is initialized in New-Chunk)
     $chunk.RetryCount++
 

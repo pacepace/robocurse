@@ -147,11 +147,16 @@
         'Show-GuiError'
         'Write-GuiLog'
         'Show-ConfirmDialog'
+        'Show-AlertDialog'
 
         # GUI Log Window
         'Show-LogWindow'
         'Clear-GuiLogBuffer'
         'Close-LogWindow'
+
+        # GUI Validation
+        'Test-ProfileValidation'
+        'Show-ValidationDialog'
 
         # Main
         'Start-RobocurseMain'

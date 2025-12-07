@@ -9,7 +9,7 @@
     "ActivePanel":  "Profiles",
     "LastRun":  {
                     "ChunksCompleted":  145,
-                    "Timestamp":  "2025-12-06T15:27:26.8227144-08:00",
+                    "Timestamp":  "2025-12-06T20:30:01.4920303-08:00",
                     "ProfilesRun":  [
                                         "IntegrationProfile"
                                     ],
@@ -19,5 +19,5 @@
                     "ChunksTotal":  150,
                     "ChunksFailed":  5
                 },
-    "SavedAt":  "2025-12-06T15:27:26.8352047-08:00"
+    "SavedAt":  "2025-12-06T20:30:01.5090590-08:00"
 }

@@ -4,6 +4,52 @@
 # Log window instance and controls
 $script:LogWindow = $null
 $script:LogControls = @{}
+$script:LogWindowPosition = $null
+
+function Save-LogWindowPosition {
+    <#
+    .SYNOPSIS
+        Saves the current log window position and size
+    .DESCRIPTION
+        Called when the window is closing to preserve its position
+        for the next time it is opened.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if ($script:LogWindow -and $script:LogWindow.IsLoaded) {
+        $script:LogWindowPosition = @{
+            Left = $script:LogWindow.Left
+            Top = $script:LogWindow.Top
+            Width = $script:LogWindow.Width
+            Height = $script:LogWindow.Height
+            State = $script:LogWindow.WindowState
+        }
+    }
+}
+
+function Restore-LogWindowPosition {
+    <#
+    .SYNOPSIS
+        Restores the log window position and size from saved state
+    .DESCRIPTION
+        Called after creating the window to restore its previous position.
+        Does not restore Minimized state to avoid invisible window.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if ($script:LogWindowPosition -and $script:LogWindow) {
+        $script:LogWindow.Left = $script:LogWindowPosition.Left
+        $script:LogWindow.Top = $script:LogWindowPosition.Top
+        $script:LogWindow.Width = $script:LogWindowPosition.Width
+        $script:LogWindow.Height = $script:LogWindowPosition.Height
+        # Don't restore Minimized state - that would create an invisible window
+        if ($script:LogWindowPosition.State -ne 'Minimized') {
+            $script:LogWindow.WindowState = $script:LogWindowPosition.State
+        }
+    }
+}
 
 function Show-LogWindow {
     <#
@@ -27,8 +73,13 @@ function Show-LogWindow {
     try {
         $script:LogWindow = Initialize-LogWindow
         if ($script:LogWindow) {
-            # Set owner to main window so it stays on top of it
-            $script:LogWindow.Owner = $script:Window
+            # NOTE: Owner is intentionally NOT set for non-modal windows.
+            # Setting Owner + using Show() (non-modal) causes the window to ALWAYS
+            # stay on top of its owner, which is not desired for the log window.
+            # Modal dialogs (ShowDialog) should still use Owner for proper centering.
+
+            # Restore previous position if available
+            Restore-LogWindowPosition
 
             # Show non-modal
             $script:LogWindow.Show()
@@ -145,9 +196,10 @@ function Initialize-LogWindowEventHandlers {
         $script:LogControls[$_].Add_Unchecked({ Update-LogWindowContent })
     }
 
-    # Handle window closing - hide instead of close to preserve state
+    # Handle window closing - save position and hide instead of close to preserve state
     $Window.Add_Closing({
         param($sender, $e)
+        Save-LogWindowPosition
         $e.Cancel = $true
         $sender.Hide()
     })

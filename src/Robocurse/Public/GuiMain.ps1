@@ -74,9 +74,11 @@ function Initialize-RobocurseGui {
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
         'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'btnValidateProfile',
         'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
         'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus',
+        'pnlProfileErrors', 'pnlProfileErrorItems',
         'btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs',
         'panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs',
         'chkLogDebug', 'chkLogInfo', 'chkLogWarning', 'chkLogError',
@@ -87,7 +89,8 @@ function Initialize-RobocurseGui {
         'chkSettingsSiem', 'txtSettingsSiemPath', 'btnSettingsSiemBrowse',
         'chkSettingsEmailEnabled', 'txtSettingsSmtp', 'txtSettingsSmtpPort',
         'chkSettingsTls', 'txtSettingsCredential', 'btnSettingsSetCredential', 'txtSettingsEmailFrom', 'txtSettingsEmailTo',
-        'btnSettingsSchedule', 'txtSettingsScheduleStatus', 'btnSettingsRevert', 'btnSettingsSave'
+        'btnSettingsSchedule', 'txtSettingsScheduleStatus', 'btnSettingsRevert', 'btnSettingsSave',
+        'cmChunks', 'miRetryChunk', 'miSkipChunk', 'miOpenLog'
     ) | ForEach-Object {
         $script:Controls[$_] = $script:Window.FindName($_)
     }
@@ -341,6 +344,18 @@ function Initialize-EventHandlers {
         }
     })
 
+    # Validate Profile button
+    $script:Controls.btnValidateProfile.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "ValidateProfile" -ScriptBlock {
+            $selectedProfile = $script:Controls.lstProfiles.SelectedItem
+            if (-not $selectedProfile) {
+                Show-AlertDialog -Title "No Profile Selected" -Message "Please select a profile to validate" -Icon 'Warning'
+                return
+            }
+            Show-ValidationDialog -Profile $selectedProfile
+        }
+    })
+
     # Workers slider
     $script:Controls.sldWorkers.Add_ValueChanged({
         Invoke-SafeEventHandler -HandlerName "WorkerSlider" -ScriptBlock {
@@ -362,6 +377,15 @@ function Initialize-EventHandlers {
     # Schedule button
     $script:Controls.btnSchedule.Add_Click({
         Invoke-SafeEventHandler -HandlerName "Schedule" -ScriptBlock { Show-ScheduleDialog }
+    })
+
+    # Status text - click to show error popup when errors exist
+    $script:Controls.txtStatus.Add_MouseLeftButtonUp({
+        Invoke-SafeEventHandler -HandlerName "StatusClick" -ScriptBlock {
+            if ($script:GuiErrorCount -gt 0) {
+                Show-ErrorPopup
+            }
+        }
     })
 
     # Navigation rail buttons - toggle panel visibility
@@ -564,6 +588,66 @@ function Initialize-EventHandlers {
     if ($script:Controls['btnSettingsSetCredential']) {
         $script:Controls.btnSettingsSetCredential.Add_Click({
             Invoke-SafeEventHandler -HandlerName "SettingsSetCredential" -ScriptBlock { Show-CredentialInputDialog }
+        })
+    }
+
+    # Context menu - Retry chunk
+    if ($script:Controls['miRetryChunk']) {
+        $script:Controls.miRetryChunk.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "RetryChunk" -ScriptBlock {
+                $selectedItem = $script:Controls.dgChunks.SelectedItem
+                if ($selectedItem -and $selectedItem.Status -eq 'Failed') {
+                    Invoke-ChunkRetry -ChunkId $selectedItem.ChunkId
+                }
+            }
+        })
+    }
+
+    # Context menu - Skip chunk
+    if ($script:Controls['miSkipChunk']) {
+        $script:Controls.miSkipChunk.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SkipChunk" -ScriptBlock {
+                $selectedItem = $script:Controls.dgChunks.SelectedItem
+                if ($selectedItem -and $selectedItem.Status -eq 'Failed') {
+                    Invoke-ChunkSkip -ChunkId $selectedItem.ChunkId
+                }
+            }
+        })
+    }
+
+    # Context menu - Open log file
+    if ($script:Controls['miOpenLog']) {
+        $script:Controls.miOpenLog.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "OpenChunkLog" -ScriptBlock {
+                $selectedItem = $script:Controls.dgChunks.SelectedItem
+                if ($selectedItem -and $selectedItem.LogPath) {
+                    Open-ChunkLog -LogPath $selectedItem.LogPath
+                }
+            }
+        })
+    }
+
+    # Context menu - Opening event (enable/disable items based on selection)
+    if ($script:Controls['cmChunks']) {
+        $script:Controls.cmChunks.Add_Opened({
+            Invoke-SafeEventHandler -HandlerName "ChunkContextMenuOpened" -ScriptBlock {
+                $selectedItem = $script:Controls.dgChunks.SelectedItem
+
+                # Enable retry/skip only for failed chunks
+                $isFailed = $selectedItem -and $selectedItem.Status -eq 'Failed'
+                if ($script:Controls['miRetryChunk']) {
+                    $script:Controls.miRetryChunk.IsEnabled = $isFailed
+                }
+                if ($script:Controls['miSkipChunk']) {
+                    $script:Controls.miSkipChunk.IsEnabled = $isFailed
+                }
+
+                # Enable Open Log only if log path is available
+                $hasLog = $selectedItem -and -not [string]::IsNullOrWhiteSpace($selectedItem.LogPath)
+                if ($script:Controls['miOpenLog']) {
+                    $script:Controls.miOpenLog.IsEnabled = $hasLog
+                }
+            }
         })
     }
 

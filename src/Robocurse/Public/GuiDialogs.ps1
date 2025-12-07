@@ -119,6 +119,109 @@ function Show-ConfirmDialog {
     }
 }
 
+function Show-AlertDialog {
+    <#
+    .SYNOPSIS
+        Shows a styled alert/warning dialog matching the app's dark theme
+    .PARAMETER Title
+        Dialog title text
+    .PARAMETER Message
+        Message to display
+    .PARAMETER Icon
+        Icon type: 'Warning', 'Error', 'Info' (default: Warning)
+    .PARAMETER ButtonText
+        Text for the OK button (default: "OK")
+    .OUTPUTS
+        Nothing (void)
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Title = "Alert",
+        [string]$Message = "",
+        [ValidateSet('Warning', 'Error', 'Info')]
+        [string]$Icon = 'Warning',
+        [string]$ButtonText = "OK"
+    )
+
+    try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'AlertDialog.xaml'
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $txtTitle = $dialog.FindName("txtTitle")
+        $txtMessage = $dialog.FindName("txtMessage")
+        $txtIcon = $dialog.FindName("txtIcon")
+        $iconBorder = $dialog.FindName("iconBorder")
+        $dialogBorder = $dialog.FindName("dialogBorder")
+        $btnOk = $dialog.FindName("btnOk")
+
+        # Set content
+        $txtTitle.Text = $Title
+        $txtMessage.Text = $Message
+        $btnOk.Content = $ButtonText
+
+        # Set icon and colors based on type
+        switch ($Icon) {
+            'Error' {
+                $txtIcon.Text = "X"
+                $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF6B6B")
+                $dialogBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF6B6B")
+            }
+            'Info' {
+                $txtIcon.Text = "i"
+                $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#0078D4")
+                $dialogBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#0078D4")
+            }
+            default {
+                # Warning (default)
+                $txtIcon.Text = "!"
+                $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FFB340")
+                $dialogBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FFB340")
+            }
+        }
+
+        # OK button handler
+        $btnOk.Add_Click({
+            $dialog.Close()
+        })
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+                $dialog.DragMove()
+            }
+        })
+
+        # Escape or Enter key to close
+        $dialog.Add_KeyDown({
+            param($sender, $e)
+            if ($e.Key -eq [System.Windows.Input.Key]::Escape -or $e.Key -eq [System.Windows.Input.Key]::Return) {
+                $dialog.Close()
+            }
+        })
+
+        # Set owner to main window for proper modal behavior
+        if ($script:Window) {
+            $dialog.Owner = $script:Window
+        }
+        $dialog.ShowDialog() | Out-Null
+    }
+    catch {
+        Write-GuiLog "Error showing alert dialog: $($_.Exception.Message)"
+        # Fallback to MessageBox
+        $mbIcon = switch ($Icon) {
+            'Error' { [System.Windows.MessageBoxImage]::Error }
+            'Info' { [System.Windows.MessageBoxImage]::Information }
+            default { [System.Windows.MessageBoxImage]::Warning }
+        }
+        [System.Windows.MessageBox]::Show($Message, $Title, [System.Windows.MessageBoxButton]::OK, $mbIcon) | Out-Null
+    }
+}
+
 function Show-CompletionDialog {
     <#
     .SYNOPSIS
@@ -129,12 +232,15 @@ function Show-CompletionDialog {
         Total number of chunks
     .PARAMETER ChunksFailed
         Number of chunks that failed
+    .PARAMETER FailedChunkDetails
+        Array of failed chunk objects with details for error display
     #>
     [CmdletBinding()]
     param(
         [int]$ChunksComplete = 0,
         [int]$ChunksTotal = 0,
-        [int]$ChunksFailed = 0
+        [int]$ChunksFailed = 0,
+        [PSCustomObject[]]$FailedChunkDetails = @()
     )
 
     try {
@@ -152,6 +258,11 @@ function Show-CompletionDialog {
         $txtChunksValue = $dialog.FindName("txtChunksValue")
         $txtTotalValue = $dialog.FindName("txtTotalValue")
         $txtFailedValue = $dialog.FindName("txtFailedValue")
+        $pnlErrors = $dialog.FindName("pnlErrors")
+        $lstErrors = $dialog.FindName("lstErrors")
+        $txtMoreErrors = $dialog.FindName("txtMoreErrors")
+        $btnCopyErrors = $dialog.FindName("btnCopyErrors")
+        $btnViewLogs = $dialog.FindName("btnViewLogs")
         $btnOk = $dialog.FindName("btnOk")
 
         # Set values
@@ -167,6 +278,120 @@ function Show-CompletionDialog {
             $txtTitle.Text = "Replication Complete with Warnings"
             $txtSubtitle.Text = "$ChunksFailed chunk(s) failed"
             $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
+
+            # Show error details if we have failed chunk information
+            if ($FailedChunkDetails.Count -gt 0) {
+                $pnlErrors.Visibility = 'Visible'
+
+                # Display up to 10 errors
+                $displayErrors = $FailedChunkDetails | Select-Object -First 10
+                foreach ($chunk in $displayErrors) {
+                    $errorItem = New-Object System.Windows.Controls.Border
+                    $errorItem.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#1E1E1E")
+                    $errorItem.CornerRadius = 3
+                    $errorItem.Padding = 8
+                    $errorItem.Margin = "0,0,0,6"
+
+                    $errorStack = New-Object System.Windows.Controls.StackPanel
+
+                    # Chunk ID and Source Path
+                    $headerText = New-Object System.Windows.Controls.TextBlock
+                    $headerText.Text = "Chunk $($chunk.ChunkId): $($chunk.SourcePath)"
+                    $headerText.FontSize = 11
+                    $headerText.FontWeight = 'SemiBold'
+                    $headerText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#E0E0E0")
+                    $headerText.TextWrapping = 'Wrap'
+                    $errorStack.Children.Add($headerText) | Out-Null
+
+                    # Exit Code
+                    $exitCode = if ($chunk.PSObject.Properties['LastExitCode']) { $chunk.LastExitCode } else { 'N/A' }
+                    $exitCodeText = New-Object System.Windows.Controls.TextBlock
+                    $exitCodeText.Text = "Exit Code: $exitCode"
+                    $exitCodeText.FontSize = 10
+                    $exitCodeText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#808080")
+                    $exitCodeText.Margin = "0,2,0,0"
+                    $errorStack.Children.Add($exitCodeText) | Out-Null
+
+                    # Error Message
+                    $errorMsg = if ($chunk.PSObject.Properties['LastErrorMessage']) { $chunk.LastErrorMessage } else { 'Unknown error' }
+                    $errorMsgText = New-Object System.Windows.Controls.TextBlock
+                    $errorMsgText.Text = "Error: $errorMsg"
+                    $errorMsgText.FontSize = 10
+                    $errorMsgText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF6B6B")
+                    $errorMsgText.TextWrapping = 'Wrap'
+                    $errorMsgText.Margin = "0,2,0,0"
+                    $errorStack.Children.Add($errorMsgText) | Out-Null
+
+                    $errorItem.Child = $errorStack
+                    $lstErrors.Children.Add($errorItem) | Out-Null
+                }
+
+                # Show "and X more..." if there are more than 10 errors
+                if ($FailedChunkDetails.Count -gt 10) {
+                    $remaining = $FailedChunkDetails.Count - 10
+                    $txtMoreErrors.Text = "...and $remaining more error(s)"
+                    $txtMoreErrors.Visibility = 'Visible'
+                }
+
+                # Copy Errors button handler
+                $btnCopyErrors.Add_Click({
+                    try {
+                        # Build error report
+                        $errorReport = "Robocurse Replication Errors`n"
+                        $errorReport += "=" * 50 + "`n`n"
+
+                        foreach ($chunk in $FailedChunkDetails) {
+                            $errorReport += "Chunk $($chunk.ChunkId): $($chunk.SourcePath)`n"
+                            $exitCode = if ($chunk.PSObject.Properties['LastExitCode']) { $chunk.LastExitCode } else { 'N/A' }
+                            $errorReport += "Exit Code: $exitCode`n"
+                            $errorMsg = if ($chunk.PSObject.Properties['LastErrorMessage']) { $chunk.LastErrorMessage } else { 'Unknown error' }
+                            $errorReport += "Error: $errorMsg`n"
+                            $errorReport += "`n"
+                        }
+
+                        # Copy to clipboard
+                        [System.Windows.Clipboard]::SetText($errorReport)
+
+                        # Change button text temporarily
+                        $originalText = $btnCopyErrors.Content
+                        $btnCopyErrors.Content = "Copied!"
+
+                        # Use DispatcherTimer to reset after 2 seconds
+                        $resetTimer = New-Object System.Windows.Threading.DispatcherTimer
+                        $resetTimer.Interval = [TimeSpan]::FromSeconds(2)
+                        $resetTimer.Add_Tick({
+                            $btnCopyErrors.Content = $originalText
+                            $resetTimer.Stop()
+                        })
+                        $resetTimer.Start()
+                    }
+                    catch {
+                        Write-GuiLog "Error copying errors to clipboard: $($_.Exception.Message)"
+                    }
+                }.GetNewClosure())
+
+                # View Logs button handler
+                $btnViewLogs.Add_Click({
+                    try {
+                        # Get log path from config
+                        $logPath = if ($script:Config -and $script:Config.LogPath) {
+                            $script:Config.LogPath
+                        } else {
+                            Join-Path (Get-Location) "Logs"
+                        }
+
+                        # Open log directory in explorer
+                        if (Test-Path $logPath) {
+                            Start-Process explorer.exe -ArgumentList $logPath
+                        } else {
+                            Write-GuiLog "Log directory not found: $logPath"
+                        }
+                    }
+                    catch {
+                        Write-GuiLog "Error opening log directory: $($_.Exception.Message)"
+                    }
+                })
+            }
         }
         elseif ($ChunksComplete -eq 0 -and $ChunksTotal -eq 0) {
             # Nothing to do

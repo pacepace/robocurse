@@ -7,6 +7,261 @@ $script:LastGuiUpdateState = $null
 # Cache for progress text - avoids unnecessary UpdateLayout() calls
 $script:LastProgressTextState = $null
 
+# Per-profile error tracking (reset each run)
+$script:ProfileErrorCounts = [System.Collections.Generic.Dictionary[string, int]]::new()
+
+# Error history buffer for clickable error indicator
+$script:ErrorHistoryBuffer = [System.Collections.Generic.List[PSCustomObject]]::new()
+$script:MaxErrorHistoryItems = 10
+
+function Add-ErrorToHistory {
+    <#
+    .SYNOPSIS
+        Adds an error message to the history buffer with timestamp
+    .PARAMETER Message
+        The error message to add
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message
+    )
+
+    [System.Threading.Monitor]::Enter($script:ErrorHistoryBuffer)
+    try {
+        $entry = [PSCustomObject]@{
+            Timestamp = [datetime]::Now.ToString('HH:mm:ss')
+            Message = $Message
+        }
+
+        $script:ErrorHistoryBuffer.Add($entry)
+
+        # Trim to max size
+        while ($script:ErrorHistoryBuffer.Count -gt $script:MaxErrorHistoryItems) {
+            $script:ErrorHistoryBuffer.RemoveAt(0)
+        }
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:ErrorHistoryBuffer)
+    }
+}
+
+function Update-ErrorIndicatorState {
+    <#
+    .SYNOPSIS
+        Updates the status bar to reflect current error state
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not $script:Controls -or -not $script:Controls.txtStatus) {
+        return
+    }
+
+    if ($script:GuiErrorCount -gt 0) {
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
+        $script:Controls.txtStatus.Text = "Replication in progress... ($($script:GuiErrorCount) error(s) - click to view)"
+        $script:Controls.txtStatus.Cursor = [System.Windows.Input.Cursors]::Hand
+        $script:Controls.txtStatus.TextDecorations = [System.Windows.TextDecorations]::Underline
+    } else {
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::Gray
+        $script:Controls.txtStatus.Cursor = [System.Windows.Input.Cursors]::Arrow
+        $script:Controls.txtStatus.TextDecorations = $null
+    }
+}
+
+function Clear-ErrorHistory {
+    <#
+    .SYNOPSIS
+        Clears the error history buffer and resets error state
+    #>
+    [CmdletBinding()]
+    param()
+
+    [System.Threading.Monitor]::Enter($script:ErrorHistoryBuffer)
+    try {
+        $script:ErrorHistoryBuffer.Clear()
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:ErrorHistoryBuffer)
+    }
+
+    $script:GuiErrorCount = 0
+
+    if ($script:Controls -and $script:Controls.txtStatus) {
+        $script:Controls.txtStatus.Text = "Replication in progress..."
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::Gray
+        $script:Controls.txtStatus.Cursor = [System.Windows.Input.Cursors]::Arrow
+        $script:Controls.txtStatus.TextDecorations = $null
+    }
+}
+
+function Reset-ProfileErrorTracking {
+    <#
+    .SYNOPSIS
+        Resets all per-profile error counts
+    #>
+    [CmdletBinding()]
+    param()
+
+    [System.Threading.Monitor]::Enter($script:ProfileErrorCounts)
+    try {
+        $script:ProfileErrorCounts.Clear()
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:ProfileErrorCounts)
+    }
+}
+
+function Add-ProfileError {
+    <#
+    .SYNOPSIS
+        Increments the error count for a specific profile
+    .PARAMETER ProfileName
+        Name of the profile to increment error count for
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    [System.Threading.Monitor]::Enter($script:ProfileErrorCounts)
+    try {
+        if (-not $script:ProfileErrorCounts.ContainsKey($ProfileName)) {
+            $script:ProfileErrorCounts[$ProfileName] = 0
+        }
+        $script:ProfileErrorCounts[$ProfileName]++
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:ProfileErrorCounts)
+    }
+}
+
+function Get-ProfileErrorSummary {
+    <#
+    .SYNOPSIS
+        Returns a summary of errors by profile
+    .OUTPUTS
+        Array of objects with Name and ErrorCount properties
+    #>
+    [CmdletBinding()]
+    param()
+
+    $summary = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    [System.Threading.Monitor]::Enter($script:ProfileErrorCounts)
+    try {
+        foreach ($kvp in $script:ProfileErrorCounts.GetEnumerator()) {
+            $summary.Add([PSCustomObject]@{
+                Name = $kvp.Key
+                ErrorCount = $kvp.Value
+            })
+        }
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:ProfileErrorCounts)
+    }
+
+    # Use Write-Output -NoEnumerate to prevent PowerShell array unwrapping
+    Write-Output -NoEnumerate $summary.ToArray()
+}
+
+function Update-ProfileErrorSummary {
+    <#
+    .SYNOPSIS
+        Updates the profile error summary panel in the progress view
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Check if controls exist
+    if (-not $script:Controls -or -not $script:Controls.pnlProfileErrors) {
+        return
+    }
+
+    # Check if orchestration state exists and has profiles
+    if (-not $script:OrchestrationState) {
+        $script:Controls.pnlProfileErrors.Visibility = 'Collapsed'
+        return
+    }
+
+    $profiles = $script:OrchestrationState.Profiles
+    $profileCount = if ($profiles) { @($profiles).Count } else { 0 }
+
+    # Only show for 2+ profiles
+    if ($profileCount -lt 2) {
+        $script:Controls.pnlProfileErrors.Visibility = 'Collapsed'
+        return
+    }
+
+    # Check if we have any error data
+    if ($script:ProfileErrorCounts.Count -eq 0) {
+        $script:Controls.pnlProfileErrors.Visibility = 'Collapsed'
+        return
+    }
+
+    $script:Controls.pnlProfileErrors.Visibility = 'Visible'
+    $panel = $script:Controls.pnlProfileErrorItems
+
+    if (-not $panel) { return }
+
+    $panel.Children.Clear()
+
+    foreach ($profile in $profiles) {
+        $errorCount = 0
+        if ($script:ProfileErrorCounts.ContainsKey($profile.Name)) {
+            $errorCount = $script:ProfileErrorCounts[$profile.Name]
+        }
+
+        # Create pill-style indicator
+        $border = New-Object System.Windows.Controls.Border
+        $border.CornerRadius = [System.Windows.CornerRadius]::new(12)
+        $border.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
+        $border.Margin = [System.Windows.Thickness]::new(0, 0, 8, 4)
+
+        # Color based on error count
+        if ($errorCount -eq 0) {
+            $border.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#2D4A2D")
+        } else {
+            $border.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#4A2D2D")
+        }
+
+        $stack = New-Object System.Windows.Controls.StackPanel
+        $stack.Orientation = 'Horizontal'
+
+        $nameText = New-Object System.Windows.Controls.TextBlock
+        $nameText.Text = $profile.Name
+        $nameText.Foreground = [System.Windows.Media.Brushes]::White
+        $nameText.FontSize = 11
+        $nameText.VerticalAlignment = 'Center'
+
+        $countText = New-Object System.Windows.Controls.TextBlock
+        $countText.Margin = [System.Windows.Thickness]::new(6, 0, 0, 0)
+        $countText.FontWeight = 'Bold'
+        $countText.FontSize = 11
+        $countText.VerticalAlignment = 'Center'
+
+        if ($errorCount -eq 0) {
+            $countText.Text = [char]0x2713
+            $countText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#4CAF50")
+        } else {
+            $countText.Text = $errorCount.ToString()
+            $countText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF6B6B")
+        }
+
+        $stack.Children.Add($nameText)
+        $stack.Children.Add($countText)
+        $border.Child = $stack
+
+        $panel.Children.Add($border)
+    }
+
+    if ($script:Window) {
+        $script:Window.UpdateLayout()
+    }
+}
+
 function Update-GuiProgressText {
     <#
     .SYNOPSIS
@@ -159,10 +414,14 @@ function Get-ChunkDisplayItems {
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = $chunk.ChunkId
             SourcePath = $chunk.SourcePath
+            DestinationPath = $chunk.DestinationPath
             Status = "Failed"
             Progress = 0
             ProgressScale = [double]0.0
             Speed = "--"
+            RetryCount = $chunk.RetryCount
+            LastExitCode = $chunk.LastExitCode
+            LastErrorMessage = $chunk.LastErrorMessage
         })
     }
 
@@ -276,13 +535,22 @@ function Update-GuiProgress {
             $errors = $script:OrchestrationState.DequeueErrors()
             foreach ($err in $errors) {
                 Write-GuiLog "[ERROR] $err"
+                Add-ErrorToHistory -Message $err
                 $script:GuiErrorCount++
+
+                # Track error against current profile
+                $currentProfile = $script:OrchestrationState.CurrentProfile
+                if ($currentProfile -and $currentProfile.Name) {
+                    Add-ProfileError -ProfileName $currentProfile.Name
+                }
             }
 
             # Update status bar with error indicator if errors occurred
             if ($script:GuiErrorCount -gt 0) {
                 $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
                 $script:Controls.txtStatus.Text = "Replication in progress... ($($script:GuiErrorCount) error(s))"
+                Update-ErrorIndicatorState
+                Update-ProfileErrorSummary
             }
         }
 
