@@ -9,15 +9,15 @@
     "ActivePanel":  "Progress",
     "LastRun":  {
                     "ChunksCompleted":  21,
-                    "Timestamp":  "2025-12-06T22:04:27.4314222-08:00",
+                    "Timestamp":  "2025-12-06T22:36:48.9631370-08:00",
                     "ProfilesRun":  [
                                         "Test"
                                     ],
                     "BytesCopied":  5262835484,
                     "Status":  "Success",
-                    "Duration":  "00:00:03",
+                    "Duration":  "00:00:11",
                     "ChunksTotal":  21,
                     "ChunksFailed":  0
                 },
-    "SavedAt":  "2025-12-06T22:06:40.9416091-08:00"
+    "SavedAt":  "2025-12-06T22:36:54.5332932-08:00"
 }
