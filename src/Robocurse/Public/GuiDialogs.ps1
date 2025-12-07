@@ -28,6 +28,11 @@ function Show-ConfirmDialog {
     <#
     .SYNOPSIS
         Shows a styled confirmation dialog matching the app's dark theme
+    .DESCRIPTION
+        Displays a modal confirmation dialog with customizable title, message, and button text.
+        Styled to match the application's dark theme. Supports mouse dragging and Escape key
+        cancellation. Used for user confirmations throughout the GUI (delete profile, stop
+        replication, etc.).
     .PARAMETER Title
         Dialog title text
     .PARAMETER Message
@@ -123,6 +128,11 @@ function Show-AlertDialog {
     <#
     .SYNOPSIS
         Shows a styled alert/warning dialog matching the app's dark theme
+    .DESCRIPTION
+        Displays a modal alert dialog with customizable icon, title, message, and button text.
+        Supports three icon types (Warning, Error, Info) with appropriate color coding. Styled
+        to match the application's dark theme. Used for non-interactive notifications and
+        warnings throughout the GUI.
     .PARAMETER Title
         Dialog title text
     .PARAMETER Message
@@ -226,6 +236,11 @@ function Show-CompletionDialog {
     <#
     .SYNOPSIS
         Shows a modern completion dialog with replication statistics
+    .DESCRIPTION
+        Displays a styled completion dialog at the end of replication showing success/failure
+        statistics. Color-coded based on results (success green, warnings orange). Shows detailed
+        error information for failed chunks with copy-to-clipboard functionality and log viewer
+        access. Provides visual feedback on overall replication health.
     .PARAMETER ChunksComplete
         Number of chunks completed successfully
     .PARAMETER ChunksTotal

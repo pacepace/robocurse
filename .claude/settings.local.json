@@ -31,7 +31,12 @@
       "Bash(powershell -NoProfile -Command \"[Environment]::GetEnvironmentVariable(''TEMP'')\")",
       "Bash(powershell -NoProfile -Command \"Get-Content ''C:\\Users\\pace\\AppData\\Local\\Temp\\pester-summary.txt''\")",
       "Bash(powershell -NoProfile -Command:*)",
-      "Bash(Select-String -Pattern \"Context|Should|Tests Passed\")"
+      "Bash(Select-String -Pattern \"Context|Should|Tests Passed\")",
+      "Bash(test:*)",
+      "Bash(powershell -Command \"Invoke-Pester -Path tests\\Enforcement\\LoggingStyle.Tests.ps1 -Output Detailed\")",
+      "Bash(powershell:*)",
+      "Bash(Get-Content \"$env:TEMP\\pester-summary.txt\")",
+      "Bash(Invoke-Pester -Path \"tests\\Enforcement\\Documentation.Tests.ps1\" -Output Detailed)"
     ],
     "deny": [],
     "ask": []

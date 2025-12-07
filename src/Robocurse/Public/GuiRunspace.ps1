@@ -5,6 +5,10 @@ function New-ReplicationRunspace {
     <#
     .SYNOPSIS
         Creates and configures a background runspace for replication
+    .DESCRIPTION
+        Initializes a PowerShell runspace with Robocurse module loaded for background replication.
+        Configures the runspace to import the Robocurse module (or dot-source monolith script)
+        and passes profile names for execution. Returns runspace handle for async management.
     .PARAMETER Profiles
         Array of profiles to run
     .PARAMETER MaxWorkers

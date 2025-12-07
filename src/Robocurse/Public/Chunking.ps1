@@ -6,6 +6,13 @@ function Get-DirectoryChunks {
     <#
     .SYNOPSIS
         Recursively splits a directory tree into manageable chunks
+    .DESCRIPTION
+        Analyzes directory structure and intelligently divides it into chunks suitable for parallel
+        replication. Uses directory profiling to determine optimal split points based on size, file
+        count, and depth constraints. Recursively subdivides large directories while respecting
+        minimum chunk sizes to avoid overhead. Handles both directory-based chunks and files-only
+        chunks for optimal parallelization. This is the core chunking algorithm for the replication
+        orchestrator.
     .PARAMETER Path
         Root path to chunk
     .PARAMETER DestinationRoot
@@ -69,21 +76,21 @@ function Get-DirectoryChunks {
         $SourceRoot = $Path
     }
 
-    Write-RobocurseLog "Analyzing directory at depth $CurrentDepth : $Path" -Level Debug
+    Write-RobocurseLog "Analyzing directory at depth $CurrentDepth : $Path" -Level 'Debug' -Component 'Chunking'
 
     # Get profile for this directory
     $profile = Get-DirectoryProfile -Path $Path -UseCache $true
 
     # Check if this directory is small enough to be a chunk
     if ($profile.TotalSize -le $MaxSizeBytes -and $profile.FileCount -le $MaxFiles) {
-        Write-RobocurseLog "Directory fits in single chunk: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level Debug
+        Write-RobocurseLog "Directory fits in single chunk: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
     }
 
     # Check if we've hit max depth - must accept as chunk even if large
     if ($CurrentDepth -ge $MaxDepth) {
-        Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level Warning
+        Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level 'Warning' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
     }
@@ -91,7 +98,7 @@ function Get-DirectoryChunks {
     # Check if directory is above MinSizeBytes - if not, accept as single chunk to reduce overhead
     # This prevents creating many tiny chunks which add more overhead than benefit
     if ($profile.TotalSize -lt $MinSizeBytes) {
-        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $($profile.TotalSize))" -Level Debug
+        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $($profile.TotalSize))" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
     }
@@ -101,14 +108,14 @@ function Get-DirectoryChunks {
 
     if ($children.Count -eq 0) {
         # No subdirs but too many files - must accept as large chunk
-        Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level Warning
+        Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level 'Warning' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
     }
 
     # Recurse into each child
     # Use List<> instead of array concatenation for O(N) instead of O(N²) performance
-    Write-RobocurseLog "Directory too large, recursing into $($children.Count) children: $Path" -Level Debug
+    Write-RobocurseLog "Directory too large, recursing into $($children.Count) children: $Path" -Level 'Debug' -Component 'Chunking'
     $chunkList = [System.Collections.Generic.List[PSCustomObject]]::new()
     foreach ($child in $children) {
         $childChunks = Get-DirectoryChunks `
@@ -129,7 +136,7 @@ function Get-DirectoryChunks {
     # Handle files at this level (not in any subdir)
     $filesAtLevel = Get-FilesAtLevel -Path $Path
     if ($filesAtLevel.Count -gt 0) {
-        Write-RobocurseLog "Found $($filesAtLevel.Count) files at level: $Path" -Level Debug
+        Write-RobocurseLog "Found $($filesAtLevel.Count) files at level: $Path" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath))
     }
@@ -158,7 +165,7 @@ function Get-FilesAtLevel {
         return @($files)
     }
     catch {
-        Write-RobocurseLog "Error getting files at level '$Path': $_" -Level Warning
+        Write-RobocurseLog "Error getting files at level '$Path': $_" -Level 'Warning' -Component 'Chunking'
         return @()
     }
 }
@@ -167,6 +174,10 @@ function New-Chunk {
     <#
     .SYNOPSIS
         Creates a chunk object
+    .DESCRIPTION
+        Constructs a standardized chunk object with unique ID, source/destination paths, size
+        estimates, and replication metadata. Thread-safe chunk ID assignment using Interlocked
+        increment. Used by the chunking algorithm to create work units for the orchestrator.
     .PARAMETER SourcePath
         Source directory path
     .PARAMETER DestinationPath
@@ -208,7 +219,7 @@ function New-Chunk {
         RobocopyArgs = @()
     }
 
-    Write-RobocurseLog "Created chunk #$($chunk.ChunkId): $SourcePath -> $DestinationPath (Size: $($chunk.EstimatedSize), Files: $($chunk.EstimatedFiles), FilesOnly: $IsFilesOnly)" -Level Debug
+    Write-RobocurseLog "Created chunk #$($chunk.ChunkId): $SourcePath -> $DestinationPath (Size: $($chunk.EstimatedSize), Files: $($chunk.EstimatedFiles), FilesOnly: $IsFilesOnly)" -Level 'Debug' -Component 'Chunking'
 
     return $chunk
 }
@@ -256,7 +267,7 @@ function New-FilesOnlyChunk {
     # Add robocopy args to copy only files at this level
     $chunk.RobocopyArgs = @("/LEV:1")
 
-    Write-RobocurseLog "Created files-only chunk #$($chunk.ChunkId): $SourcePath (Files: $($filesAtLevel.Count))" -Level Debug
+    Write-RobocurseLog "Created files-only chunk #$($chunk.ChunkId): $SourcePath (Files: $($filesAtLevel.Count))" -Level 'Debug' -Component 'Chunking'
 
     return $chunk
 }

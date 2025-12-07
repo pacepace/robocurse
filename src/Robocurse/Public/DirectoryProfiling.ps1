@@ -71,7 +71,7 @@ function Reset-ProfileCacheStatistics {
     [System.Threading.Interlocked]::Exchange([ref]$script:ProfileCacheMisses, 0) | Out-Null
     [System.Threading.Interlocked]::Exchange([ref]$script:ProfileCacheEvictions, 0) | Out-Null
 
-    Write-RobocurseLog "Profile cache statistics reset" -Level Debug -Component 'Cache'
+    Write-RobocurseLog "Profile cache statistics reset" -Level 'Debug' -Component 'Profiling'
 }
 
 function Invoke-RobocopyList {
@@ -185,6 +185,11 @@ function Get-DirectoryProfile {
     <#
     .SYNOPSIS
         Gets size and file count for a directory using robocopy /L
+    .DESCRIPTION
+        Performs fast directory profiling using robocopy /L (list mode) to gather size and file
+        count statistics without actually copying files. Supports caching to avoid redundant scans
+        of large directory trees. Returns detailed metrics used by the chunking algorithm to make
+        intelligent split decisions.
     .PARAMETER Path
         Directory path to profile
     .PARAMETER UseCache
@@ -211,13 +216,13 @@ function Get-DirectoryProfile {
     if ($UseCache) {
         $cached = Get-CachedProfile -Path $normalizedPath -MaxAgeHours $CacheMaxAgeHours
         if ($null -ne $cached) {
-            Write-RobocurseLog "Using cached profile for: $Path" -Level Debug
+            Write-RobocurseLog "Using cached profile for: $Path" -Level 'Debug' -Component 'Profiling'
             return $cached
         }
     }
 
     # Run robocopy list
-    Write-RobocurseLog "Profiling directory: $Path" -Level Debug
+    Write-RobocurseLog "Profiling directory: $Path" -Level 'Debug' -Component 'Profiling'
 
     try {
         $output = Invoke-RobocopyList -Source $Path
@@ -247,7 +252,7 @@ function Get-DirectoryProfile {
         return $profile
     }
     catch {
-        Write-RobocurseLog "Error profiling directory '$Path': $_" -Level Warning
+        Write-RobocurseLog "Error profiling directory '$Path': $_" -Level 'Warning' -Component 'Profiling'
 
         # Return empty profile on error
         return [PSCustomObject]@{
@@ -281,7 +286,7 @@ function Get-DirectoryChildren {
         return $children | ForEach-Object { $_.FullName }
     }
     catch {
-        Write-RobocurseLog "Error getting children of '$Path': $_" -Level Warning
+        Write-RobocurseLog "Error getting children of '$Path': $_" -Level 'Warning' -Component 'Profiling'
         return @()
     }
 }
@@ -340,7 +345,7 @@ function Get-CachedProfile {
     # Check if cache is still valid
     $age = (Get-Date) - $cachedProfile.LastScanned
     if ($age.TotalHours -gt $MaxAgeHours) {
-        Write-RobocurseLog "Cache expired for: $Path (age: $([math]::Round($age.TotalHours, 1))h)" -Level Debug
+        Write-RobocurseLog "Cache expired for: $Path (age: $([math]::Round($age.TotalHours, 1))h)" -Level 'Debug' -Component 'Profiling'
         # Remove expired entry (thread-safe)
         $script:ProfileCache.TryRemove($cacheKey, [ref]$null) | Out-Null
         # Track as miss (expired entry)
@@ -380,7 +385,7 @@ function Set-CachedProfile {
     # Thread-safe add or update using ConcurrentDictionary indexer
     # Do this FIRST to ensure the profile is always cached, even if eviction has issues
     $script:ProfileCache[$cacheKey] = $Profile
-    Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level Debug
+    Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level 'Debug' -Component 'Profiling'
 
     # Enforce cache size limit - if significantly over max, trigger eviction
     # Use a 10% buffer to reduce eviction frequency under concurrent load
@@ -428,7 +433,7 @@ function Set-CachedProfile {
             }
 
             if ($removed -gt 0) {
-                Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $snapshotCount entries)" -Level Debug
+                Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $snapshotCount entries)" -Level 'Debug' -Component 'Profiling'
             }
         }
     }
@@ -449,7 +454,7 @@ function Clear-ProfileCache {
 
     $count = $script:ProfileCache.Count
     $script:ProfileCache.Clear()
-    Write-RobocurseLog "Cleared profile cache ($count entries removed)" -Level Debug
+    Write-RobocurseLog "Cleared profile cache ($count entries removed)" -Level 'Debug' -Component 'Profiling'
 }
 
 function Get-DirectoryProfilesParallel {
@@ -498,7 +503,7 @@ function Get-DirectoryProfilesParallel {
         return $results
     }
 
-    Write-RobocurseLog "Starting parallel profiling of $($Paths.Count) directories (max parallelism: $MaxDegreeOfParallelism)" -Level Debug
+    Write-RobocurseLog "Starting parallel profiling of $($Paths.Count) directories (max parallelism: $MaxDegreeOfParallelism)" -Level 'Debug' -Component 'Profiling'
 
     # Check cache first for any paths that are already cached
     $pathsToProfile = [System.Collections.Generic.List[string]]::new()
@@ -516,11 +521,11 @@ function Get-DirectoryProfilesParallel {
 
     # If all paths were cached, return early
     if ($pathsToProfile.Count -eq 0) {
-        Write-RobocurseLog "All $($Paths.Count) directories found in cache" -Level Debug
+        Write-RobocurseLog "All $($Paths.Count) directories found in cache" -Level 'Debug' -Component 'Profiling'
         return $results
     }
 
-    Write-RobocurseLog "Profiling $($pathsToProfile.Count) directories (cached: $($results.Count))" -Level Debug
+    Write-RobocurseLog "Profiling $($pathsToProfile.Count) directories (cached: $($results.Count))" -Level 'Debug' -Component 'Profiling'
 
     try {
         # Create runspace pool
@@ -630,7 +635,7 @@ function Get-DirectoryProfilesParallel {
                         Set-CachedProfile -Profile $cacheObj
                     }
                     else {
-                        Write-RobocurseLog "Error profiling '$($job.Path)': $($profile.Error)" -Level Warning
+                        Write-RobocurseLog "Error profiling '$($job.Path)': $($profile.Error)" -Level 'Warning' -Component 'Profiling'
                         # Return profile with error indicator so callers can detect failure
                         $results[$job.Path] = [PSCustomObject]@{
                             Path = $job.Path.TrimEnd('\')
@@ -646,7 +651,7 @@ function Get-DirectoryProfilesParallel {
                 }
             }
             catch {
-                Write-RobocurseLog "Error completing profile job for '$($job.Path)': $_" -Level Warning
+                Write-RobocurseLog "Error completing profile job for '$($job.Path)': $_" -Level 'Warning' -Component 'Profiling'
                 $results[$job.Path] = [PSCustomObject]@{
                     Path = $job.Path.TrimEnd('\')
                     TotalSize = 0
@@ -665,7 +670,7 @@ function Get-DirectoryProfilesParallel {
             }
         }
 
-        Write-RobocurseLog "Completed parallel profiling of $($pathsToProfile.Count) directories" -Level Debug
+        Write-RobocurseLog "Completed parallel profiling of $($pathsToProfile.Count) directories" -Level 'Debug' -Component 'Profiling'
     }
     finally {
         if ($runspacePool) {

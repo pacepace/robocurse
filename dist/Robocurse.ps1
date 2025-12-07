@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-06 16:36:22
+    Built: 2025-12-06 21:42:11
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -2536,6 +2536,11 @@ function Write-SiemEvent {
     <#
     .SYNOPSIS
         Writes a SIEM-compatible JSON event
+    .DESCRIPTION
+        Emits structured JSON Lines events for SIEM integration. Each event includes timestamp,
+        machine name, session ID, event type, and custom data fields. Events are written to
+        the SIEM log path with atomic appends. Used for security monitoring, auditing, and
+        correlation of replication events across distributed systems.
     .PARAMETER EventType
         Event type for SIEM categorization. Types are organized by severity and component:
         - Session: SessionStart, SessionEnd
@@ -2669,6 +2674,12 @@ function Invoke-LogRotation {
     <#
     .SYNOPSIS
         Compresses old logs and deletes ancient ones
+    .DESCRIPTION
+        Performs log rotation by compressing date-based log directories older than the compression
+        threshold and deleting compressed archives older than the deletion threshold. Uses timeout
+        protection to prevent hanging on locked files or network shares. Skips today's and
+        yesterday's logs to avoid interference with active sessions. Automatically validates
+        thresholds to ensure compress-before-delete ordering.
     .PARAMETER LogRoot
         Root directory for logs
     .PARAMETER CompressAfterDays
@@ -2922,7 +2933,7 @@ function Reset-ProfileCacheStatistics {
     [System.Threading.Interlocked]::Exchange([ref]$script:ProfileCacheMisses, 0) | Out-Null
     [System.Threading.Interlocked]::Exchange([ref]$script:ProfileCacheEvictions, 0) | Out-Null
 
-    Write-RobocurseLog "Profile cache statistics reset" -Level Debug -Component 'Cache'
+    Write-RobocurseLog "Profile cache statistics reset" -Level 'Debug' -Component 'Profiling'
 }
 
 function Invoke-RobocopyList {
@@ -3036,6 +3047,11 @@ function Get-DirectoryProfile {
     <#
     .SYNOPSIS
         Gets size and file count for a directory using robocopy /L
+    .DESCRIPTION
+        Performs fast directory profiling using robocopy /L (list mode) to gather size and file
+        count statistics without actually copying files. Supports caching to avoid redundant scans
+        of large directory trees. Returns detailed metrics used by the chunking algorithm to make
+        intelligent split decisions.
     .PARAMETER Path
         Directory path to profile
     .PARAMETER UseCache
@@ -3062,13 +3078,13 @@ function Get-DirectoryProfile {
     if ($UseCache) {
         $cached = Get-CachedProfile -Path $normalizedPath -MaxAgeHours $CacheMaxAgeHours
         if ($null -ne $cached) {
-            Write-RobocurseLog "Using cached profile for: $Path" -Level Debug
+            Write-RobocurseLog "Using cached profile for: $Path" -Level 'Debug' -Component 'Profiling'
             return $cached
         }
     }
 
     # Run robocopy list
-    Write-RobocurseLog "Profiling directory: $Path" -Level Debug
+    Write-RobocurseLog "Profiling directory: $Path" -Level 'Debug' -Component 'Profiling'
 
     try {
         $output = Invoke-RobocopyList -Source $Path
@@ -3098,7 +3114,7 @@ function Get-DirectoryProfile {
         return $profile
     }
     catch {
-        Write-RobocurseLog "Error profiling directory '$Path': $_" -Level Warning
+        Write-RobocurseLog "Error profiling directory '$Path': $_" -Level 'Warning' -Component 'Profiling'
 
         # Return empty profile on error
         return [PSCustomObject]@{
@@ -3132,7 +3148,7 @@ function Get-DirectoryChildren {
         return $children | ForEach-Object { $_.FullName }
     }
     catch {
-        Write-RobocurseLog "Error getting children of '$Path': $_" -Level Warning
+        Write-RobocurseLog "Error getting children of '$Path': $_" -Level 'Warning' -Component 'Profiling'
         return @()
     }
 }
@@ -3191,7 +3207,7 @@ function Get-CachedProfile {
     # Check if cache is still valid
     $age = (Get-Date) - $cachedProfile.LastScanned
     if ($age.TotalHours -gt $MaxAgeHours) {
-        Write-RobocurseLog "Cache expired for: $Path (age: $([math]::Round($age.TotalHours, 1))h)" -Level Debug
+        Write-RobocurseLog "Cache expired for: $Path (age: $([math]::Round($age.TotalHours, 1))h)" -Level 'Debug' -Component 'Profiling'
         # Remove expired entry (thread-safe)
         $script:ProfileCache.TryRemove($cacheKey, [ref]$null) | Out-Null
         # Track as miss (expired entry)
@@ -3231,7 +3247,7 @@ function Set-CachedProfile {
     # Thread-safe add or update using ConcurrentDictionary indexer
     # Do this FIRST to ensure the profile is always cached, even if eviction has issues
     $script:ProfileCache[$cacheKey] = $Profile
-    Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level Debug
+    Write-RobocurseLog "Cached profile for: $($Profile.Path)" -Level 'Debug' -Component 'Profiling'
 
     # Enforce cache size limit - if significantly over max, trigger eviction
     # Use a 10% buffer to reduce eviction frequency under concurrent load
@@ -3279,7 +3295,7 @@ function Set-CachedProfile {
             }
 
             if ($removed -gt 0) {
-                Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $snapshotCount entries)" -Level Debug
+                Write-RobocurseLog "Cache eviction: removed $removed of $entriesToRemove targeted (sampled $sampleSize of $snapshotCount entries)" -Level 'Debug' -Component 'Profiling'
             }
         }
     }
@@ -3300,7 +3316,7 @@ function Clear-ProfileCache {
 
     $count = $script:ProfileCache.Count
     $script:ProfileCache.Clear()
-    Write-RobocurseLog "Cleared profile cache ($count entries removed)" -Level Debug
+    Write-RobocurseLog "Cleared profile cache ($count entries removed)" -Level 'Debug' -Component 'Profiling'
 }
 
 function Get-DirectoryProfilesParallel {
@@ -3349,7 +3365,7 @@ function Get-DirectoryProfilesParallel {
         return $results
     }
 
-    Write-RobocurseLog "Starting parallel profiling of $($Paths.Count) directories (max parallelism: $MaxDegreeOfParallelism)" -Level Debug
+    Write-RobocurseLog "Starting parallel profiling of $($Paths.Count) directories (max parallelism: $MaxDegreeOfParallelism)" -Level 'Debug' -Component 'Profiling'
 
     # Check cache first for any paths that are already cached
     $pathsToProfile = [System.Collections.Generic.List[string]]::new()
@@ -3367,11 +3383,11 @@ function Get-DirectoryProfilesParallel {
 
     # If all paths were cached, return early
     if ($pathsToProfile.Count -eq 0) {
-        Write-RobocurseLog "All $($Paths.Count) directories found in cache" -Level Debug
+        Write-RobocurseLog "All $($Paths.Count) directories found in cache" -Level 'Debug' -Component 'Profiling'
         return $results
     }
 
-    Write-RobocurseLog "Profiling $($pathsToProfile.Count) directories (cached: $($results.Count))" -Level Debug
+    Write-RobocurseLog "Profiling $($pathsToProfile.Count) directories (cached: $($results.Count))" -Level 'Debug' -Component 'Profiling'
 
     try {
         # Create runspace pool
@@ -3481,7 +3497,7 @@ function Get-DirectoryProfilesParallel {
                         Set-CachedProfile -Profile $cacheObj
                     }
                     else {
-                        Write-RobocurseLog "Error profiling '$($job.Path)': $($profile.Error)" -Level Warning
+                        Write-RobocurseLog "Error profiling '$($job.Path)': $($profile.Error)" -Level 'Warning' -Component 'Profiling'
                         # Return profile with error indicator so callers can detect failure
                         $results[$job.Path] = [PSCustomObject]@{
                             Path = $job.Path.TrimEnd('\')
@@ -3497,7 +3513,7 @@ function Get-DirectoryProfilesParallel {
                 }
             }
             catch {
-                Write-RobocurseLog "Error completing profile job for '$($job.Path)': $_" -Level Warning
+                Write-RobocurseLog "Error completing profile job for '$($job.Path)': $_" -Level 'Warning' -Component 'Profiling'
                 $results[$job.Path] = [PSCustomObject]@{
                     Path = $job.Path.TrimEnd('\')
                     TotalSize = 0
@@ -3516,7 +3532,7 @@ function Get-DirectoryProfilesParallel {
             }
         }
 
-        Write-RobocurseLog "Completed parallel profiling of $($pathsToProfile.Count) directories" -Level Debug
+        Write-RobocurseLog "Completed parallel profiling of $($pathsToProfile.Count) directories" -Level 'Debug' -Component 'Profiling'
     }
     finally {
         if ($runspacePool) {
@@ -3539,6 +3555,13 @@ function Get-DirectoryChunks {
     <#
     .SYNOPSIS
         Recursively splits a directory tree into manageable chunks
+    .DESCRIPTION
+        Analyzes directory structure and intelligently divides it into chunks suitable for parallel
+        replication. Uses directory profiling to determine optimal split points based on size, file
+        count, and depth constraints. Recursively subdivides large directories while respecting
+        minimum chunk sizes to avoid overhead. Handles both directory-based chunks and files-only
+        chunks for optimal parallelization. This is the core chunking algorithm for the replication
+        orchestrator.
     .PARAMETER Path
         Root path to chunk
     .PARAMETER DestinationRoot
@@ -3602,21 +3625,21 @@ function Get-DirectoryChunks {
         $SourceRoot = $Path
     }
 
-    Write-RobocurseLog "Analyzing directory at depth $CurrentDepth : $Path" -Level Debug
+    Write-RobocurseLog "Analyzing directory at depth $CurrentDepth : $Path" -Level 'Debug' -Component 'Chunking'
 
     # Get profile for this directory
     $profile = Get-DirectoryProfile -Path $Path -UseCache $true
 
     # Check if this directory is small enough to be a chunk
     if ($profile.TotalSize -le $MaxSizeBytes -and $profile.FileCount -le $MaxFiles) {
-        Write-RobocurseLog "Directory fits in single chunk: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level Debug
+        Write-RobocurseLog "Directory fits in single chunk: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
     }
 
     # Check if we've hit max depth - must accept as chunk even if large
     if ($CurrentDepth -ge $MaxDepth) {
-        Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level Warning
+        Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level 'Warning' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
     }
@@ -3624,7 +3647,7 @@ function Get-DirectoryChunks {
     # Check if directory is above MinSizeBytes - if not, accept as single chunk to reduce overhead
     # This prevents creating many tiny chunks which add more overhead than benefit
     if ($profile.TotalSize -lt $MinSizeBytes) {
-        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $($profile.TotalSize))" -Level Debug
+        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $($profile.TotalSize))" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
     }
@@ -3634,14 +3657,14 @@ function Get-DirectoryChunks {
 
     if ($children.Count -eq 0) {
         # No subdirs but too many files - must accept as large chunk
-        Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level Warning
+        Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level 'Warning' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false)
     }
 
     # Recurse into each child
     # Use List<> instead of array concatenation for O(N) instead of O(N²) performance
-    Write-RobocurseLog "Directory too large, recursing into $($children.Count) children: $Path" -Level Debug
+    Write-RobocurseLog "Directory too large, recursing into $($children.Count) children: $Path" -Level 'Debug' -Component 'Chunking'
     $chunkList = [System.Collections.Generic.List[PSCustomObject]]::new()
     foreach ($child in $children) {
         $childChunks = Get-DirectoryChunks `
@@ -3662,7 +3685,7 @@ function Get-DirectoryChunks {
     # Handle files at this level (not in any subdir)
     $filesAtLevel = Get-FilesAtLevel -Path $Path
     if ($filesAtLevel.Count -gt 0) {
-        Write-RobocurseLog "Found $($filesAtLevel.Count) files at level: $Path" -Level Debug
+        Write-RobocurseLog "Found $($filesAtLevel.Count) files at level: $Path" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath))
     }
@@ -3691,7 +3714,7 @@ function Get-FilesAtLevel {
         return @($files)
     }
     catch {
-        Write-RobocurseLog "Error getting files at level '$Path': $_" -Level Warning
+        Write-RobocurseLog "Error getting files at level '$Path': $_" -Level 'Warning' -Component 'Chunking'
         return @()
     }
 }
@@ -3700,6 +3723,10 @@ function New-Chunk {
     <#
     .SYNOPSIS
         Creates a chunk object
+    .DESCRIPTION
+        Constructs a standardized chunk object with unique ID, source/destination paths, size
+        estimates, and replication metadata. Thread-safe chunk ID assignment using Interlocked
+        increment. Used by the chunking algorithm to create work units for the orchestrator.
     .PARAMETER SourcePath
         Source directory path
     .PARAMETER DestinationPath
@@ -3741,7 +3768,7 @@ function New-Chunk {
         RobocopyArgs = @()
     }
 
-    Write-RobocurseLog "Created chunk #$($chunk.ChunkId): $SourcePath -> $DestinationPath (Size: $($chunk.EstimatedSize), Files: $($chunk.EstimatedFiles), FilesOnly: $IsFilesOnly)" -Level Debug
+    Write-RobocurseLog "Created chunk #$($chunk.ChunkId): $SourcePath -> $DestinationPath (Size: $($chunk.EstimatedSize), Files: $($chunk.EstimatedFiles), FilesOnly: $IsFilesOnly)" -Level 'Debug' -Component 'Chunking'
 
     return $chunk
 }
@@ -3789,7 +3816,7 @@ function New-FilesOnlyChunk {
     # Add robocopy args to copy only files at this level
     $chunk.RobocopyArgs = @("/LEV:1")
 
-    Write-RobocurseLog "Created files-only chunk #$($chunk.ChunkId): $SourcePath (Files: $($filesAtLevel.Count))" -Level Debug
+    Write-RobocurseLog "Created files-only chunk #$($chunk.ChunkId): $SourcePath (Files: $($filesAtLevel.Count))" -Level 'Debug' -Component 'Chunking'
 
     return $chunk
 }
@@ -4287,6 +4314,12 @@ function Start-RobocopyJob {
     <#
     .SYNOPSIS
         Starts a robocopy process for a chunk
+    .DESCRIPTION
+        Launches a robocopy background process for chunk replication with comprehensive argument
+        building, validation, and logging. Supports mirror/non-mirror modes, bandwidth throttling,
+        exclusions, dry-run preview, and custom robocopy switches. Constructs argument list via
+        New-RobocopyArguments, validates chunk paths, and returns job tracking object for
+        orchestration. Core execution primitive for parallel chunk processing.
     .PARAMETER Chunk
         Chunk object with SourcePath, DestinationPath, RobocopyArgs
     .PARAMETER LogPath
@@ -5307,6 +5340,11 @@ function Test-ChunkAlreadyCompleted {
     <#
     .SYNOPSIS
         Checks if a chunk was completed in a previous run
+    .DESCRIPTION
+        Determines whether a specific chunk has already been successfully replicated in a previous
+        run by checking against checkpoint data. Supports both O(1) HashSet lookups (preferred) and
+        O(N) linear search (backwards compatibility). Used during resume operations to skip chunks
+        that don't need to be re-replicated.
     .PARAMETER Chunk
         Chunk object to check
     .PARAMETER Checkpoint
@@ -6894,6 +6932,11 @@ function Invoke-FailedChunkHandler {
 
     $chunk = $Job.Chunk
 
+    # Store error details on chunk for tooltip display
+    $chunk | Add-Member -NotePropertyName 'LastExitCode' -NotePropertyValue $Result.ExitCode -Force
+    $chunk | Add-Member -NotePropertyName 'LastErrorMessage' -NotePropertyValue $Result.ExitMeaning.Message -Force
+    $chunk | Add-Member -NotePropertyName 'DestinationPath' -NotePropertyValue $chunk.DestinationPath -Force
+
     # Increment retry count (RetryCount is initialized in New-Chunk)
     $chunk.RetryCount++
 
@@ -8187,6 +8230,8 @@ function New-VssSnapshotInternal {
         Internal function that performs the actual VSS snapshot creation
     .DESCRIPTION
         Called by New-VssSnapshot. Separated for retry logic.
+    .PARAMETER SourcePath
+        Path to create snapshot for (volume will be determined from this path)
     #>
     [CmdletBinding()]
     param(
@@ -9148,26 +9193,26 @@ function New-RemoteVssJunction {
 
             # Check if junction already exists
             if (Test-Path $JunctionPath) {
-                return @{ Success = $false; Error = "Junction path already exists: $JunctionPath" }
+                return @{ Success = $false; ErrorMessage = "Junction path already exists: $JunctionPath" }
             }
 
             # Create junction using cmd mklink /J
             $output = cmd /c "mklink /J `"$JunctionPath`" `"$TargetPath`"" 2>&1
 
             if ($LASTEXITCODE -ne 0) {
-                return @{ Success = $false; Error = "mklink failed: $output" }
+                return @{ Success = $false; ErrorMessage = "mklink failed: $output" }
             }
 
             # Verify
             if (-not (Test-Path $JunctionPath)) {
-                return @{ Success = $false; Error = "Junction created but not accessible" }
+                return @{ Success = $false; ErrorMessage = "Junction created but not accessible" }
             }
 
             return @{ Success = $true; JunctionPath = $JunctionPath }
         } -ArgumentList $junctionLocalPath, $vssTargetPath -ErrorAction Stop
 
         if (-not $result.Success) {
-            return New-OperationResult -Success $false -ErrorMessage "Failed to create remote junction: $($result.Error)"
+            return New-OperationResult -Success $false -ErrorMessage "Failed to create remote junction: $($result.ErrorMessage)"
         }
 
         # Verify we can access it via UNC
@@ -9236,19 +9281,19 @@ function Remove-RemoteVssJunction {
                     [System.IO.Directory]::Delete($JunctionPath, $false)
                 }
                 catch {
-                    return @{ Success = $false; Error = "rmdir failed: $output" }
+                    return @{ Success = $false; ErrorMessage = "rmdir failed: $output" }
                 }
             }
 
             if (Test-Path $JunctionPath) {
-                return @{ Success = $false; Error = "Junction still exists after removal" }
+                return @{ Success = $false; ErrorMessage = "Junction still exists after removal" }
             }
 
             return @{ Success = $true }
         } -ArgumentList $JunctionLocalPath -ErrorAction Stop
 
         if (-not $result.Success) {
-            return New-OperationResult -Success $false -ErrorMessage "Failed to remove remote junction: $($result.Error)"
+            return New-OperationResult -Success $false -ErrorMessage "Failed to remove remote junction: $($result.ErrorMessage)"
         }
 
         Write-RobocurseLog -Message "Removed remote VSS junction from '$ServerName'" -Level 'Info' -Component 'VSS'
@@ -11225,6 +11270,11 @@ function Save-GuiState {
     <#
     .SYNOPSIS
         Saves GUI state to settings file
+    .DESCRIPTION
+        Persists GUI state to JSON settings file including window position/size, worker count,
+        selected profile, and panel selection. Supports both direct state object saving and
+        building state from Window parameters. Preserves existing LastRun and ActivePanel
+        values when saving from Window. Used for restoring user preferences on next launch.
     .PARAMETER Window
         WPF Window object (optional - for saving window position/size)
     .PARAMETER WorkerCount
@@ -11917,6 +11967,11 @@ function Show-ConfirmDialog {
     <#
     .SYNOPSIS
         Shows a styled confirmation dialog matching the app's dark theme
+    .DESCRIPTION
+        Displays a modal confirmation dialog with customizable title, message, and button text.
+        Styled to match the application's dark theme. Supports mouse dragging and Escape key
+        cancellation. Used for user confirmations throughout the GUI (delete profile, stop
+        replication, etc.).
     .PARAMETER Title
         Dialog title text
     .PARAMETER Message
@@ -12105,22 +12160,209 @@ function Show-ConfirmDialog {
     }
 }
 
+function Show-AlertDialog {
+    <#
+    .SYNOPSIS
+        Shows a styled alert/warning dialog matching the app's dark theme
+    .DESCRIPTION
+        Displays a modal alert dialog with customizable icon, title, message, and button text.
+        Supports three icon types (Warning, Error, Info) with appropriate color coding. Styled
+        to match the application's dark theme. Used for non-interactive notifications and
+        warnings throughout the GUI.
+    .PARAMETER Title
+        Dialog title text
+    .PARAMETER Message
+        Message to display
+    .PARAMETER Icon
+        Icon type: 'Warning', 'Error', 'Info' (default: Warning)
+    .PARAMETER ButtonText
+        Text for the OK button (default: "OK")
+    .OUTPUTS
+        Nothing (void)
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Title = "Alert",
+        [string]$Message = "",
+        [ValidateSet('Warning', 'Error', 'Info')]
+        [string]$Icon = 'Warning',
+        [string]$ButtonText = "OK"
+    )
+
+    try {
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'AlertDialog.xaml' -FallbackContent @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Alert"
+        Height="200" Width="420"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize">
+
+    <Window.Resources>
+        <!-- OK button (blue accent) -->
+        <Style x:Key="OkButton" TargetType="Button">
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="#0078D4" CornerRadius="4" Padding="24,8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#1A8FE0"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#006CBD"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Border x:Name="dialogBorder" Background="#1E1E1E" CornerRadius="8" BorderBrush="#3E3E3E" BorderThickness="1">
+        <Grid Margin="24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header with icon and title -->
+            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,16">
+                <!-- Icon circle - color set dynamically -->
+                <Border x:Name="iconBorder" Width="40" Height="40" CornerRadius="20" Background="#FFB340" Margin="0,0,14,0">
+                    <TextBlock x:Name="txtIcon" Text="!" FontSize="24" Foreground="White"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold"
+                               Margin="0,-2,0,0"/>
+                </Border>
+                <TextBlock x:Name="txtTitle" Text="Alert" FontSize="18" FontWeight="SemiBold"
+                           Foreground="#E0E0E0" VerticalAlignment="Center"/>
+            </StackPanel>
+
+            <!-- Message -->
+            <TextBlock x:Name="txtMessage" Grid.Row="1" Text=""
+                       FontSize="14" Foreground="#B0B0B0" TextWrapping="Wrap"
+                       Margin="54,0,0,16" VerticalAlignment="Top"/>
+
+            <!-- OK Button -->
+            <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="btnOk" Content="OK" Style="{StaticResource OkButton}"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>
+
+'@
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $txtTitle = $dialog.FindName("txtTitle")
+        $txtMessage = $dialog.FindName("txtMessage")
+        $txtIcon = $dialog.FindName("txtIcon")
+        $iconBorder = $dialog.FindName("iconBorder")
+        $dialogBorder = $dialog.FindName("dialogBorder")
+        $btnOk = $dialog.FindName("btnOk")
+
+        # Set content
+        $txtTitle.Text = $Title
+        $txtMessage.Text = $Message
+        $btnOk.Content = $ButtonText
+
+        # Set icon and colors based on type
+        switch ($Icon) {
+            'Error' {
+                $txtIcon.Text = "X"
+                $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF6B6B")
+                $dialogBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF6B6B")
+            }
+            'Info' {
+                $txtIcon.Text = "i"
+                $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#0078D4")
+                $dialogBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#0078D4")
+            }
+            default {
+                # Warning (default)
+                $txtIcon.Text = "!"
+                $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FFB340")
+                $dialogBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FFB340")
+            }
+        }
+
+        # OK button handler
+        $btnOk.Add_Click({
+            $dialog.Close()
+        })
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+                $dialog.DragMove()
+            }
+        })
+
+        # Escape or Enter key to close
+        $dialog.Add_KeyDown({
+            param($sender, $e)
+            if ($e.Key -eq [System.Windows.Input.Key]::Escape -or $e.Key -eq [System.Windows.Input.Key]::Return) {
+                $dialog.Close()
+            }
+        })
+
+        # Set owner to main window for proper modal behavior
+        if ($script:Window) {
+            $dialog.Owner = $script:Window
+        }
+        $dialog.ShowDialog() | Out-Null
+    }
+    catch {
+        Write-GuiLog "Error showing alert dialog: $($_.Exception.Message)"
+        # Fallback to MessageBox
+        $mbIcon = switch ($Icon) {
+            'Error' { [System.Windows.MessageBoxImage]::Error }
+            'Info' { [System.Windows.MessageBoxImage]::Information }
+            default { [System.Windows.MessageBoxImage]::Warning }
+        }
+        [System.Windows.MessageBox]::Show($Message, $Title, [System.Windows.MessageBoxButton]::OK, $mbIcon) | Out-Null
+    }
+}
+
 function Show-CompletionDialog {
     <#
     .SYNOPSIS
         Shows a modern completion dialog with replication statistics
+    .DESCRIPTION
+        Displays a styled completion dialog at the end of replication showing success/failure
+        statistics. Color-coded based on results (success green, warnings orange). Shows detailed
+        error information for failed chunks with copy-to-clipboard functionality and log viewer
+        access. Provides visual feedback on overall replication health.
     .PARAMETER ChunksComplete
         Number of chunks completed successfully
     .PARAMETER ChunksTotal
         Total number of chunks
     .PARAMETER ChunksFailed
         Number of chunks that failed
+    .PARAMETER FailedChunkDetails
+        Array of failed chunk objects with details for error display
     #>
     [CmdletBinding()]
     param(
         [int]$ChunksComplete = 0,
         [int]$ChunksTotal = 0,
-        [int]$ChunksFailed = 0
+        [int]$ChunksFailed = 0,
+        [PSCustomObject[]]$FailedChunkDetails = @()
     )
 
     try {
@@ -12129,7 +12371,9 @@ function Show-CompletionDialog {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Replication Complete"
-        Height="280" Width="420"
+        SizeToContent="Height"
+        MaxHeight="550"
+        Width="420"
         WindowStartupLocation="CenterScreen"
         WindowStyle="None"
         AllowsTransparency="True"
@@ -12158,6 +12402,35 @@ function Show-CompletionDialog {
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="border" Property="Background" Value="#006CBD"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Secondary button style for action buttons -->
+        <Style x:Key="SecondaryButton" TargetType="Button">
+            <Setter Property="Background" Value="#3E3E3E"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Margin" Value="4"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="#3E3E3E" CornerRadius="3" Padding="16,8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#4E4E4E"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#2E2E2E"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -12218,6 +12491,29 @@ function Show-CompletionDialog {
                 </StackPanel>
             </Grid>
 
+            <!-- Error Details Panel (Collapsed by default) -->
+            <Border x:Name="pnlErrors" Grid.Row="2" Visibility="Collapsed" Background="#252525" CornerRadius="4"
+                    BorderBrush="#FF6B6B" BorderThickness="1" Padding="12" Margin="0,0,0,16" MaxHeight="200">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <StackPanel>
+                        <TextBlock Text="Failed Chunks:" FontSize="12" FontWeight="SemiBold" Foreground="#FF6B6B" Margin="0,0,0,8"/>
+
+                        <!-- Error list container -->
+                        <StackPanel x:Name="lstErrors"/>
+
+                        <!-- More errors text -->
+                        <TextBlock x:Name="txtMoreErrors" Visibility="Collapsed" FontSize="11"
+                                   Foreground="#808080" Margin="0,4,0,0" FontStyle="Italic"/>
+
+                        <!-- Action buttons -->
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+                            <Button x:Name="btnCopyErrors" Content="Copy Errors" Style="{StaticResource SecondaryButton}"/>
+                            <Button x:Name="btnViewLogs" Content="View Logs" Style="{StaticResource SecondaryButton}"/>
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </Border>
+
             <!-- OK Button with proper styling -->
             <Button x:Name="btnOk" Grid.Row="3" Content="OK" Style="{StaticResource ModernButton}" HorizontalAlignment="Center"/>
         </Grid>
@@ -12237,6 +12533,11 @@ function Show-CompletionDialog {
         $txtChunksValue = $dialog.FindName("txtChunksValue")
         $txtTotalValue = $dialog.FindName("txtTotalValue")
         $txtFailedValue = $dialog.FindName("txtFailedValue")
+        $pnlErrors = $dialog.FindName("pnlErrors")
+        $lstErrors = $dialog.FindName("lstErrors")
+        $txtMoreErrors = $dialog.FindName("txtMoreErrors")
+        $btnCopyErrors = $dialog.FindName("btnCopyErrors")
+        $btnViewLogs = $dialog.FindName("btnViewLogs")
         $btnOk = $dialog.FindName("btnOk")
 
         # Set values
@@ -12252,6 +12553,120 @@ function Show-CompletionDialog {
             $txtTitle.Text = "Replication Complete with Warnings"
             $txtSubtitle.Text = "$ChunksFailed chunk(s) failed"
             $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
+
+            # Show error details if we have failed chunk information
+            if ($FailedChunkDetails.Count -gt 0) {
+                $pnlErrors.Visibility = 'Visible'
+
+                # Display up to 10 errors
+                $displayErrors = $FailedChunkDetails | Select-Object -First 10
+                foreach ($chunk in $displayErrors) {
+                    $errorItem = New-Object System.Windows.Controls.Border
+                    $errorItem.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#1E1E1E")
+                    $errorItem.CornerRadius = 3
+                    $errorItem.Padding = 8
+                    $errorItem.Margin = "0,0,0,6"
+
+                    $errorStack = New-Object System.Windows.Controls.StackPanel
+
+                    # Chunk ID and Source Path
+                    $headerText = New-Object System.Windows.Controls.TextBlock
+                    $headerText.Text = "Chunk $($chunk.ChunkId): $($chunk.SourcePath)"
+                    $headerText.FontSize = 11
+                    $headerText.FontWeight = 'SemiBold'
+                    $headerText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#E0E0E0")
+                    $headerText.TextWrapping = 'Wrap'
+                    $errorStack.Children.Add($headerText) | Out-Null
+
+                    # Exit Code
+                    $exitCode = if ($chunk.PSObject.Properties['LastExitCode']) { $chunk.LastExitCode } else { 'N/A' }
+                    $exitCodeText = New-Object System.Windows.Controls.TextBlock
+                    $exitCodeText.Text = "Exit Code: $exitCode"
+                    $exitCodeText.FontSize = 10
+                    $exitCodeText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#808080")
+                    $exitCodeText.Margin = "0,2,0,0"
+                    $errorStack.Children.Add($exitCodeText) | Out-Null
+
+                    # Error Message
+                    $errorMsg = if ($chunk.PSObject.Properties['LastErrorMessage']) { $chunk.LastErrorMessage } else { 'Unknown error' }
+                    $errorMsgText = New-Object System.Windows.Controls.TextBlock
+                    $errorMsgText.Text = "Error: $errorMsg"
+                    $errorMsgText.FontSize = 10
+                    $errorMsgText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF6B6B")
+                    $errorMsgText.TextWrapping = 'Wrap'
+                    $errorMsgText.Margin = "0,2,0,0"
+                    $errorStack.Children.Add($errorMsgText) | Out-Null
+
+                    $errorItem.Child = $errorStack
+                    $lstErrors.Children.Add($errorItem) | Out-Null
+                }
+
+                # Show "and X more..." if there are more than 10 errors
+                if ($FailedChunkDetails.Count -gt 10) {
+                    $remaining = $FailedChunkDetails.Count - 10
+                    $txtMoreErrors.Text = "...and $remaining more error(s)"
+                    $txtMoreErrors.Visibility = 'Visible'
+                }
+
+                # Copy Errors button handler
+                $btnCopyErrors.Add_Click({
+                    try {
+                        # Build error report
+                        $errorReport = "Robocurse Replication Errors`n"
+                        $errorReport += "=" * 50 + "`n`n"
+
+                        foreach ($chunk in $FailedChunkDetails) {
+                            $errorReport += "Chunk $($chunk.ChunkId): $($chunk.SourcePath)`n"
+                            $exitCode = if ($chunk.PSObject.Properties['LastExitCode']) { $chunk.LastExitCode } else { 'N/A' }
+                            $errorReport += "Exit Code: $exitCode`n"
+                            $errorMsg = if ($chunk.PSObject.Properties['LastErrorMessage']) { $chunk.LastErrorMessage } else { 'Unknown error' }
+                            $errorReport += "Error: $errorMsg`n"
+                            $errorReport += "`n"
+                        }
+
+                        # Copy to clipboard
+                        [System.Windows.Clipboard]::SetText($errorReport)
+
+                        # Change button text temporarily
+                        $originalText = $btnCopyErrors.Content
+                        $btnCopyErrors.Content = "Copied!"
+
+                        # Use DispatcherTimer to reset after 2 seconds
+                        $resetTimer = New-Object System.Windows.Threading.DispatcherTimer
+                        $resetTimer.Interval = [TimeSpan]::FromSeconds(2)
+                        $resetTimer.Add_Tick({
+                            $btnCopyErrors.Content = $originalText
+                            $resetTimer.Stop()
+                        })
+                        $resetTimer.Start()
+                    }
+                    catch {
+                        Write-GuiLog "Error copying errors to clipboard: $($_.Exception.Message)"
+                    }
+                }.GetNewClosure())
+
+                # View Logs button handler
+                $btnViewLogs.Add_Click({
+                    try {
+                        # Get log path from config
+                        $logPath = if ($script:Config -and $script:Config.LogPath) {
+                            $script:Config.LogPath
+                        } else {
+                            Join-Path (Get-Location) "Logs"
+                        }
+
+                        # Open log directory in explorer
+                        if (Test-Path $logPath) {
+                            Start-Process explorer.exe -ArgumentList $logPath
+                        } else {
+                            Write-GuiLog "Log directory not found: $logPath"
+                        }
+                    }
+                    catch {
+                        Write-GuiLog "Error opening log directory: $($_.Exception.Message)"
+                    }
+                })
+            }
         }
         elseif ($ChunksComplete -eq 0 -and $ChunksTotal -eq 0) {
             # Nothing to do
@@ -12807,6 +13222,52 @@ function Show-CredentialInputDialog {
 # Log window instance and controls
 $script:LogWindow = $null
 $script:LogControls = @{}
+$script:LogWindowPosition = $null
+
+function Save-LogWindowPosition {
+    <#
+    .SYNOPSIS
+        Saves the current log window position and size
+    .DESCRIPTION
+        Called when the window is closing to preserve its position
+        for the next time it is opened.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if ($script:LogWindow -and $script:LogWindow.IsLoaded) {
+        $script:LogWindowPosition = @{
+            Left = $script:LogWindow.Left
+            Top = $script:LogWindow.Top
+            Width = $script:LogWindow.Width
+            Height = $script:LogWindow.Height
+            State = $script:LogWindow.WindowState
+        }
+    }
+}
+
+function Restore-LogWindowPosition {
+    <#
+    .SYNOPSIS
+        Restores the log window position and size from saved state
+    .DESCRIPTION
+        Called after creating the window to restore its previous position.
+        Does not restore Minimized state to avoid invisible window.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if ($script:LogWindowPosition -and $script:LogWindow) {
+        $script:LogWindow.Left = $script:LogWindowPosition.Left
+        $script:LogWindow.Top = $script:LogWindowPosition.Top
+        $script:LogWindow.Width = $script:LogWindowPosition.Width
+        $script:LogWindow.Height = $script:LogWindowPosition.Height
+        # Don't restore Minimized state - that would create an invisible window
+        if ($script:LogWindowPosition.State -ne 'Minimized') {
+            $script:LogWindow.WindowState = $script:LogWindowPosition.State
+        }
+    }
+}
 
 function Show-LogWindow {
     <#
@@ -12830,8 +13291,13 @@ function Show-LogWindow {
     try {
         $script:LogWindow = Initialize-LogWindow
         if ($script:LogWindow) {
-            # Set owner to main window so it stays on top of it
-            $script:LogWindow.Owner = $script:Window
+            # NOTE: Owner is intentionally NOT set for non-modal windows.
+            # Setting Owner + using Show() (non-modal) causes the window to ALWAYS
+            # stay on top of its owner, which is not desired for the log window.
+            # Modal dialogs (ShowDialog) should still use Owner for proper centering.
+
+            # Restore previous position if available
+            Restore-LogWindowPosition
 
             # Show non-modal
             $script:LogWindow.Show()
@@ -13067,9 +13533,10 @@ function Initialize-LogWindowEventHandlers {
         $script:LogControls[$_].Add_Unchecked({ Update-LogWindowContent })
     }
 
-    # Handle window closing - hide instead of close to preserve state
+    # Handle window closing - save position and hide instead of close to preserve state
     $Window.Add_Closing({
         param($sender, $e)
+        Save-LogWindowPosition
         $e.Cancel = $true
         $sender.Hide()
     })
@@ -13249,6 +13716,10 @@ function New-ReplicationRunspace {
     <#
     .SYNOPSIS
         Creates and configures a background runspace for replication
+    .DESCRIPTION
+        Initializes a PowerShell runspace with Robocurse module loaded for background replication.
+        Configures the runspace to import the Robocurse module (or dot-source monolith script)
+        and passes profile names for execution. Returns runspace handle for async management.
     .PARAMETER Profiles
         Array of profiles to run
     .PARAMETER MaxWorkers
@@ -13681,7 +14152,24 @@ function Start-GuiReplication {
     $script:Controls.btnStop.IsEnabled = $true
     $script:Controls.txtStatus.Text = "Replication in progress..."
     $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::Gray  # Reset error color
+    $script:Controls.txtStatus.Cursor = [System.Windows.Input.Cursors]::Arrow  # Reset cursor
+    $script:Controls.txtStatus.TextDecorations = $null  # Clear underline
     $script:GuiErrorCount = 0  # Reset error count for new run
+
+    # Clear error history for new run
+    if ($script:ErrorHistoryBuffer) {
+        [System.Threading.Monitor]::Enter($script:ErrorHistoryBuffer)
+        try {
+            $script:ErrorHistoryBuffer.Clear()
+        }
+        finally {
+            [System.Threading.Monitor]::Exit($script:ErrorHistoryBuffer)
+        }
+    }
+
+    # Reset per-profile error tracking
+    Reset-ProfileErrorTracking
+
     $script:LastGuiUpdateState = $null
     $script:Controls.dgChunks.ItemsSource = $null
 
@@ -13888,8 +14376,14 @@ function Complete-GuiReplication {
         Write-GuiLog "ERROR: Exception sending completion email: $($_.Exception.Message)"
     }
 
+    # Gather failed chunk details for the completion dialog
+    $failedDetails = @()
+    if ($script:OrchestrationState.FailedChunks.Count -gt 0) {
+        $failedDetails = @($script:OrchestrationState.FailedChunks.ToArray())
+    }
+
     # Show completion dialog (modal - blocks until user clicks OK)
-    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed
+    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -FailedChunkDetails $failedDetails
 
     # Clean up config snapshot if it was created
     if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {
@@ -13916,6 +14410,261 @@ $script:LastGuiUpdateState = $null
 
 # Cache for progress text - avoids unnecessary UpdateLayout() calls
 $script:LastProgressTextState = $null
+
+# Per-profile error tracking (reset each run)
+$script:ProfileErrorCounts = [System.Collections.Generic.Dictionary[string, int]]::new()
+
+# Error history buffer for clickable error indicator
+$script:ErrorHistoryBuffer = [System.Collections.Generic.List[PSCustomObject]]::new()
+$script:MaxErrorHistoryItems = 10
+
+function Add-ErrorToHistory {
+    <#
+    .SYNOPSIS
+        Adds an error message to the history buffer with timestamp
+    .PARAMETER Message
+        The error message to add
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message
+    )
+
+    [System.Threading.Monitor]::Enter($script:ErrorHistoryBuffer)
+    try {
+        $entry = [PSCustomObject]@{
+            Timestamp = [datetime]::Now.ToString('HH:mm:ss')
+            Message = $Message
+        }
+
+        $script:ErrorHistoryBuffer.Add($entry)
+
+        # Trim to max size
+        while ($script:ErrorHistoryBuffer.Count -gt $script:MaxErrorHistoryItems) {
+            $script:ErrorHistoryBuffer.RemoveAt(0)
+        }
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:ErrorHistoryBuffer)
+    }
+}
+
+function Update-ErrorIndicatorState {
+    <#
+    .SYNOPSIS
+        Updates the status bar to reflect current error state
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not $script:Controls -or -not $script:Controls.txtStatus) {
+        return
+    }
+
+    if ($script:GuiErrorCount -gt 0) {
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
+        $script:Controls.txtStatus.Text = "Replication in progress... ($($script:GuiErrorCount) error(s) - click to view)"
+        $script:Controls.txtStatus.Cursor = [System.Windows.Input.Cursors]::Hand
+        $script:Controls.txtStatus.TextDecorations = [System.Windows.TextDecorations]::Underline
+    } else {
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::Gray
+        $script:Controls.txtStatus.Cursor = [System.Windows.Input.Cursors]::Arrow
+        $script:Controls.txtStatus.TextDecorations = $null
+    }
+}
+
+function Clear-ErrorHistory {
+    <#
+    .SYNOPSIS
+        Clears the error history buffer and resets error state
+    #>
+    [CmdletBinding()]
+    param()
+
+    [System.Threading.Monitor]::Enter($script:ErrorHistoryBuffer)
+    try {
+        $script:ErrorHistoryBuffer.Clear()
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:ErrorHistoryBuffer)
+    }
+
+    $script:GuiErrorCount = 0
+
+    if ($script:Controls -and $script:Controls.txtStatus) {
+        $script:Controls.txtStatus.Text = "Replication in progress..."
+        $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::Gray
+        $script:Controls.txtStatus.Cursor = [System.Windows.Input.Cursors]::Arrow
+        $script:Controls.txtStatus.TextDecorations = $null
+    }
+}
+
+function Reset-ProfileErrorTracking {
+    <#
+    .SYNOPSIS
+        Resets all per-profile error counts
+    #>
+    [CmdletBinding()]
+    param()
+
+    [System.Threading.Monitor]::Enter($script:ProfileErrorCounts)
+    try {
+        $script:ProfileErrorCounts.Clear()
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:ProfileErrorCounts)
+    }
+}
+
+function Add-ProfileError {
+    <#
+    .SYNOPSIS
+        Increments the error count for a specific profile
+    .PARAMETER ProfileName
+        Name of the profile to increment error count for
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    [System.Threading.Monitor]::Enter($script:ProfileErrorCounts)
+    try {
+        if (-not $script:ProfileErrorCounts.ContainsKey($ProfileName)) {
+            $script:ProfileErrorCounts[$ProfileName] = 0
+        }
+        $script:ProfileErrorCounts[$ProfileName]++
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:ProfileErrorCounts)
+    }
+}
+
+function Get-ProfileErrorSummary {
+    <#
+    .SYNOPSIS
+        Returns a summary of errors by profile
+    .OUTPUTS
+        Array of objects with Name and ErrorCount properties
+    #>
+    [CmdletBinding()]
+    param()
+
+    $summary = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    [System.Threading.Monitor]::Enter($script:ProfileErrorCounts)
+    try {
+        foreach ($kvp in $script:ProfileErrorCounts.GetEnumerator()) {
+            $summary.Add([PSCustomObject]@{
+                Name = $kvp.Key
+                ErrorCount = $kvp.Value
+            })
+        }
+    }
+    finally {
+        [System.Threading.Monitor]::Exit($script:ProfileErrorCounts)
+    }
+
+    # Use Write-Output -NoEnumerate to prevent PowerShell array unwrapping
+    Write-Output -NoEnumerate $summary.ToArray()
+}
+
+function Update-ProfileErrorSummary {
+    <#
+    .SYNOPSIS
+        Updates the profile error summary panel in the progress view
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Check if controls exist
+    if (-not $script:Controls -or -not $script:Controls.pnlProfileErrors) {
+        return
+    }
+
+    # Check if orchestration state exists and has profiles
+    if (-not $script:OrchestrationState) {
+        $script:Controls.pnlProfileErrors.Visibility = 'Collapsed'
+        return
+    }
+
+    $profiles = $script:OrchestrationState.Profiles
+    $profileCount = if ($profiles) { @($profiles).Count } else { 0 }
+
+    # Only show for 2+ profiles
+    if ($profileCount -lt 2) {
+        $script:Controls.pnlProfileErrors.Visibility = 'Collapsed'
+        return
+    }
+
+    # Check if we have any error data
+    if ($script:ProfileErrorCounts.Count -eq 0) {
+        $script:Controls.pnlProfileErrors.Visibility = 'Collapsed'
+        return
+    }
+
+    $script:Controls.pnlProfileErrors.Visibility = 'Visible'
+    $panel = $script:Controls.pnlProfileErrorItems
+
+    if (-not $panel) { return }
+
+    $panel.Children.Clear()
+
+    foreach ($profile in $profiles) {
+        $errorCount = 0
+        if ($script:ProfileErrorCounts.ContainsKey($profile.Name)) {
+            $errorCount = $script:ProfileErrorCounts[$profile.Name]
+        }
+
+        # Create pill-style indicator
+        $border = New-Object System.Windows.Controls.Border
+        $border.CornerRadius = [System.Windows.CornerRadius]::new(12)
+        $border.Padding = [System.Windows.Thickness]::new(10, 4, 10, 4)
+        $border.Margin = [System.Windows.Thickness]::new(0, 0, 8, 4)
+
+        # Color based on error count
+        if ($errorCount -eq 0) {
+            $border.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#2D4A2D")
+        } else {
+            $border.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#4A2D2D")
+        }
+
+        $stack = New-Object System.Windows.Controls.StackPanel
+        $stack.Orientation = 'Horizontal'
+
+        $nameText = New-Object System.Windows.Controls.TextBlock
+        $nameText.Text = $profile.Name
+        $nameText.Foreground = [System.Windows.Media.Brushes]::White
+        $nameText.FontSize = 11
+        $nameText.VerticalAlignment = 'Center'
+
+        $countText = New-Object System.Windows.Controls.TextBlock
+        $countText.Margin = [System.Windows.Thickness]::new(6, 0, 0, 0)
+        $countText.FontWeight = 'Bold'
+        $countText.FontSize = 11
+        $countText.VerticalAlignment = 'Center'
+
+        if ($errorCount -eq 0) {
+            $countText.Text = [char]0x2713
+            $countText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#4CAF50")
+        } else {
+            $countText.Text = $errorCount.ToString()
+            $countText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF6B6B")
+        }
+
+        $stack.Children.Add($nameText)
+        $stack.Children.Add($countText)
+        $border.Child = $stack
+
+        $panel.Children.Add($border)
+    }
+
+    if ($script:Window) {
+        $script:Window.UpdateLayout()
+    }
+}
 
 function Update-GuiProgressText {
     <#
@@ -14069,10 +14818,14 @@ function Get-ChunkDisplayItems {
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = $chunk.ChunkId
             SourcePath = $chunk.SourcePath
+            DestinationPath = $chunk.DestinationPath
             Status = "Failed"
             Progress = 0
             ProgressScale = [double]0.0
             Speed = "--"
+            RetryCount = $chunk.RetryCount
+            LastExitCode = $chunk.LastExitCode
+            LastErrorMessage = $chunk.LastErrorMessage
         })
     }
 
@@ -14186,13 +14939,22 @@ function Update-GuiProgress {
             $errors = $script:OrchestrationState.DequeueErrors()
             foreach ($err in $errors) {
                 Write-GuiLog "[ERROR] $err"
+                Add-ErrorToHistory -Message $err
                 $script:GuiErrorCount++
+
+                # Track error against current profile
+                $currentProfile = $script:OrchestrationState.CurrentProfile
+                if ($currentProfile -and $currentProfile.Name) {
+                    Add-ProfileError -ProfileName $currentProfile.Name
+                }
             }
 
             # Update status bar with error indicator if errors occurred
             if ($script:GuiErrorCount -gt 0) {
                 $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
                 $script:Controls.txtStatus.Text = "Replication in progress... ($($script:GuiErrorCount) error(s))"
+                Update-ErrorIndicatorState
+                Update-ProfileErrorSummary
             }
         }
 
@@ -14572,6 +15334,40 @@ function Initialize-RobocurseGui {
             </Style.Triggers>
         </Style>
 
+        <!-- DataGrid Row Style with Error Tooltip -->
+        <Style x:Key="DarkDataGridRowWithTooltip" TargetType="DataGridRow" BasedOn="{StaticResource DarkDataGridRow}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Status}" Value="Failed">
+                    <Setter Property="ToolTip">
+                        <Setter.Value>
+                            <ToolTip Background="#2D2D2D" BorderBrush="#FF6B6B" BorderThickness="2">
+                                <StackPanel MaxWidth="400">
+                                    <TextBlock Text="CHUNK ERROR DETAILS" FontWeight="Bold" Foreground="#FF6B6B" Margin="0,0,0,10"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                        <TextBlock Text="Exit Code: " Foreground="#808080" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding LastExitCode}" Foreground="#E0E0E0"/>
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                        <TextBlock Text="Error: " Foreground="#808080" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding LastErrorMessage}" Foreground="#FFB340" TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                    <Separator Background="#3E3E3E" Margin="0,10"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,5,0,5">
+                                        <TextBlock Text="Source: " Foreground="#808080" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding SourcePath}" Foreground="#E0E0E0" TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                    <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
+                                        <TextBlock Text="Destination: " Foreground="#808080" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding DestinationPath}" Foreground="#E0E0E0" TextWrapping="Wrap"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </ToolTip>
+                        </Setter.Value>
+                    </Setter>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
         <Style x:Key="DarkDataGridColumnHeader" TargetType="DataGridColumnHeader">
             <Setter Property="Background" Value="#1E1E1E"/>
             <Setter Property="Foreground" Value="#E0E0E0"/>
@@ -14579,6 +15375,29 @@ function Initialize-RobocurseGui {
             <Setter Property="BorderThickness" Value="0,0,0,1"/>
             <Setter Property="Padding" Value="8,5"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+
+        <!-- Dark ContextMenu Style -->
+        <Style x:Key="DarkContextMenu" TargetType="ContextMenu">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+
+        <Style x:Key="DarkMenuItem" TargetType="MenuItem">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="Padding" Value="8,5"/>
+            <Style.Triggers>
+                <Trigger Property="IsHighlighted" Value="True">
+                    <Setter Property="Background" Value="#0078D4"/>
+                    <Setter Property="Foreground" Value="White"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Foreground" Value="#707070"/>
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
         <!-- NEW: Rail Button Style for Navigation -->
@@ -14699,6 +15518,7 @@ function Initialize-RobocurseGui {
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="80"/>
@@ -14747,6 +15567,12 @@ function Initialize-RobocurseGui {
                                      ToolTip="Max depth"/>
                             <Label Content="depth" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
                         </StackPanel>
+
+                        <!-- Validate Button -->
+                        <Button Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" x:Name="btnValidateProfile"
+                                Content="Validate Profile" Style="{StaticResource DarkButton}"
+                                HorizontalAlignment="Left" Width="120" Margin="0,10,0,0"
+                                ToolTip="Run pre-flight validation checks"/>
                     </Grid>
                 </Border>
             </Grid>
@@ -14938,41 +15764,61 @@ function Initialize-RobocurseGui {
 
                 <!-- Progress Summary -->
                 <Border Grid.Row="0" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
-                    <Grid>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="150"/>
-                        </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <!-- Main progress row -->
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="150"/>
+                            </Grid.ColumnDefinitions>
 
-                        <StackPanel Grid.Column="0">
-                            <TextBlock x:Name="txtProfileProgress" Text="Profile: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                            <ProgressBar x:Name="pbProfile" Height="20" Minimum="0" Maximum="100" Value="0"
-                                         Background="#1A1A1A" Foreground="#00BFFF" BorderBrush="#555555" BorderThickness="1"/>
-                        </StackPanel>
+                            <StackPanel Grid.Column="0">
+                                <TextBlock x:Name="txtProfileProgress" Text="Profile: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
+                                <ProgressBar x:Name="pbProfile" Height="20" Minimum="0" Maximum="100" Value="0"
+                                             Background="#1A1A1A" Foreground="#00BFFF" BorderBrush="#555555" BorderThickness="1"/>
+                            </StackPanel>
 
-                        <StackPanel Grid.Column="1" Margin="15,0,0,0">
-                            <TextBlock x:Name="txtOverallProgress" Text="Overall: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
-                            <ProgressBar x:Name="pbOverall" Height="20" Minimum="0" Maximum="100" Value="0"
-                                         Background="#1A1A1A" Foreground="#00FF7F" BorderBrush="#555555" BorderThickness="1"/>
-                        </StackPanel>
+                            <StackPanel Grid.Column="1" Margin="15,0,0,0">
+                                <TextBlock x:Name="txtOverallProgress" Text="Overall: --" Foreground="#E0E0E0" Margin="0,0,0,5"/>
+                                <ProgressBar x:Name="pbOverall" Height="20" Minimum="0" Maximum="100" Value="0"
+                                             Background="#1A1A1A" Foreground="#00FF7F" BorderBrush="#555555" BorderThickness="1"/>
+                            </StackPanel>
 
-                        <StackPanel Grid.Column="2" Margin="15,0,0,0">
-                            <TextBlock x:Name="txtEta" Text="ETA: --:--:--" Foreground="#808080"/>
-                            <TextBlock x:Name="txtSpeed" Text="Speed: -- MB/s" Foreground="#808080"/>
-                            <TextBlock x:Name="txtChunks" Text="Chunks: 0/0" Foreground="#808080"/>
-                        </StackPanel>
-                    </Grid>
+                            <StackPanel Grid.Column="2" Margin="15,0,0,0">
+                                <TextBlock x:Name="txtEta" Text="ETA: --:--:--" Foreground="#808080"/>
+                                <TextBlock x:Name="txtSpeed" Text="Speed: -- MB/s" Foreground="#808080"/>
+                                <TextBlock x:Name="txtChunks" Text="Chunks: 0/0" Foreground="#808080"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- Per-profile error summary (visible only when 2+ profiles running) -->
+                        <Border x:Name="pnlProfileErrors" Visibility="Collapsed"
+                                Background="#1E1E1E" CornerRadius="4" Padding="10" Margin="0,10,0,0">
+                            <StackPanel>
+                                <TextBlock Text="Profile Status" Foreground="#808080" FontSize="11" Margin="0,0,0,5"/>
+                                <WrapPanel x:Name="pnlProfileErrorItems"/>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
                 </Border>
 
                 <!-- Chunk DataGrid -->
                 <DataGrid Grid.Row="1" x:Name="dgChunks" AutoGenerateColumns="False"
                           Style="{StaticResource DarkDataGrid}"
                           CellStyle="{StaticResource DarkDataGridCell}"
-                          RowStyle="{StaticResource DarkDataGridRow}"
+                          RowStyle="{StaticResource DarkDataGridRowWithTooltip}"
                           ColumnHeaderStyle="{StaticResource DarkDataGridColumnHeader}"
                           AlternationCount="2"
                           IsReadOnly="True" SelectionMode="Single">
+                    <DataGrid.ContextMenu>
+                        <ContextMenu x:Name="cmChunks" Style="{StaticResource DarkContextMenu}">
+                            <MenuItem x:Name="miRetryChunk" Header="Retry Chunk" Style="{StaticResource DarkMenuItem}"/>
+                            <MenuItem x:Name="miSkipChunk" Header="Skip Chunk" Style="{StaticResource DarkMenuItem}"/>
+                            <Separator Background="#3E3E3E"/>
+                            <MenuItem x:Name="miOpenLog" Header="Open Log File" Style="{StaticResource DarkMenuItem}"/>
+                        </ContextMenu>
+                    </DataGrid.ContextMenu>
                     <DataGrid.Columns>
                         <DataGridTextColumn Header="ID" Binding="{Binding ChunkId}" Width="50"/>
                         <DataGridTextColumn Header="Path" Binding="{Binding SourcePath}" Width="250"/>
@@ -15109,9 +15955,10 @@ function Initialize-RobocurseGui {
                             ToolTip="Configure scheduled runs"/>
                 </StackPanel>
 
-                <!-- Status text -->
+                <!-- Status text - clickable when errors exist -->
                 <TextBlock Grid.Column="1" x:Name="txtStatus" Text="Ready"
-                           Foreground="#808080" VerticalAlignment="Center" Margin="15,0"/>
+                           Foreground="#808080" VerticalAlignment="Center" Margin="15,0"
+                           Background="Transparent"/>
 
                 <!-- Workers slider -->
                 <StackPanel Grid.Column="2" Orientation="Horizontal">
@@ -15144,9 +15991,11 @@ function Initialize-RobocurseGui {
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
         'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'btnValidateProfile',
         'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
         'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus',
+        'pnlProfileErrors', 'pnlProfileErrorItems',
         'btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs',
         'panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs',
         'chkLogDebug', 'chkLogInfo', 'chkLogWarning', 'chkLogError',
@@ -15157,7 +16006,8 @@ function Initialize-RobocurseGui {
         'chkSettingsSiem', 'txtSettingsSiemPath', 'btnSettingsSiemBrowse',
         'chkSettingsEmailEnabled', 'txtSettingsSmtp', 'txtSettingsSmtpPort',
         'chkSettingsTls', 'txtSettingsCredential', 'btnSettingsSetCredential', 'txtSettingsEmailFrom', 'txtSettingsEmailTo',
-        'btnSettingsSchedule', 'txtSettingsScheduleStatus', 'btnSettingsRevert', 'btnSettingsSave'
+        'btnSettingsSchedule', 'txtSettingsScheduleStatus', 'btnSettingsRevert', 'btnSettingsSave',
+        'cmChunks', 'miRetryChunk', 'miSkipChunk', 'miOpenLog'
     ) | ForEach-Object {
         $script:Controls[$_] = $script:Window.FindName($_)
     }
@@ -15411,6 +16261,18 @@ function Initialize-EventHandlers {
         }
     })
 
+    # Validate Profile button
+    $script:Controls.btnValidateProfile.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "ValidateProfile" -ScriptBlock {
+            $selectedProfile = $script:Controls.lstProfiles.SelectedItem
+            if (-not $selectedProfile) {
+                Show-AlertDialog -Title "No Profile Selected" -Message "Please select a profile to validate" -Icon 'Warning'
+                return
+            }
+            Show-ValidationDialog -Profile $selectedProfile
+        }
+    })
+
     # Workers slider
     $script:Controls.sldWorkers.Add_ValueChanged({
         Invoke-SafeEventHandler -HandlerName "WorkerSlider" -ScriptBlock {
@@ -15432,6 +16294,15 @@ function Initialize-EventHandlers {
     # Schedule button
     $script:Controls.btnSchedule.Add_Click({
         Invoke-SafeEventHandler -HandlerName "Schedule" -ScriptBlock { Show-ScheduleDialog }
+    })
+
+    # Status text - click to show error popup when errors exist
+    $script:Controls.txtStatus.Add_MouseLeftButtonUp({
+        Invoke-SafeEventHandler -HandlerName "StatusClick" -ScriptBlock {
+            if ($script:GuiErrorCount -gt 0) {
+                Show-ErrorPopup
+            }
+        }
     })
 
     # Navigation rail buttons - toggle panel visibility
@@ -15634,6 +16505,66 @@ function Initialize-EventHandlers {
     if ($script:Controls['btnSettingsSetCredential']) {
         $script:Controls.btnSettingsSetCredential.Add_Click({
             Invoke-SafeEventHandler -HandlerName "SettingsSetCredential" -ScriptBlock { Show-CredentialInputDialog }
+        })
+    }
+
+    # Context menu - Retry chunk
+    if ($script:Controls['miRetryChunk']) {
+        $script:Controls.miRetryChunk.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "RetryChunk" -ScriptBlock {
+                $selectedItem = $script:Controls.dgChunks.SelectedItem
+                if ($selectedItem -and $selectedItem.Status -eq 'Failed') {
+                    Invoke-ChunkRetry -ChunkId $selectedItem.ChunkId
+                }
+            }
+        })
+    }
+
+    # Context menu - Skip chunk
+    if ($script:Controls['miSkipChunk']) {
+        $script:Controls.miSkipChunk.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "SkipChunk" -ScriptBlock {
+                $selectedItem = $script:Controls.dgChunks.SelectedItem
+                if ($selectedItem -and $selectedItem.Status -eq 'Failed') {
+                    Invoke-ChunkSkip -ChunkId $selectedItem.ChunkId
+                }
+            }
+        })
+    }
+
+    # Context menu - Open log file
+    if ($script:Controls['miOpenLog']) {
+        $script:Controls.miOpenLog.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "OpenChunkLog" -ScriptBlock {
+                $selectedItem = $script:Controls.dgChunks.SelectedItem
+                if ($selectedItem -and $selectedItem.LogPath) {
+                    Open-ChunkLog -LogPath $selectedItem.LogPath
+                }
+            }
+        })
+    }
+
+    # Context menu - Opening event (enable/disable items based on selection)
+    if ($script:Controls['cmChunks']) {
+        $script:Controls.cmChunks.Add_Opened({
+            Invoke-SafeEventHandler -HandlerName "ChunkContextMenuOpened" -ScriptBlock {
+                $selectedItem = $script:Controls.dgChunks.SelectedItem
+
+                # Enable retry/skip only for failed chunks
+                $isFailed = $selectedItem -and $selectedItem.Status -eq 'Failed'
+                if ($script:Controls['miRetryChunk']) {
+                    $script:Controls.miRetryChunk.IsEnabled = $isFailed
+                }
+                if ($script:Controls['miSkipChunk']) {
+                    $script:Controls.miSkipChunk.IsEnabled = $isFailed
+                }
+
+                # Enable Open Log only if log path is available
+                $hasLog = $selectedItem -and -not [string]::IsNullOrWhiteSpace($selectedItem.LogPath)
+                if ($script:Controls['miOpenLog']) {
+                    $script:Controls.miOpenLog.IsEnabled = $hasLog
+                }
+            }
         })
     }
 
@@ -15933,6 +16864,12 @@ function Invoke-HeadlessReplication {
     <#
     .SYNOPSIS
         Runs replication in headless mode with progress output and email notification
+    .DESCRIPTION
+        Orchestrates complete replication run in non-GUI mode with console progress updates,
+        email notifications, and proper cleanup. Manages the orchestration loop, tick processing,
+        progress output throttling, completion detection, and final result reporting. Supports
+        dry-run mode and bandwidth limiting. Returns exit code 0 for success or 1 for failures
+        suitable for scripting and automation.
     .PARAMETER Config
         Configuration object
     .PARAMETER ProfilesToRun

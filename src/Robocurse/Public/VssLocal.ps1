@@ -207,6 +207,8 @@ function New-VssSnapshotInternal {
         Internal function that performs the actual VSS snapshot creation
     .DESCRIPTION
         Called by New-VssSnapshot. Separated for retry logic.
+    .PARAMETER SourcePath
+        Path to create snapshot for (volume will be determined from this path)
     #>
     [CmdletBinding()]
     param(

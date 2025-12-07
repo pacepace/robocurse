@@ -230,6 +230,11 @@ function Test-ChunkAlreadyCompleted {
     <#
     .SYNOPSIS
         Checks if a chunk was completed in a previous run
+    .DESCRIPTION
+        Determines whether a specific chunk has already been successfully replicated in a previous
+        run by checking against checkpoint data. Supports both O(1) HashSet lookups (preferred) and
+        O(N) linear search (backwards compatibility). Used during resume operations to skip chunks
+        that don't need to be re-replicated.
     .PARAMETER Chunk
         Chunk object to check
     .PARAMETER Checkpoint

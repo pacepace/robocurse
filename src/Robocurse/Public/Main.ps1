@@ -47,6 +47,12 @@ function Invoke-HeadlessReplication {
     <#
     .SYNOPSIS
         Runs replication in headless mode with progress output and email notification
+    .DESCRIPTION
+        Orchestrates complete replication run in non-GUI mode with console progress updates,
+        email notifications, and proper cleanup. Manages the orchestration loop, tick processing,
+        progress output throttling, completion detection, and final result reporting. Supports
+        dry-run mode and bandwidth limiting. Returns exit code 0 for success or 1 for failures
+        suitable for scripting and automation.
     .PARAMETER Config
         Configuration object
     .PARAMETER ProfilesToRun
