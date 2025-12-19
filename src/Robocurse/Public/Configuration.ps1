@@ -82,6 +82,11 @@ function New-DefaultConfig {
             VerboseFileLogging = $false  # If true, log every file copied; if false, only log summary
             RedactPaths = $false  # If true, redact file paths in logs for security/privacy
             RedactServerNames = @()  # Array of server names to specifically redact from logs
+            SnapshotRetention = [PSCustomObject]@{
+                DefaultKeepCount = 3          # Default snapshots to keep per volume
+                VolumeOverrides = @{}         # Per-volume overrides: @{ "D:" = 5; "E:" = 10 }
+            }
+            SnapshotSchedules = @()  # Array of schedule definitions
         }
         Email = [PSCustomObject]@{
             Enabled = $false
@@ -260,6 +265,43 @@ function ConvertFrom-GlobalSettings {
         }
     }
 
+    # Snapshot retention settings (DEPRECATED - now per-profile)
+    # Kept for migration purposes only - new configs should use per-profile sourceSnapshot/destinationSnapshot
+    if ($RawGlobal.snapshotRetention) {
+        Write-Warning "Global snapshotRetention settings are deprecated. Snapshot retention is now configured per-profile using sourceSnapshot and destinationSnapshot. These settings will be used for migration only."
+        $Config.GlobalSettings.SnapshotRetention = [PSCustomObject]@{
+            DefaultKeepCount = if ($RawGlobal.snapshotRetention.defaultKeepCount) {
+                $RawGlobal.snapshotRetention.defaultKeepCount
+            } else { 3 }
+            VolumeOverrides = @{}
+        }
+        if ($RawGlobal.snapshotRetention.volumeOverrides) {
+            $overrides = @{}
+            $RawGlobal.snapshotRetention.volumeOverrides.PSObject.Properties | ForEach-Object {
+                $overrides[$_.Name.ToUpper()] = [int]$_.Value
+            }
+            $Config.GlobalSettings.SnapshotRetention.VolumeOverrides = $overrides
+        }
+    }
+
+    # Snapshot schedule settings
+    if ($RawGlobal.snapshotSchedules) {
+        $schedules = @()
+        foreach ($rawSched in $RawGlobal.snapshotSchedules) {
+            $schedules += [PSCustomObject]@{
+                Name = $rawSched.name
+                Volume = $rawSched.volume.ToUpper()
+                Schedule = $rawSched.schedule  # "Hourly", "Daily", "Weekly"
+                Time = $rawSched.time          # "HH:MM" format
+                DaysOfWeek = if ($rawSched.daysOfWeek) { @($rawSched.daysOfWeek) } else { @() }
+                KeepCount = if ($rawSched.keepCount) { [int]$rawSched.keepCount } else { 3 }
+                Enabled = if ($null -ne $rawSched.enabled) { [bool]$rawSched.enabled } else { $true }
+                ServerName = $rawSched.serverName  # For remote volumes
+            }
+        }
+        $Config.GlobalSettings.SnapshotSchedules = $schedules
+    }
+
     # Email settings
     if ($RawGlobal.email) {
         $Config.Email.Enabled = [bool]$RawGlobal.email.enabled
@@ -341,6 +383,14 @@ function ConvertFrom-FriendlyConfig {
                 ChunkMaxDepth = $script:DefaultMaxChunkDepth
                 RobocopyOptions = @{}
                 Enabled = $true
+                SourceSnapshot = [PSCustomObject]@{
+                    PersistentEnabled = $false    # Create persistent snapshot on source before backup
+                    RetentionCount = 3            # How many snapshots to keep on source volume
+                }
+                DestinationSnapshot = [PSCustomObject]@{
+                    PersistentEnabled = $false    # Create persistent snapshot on destination before backup
+                    RetentionCount = 3            # How many snapshots to keep on destination volume
+                }
             }
 
             # Handle source - "source" property (string or object with path/useVss)
@@ -358,6 +408,36 @@ function ConvertFrom-FriendlyConfig {
 
             # Handle destination
             $syncProfile.Destination = Get-DestinationPathFromRaw -RawDestination $rawProfile.destination
+
+            # Handle snapshot settings (new format: sourceSnapshot/destinationSnapshot)
+            if ($rawProfile.sourceSnapshot) {
+                $syncProfile.SourceSnapshot = [PSCustomObject]@{
+                    PersistentEnabled = [bool]$rawProfile.sourceSnapshot.persistentEnabled
+                    RetentionCount = if ($rawProfile.sourceSnapshot.retentionCount) {
+                        [int]$rawProfile.sourceSnapshot.retentionCount
+                    } else { 3 }
+                }
+            }
+            if ($rawProfile.destinationSnapshot) {
+                $syncProfile.DestinationSnapshot = [PSCustomObject]@{
+                    PersistentEnabled = [bool]$rawProfile.destinationSnapshot.persistentEnabled
+                    RetentionCount = if ($rawProfile.destinationSnapshot.retentionCount) {
+                        [int]$rawProfile.destinationSnapshot.retentionCount
+                    } else { 3 }
+                }
+            }
+
+            # Migration: Handle legacy persistentSnapshot format (migrate to sourceSnapshot)
+            if ($rawProfile.persistentSnapshot -and $rawProfile.persistentSnapshot.enabled) {
+                if (-not $rawProfile.sourceSnapshot) {
+                    Write-Verbose "Migrating legacy persistentSnapshot to sourceSnapshot for profile '$profileName'"
+                    $syncProfile.SourceSnapshot.PersistentEnabled = $true
+                    # Use global default retention if available (for migration), otherwise 3
+                    if ($RawConfig.global -and $RawConfig.global.snapshotRetention -and $RawConfig.global.snapshotRetention.defaultKeepCount) {
+                        $syncProfile.SourceSnapshot.RetentionCount = [int]$RawConfig.global.snapshotRetention.defaultKeepCount
+                    }
+                }
+            }
 
             # Apply chunking settings
             ConvertTo-ChunkSettingsInternal -Profile $syncProfile -RawChunking $rawProfile.chunking
@@ -459,6 +539,22 @@ function ConvertTo-FriendlyConfig {
                     'Flat' { 'flat' }
                     default { 'auto' }
                 }
+            }
+        }
+
+        # Add source snapshot settings if enabled
+        if ($profile.SourceSnapshot -and $profile.SourceSnapshot.PersistentEnabled) {
+            $friendlyProfile.sourceSnapshot = [ordered]@{
+                persistentEnabled = $profile.SourceSnapshot.PersistentEnabled
+                retentionCount = if ($profile.SourceSnapshot.RetentionCount) { $profile.SourceSnapshot.RetentionCount } else { 3 }
+            }
+        }
+
+        # Add destination snapshot settings if enabled
+        if ($profile.DestinationSnapshot -and $profile.DestinationSnapshot.PersistentEnabled) {
+            $friendlyProfile.destinationSnapshot = [ordered]@{
+                persistentEnabled = $profile.DestinationSnapshot.PersistentEnabled
+                retentionCount = if ($profile.DestinationSnapshot.RetentionCount) { $profile.DestinationSnapshot.RetentionCount } else { 3 }
             }
         }
 

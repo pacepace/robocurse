@@ -57,6 +57,14 @@ Edit `Robocurse.config.json`:
       "Source": "\\\\FILESERVER\\Share",
       "Destination": "D:\\Backups\\FileServer",
       "UseVss": true,
+      "SourceSnapshot": {
+        "PersistentEnabled": false,
+        "RetentionCount": 3
+      },
+      "DestinationSnapshot": {
+        "PersistentEnabled": true,
+        "RetentionCount": 7
+      },
       "RobocopyOptions": {
         "Switches": ["/COPYALL"],
         "ExcludeDirs": ["$RECYCLE.BIN", "System Volume Information"]
@@ -218,6 +226,54 @@ Set globally or per-profile via `MismatchSeverity`.
 
 ### VSS Configuration
 
+Robocurse offers two types of VSS snapshots:
+
+| Type | Purpose | Lifetime |
+|------|---------|----------|
+| **Temporary (UseVss)** | Copy locked/open files during sync | Deleted immediately after job |
+| **Persistent Snapshots** | Point-in-time recovery | Retained per your retention policy |
+
+#### Per-Profile Snapshot Settings
+
+Each profile can independently configure snapshots for both source and destination volumes:
+
+```json
+{
+  "SyncProfiles": [
+    {
+      "Name": "DailyBackup",
+      "Source": "\\\\FILESERVER\\Share",
+      "Destination": "D:\\Backups",
+      "UseVss": true,
+      "SourceSnapshot": {
+        "PersistentEnabled": true,
+        "RetentionCount": 5
+      },
+      "DestinationSnapshot": {
+        "PersistentEnabled": true,
+        "RetentionCount": 7
+      }
+    }
+  ]
+}
+```
+
+| Setting | Description |
+|---------|-------------|
+| `UseVss` | Create temporary snapshot on source to copy locked files (deleted after sync) |
+| `SourceSnapshot.PersistentEnabled` | Create persistent snapshot on source volume before backup |
+| `SourceSnapshot.RetentionCount` | Number of snapshots to retain on source volume (1-100) |
+| `DestinationSnapshot.PersistentEnabled` | Create persistent snapshot on destination volume before backup |
+| `DestinationSnapshot.RetentionCount` | Number of snapshots to retain on destination volume (1-100) |
+
+#### Intelligent MAX Retention
+
+When multiple profiles share the same volume (source or destination), Robocurse uses the **maximum retention count** from all profiles targeting that volume during cleanup.
+
+**Example:** Profile A backs up from `D:\Data1` with retention 3, Profile B backs up from `D:\Data2` with retention 7. Both target volume `D:`. When either profile runs, it creates a snapshot and cleans up old ones keeping **7** (the max).
+
+This prevents snapshot accumulation while respecting each profile's declared retention requirements.
+
 #### Pre-flight Check
 
 ```powershell
@@ -281,6 +337,104 @@ VSS operations retry automatically for transient failures (lock contention, VSS 
 
 ---
 
+## Snapshot Management
+
+Robocurse provides both GUI and CLI interfaces for managing VSS snapshots.
+
+### GUI Management
+
+In the GUI, each profile has **Source Snapshots** and **Destination Snapshots** tabs showing existing snapshots for the respective volumes. From these tabs you can:
+- View snapshot creation dates and shadow IDs
+- Delete individual snapshots
+- Refresh the snapshot list
+
+### CLI Commands
+
+The CLI provides commands for managing VSS snapshots independently of replication jobs.
+
+### List Snapshots
+
+```powershell
+# List all local snapshots
+.\Robocurse.ps1 -ListSnapshots
+
+# List snapshots for specific volume
+.\Robocurse.ps1 -ListSnapshots -Volume D:
+
+# List snapshots on remote server
+.\Robocurse.ps1 -ListSnapshots -Server FileServer01
+.\Robocurse.ps1 -ListSnapshots -Volume D: -Server FileServer01
+```
+
+### Create Snapshots
+
+```powershell
+# Create snapshot on local volume
+.\Robocurse.ps1 -CreateSnapshot -Volume D:
+
+# Create on remote server
+.\Robocurse.ps1 -CreateSnapshot -Volume D: -Server FileServer01
+
+# Create with retention (keeps only N newest snapshots)
+.\Robocurse.ps1 -CreateSnapshot -Volume D: -KeepCount 5
+```
+
+### Delete Snapshots
+
+```powershell
+# Delete by shadow ID (get ID from -ListSnapshots)
+.\Robocurse.ps1 -DeleteSnapshot -ShadowId "{abc12345-...}"
+
+# Delete on remote server
+.\Robocurse.ps1 -DeleteSnapshot -ShadowId "{abc12345-...}" -Server FileServer01
+```
+
+### Snapshot Schedules
+
+Define schedules in your config file under `GlobalSettings.SnapshotSchedules`:
+
+```json
+{
+  "GlobalSettings": {
+    "SnapshotSchedules": [
+      {
+        "Name": "HourlyD",
+        "Volume": "D:",
+        "Schedule": "Hourly",
+        "Time": "00:00",
+        "KeepCount": 24,
+        "Enabled": true
+      },
+      {
+        "Name": "DailyE",
+        "Volume": "E:",
+        "Schedule": "Daily",
+        "Time": "02:00",
+        "KeepCount": 7,
+        "Enabled": true
+      }
+    ]
+  }
+}
+```
+
+Manage schedules via CLI:
+
+```powershell
+# List configured schedules
+.\Robocurse.ps1 -SnapshotSchedule
+
+# Sync schedules from config to Windows Task Scheduler
+.\Robocurse.ps1 -SnapshotSchedule -Sync
+
+# Remove a schedule
+.\Robocurse.ps1 -SnapshotSchedule -Remove -ScheduleName HourlyD
+```
+
+Schedule options: `Hourly`, `Daily`, `Weekly`, `Monthly`.
+
+---
+
 ## Logging
 
 Robocurse generates three log types:
@@ -309,7 +463,7 @@ src/Robocurse/           # Module source (edit here)
 
 build/                   # Build tools
 dist/                    # Built monolith (deploy this)
-tests/                   # Pester test suite (900+ cases)
+tests/                   # Pester test suite (2000+ cases)
 ```
 
 ### Building

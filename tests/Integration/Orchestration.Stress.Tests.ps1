@@ -51,26 +51,47 @@ InModuleScope 'Robocurse' {
             }
 
             It "Should maintain accurate count with concurrent increments" {
-                $iterations = 100
+                # Test concurrent increments using runspaces for true in-process parallelism
+                $threadCount = 10
+                $incrementsPerThread = 100
+                $expectedTotal = $threadCount * $incrementsPerThread
 
-                # Run concurrent increments
-                $jobs = 1..10 | ForEach-Object {
-                    Start-Job -ScriptBlock {
-                        param($Count)
-                        for ($i = 0; $i -lt $Count; $i++) {
-                            # Simulate increment operation
-                            Start-Sleep -Milliseconds 1
+                $runspacePool = [runspacefactory]::CreateRunspacePool(1, $threadCount)
+                $runspacePool.Open()
+
+                $state = $script:OrchestrationState
+                $runspaces = @()
+
+                try {
+                    1..$threadCount | ForEach-Object {
+                        $powershell = [powershell]::Create()
+                        $powershell.RunspacePool = $runspacePool
+                        [void]$powershell.AddScript({
+                            param($State, $Count)
+                            for ($i = 0; $i -lt $Count; $i++) {
+                                $State.IncrementCompletedCount()
+                            }
+                        }).AddArgument($state).AddArgument($incrementsPerThread)
+
+                        $runspaces += @{
+                            PowerShell = $powershell
+                            Handle = $powershell.BeginInvoke()
                         }
-                        return $Count
-                    } -ArgumentList ($iterations / 10)
+                    }
+
+                    # Wait for all to complete
+                    foreach ($rs in $runspaces) {
+                        $rs.PowerShell.EndInvoke($rs.Handle)
+                        $rs.PowerShell.Dispose()
+                    }
+                }
+                finally {
+                    $runspacePool.Close()
+                    $runspacePool.Dispose()
                 }
 
-                $jobs | Wait-Job -Timeout 30 | Out-Null
-                $results = $jobs | Receive-Job
-                $jobs | Remove-Job -Force
-
-                # All jobs should complete
-                $results.Count | Should -Be 10
+                # Verify accurate count - the C# class uses Interlocked.Increment for thread safety
+                $script:OrchestrationState.CompletedCount | Should -Be $expectedTotal
             }
 
             It "Should handle rapid CompletedCount increments" {

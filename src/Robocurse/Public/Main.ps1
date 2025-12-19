@@ -9,37 +9,58 @@ function Show-RobocurseHelp {
     param()
 
     Write-Host @"
-Robocurse - Multi-Share Parallel Robocopy Orchestrator
-======================================================
+ROBOCURSE - Chunked Robocopy Orchestrator with VSS Support
 
 USAGE:
     .\Robocurse.ps1 [options]
 
-OPTIONS:
-    -Headless           Run in headless mode without GUI
+GENERAL OPTIONS:
+    -Help               Show this help message
     -ConfigPath <path>  Path to configuration file (default: .\Robocurse.config.json)
-    -Profile <name>     Run a specific profile by name
-    -AllProfiles        Run all enabled profiles (headless mode only)
-    -DryRun             Preview mode - show what would be copied without copying
-    -Help               Display this help message
+
+GUI MODE (default):
+    .\Robocurse.ps1
+
+HEADLESS MODE:
+    -Headless           Run without GUI
+    -Profile <name>     Run specific profile
+    -AllProfiles        Run all enabled profiles
+    -DryRun             Preview changes without copying
+
+SNAPSHOT MANAGEMENT:
+    -ListSnapshots                      List all VSS snapshots
+    -ListSnapshots -Volume D:           List snapshots for specific volume
+    -ListSnapshots -Server Server01     List snapshots on remote server
+
+    -CreateSnapshot -Volume D:          Create snapshot on local volume
+    -CreateSnapshot -Volume D: -Server Server01    Create on remote server
+    -CreateSnapshot -Volume D: -KeepCount 5        Create with retention
+
+    -DeleteSnapshot -ShadowId {guid}    Delete snapshot by ID
+    -DeleteSnapshot -ShadowId {guid} -Server Server01    Delete remote snapshot
+
+SNAPSHOT SCHEDULES:
+    -SnapshotSchedule                   List configured schedules
+    -SnapshotSchedule -List             List configured schedules
+    -SnapshotSchedule -Sync             Sync schedules with config file
+    -SnapshotSchedule -Remove -ScheduleName DailyD    Remove a schedule
 
 EXAMPLES:
+    # GUI mode
     .\Robocurse.ps1
-        Launch GUI interface
 
+    # Run specific profile headless
     .\Robocurse.ps1 -Headless -Profile "DailyBackup"
-        Run in headless mode with the DailyBackup profile
 
-    .\Robocurse.ps1 -Headless -AllProfiles
-        Run all enabled profiles in headless mode
+    # List all local snapshots
+    .\Robocurse.ps1 -ListSnapshots
 
-    .\Robocurse.ps1 -Headless -Profile "DailyBackup" -DryRun
-        Preview what would be copied without actually copying
+    # Create snapshot with retention
+    .\Robocurse.ps1 -CreateSnapshot -Volume D: -KeepCount 5
 
-    .\Robocurse.ps1 -ConfigPath "C:\Configs\custom.json" -Headless -AllProfiles
-        Run with custom configuration file
+    # Sync snapshot schedules from config
+    .\Robocurse.ps1 -SnapshotSchedule -Sync
 
-For more information, see README.md
 "@
 }
 
@@ -94,7 +115,7 @@ function Invoke-HeadlessReplication {
     Write-Host ""
 
     # Start replication with bandwidth throttling
-    Start-ReplicationRun -Profiles $ProfilesToRun -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps -DryRun:$DryRun
+    Start-ReplicationRun -Profiles $ProfilesToRun -Config $Config -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps -DryRun:$DryRun
 
     # Track last progress output time for throttling
     $lastProgressOutput = [datetime]::MinValue
@@ -238,12 +259,58 @@ function Start-RobocurseMain {
         [string]$ProfileName,
         [switch]$AllProfiles,
         [switch]$DryRun,
-        [switch]$ShowHelp
+        [switch]$ShowHelp,
+
+        # Snapshot parameters
+        [switch]$ListSnapshots,
+        [switch]$CreateSnapshot,
+        [switch]$DeleteSnapshot,
+        [string]$Volume,
+        [string]$ShadowId,
+        [string]$Server,
+        [int]$KeepCount = 3,
+        [switch]$SnapshotSchedule,
+        [switch]$List,
+        [switch]$Sync,
+        [switch]$Add,
+        [switch]$Remove,
+        [string]$ScheduleName
     )
 
     if ($ShowHelp) {
         Show-RobocurseHelp
         return 0
+    }
+
+    # Snapshot command dispatch (before GUI/headless logic)
+    if ($ListSnapshots) {
+        return Invoke-ListSnapshotsCommand -Volume $Volume -Server $Server
+    }
+
+    if ($CreateSnapshot) {
+        if (-not $Volume) {
+            Write-Host "Error: -Volume is required for -CreateSnapshot" -ForegroundColor Red
+            return 1
+        }
+        return Invoke-CreateSnapshotCommand -Volume $Volume -Server $Server -KeepCount $KeepCount
+    }
+
+    if ($DeleteSnapshot) {
+        if (-not $ShadowId) {
+            Write-Host "Error: -ShadowId is required for -DeleteSnapshot" -ForegroundColor Red
+            return 1
+        }
+        return Invoke-DeleteSnapshotCommand -ShadowId $ShadowId -Server $Server
+    }
+
+    if ($SnapshotSchedule) {
+        # Load config for schedule operations
+        if (-not (Test-Path $ConfigPath)) {
+            Write-Host "Error: Configuration file not found: $ConfigPath" -ForegroundColor Red
+            return 1
+        }
+        $config = Get-RobocurseConfig -Path $ConfigPath
+        return Invoke-SnapshotScheduleCommand -List:$List -Sync:$Sync -Add:$Add -Remove:$Remove -ScheduleName $ScheduleName -Config $config
     }
 
     # Track state for cleanup

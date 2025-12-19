@@ -335,6 +335,8 @@ function Import-SettingsToForm {
         }
     }
 
+    # Note: Snapshot retention is now per-profile, configured in the Profiles tab
+
     Write-GuiLog "Settings loaded from configuration"
 }
 
@@ -419,6 +421,8 @@ function Save-SettingsFromForm {
             }
         }
 
+        # Note: Snapshot retention is now per-profile, configured in the Profiles tab
+
         # Save configuration to file
         $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
         if ($saveResult.Success) {
@@ -502,4 +506,32 @@ function Get-LastRunSummary {
 
     Write-Verbose "Get-LastRunSummary: Found LastRun with Timestamp=$($settings.LastRun.Timestamp)"
     return $settings.LastRun
+}
+
+function Test-VolumeOverridesFormat {
+    <#
+    .SYNOPSIS
+        Validates the volume overrides text format
+    .PARAMETER Text
+        The text to validate (e.g., "D:=5, E:=10")
+    .OUTPUTS
+        $true if valid, $false otherwise
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $true  # Empty is valid
+    }
+
+    $pairs = $Text -split '\s*,\s*'
+    foreach ($pair in $pairs) {
+        if ($pair -notmatch '^[A-Za-z]:\s*=\s*\d+$') {
+            return $false
+        }
+    }
+
+    return $true
 }

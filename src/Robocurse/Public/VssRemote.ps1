@@ -745,3 +745,212 @@ function Invoke-WithRemoteVssJunction {
         }
     }
 }
+
+
+function Get-RemoteVssSnapshots {
+    <#
+    .SYNOPSIS
+        Lists VSS snapshots on a remote server
+    .DESCRIPTION
+        Uses a CIM session to query VSS shadow copies on a remote server.
+        Can filter by volume or return all snapshots on the server.
+    .PARAMETER ServerName
+        The remote server name to query
+    .PARAMETER Volume
+        Optional volume to filter (e.g., "D:"). If not specified, returns all.
+    .OUTPUTS
+        OperationResult with Data = array of snapshot objects
+    .EXAMPLE
+        $result = Get-RemoteVssSnapshots -ServerName "FileServer01" -Volume "D:"
+        $result.Data | Format-Table ShadowId, CreatedAt, SourceVolume
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerName,
+
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Volume
+    )
+
+    Write-RobocurseLog -Message "Listing VSS snapshots on '$ServerName'$(if ($Volume) { " for volume $Volume" })" -Level 'Debug' -Component 'VSS'
+
+    $cimSession = $null
+    try {
+        $cimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+
+        $snapshots = Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy -ErrorAction Stop
+
+        if (-not $snapshots) {
+            return New-OperationResult -Success $true -Data @()
+        }
+
+        # Get volume mapping for filtering
+        $volumeMap = @{}
+        $volumes = Get-CimInstance -CimSession $cimSession -ClassName Win32_Volume -ErrorAction SilentlyContinue |
+            Where-Object { $_.DriveLetter }
+        foreach ($vol in $volumes) {
+            $volumeMap[$vol.DeviceID] = $vol.DriveLetter
+        }
+
+        # Convert and filter
+        $result = @($snapshots | ForEach-Object {
+            $snapshotVolume = $volumeMap[$_.VolumeName]
+
+            # Skip if filtering by volume and doesn't match
+            if ($Volume -and $snapshotVolume -ne $Volume.ToUpper()) {
+                return
+            }
+
+            [PSCustomObject]@{
+                ShadowId     = $_.ID
+                ShadowPath   = $_.DeviceObject
+                SourceVolume = $snapshotVolume
+                CreatedAt    = $_.InstallDate
+                ServerName   = $ServerName
+                IsRemote     = $true
+            }
+        } | Where-Object { $_ })
+
+        # Sort by creation time (newest first)
+        $result = @($result | Sort-Object CreatedAt -Descending)
+
+        Write-RobocurseLog -Message "Found $($result.Count) VSS snapshot(s) on '$ServerName'" -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data $result
+    }
+    catch {
+        $errorMsg = $_.Exception.Message
+        $guidance = Get-RemoteVssErrorGuidance -ErrorMessage $errorMsg -ServerName $ServerName
+        $fullError = "Failed to list snapshots on '$ServerName': $errorMsg$guidance"
+
+        Write-RobocurseLog -Message $fullError -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage $fullError -ErrorRecord $_
+    }
+    finally {
+        if ($cimSession) {
+            Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-RemoteVssErrorGuidance {
+    <#
+    .SYNOPSIS
+        Returns actionable guidance for remote VSS errors
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$ErrorMessage,
+        [string]$ServerName
+    )
+
+    if ($ErrorMessage -match 'Access is denied|Access denied') {
+        return " Ensure you have administrative rights on '$ServerName'."
+    }
+    elseif ($ErrorMessage -match 'RPC server|unavailable|endpoint mapper') {
+        return " Ensure WinRM service is running on '$ServerName'. Run 'Enable-PSRemoting -Force' on the remote server."
+    }
+    elseif ($ErrorMessage -match 'network path|not found|host.*unknown') {
+        return " Verify the server name is correct and network connectivity is available."
+    }
+    elseif ($ErrorMessage -match 'firewall|blocked') {
+        return " Check firewall rules on '$ServerName' - WinRM (TCP 5985/5986) and WMI/DCOM must be allowed."
+    }
+    return ""
+}
+
+function Invoke-RemoteVssRetentionPolicy {
+    <#
+    .SYNOPSIS
+        Enforces VSS snapshot retention on a remote server
+    .DESCRIPTION
+        For a specified volume on a remote server, keeps the newest N snapshots
+        and removes the rest. Uses CIM sessions for remote operations.
+    .PARAMETER ServerName
+        The remote server name
+    .PARAMETER Volume
+        Volume to apply retention to (e.g., "D:")
+    .PARAMETER KeepCount
+        Number of snapshots to keep (default: 3)
+    .OUTPUTS
+        OperationResult with Data containing DeletedCount, KeptCount, Errors
+    .EXAMPLE
+        $result = Invoke-RemoteVssRetentionPolicy -ServerName "FileServer01" -Volume "D:" -KeepCount 5
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerName,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Volume,
+
+        [ValidateRange(0, 100)]
+        [int]$KeepCount = 3
+    )
+
+    Write-RobocurseLog -Message "Applying VSS retention on '$ServerName' for $Volume (keep: $KeepCount)" -Level 'Info' -Component 'VSS'
+
+    # Get current snapshots
+    $listResult = Get-RemoteVssSnapshots -ServerName $ServerName -Volume $Volume
+    if (-not $listResult.Success) {
+        return New-OperationResult -Success $false -ErrorMessage "Failed to list snapshots: $($listResult.ErrorMessage)"
+    }
+
+    $snapshots = @($listResult.Data)
+    $currentCount = $snapshots.Count
+
+    # Nothing to do if under limit
+    if ($currentCount -le $KeepCount) {
+        Write-RobocurseLog -Message "Retention OK on '$ServerName': $currentCount snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data @{
+            DeletedCount = 0
+            KeptCount    = $currentCount
+            Errors       = @()
+        }
+    }
+
+    # Sort by CreatedAt ascending (oldest first) and select ones to delete
+    $sortedSnapshots = $snapshots | Sort-Object CreatedAt
+    $toDelete = @($sortedSnapshots | Select-Object -First ($currentCount - $KeepCount))
+    $toKeep = @($sortedSnapshots | Select-Object -Last $KeepCount)
+
+    Write-RobocurseLog -Message "Retention on '$ServerName': Deleting $($toDelete.Count) old snapshot(s), keeping $($toKeep.Count)" -Level 'Info' -Component 'VSS'
+
+    $deletedCount = 0
+    $errors = @()
+
+    foreach ($snapshot in $toDelete) {
+        $shadowId = $snapshot.ShadowId
+        $createdAt = $snapshot.CreatedAt
+
+        if ($PSCmdlet.ShouldProcess("$shadowId on $ServerName (created $createdAt)", "Remove Remote VSS Snapshot")) {
+            $removeResult = Remove-RemoteVssSnapshot -ShadowId $shadowId -ServerName $ServerName
+            if ($removeResult.Success) {
+                $deletedCount++
+                Write-RobocurseLog -Message "Deleted remote snapshot $shadowId on '$ServerName'" -Level 'Debug' -Component 'VSS'
+            }
+            else {
+                $errors += "Failed to delete $shadowId on '$ServerName': $($removeResult.ErrorMessage)"
+                Write-RobocurseLog -Message "Failed to delete remote snapshot: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
+        }
+    }
+
+    $success = $errors.Count -eq 0
+    $resultData = @{
+        DeletedCount = $deletedCount
+        KeptCount    = $toKeep.Count
+        Errors       = $errors
+    }
+
+    if ($success) {
+        Write-RobocurseLog -Message "Remote retention applied on '$ServerName': deleted $deletedCount, kept $($toKeep.Count)" -Level 'Info' -Component 'VSS'
+    }
+    else {
+        Write-RobocurseLog -Message "Remote retention on '$ServerName' completed with errors: $($errors.Count)" -Level 'Warning' -Component 'VSS'
+    }
+
+    return New-OperationResult -Success $success -Data $resultData -ErrorMessage $(if (-not $success) { $errors -join "; " })
+}

@@ -66,17 +66,23 @@ $moduleOrder = @(
     'Public\VssCore.ps1'
     'Public\VssLocal.ps1'
     'Public\VssRemote.ps1'
+    'Public\SnapshotCli.ps1'        # CLI snapshot management
     'Public\Email.ps1'
     'Public\Scheduling.ps1'
+    'Public\SnapshotSchedule.ps1'   # Scheduled snapshot operations
     # GUI modules (split from GUI.ps1 for maintainability)
     'Public\GuiResources.ps1'
+    'Public\GuiValidation.ps1'      # GUI validation helpers
     'Public\GuiSettings.ps1'
     'Public\GuiProfiles.ps1'
+    'Public\GuiChunkActions.ps1'    # Chunk action handlers
     'Public\GuiDialogs.ps1'
-    'Public\GuiLogWindow.ps1'   # Popup log viewer window
+    'Public\GuiLogWindow.ps1'       # Popup log viewer window
     'Public\GuiRunspace.ps1'
     'Public\GuiReplication.ps1'
     'Public\GuiProgress.ps1'
+    'Public\GuiSnapshotDialogs.ps1' # Snapshot dialog windows
+    'Public\GuiSnapshots.ps1'
     'Public\GuiMain.ps1'
     # Entry point
     'Public\Main.ps1'

@@ -58,9 +58,9 @@ InModuleScope 'Robocurse' {
                 $result | Should -BeNullOrEmpty
             }
 
-            It "Should return null for D5" {
+            It "Should map D5 to Snapshots panel" {
                 $result = Get-PanelForKey -Key 'D5'
-                $result | Should -BeNullOrEmpty
+                $result | Should -Be 'Snapshots'
             }
         }
 

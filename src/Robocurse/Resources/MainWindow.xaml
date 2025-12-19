@@ -119,6 +119,118 @@
             <Setter Property="BorderBrush" Value="#3E3E3E"/>
         </Style>
 
+        <!-- ComboBox Toggle Button -->
+        <ControlTemplate x:Key="DarkComboBoxToggleButton" TargetType="ToggleButton">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition/>
+                    <ColumnDefinition Width="20"/>
+                </Grid.ColumnDefinitions>
+                <Border x:Name="Border" Grid.ColumnSpan="2" Background="#2D2D2D" BorderBrush="#3E3E3E" BorderThickness="1" CornerRadius="2"/>
+                <Border Grid.Column="0" Background="#2D2D2D" BorderBrush="#3E3E3E" BorderThickness="0" CornerRadius="2,0,0,2" Margin="1"/>
+                <Path x:Name="Arrow" Grid.Column="1" Fill="#E0E0E0" HorizontalAlignment="Center" VerticalAlignment="Center"
+                      Data="M 0 0 L 4 4 L 8 0 Z"/>
+            </Grid>
+        </ControlTemplate>
+
+        <Style x:Key="DarkComboBox" TargetType="ComboBox">
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="Padding" Value="5,3"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton x:Name="ToggleButton" Template="{StaticResource DarkComboBoxToggleButton}"
+                                          Focusable="False" ClickMode="Press"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"/>
+                            <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                              Margin="6,3,23,3" VerticalAlignment="Center" HorizontalAlignment="Left"
+                                              TextElement.Foreground="#E0E0E0"/>
+                            <Popup x:Name="Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   AllowsTransparency="True" Focusable="False" PopupAnimation="Slide">
+                                <Grid x:Name="DropDown" SnapsToDevicePixels="True"
+                                      MinWidth="{TemplateBinding ActualWidth}" MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                    <Border x:Name="DropDownBorder" Background="#2D2D2D" BorderBrush="#3E3E3E" BorderThickness="1"/>
+                                    <ScrollViewer Margin="2" SnapsToDevicePixels="True">
+                                        <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                    </ScrollViewer>
+                                </Grid>
+                            </Popup>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="DarkComboBoxItem" TargetType="ComboBoxItem">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="Padding" Value="5,3"/>
+            <Style.Triggers>
+                <Trigger Property="IsHighlighted" Value="True">
+                    <Setter Property="Background" Value="#0078D4"/>
+                    <Setter Property="Foreground" Value="White"/>
+                </Trigger>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#3E3E3E"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="DarkSlider" TargetType="Slider">
+            <Setter Property="Background" Value="#3E3E3E"/>
+            <Setter Property="Foreground" Value="#0078D4"/>
+        </Style>
+
+        <!-- Dark TabControl Styles -->
+        <Style x:Key="DarkTabControl" TargetType="TabControl">
+            <Setter Property="Background" Value="#1E1E1E"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="0"/>
+        </Style>
+
+        <Style x:Key="DarkTabItem" TargetType="TabItem">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#A0A0A0"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="Border"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1,1,1,0"
+                                CornerRadius="4,4,0,0"
+                                Padding="{TemplateBinding Padding}"
+                                Margin="0,0,2,0">
+                            <ContentPresenter x:Name="ContentSite"
+                                              ContentSource="Header"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="#3E3E3E"/>
+                                <Setter Property="Foreground" Value="#E0E0E0"/>
+                                <Setter TargetName="Border" Property="BorderBrush" Value="#0078D4"/>
+                                <Setter TargetName="Border" Property="BorderThickness" Value="1,2,1,0"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#3A3A3A"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Dark DataGrid Styles -->
         <Style x:Key="DarkDataGrid" TargetType="DataGrid">
             <Setter Property="Background" Value="#2D2D2D"/>
@@ -297,6 +409,11 @@
                              Style="{StaticResource RailButton}"
                              Content="&#x1F4DC;"
                              ToolTip="Logs (4)"/>
+                <RadioButton x:Name="btnNavSnapshots"
+                             GroupName="NavRail"
+                             Style="{StaticResource RailButton}"
+                             Content="&#x1F4F7;"
+                             ToolTip="Snapshots (5)"/>
             </StackPanel>
         </Border>
 
@@ -338,8 +455,11 @@
 
                 <!-- Profile Settings Editor -->
                 <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="1" Background="#252525" CornerRadius="4" Padding="15">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <Grid x:Name="pnlProfileSettings">
                         <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
@@ -370,20 +490,127 @@
                         <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
                                 Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                        <Label Grid.Row="3" Grid.Column="0" Content="Options:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,4,0,8"/>
+                        <Label Grid.Row="3" Grid.Column="0" Content="Scan:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,4,0,8"/>
                         <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,0,8">
-                            <CheckBox x:Name="chkUseVss" Content="Use VSS" Style="{StaticResource DarkCheckBox}" VerticalAlignment="Center"
-                                      ToolTip="Use Volume Shadow Copy"/>
-                            <Label Content="Scan:" Style="{StaticResource DarkLabel}" Margin="15,0,0,0" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="cmbScanMode" Width="80" Margin="5,0,0,0" VerticalAlignment="Center"
+                            <ComboBox x:Name="cmbScanMode" Width="80" VerticalAlignment="Center"
+                                      Style="{StaticResource DarkComboBox}"
                                       ToolTip="Scan mode: Smart or Quick">
-                                <ComboBoxItem Content="Smart" IsSelected="True"/>
-                                <ComboBoxItem Content="Quick"/>
+                                <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
+                                <ComboBoxItem Content="Quick" Style="{StaticResource DarkComboBoxItem}"/>
                             </ComboBox>
                         </StackPanel>
 
-                        <Label Grid.Row="4" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-                        <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <!-- Snapshot Configuration TabControl -->
+                        <TabControl Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="tabSnapshotConfig"
+                                    Style="{StaticResource DarkTabControl}" Margin="0,5,0,5" Height="130">
+                            <!-- Source Snapshots Tab -->
+                            <TabItem Header="Source Snapshots" Style="{StaticResource DarkTabItem}">
+                                <StackPanel Margin="10" Background="#252525">
+                                    <CheckBox x:Name="chkUseVss" Content="Use temporary VSS for backup (copy locked files)"
+                                              Foreground="#E0E0E0" Margin="0,0,0,8"
+                                              ToolTip="Create temporary VSS snapshot during sync to copy locked files"/>
+                                    <Border Background="#1E1E1E" CornerRadius="4" Padding="10">
+                                        <StackPanel>
+                                            <CheckBox x:Name="chkSourcePersistentSnapshot"
+                                                      Content="Create persistent snapshot before backup"
+                                                      Foreground="#E0E0E0" Margin="0,0,0,8"
+                                                      ToolTip="Creates a persistent VSS snapshot on SOURCE volume before backup"/>
+                                            <StackPanel Orientation="Horizontal" Margin="20,0,0,0">
+                                                <Label Content="Retention:" Foreground="#808080" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="txtSourceRetentionCount" Text="3" Width="50"
+                                                         Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
+                                                         TextAlignment="Center" Margin="5,0,5,0"
+                                                         ToolTip="Number of snapshots to keep on source volume"/>
+                                                <Label Content="snapshots" Foreground="#808080" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </TabItem>
+                            <!-- Destination Snapshots Tab -->
+                            <TabItem Header="Dest Snapshots" Style="{StaticResource DarkTabItem}">
+                                <StackPanel Margin="10" Background="#252525">
+                                    <Border Background="#1E1E1E" CornerRadius="4" Padding="10">
+                                        <StackPanel>
+                                            <CheckBox x:Name="chkDestPersistentSnapshot"
+                                                      Content="Create persistent snapshot before backup"
+                                                      Foreground="#E0E0E0" Margin="0,0,0,8"
+                                                      ToolTip="Creates a persistent VSS snapshot on DESTINATION volume before backup"/>
+                                            <StackPanel Orientation="Horizontal" Margin="20,0,0,0">
+                                                <Label Content="Retention:" Foreground="#808080" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="txtDestRetentionCount" Text="3" Width="50"
+                                                         Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
+                                                         TextAlignment="Center" Margin="5,0,5,0"
+                                                         ToolTip="Number of snapshots to keep on destination volume"/>
+                                                <Label Content="snapshots" Foreground="#808080" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                    <TextBlock Text="Destination snapshots enable rollback if backup corrupts existing files."
+                                               Foreground="#606060" FontSize="10" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </TabItem>
+                        </TabControl>
+
+                        <!-- Snapshot Management TabControl -->
+                        <TabControl Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" x:Name="tabProfileSnapshots"
+                                    Style="{StaticResource DarkTabControl}" Margin="0,0,0,5" Height="140">
+                            <!-- Source Snapshots List -->
+                            <TabItem Header="Source Snapshots" Style="{StaticResource DarkTabItem}">
+                                <Grid Margin="5">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <DataGrid x:Name="dgSourceSnapshots" Grid.Row="0"
+                                              Style="{StaticResource DarkDataGrid}"
+                                              ColumnHeaderStyle="{StaticResource DarkDataGridColumnHeader}"
+                                              CellStyle="{StaticResource DarkDataGridCell}"
+                                              RowStyle="{StaticResource DarkDataGridRow}"
+                                              AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Created" Binding="{Binding CreatedAt, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="120"/>
+                                            <DataGridTextColumn Header="Shadow ID" Binding="{Binding ShadowId}" Width="*"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,5,0,0">
+                                        <Button x:Name="btnRefreshSourceSnapshots" Content="Refresh" Width="70"
+                                                Style="{StaticResource DarkButton}" Margin="0,0,5,0"/>
+                                        <Button x:Name="btnDeleteSourceSnapshot" Content="Delete" Width="70"
+                                                Style="{StaticResource StopButton}" IsEnabled="False"/>
+                                    </StackPanel>
+                                </Grid>
+                            </TabItem>
+                            <!-- Destination Snapshots List -->
+                            <TabItem Header="Dest Snapshots" Style="{StaticResource DarkTabItem}">
+                                <Grid Margin="5">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <DataGrid x:Name="dgDestSnapshots" Grid.Row="0"
+                                              Style="{StaticResource DarkDataGrid}"
+                                              ColumnHeaderStyle="{StaticResource DarkDataGridColumnHeader}"
+                                              CellStyle="{StaticResource DarkDataGridCell}"
+                                              RowStyle="{StaticResource DarkDataGridRow}"
+                                              AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Created" Binding="{Binding CreatedAt, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="120"/>
+                                            <DataGridTextColumn Header="Shadow ID" Binding="{Binding ShadowId}" Width="*"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,5,0,0">
+                                        <Button x:Name="btnRefreshDestSnapshots" Content="Refresh" Width="70"
+                                                Style="{StaticResource DarkButton}" Margin="0,0,5,0"/>
+                                        <Button x:Name="btnDeleteDestSnapshot" Content="Delete" Width="70"
+                                                Style="{StaticResource StopButton}" IsEnabled="False"/>
+                                    </StackPanel>
+                                </Grid>
+                            </TabItem>
+                        </TabControl>
+
+                        <Label Grid.Row="6" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                        <StackPanel Grid.Row="6" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center">
                             <TextBox x:Name="txtMaxSize" Width="40" Style="{StaticResource DarkTextBox}" Text="10"
                                      ToolTip="Max size (GB)"/>
                             <Label Content="GB" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
@@ -396,11 +623,12 @@
                         </StackPanel>
 
                         <!-- Validate Button -->
-                        <Button Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" x:Name="btnValidateProfile"
+                        <Button Grid.Row="7" Grid.Column="1" Grid.ColumnSpan="2" x:Name="btnValidateProfile"
                                 Content="Validate Profile" Style="{StaticResource DarkButton}"
                                 HorizontalAlignment="Left" Width="120" Margin="0,10,0,0"
                                 ToolTip="Run pre-flight validation checks"/>
                     </Grid>
+                    </ScrollViewer>
                 </Border>
             </Grid>
 
@@ -437,6 +665,7 @@
                                         <!-- Concurrent Jobs -->
                                         <Label Grid.Row="0" Content="Concurrent Jobs:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
                                         <Slider Grid.Row="0" Grid.Column="1" x:Name="sldSettingsJobs" Minimum="1" Maximum="16" Value="4"
+                                                Style="{StaticResource DarkSlider}"
                                                 TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center" Margin="0,0,10,10"/>
                                         <TextBlock Grid.Row="0" Grid.Column="2" x:Name="txtSettingsJobs" Text="4" Foreground="#E0E0E0"
                                                    VerticalAlignment="Center" Margin="0,0,0,10"/>
@@ -444,6 +673,7 @@
                                         <!-- Threads per Job -->
                                         <Label Grid.Row="1" Content="Threads per Job:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
                                         <Slider Grid.Row="1" Grid.Column="1" x:Name="sldSettingsThreads" Minimum="1" Maximum="32" Value="8"
+                                                Style="{StaticResource DarkSlider}"
                                                 TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center" Margin="0,0,10,10"/>
                                         <TextBlock Grid.Row="1" Grid.Column="2" x:Name="txtSettingsThreads" Text="8" Foreground="#E0E0E0"
                                                    VerticalAlignment="Center" Margin="0,0,0,10"/>
@@ -576,10 +806,97 @@
                                                 ToolTip="Configure Windows Task Scheduler"/>
                                     </Grid>
                                 </Border>
+
+                                <!-- Snapshot Settings Info -->
+                                <Border BorderBrush="#3D3D3D" BorderThickness="0,1,0,0" Margin="0,15,0,0" Padding="0,15,0,0">
+                                    <StackPanel>
+                                        <Label Content="Snapshot Settings" Style="{StaticResource DarkLabel}" FontWeight="Bold" FontSize="14"/>
+                                        <TextBlock Foreground="#888888" FontSize="11" TextWrapping="Wrap" Margin="5,10,0,0">
+                                            <Run Text="Snapshot retention is now configured per-profile in the Profiles tab. Each profile can have independent source and destination snapshot settings with individual retention counts."/>
+                                        </TextBlock>
+                                        <TextBlock Foreground="#888888" FontSize="11" TextWrapping="Wrap" Margin="5,10,0,0">
+                                            <Run Text="Snapshot schedules can be configured via command line: "/>
+                                            <Run Text="Robocurse.ps1 -SnapshotSchedule" Foreground="#0078D4"/>
+                                        </TextBlock>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
                         </ScrollViewer>
                     </DockPanel>
                 </Border>
+            </Grid>
+
+            <!-- ==================== SNAPSHOTS PANEL ==================== -->
+            <Grid x:Name="panelSnapshots" Visibility="Collapsed" Margin="10">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Header and Filter Bar -->
+                <Border Grid.Row="0" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
+                    <StackPanel>
+                        <Label Content="VSS Snapshots" Style="{StaticResource DarkLabel}" FontSize="14" FontWeight="Bold" Margin="0,0,0,10"/>
+                        <StackPanel Orientation="Horizontal">
+                            <Label Content="Volume:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="cmbSnapshotVolume" Width="100" Margin="5,0"
+                                      Style="{StaticResource DarkComboBox}"
+                                      ToolTip="Filter by volume">
+                                <ComboBoxItem Content="All Volumes" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
+                            </ComboBox>
+
+                            <Label Content="Server:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="20,0,0,0"/>
+                            <ComboBox x:Name="cmbSnapshotServer" Width="150" Margin="5,0"
+                                      Style="{StaticResource DarkComboBox}"
+                                      ToolTip="Filter by server (local or remote)">
+                                <ComboBoxItem Content="Local" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
+                            </ComboBox>
+
+                            <Button x:Name="btnRefreshSnapshots" Content="Refresh" Width="80" Margin="20,0,0,0"
+                                    Style="{StaticResource DarkButton}"
+                                    ToolTip="Reload snapshot list"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Snapshot DataGrid -->
+                <DataGrid x:Name="dgSnapshots" Grid.Row="1" Margin="0,0,0,10"
+                          Style="{StaticResource DarkDataGrid}"
+                          CellStyle="{StaticResource DarkDataGridCell}"
+                          RowStyle="{StaticResource DarkDataGridRow}"
+                          ColumnHeaderStyle="{StaticResource DarkDataGridColumnHeader}"
+                          AlternationCount="2"
+                          AutoGenerateColumns="False"
+                          IsReadOnly="True"
+                          SelectionMode="Single"
+                          CanUserSortColumns="True"
+                          CanUserReorderColumns="False">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Volume" Binding="{Binding SourceVolume}" Width="70"/>
+                        <DataGridTextColumn Header="Created" Binding="{Binding CreatedAt, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="140"/>
+                        <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="120"/>
+                        <DataGridTextColumn Header="Shadow ID" Binding="{Binding ShadowId}" Width="*">
+                            <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                    <Setter Property="ToolTip" Value="{Binding ShadowId}"/>
+                                </Style>
+                            </DataGridTextColumn.ElementStyle>
+                        </DataGridTextColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- Action Buttons -->
+                <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0">
+                    <Button x:Name="btnCreateSnapshot" Content="Create Snapshot" Width="120"
+                            Style="{StaticResource RunButton}"
+                            ToolTip="Create a new VSS snapshot"/>
+                    <Button x:Name="btnDeleteSnapshot" Content="Delete Selected" Width="120" Margin="10,0,0,0"
+                            Style="{StaticResource StopButton}"
+                            IsEnabled="False"
+                            ToolTip="Delete the selected snapshot"/>
+                </StackPanel>
             </Grid>
 
             <!-- ==================== PROGRESS PANEL ==================== -->
@@ -791,7 +1108,7 @@
                 <StackPanel Grid.Column="2" Orientation="Horizontal">
                     <Label Content="Workers:" Style="{StaticResource DarkLabel}" ToolTip="Number of parallel workers"/>
                     <Slider x:Name="sldWorkers" Width="80" Minimum="1" Maximum="16" Value="4"
-                            VerticalAlignment="Center"/>
+                            Style="{StaticResource DarkSlider}" VerticalAlignment="Center"/>
                     <TextBlock x:Name="txtWorkerCount" Text="4" Foreground="#E0E0E0"
                                Width="20" VerticalAlignment="Center" Margin="5,0,0,0"/>
                 </StackPanel>
