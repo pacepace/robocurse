@@ -73,7 +73,11 @@ function Initialize-RobocurseGui {
     @(
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
-        'chkUseVss', 'chkPersistentSnapshot', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'tabSnapshotConfig', 'chkSourcePersistentSnapshot', 'txtSourceRetentionCount',
+        'chkDestPersistentSnapshot', 'txtDestRetentionCount',
+        'tabProfileSnapshots', 'dgSourceSnapshots', 'dgDestSnapshots',
+        'btnRefreshSourceSnapshots', 'btnDeleteSourceSnapshot', 'btnRefreshDestSnapshots', 'btnDeleteDestSnapshot',
         'btnValidateProfile',
         'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
@@ -90,7 +94,6 @@ function Initialize-RobocurseGui {
         'chkSettingsEmailEnabled', 'txtSettingsSmtp', 'txtSettingsSmtpPort',
         'chkSettingsTls', 'txtSettingsCredential', 'btnSettingsSetCredential', 'txtSettingsEmailFrom', 'txtSettingsEmailTo',
         'btnSettingsSchedule', 'txtSettingsScheduleStatus', 'btnSettingsRevert', 'btnSettingsSave',
-        'txtDefaultKeepCount', 'txtVolumeOverrides',
         'cmbSnapshotVolume', 'cmbSnapshotServer', 'btnRefreshSnapshots', 'dgSnapshots',
         'btnCreateSnapshot', 'btnDeleteSnapshot',
         'cmChunks', 'miRetryChunk', 'miSkipChunk', 'miOpenLog'
@@ -531,12 +534,75 @@ function Initialize-EventHandlers {
     $script:Controls.chkUseVss.Add_Unchecked({
         Invoke-SafeEventHandler -HandlerName "VssCheckbox" -ScriptBlock { Save-ProfileFromForm }
     })
-    if ($script:Controls['chkPersistentSnapshot']) {
-        $script:Controls.chkPersistentSnapshot.Add_Checked({
-            Invoke-SafeEventHandler -HandlerName "PersistentSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+    # Source snapshot controls
+    if ($script:Controls['chkSourcePersistentSnapshot']) {
+        $script:Controls.chkSourcePersistentSnapshot.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "SourceSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
         })
-        $script:Controls.chkPersistentSnapshot.Add_Unchecked({
-            Invoke-SafeEventHandler -HandlerName "PersistentSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        $script:Controls.chkSourcePersistentSnapshot.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "SourceSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        })
+    }
+    if ($script:Controls['txtSourceRetentionCount']) {
+        $script:Controls.txtSourceRetentionCount.Add_LostFocus({
+            Invoke-SafeEventHandler -HandlerName "SourceRetention" -ScriptBlock { Save-ProfileFromForm }
+        })
+    }
+
+    # Destination snapshot controls
+    if ($script:Controls['chkDestPersistentSnapshot']) {
+        $script:Controls.chkDestPersistentSnapshot.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "DestSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        })
+        $script:Controls.chkDestPersistentSnapshot.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "DestSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        })
+    }
+    if ($script:Controls['txtDestRetentionCount']) {
+        $script:Controls.txtDestRetentionCount.Add_LostFocus({
+            Invoke-SafeEventHandler -HandlerName "DestRetention" -ScriptBlock { Save-ProfileFromForm }
+        })
+    }
+
+    # Profile snapshot management controls
+    if ($script:Controls['btnRefreshSourceSnapshots']) {
+        $script:Controls.btnRefreshSourceSnapshots.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "RefreshSourceSnapshots" -ScriptBlock { Update-ProfileSnapshotLists }
+        })
+    }
+    if ($script:Controls['btnRefreshDestSnapshots']) {
+        $script:Controls.btnRefreshDestSnapshots.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "RefreshDestSnapshots" -ScriptBlock { Update-ProfileSnapshotLists }
+        })
+    }
+    if ($script:Controls['btnDeleteSourceSnapshot']) {
+        $script:Controls.btnDeleteSourceSnapshot.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "DeleteSourceSnapshot" -ScriptBlock {
+                Invoke-DeleteProfileSnapshot -SnapshotGrid $script:Controls.dgSourceSnapshots
+            }
+        })
+    }
+    if ($script:Controls['btnDeleteDestSnapshot']) {
+        $script:Controls.btnDeleteDestSnapshot.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "DeleteDestSnapshot" -ScriptBlock {
+                Invoke-DeleteProfileSnapshot -SnapshotGrid $script:Controls.dgDestSnapshots
+            }
+        })
+    }
+
+    # DataGrid selection changed events for delete button enabling
+    if ($script:Controls['dgSourceSnapshots']) {
+        $script:Controls.dgSourceSnapshots.Add_SelectionChanged({
+            Invoke-SafeEventHandler -HandlerName "SourceSnapshotSelection" -ScriptBlock {
+                $script:Controls.btnDeleteSourceSnapshot.IsEnabled = ($null -ne $script:Controls.dgSourceSnapshots.SelectedItem)
+            }
+        })
+    }
+    if ($script:Controls['dgDestSnapshots']) {
+        $script:Controls.dgDestSnapshots.Add_SelectionChanged({
+            Invoke-SafeEventHandler -HandlerName "DestSnapshotSelection" -ScriptBlock {
+                $script:Controls.btnDeleteDestSnapshot.IsEnabled = ($null -ne $script:Controls.dgDestSnapshots.SelectedItem)
+            }
         })
     }
     $script:Controls.cmbScanMode.Add_SelectionChanged({

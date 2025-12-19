@@ -251,6 +251,14 @@ namespace Robocurse
             set { lock (_lock) { _currentVssSnapshot = value; } }
         }
 
+        // Last snapshot result (for source/dest persistent snapshots)
+        private object _lastSnapshotResult;
+        public object LastSnapshotResult
+        {
+            get { lock (_lock) { return _lastSnapshotResult; } }
+            set { lock (_lock) { _lastSnapshotResult = value; } }
+        }
+
         // Thread-safe collections (no additional locking needed)
         public ConcurrentQueue<object> ChunkQueue { get; private set; }
         public ConcurrentDictionary<int, object> ActiveJobs { get; private set; }
@@ -305,6 +313,7 @@ namespace Robocurse
                 _profiles = null;
                 _currentRobocopyOptions = null;
                 _currentVssSnapshot = null;
+                _lastSnapshotResult = null;
             }
 
             // Reset atomic counters
@@ -340,6 +349,7 @@ namespace Robocurse
                 _totalBytes = 0;
                 _currentRobocopyOptions = null;
                 _currentVssSnapshot = null;
+                _lastSnapshotResult = null;
             }
 
             Interlocked.Exchange(ref _completedCount, 0);

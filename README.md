@@ -57,6 +57,14 @@ Edit `Robocurse.config.json`:
       "Source": "\\\\FILESERVER\\Share",
       "Destination": "D:\\Backups\\FileServer",
       "UseVss": true,
+      "SourceSnapshot": {
+        "PersistentEnabled": false,
+        "RetentionCount": 3
+      },
+      "DestinationSnapshot": {
+        "PersistentEnabled": true,
+        "RetentionCount": 7
+      },
       "RobocopyOptions": {
         "Switches": ["/COPYALL"],
         "ExcludeDirs": ["$RECYCLE.BIN", "System Volume Information"]
@@ -218,6 +226,54 @@ Set globally or per-profile via `MismatchSeverity`.
 
 ### VSS Configuration
 
+Robocurse offers two types of VSS snapshots:
+
+| Type | Purpose | Lifetime |
+|------|---------|----------|
+| **Temporary (UseVss)** | Copy locked/open files during sync | Deleted immediately after job |
+| **Persistent Snapshots** | Point-in-time recovery | Retained per your retention policy |
+
+#### Per-Profile Snapshot Settings
+
+Each profile can independently configure snapshots for both source and destination volumes:
+
+```json
+{
+  "SyncProfiles": [
+    {
+      "Name": "DailyBackup",
+      "Source": "\\\\FILESERVER\\Share",
+      "Destination": "D:\\Backups",
+      "UseVss": true,
+      "SourceSnapshot": {
+        "PersistentEnabled": true,
+        "RetentionCount": 5
+      },
+      "DestinationSnapshot": {
+        "PersistentEnabled": true,
+        "RetentionCount": 7
+      }
+    }
+  ]
+}
+```
+
+| Setting | Description |
+|---------|-------------|
+| `UseVss` | Create temporary snapshot on source to copy locked files (deleted after sync) |
+| `SourceSnapshot.PersistentEnabled` | Create persistent snapshot on source volume before backup |
+| `SourceSnapshot.RetentionCount` | Number of snapshots to retain on source volume (1-100) |
+| `DestinationSnapshot.PersistentEnabled` | Create persistent snapshot on destination volume before backup |
+| `DestinationSnapshot.RetentionCount` | Number of snapshots to retain on destination volume (1-100) |
+
+#### Intelligent MAX Retention
+
+When multiple profiles share the same volume (source or destination), Robocurse uses the **maximum retention count** from all profiles targeting that volume during cleanup.
+
+**Example:** Profile A backs up from `D:\Data1` with retention 3, Profile B backs up from `D:\Data2` with retention 7. Both target volume `D:`. When either profile runs, it creates a snapshot and cleans up old ones keeping **7** (the max).
+
+This prevents snapshot accumulation while respecting each profile's declared retention requirements.
+
 #### Pre-flight Check
 
 ```powershell
@@ -283,7 +339,18 @@ VSS operations retry automatically for transient failures (lock contention, VSS 
 
 ## Snapshot Management
 
-Robocurse provides CLI commands for managing VSS snapshots independently of replication jobs.
+Robocurse provides both GUI and CLI interfaces for managing VSS snapshots.
+
+### GUI Management
+
+In the GUI, each profile has **Source Snapshots** and **Destination Snapshots** tabs showing existing snapshots for the respective volumes. From these tabs you can:
+- View snapshot creation dates and shadow IDs
+- Delete individual snapshots
+- Refresh the snapshot list
+
+### CLI Commands
+
+The CLI provides commands for managing VSS snapshots independently of replication jobs.
 
 ### List Snapshots
 

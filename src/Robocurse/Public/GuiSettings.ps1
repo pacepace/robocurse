@@ -335,27 +335,7 @@ function Import-SettingsToForm {
         }
     }
 
-    # SNAPSHOT RETENTION Section
-    if ($script:Controls['txtDefaultKeepCount']) {
-        $defaultKeep = 3
-        if ($config.GlobalSettings.SnapshotRetention -and $config.GlobalSettings.SnapshotRetention.DefaultKeepCount) {
-            $defaultKeep = $config.GlobalSettings.SnapshotRetention.DefaultKeepCount
-        }
-        $script:Controls.txtDefaultKeepCount.Text = $defaultKeep.ToString()
-    }
-
-    if ($script:Controls['txtVolumeOverrides']) {
-        $overridesText = ""
-        if ($config.GlobalSettings.SnapshotRetention -and $config.GlobalSettings.SnapshotRetention.VolumeOverrides) {
-            $overrides = $config.GlobalSettings.SnapshotRetention.VolumeOverrides
-            $pairs = @()
-            foreach ($key in $overrides.Keys) {
-                $pairs += "$key=$($overrides[$key])"
-            }
-            $overridesText = $pairs -join ", "
-        }
-        $script:Controls.txtVolumeOverrides.Text = $overridesText
-    }
+    # Note: Snapshot retention is now per-profile, configured in the Profiles tab
 
     Write-GuiLog "Settings loaded from configuration"
 }
@@ -441,44 +421,7 @@ function Save-SettingsFromForm {
             }
         }
 
-        # SNAPSHOT RETENTION Section
-        if ($script:Controls['txtDefaultKeepCount']) {
-            # Ensure SnapshotRetention exists
-            if (-not $script:Config.GlobalSettings.SnapshotRetention) {
-                $script:Config.GlobalSettings | Add-Member -NotePropertyName SnapshotRetention -NotePropertyValue ([PSCustomObject]@{
-                    DefaultKeepCount = 3
-                    VolumeOverrides = @{}
-                }) -Force
-            }
-
-            $keepCount = 3
-            if ([int]::TryParse($script:Controls.txtDefaultKeepCount.Text.Trim(), [ref]$keepCount)) {
-                if ($keepCount -ge 0 -and $keepCount -le 100) {
-                    $script:Config.GlobalSettings.SnapshotRetention.DefaultKeepCount = $keepCount
-                }
-            }
-        }
-
-        if ($script:Controls['txtVolumeOverrides']) {
-            $overridesText = $script:Controls.txtVolumeOverrides.Text.Trim()
-            $overrides = @{}
-
-            if ($overridesText) {
-                # Parse "D:=5, E:=10" format
-                $pairs = $overridesText -split '\s*,\s*'
-                foreach ($pair in $pairs) {
-                    if ($pair -match '^([A-Za-z]:)\s*=\s*(\d+)$') {
-                        $volume = $Matches[1].ToUpper()
-                        $count = [int]$Matches[2]
-                        if ($count -ge 0 -and $count -le 100) {
-                            $overrides[$volume] = $count
-                        }
-                    }
-                }
-            }
-
-            $script:Config.GlobalSettings.SnapshotRetention.VolumeOverrides = $overrides
-        }
+        # Note: Snapshot retention is now per-profile, configured in the Profiles tab
 
         # Save configuration to file
         $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath

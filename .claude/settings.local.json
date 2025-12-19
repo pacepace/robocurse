@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(grep:*)",
-      "Bash(powershell:*)"
+      "Bash(powershell:*)",
+      "Bash(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"./scripts/run-tests.ps1\")",
+      "Bash(powershell.exe -NoProfile -Command \"Get-Content ''$env:TEMP\\\\pester-summary.txt''\")",
+      "Bash(powershell.exe:*)",
+      "WebSearch"
     ]
   }
 }

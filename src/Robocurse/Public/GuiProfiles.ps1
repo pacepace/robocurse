@@ -42,14 +42,36 @@ function Import-ProfileToForm {
     $script:Controls.txtDest.Text = if ($Profile.Destination) { $Profile.Destination } else { "" }
     $script:Controls.chkUseVss.IsChecked = if ($null -ne $Profile.UseVSS) { $Profile.UseVSS } else { $false }
 
-    # Load PersistentSnapshot setting
-    if ($script:Controls['chkPersistentSnapshot']) {
-        $persistentEnabled = $false
-        if ($Profile.PersistentSnapshot -and $Profile.PersistentSnapshot.Enabled) {
-            $persistentEnabled = $true
+    # Load Source Snapshot settings
+    if ($script:Controls['chkSourcePersistentSnapshot']) {
+        $srcEnabled = $false
+        $srcRetention = 3
+        if ($Profile.SourceSnapshot) {
+            $srcEnabled = [bool]$Profile.SourceSnapshot.PersistentEnabled
+            if ($Profile.SourceSnapshot.RetentionCount) {
+                $srcRetention = $Profile.SourceSnapshot.RetentionCount
+            }
         }
-        $script:Controls.chkPersistentSnapshot.IsChecked = $persistentEnabled
+        $script:Controls.chkSourcePersistentSnapshot.IsChecked = $srcEnabled
+        $script:Controls.txtSourceRetentionCount.Text = $srcRetention.ToString()
     }
+
+    # Load Destination Snapshot settings
+    if ($script:Controls['chkDestPersistentSnapshot']) {
+        $destEnabled = $false
+        $destRetention = 3
+        if ($Profile.DestinationSnapshot) {
+            $destEnabled = [bool]$Profile.DestinationSnapshot.PersistentEnabled
+            if ($Profile.DestinationSnapshot.RetentionCount) {
+                $destRetention = $Profile.DestinationSnapshot.RetentionCount
+            }
+        }
+        $script:Controls.chkDestPersistentSnapshot.IsChecked = $destEnabled
+        $script:Controls.txtDestRetentionCount.Text = $destRetention.ToString()
+    }
+
+    # Refresh snapshot lists for this profile
+    Update-ProfileSnapshotLists
 
     # Set scan mode
     $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
@@ -91,14 +113,38 @@ function Save-ProfileFromForm {
     $selected.UseVSS = $script:Controls.chkUseVss.IsChecked
     $selected.ScanMode = $script:Controls.cmbScanMode.Text
 
-    # Update PersistentSnapshot setting
-    if ($script:Controls['chkPersistentSnapshot']) {
-        if (-not $selected.PersistentSnapshot) {
-            $selected | Add-Member -NotePropertyName PersistentSnapshot -NotePropertyValue ([PSCustomObject]@{
-                Enabled = $false
+    # Update Source Snapshot settings
+    if ($script:Controls['chkSourcePersistentSnapshot']) {
+        if (-not $selected.SourceSnapshot) {
+            $selected | Add-Member -NotePropertyName SourceSnapshot -NotePropertyValue ([PSCustomObject]@{
+                PersistentEnabled = $false
+                RetentionCount = 3
             }) -Force
         }
-        $selected.PersistentSnapshot.Enabled = $script:Controls.chkPersistentSnapshot.IsChecked
+        $selected.SourceSnapshot.PersistentEnabled = $script:Controls.chkSourcePersistentSnapshot.IsChecked
+        try {
+            $srcRetention = [int]$script:Controls.txtSourceRetentionCount.Text
+            $selected.SourceSnapshot.RetentionCount = [Math]::Max(1, [Math]::Min(100, $srcRetention))
+        } catch {
+            $selected.SourceSnapshot.RetentionCount = 3
+        }
+    }
+
+    # Update Destination Snapshot settings
+    if ($script:Controls['chkDestPersistentSnapshot']) {
+        if (-not $selected.DestinationSnapshot) {
+            $selected | Add-Member -NotePropertyName DestinationSnapshot -NotePropertyValue ([PSCustomObject]@{
+                PersistentEnabled = $false
+                RetentionCount = 3
+            }) -Force
+        }
+        $selected.DestinationSnapshot.PersistentEnabled = $script:Controls.chkDestPersistentSnapshot.IsChecked
+        try {
+            $destRetention = [int]$script:Controls.txtDestRetentionCount.Text
+            $selected.DestinationSnapshot.RetentionCount = [Math]::Max(1, [Math]::Min(100, $destRetention))
+        } catch {
+            $selected.DestinationSnapshot.RetentionCount = 3
+        }
     }
 
     # Parse numeric values with validation and bounds checking
@@ -189,6 +235,14 @@ function Add-NewProfile {
         ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
         ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
         ChunkMaxDepth = $script:DefaultMaxChunkDepth
+        SourceSnapshot = [PSCustomObject]@{
+            PersistentEnabled = $false
+            RetentionCount = 3
+        }
+        DestinationSnapshot = [PSCustomObject]@{
+            PersistentEnabled = $false
+            RetentionCount = 3
+        }
     }
 
     # Add to config
@@ -246,5 +300,109 @@ function Remove-SelectedProfile {
         }
 
         Write-GuiLog "Profile '$($selected.Name)' removed"
+    }
+}
+
+function Update-ProfileSnapshotLists {
+    <#
+    .SYNOPSIS
+        Refreshes the per-profile snapshot DataGrids based on selected profile's volumes
+    .DESCRIPTION
+        Loads existing VSS snapshots for the source and destination volumes of the
+        currently selected profile and populates the respective DataGrids.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $profile = $script:Controls.lstProfiles.SelectedItem
+    if (-not $profile) {
+        # Clear grids if no profile selected
+        if ($script:Controls['dgSourceSnapshots']) {
+            $script:Controls.dgSourceSnapshots.ItemsSource = @()
+        }
+        if ($script:Controls['dgDestSnapshots']) {
+            $script:Controls.dgDestSnapshots.ItemsSource = @()
+        }
+        return
+    }
+
+    # Get source volume and load snapshots
+    if ($script:Controls['dgSourceSnapshots'] -and $profile.Source) {
+        try {
+            $sourceVolume = Get-VolumeFromPath -Path $profile.Source
+            if ($sourceVolume) {
+                $result = Get-VssSnapshots -Volume $sourceVolume
+                if ($result.Success) {
+                    $script:Controls.dgSourceSnapshots.ItemsSource = @($result.Data)
+                } else {
+                    $script:Controls.dgSourceSnapshots.ItemsSource = @()
+                }
+            } else {
+                $script:Controls.dgSourceSnapshots.ItemsSource = @()
+            }
+        } catch {
+            Write-GuiLog "Error loading source snapshots: $($_.Exception.Message)"
+            $script:Controls.dgSourceSnapshots.ItemsSource = @()
+        }
+    }
+
+    # Get destination volume and load snapshots
+    if ($script:Controls['dgDestSnapshots'] -and $profile.Destination) {
+        try {
+            $destVolume = Get-VolumeFromPath -Path $profile.Destination
+            if ($destVolume) {
+                $result = Get-VssSnapshots -Volume $destVolume
+                if ($result.Success) {
+                    $script:Controls.dgDestSnapshots.ItemsSource = @($result.Data)
+                } else {
+                    $script:Controls.dgDestSnapshots.ItemsSource = @()
+                }
+            } else {
+                $script:Controls.dgDestSnapshots.ItemsSource = @()
+            }
+        } catch {
+            Write-GuiLog "Error loading destination snapshots: $($_.Exception.Message)"
+            $script:Controls.dgDestSnapshots.ItemsSource = @()
+        }
+    }
+}
+
+function Invoke-DeleteProfileSnapshot {
+    <#
+    .SYNOPSIS
+        Deletes the selected snapshot from a profile's snapshot grid
+    .PARAMETER SnapshotGrid
+        The DataGrid control containing the selected snapshot
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        $SnapshotGrid
+    )
+
+    $selected = $SnapshotGrid.SelectedItem
+    if (-not $selected) {
+        return
+    }
+
+    $confirmed = Show-ConfirmDialog `
+        -Title "Delete Snapshot" `
+        -Message "Are you sure you want to delete this VSS snapshot?`n`nShadow ID: $($selected.ShadowId)`nCreated: $($selected.CreatedAt)" `
+        -ConfirmText "Delete" `
+        -CancelText "Cancel"
+
+    if ($confirmed) {
+        $result = Remove-VssSnapshot -ShadowId $selected.ShadowId
+        if ($result.Success) {
+            Write-GuiLog "Snapshot deleted: $($selected.ShadowId)"
+            Update-ProfileSnapshotLists
+        } else {
+            [System.Windows.MessageBox]::Show(
+                "Failed to delete snapshot: $($result.ErrorMessage)",
+                "Error",
+                [System.Windows.MessageBoxButton]::OK,
+                [System.Windows.MessageBoxImage]::Error
+            )
+        }
     }
 }

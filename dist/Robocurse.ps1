@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-18 20:46:59
+    Built: 2025-12-19 11:32:43
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -1367,8 +1367,10 @@ function ConvertFrom-GlobalSettings {
         }
     }
 
-    # Snapshot retention settings
+    # Snapshot retention settings (DEPRECATED - now per-profile)
+    # Kept for migration purposes only - new configs should use per-profile sourceSnapshot/destinationSnapshot
     if ($RawGlobal.snapshotRetention) {
+        Write-Warning "Global snapshotRetention settings are deprecated. Snapshot retention is now configured per-profile using sourceSnapshot and destinationSnapshot. These settings will be used for migration only."
         $Config.GlobalSettings.SnapshotRetention = [PSCustomObject]@{
             DefaultKeepCount = if ($RawGlobal.snapshotRetention.defaultKeepCount) {
                 $RawGlobal.snapshotRetention.defaultKeepCount
@@ -1483,9 +1485,13 @@ function ConvertFrom-FriendlyConfig {
                 ChunkMaxDepth = $script:DefaultMaxChunkDepth
                 RobocopyOptions = @{}
                 Enabled = $true
-                PersistentSnapshot = [PSCustomObject]@{
-                    Enabled = $false              # Enable persistent snapshots for this profile
-                    # Retention uses GlobalSettings.SnapshotRetention by default
+                SourceSnapshot = [PSCustomObject]@{
+                    PersistentEnabled = $false    # Create persistent snapshot on source before backup
+                    RetentionCount = 3            # How many snapshots to keep on source volume
+                }
+                DestinationSnapshot = [PSCustomObject]@{
+                    PersistentEnabled = $false    # Create persistent snapshot on destination before backup
+                    RetentionCount = 3            # How many snapshots to keep on destination volume
                 }
             }
 
@@ -1505,10 +1511,33 @@ function ConvertFrom-FriendlyConfig {
             # Handle destination
             $syncProfile.Destination = Get-DestinationPathFromRaw -RawDestination $rawProfile.destination
 
-            # Handle persistent snapshot settings
-            if ($rawProfile.persistentSnapshot) {
-                $syncProfile.PersistentSnapshot = [PSCustomObject]@{
-                    Enabled = [bool]$rawProfile.persistentSnapshot.enabled
+            # Handle snapshot settings (new format: sourceSnapshot/destinationSnapshot)
+            if ($rawProfile.sourceSnapshot) {
+                $syncProfile.SourceSnapshot = [PSCustomObject]@{
+                    PersistentEnabled = [bool]$rawProfile.sourceSnapshot.persistentEnabled
+                    RetentionCount = if ($rawProfile.sourceSnapshot.retentionCount) {
+                        [int]$rawProfile.sourceSnapshot.retentionCount
+                    } else { 3 }
+                }
+            }
+            if ($rawProfile.destinationSnapshot) {
+                $syncProfile.DestinationSnapshot = [PSCustomObject]@{
+                    PersistentEnabled = [bool]$rawProfile.destinationSnapshot.persistentEnabled
+                    RetentionCount = if ($rawProfile.destinationSnapshot.retentionCount) {
+                        [int]$rawProfile.destinationSnapshot.retentionCount
+                    } else { 3 }
+                }
+            }
+
+            # Migration: Handle legacy persistentSnapshot format (migrate to sourceSnapshot)
+            if ($rawProfile.persistentSnapshot -and $rawProfile.persistentSnapshot.enabled) {
+                if (-not $rawProfile.sourceSnapshot) {
+                    Write-Verbose "Migrating legacy persistentSnapshot to sourceSnapshot for profile '$profileName'"
+                    $syncProfile.SourceSnapshot.PersistentEnabled = $true
+                    # Use global default retention if available (for migration), otherwise 3
+                    if ($RawConfig.global -and $RawConfig.global.snapshotRetention -and $RawConfig.global.snapshotRetention.defaultKeepCount) {
+                        $syncProfile.SourceSnapshot.RetentionCount = [int]$RawConfig.global.snapshotRetention.defaultKeepCount
+                    }
                 }
             }
 
@@ -1615,10 +1644,19 @@ function ConvertTo-FriendlyConfig {
             }
         }
 
-        # Add persistent snapshot settings if enabled
-        if ($profile.PersistentSnapshot -and $profile.PersistentSnapshot.Enabled) {
-            $friendlyProfile.persistentSnapshot = [ordered]@{
-                enabled = $profile.PersistentSnapshot.Enabled
+        # Add source snapshot settings if enabled
+        if ($profile.SourceSnapshot -and $profile.SourceSnapshot.PersistentEnabled) {
+            $friendlyProfile.sourceSnapshot = [ordered]@{
+                persistentEnabled = $profile.SourceSnapshot.PersistentEnabled
+                retentionCount = if ($profile.SourceSnapshot.RetentionCount) { $profile.SourceSnapshot.RetentionCount } else { 3 }
+            }
+        }
+
+        # Add destination snapshot settings if enabled
+        if ($profile.DestinationSnapshot -and $profile.DestinationSnapshot.PersistentEnabled) {
+            $friendlyProfile.destinationSnapshot = [ordered]@{
+                persistentEnabled = $profile.DestinationSnapshot.PersistentEnabled
+                retentionCount = if ($profile.DestinationSnapshot.RetentionCount) { $profile.DestinationSnapshot.RetentionCount } else { 3 }
             }
         }
 
@@ -5713,6 +5751,14 @@ namespace Robocurse
             set { lock (_lock) { _currentVssSnapshot = value; } }
         }
 
+        // Last snapshot result (for source/dest persistent snapshots)
+        private object _lastSnapshotResult;
+        public object LastSnapshotResult
+        {
+            get { lock (_lock) { return _lastSnapshotResult; } }
+            set { lock (_lock) { _lastSnapshotResult = value; } }
+        }
+
         // Thread-safe collections (no additional locking needed)
         public ConcurrentQueue<object> ChunkQueue { get; private set; }
         public ConcurrentDictionary<int, object> ActiveJobs { get; private set; }
@@ -5767,6 +5813,7 @@ namespace Robocurse
                 _profiles = null;
                 _currentRobocopyOptions = null;
                 _currentVssSnapshot = null;
+                _lastSnapshotResult = null;
             }
 
             // Reset atomic counters
@@ -5802,6 +5849,7 @@ namespace Robocurse
                 _totalBytes = 0;
                 _currentRobocopyOptions = null;
                 _currentVssSnapshot = null;
+                _lastSnapshotResult = null;
             }
 
             Interlocked.Exchange(ref _completedCount, 0);
@@ -6429,22 +6477,32 @@ function Start-ReplicationRun {
     }
 }
 
-function Invoke-ProfilePersistentSnapshot {
+function Invoke-ProfileSnapshots {
     <#
     .SYNOPSIS
-        Creates a persistent VSS snapshot at profile start with retention enforcement
+        Creates persistent VSS snapshots for source and/or destination at profile start
     .DESCRIPTION
-        If the profile has PersistentSnapshot.Enabled = $true, this function:
-        1. Determines the source volume (local or remote)
-        2. Enforces retention policy (deletes old snapshots to make room)
-        3. Creates a new persistent snapshot
-        The snapshot remains after backup completes for point-in-time recovery.
+        Creates persistent snapshots based on profile configuration:
+        1. Source snapshot (if SourceSnapshot.PersistentEnabled = $true)
+        2. Destination snapshot (if DestinationSnapshot.PersistentEnabled = $true)
+
+        For each snapshot:
+        - Determines the volume (local or remote)
+        - Computes effective retention using MAX across all profiles sharing that volume
+        - Enforces retention policy (deletes old snapshots to make room)
+        - Creates a new persistent snapshot
+
+        The snapshots remain after backup completes for point-in-time recovery.
     .PARAMETER Profile
         The sync profile object
     .PARAMETER Config
-        The full configuration object (for retention settings)
+        The full configuration object (for computing effective retention)
     .OUTPUTS
-        OperationResult with Data = snapshot info (or $null if not enabled)
+        OperationResult with Data containing:
+        - SourceSnapshot: snapshot info or $null
+        - DestinationSnapshot: snapshot info or $null
+        - SourceRetention: retention summary or $null
+        - DestinationRetention: retention summary or $null
     #>
     [CmdletBinding()]
     param(
@@ -6455,83 +6513,146 @@ function Invoke-ProfilePersistentSnapshot {
         [PSCustomObject]$Config
     )
 
-    # Check if persistent snapshots are enabled for this profile
-    if (-not $Profile.PersistentSnapshot -or -not $Profile.PersistentSnapshot.Enabled) {
-        Write-RobocurseLog -Message "Persistent snapshots not enabled for profile '$($Profile.Name)'" -Level 'Debug' -Component 'Orchestration'
-        return New-OperationResult -Success $true -Data $null
+    $results = @{
+        SourceSnapshot = $null
+        DestinationSnapshot = $null
+        SourceRetention = $null
+        DestinationRetention = $null
+        Errors = @()
     }
 
-    $sourcePath = $Profile.Source
-    Write-RobocurseLog -Message "Creating persistent snapshot for profile '$($Profile.Name)' source: $sourcePath" -Level 'Info' -Component 'Orchestration'
+    # Source snapshot
+    if ($Profile.SourceSnapshot -and $Profile.SourceSnapshot.PersistentEnabled) {
+        $sourcePath = $Profile.Source
+        Write-RobocurseLog -Message "Creating source persistent snapshot for profile '$($Profile.Name)': $sourcePath" -Level 'Info' -Component 'Orchestration'
 
-    # Determine if local or remote
-    $isRemote = $sourcePath -match '^\\\\[^\\]+\\[^\\]+'
+        $isRemote = $sourcePath -match '^\\\\[^\\]+\\[^\\]+'
 
-    if ($isRemote) {
-        return Invoke-RemotePersistentSnapshot -SourcePath $sourcePath -Config $Config
+        if ($isRemote) {
+            $sourceResult = Invoke-RemotePersistentSnapshot -Path $sourcePath -Side "Source" -Config $Config
+        }
+        else {
+            $sourceResult = Invoke-LocalPersistentSnapshot -Path $sourcePath -Side "Source" -Config $Config
+        }
+
+        if ($sourceResult.Success) {
+            $results.SourceSnapshot = $sourceResult.Data.Snapshot
+            $results.SourceRetention = $sourceResult.Data.Retention
+        }
+        else {
+            $results.Errors += "Source: $($sourceResult.ErrorMessage)"
+        }
     }
     else {
-        return Invoke-LocalPersistentSnapshot -SourcePath $sourcePath -Config $Config
+        Write-RobocurseLog -Message "Source persistent snapshots not enabled for profile '$($Profile.Name)'" -Level 'Debug' -Component 'Orchestration'
     }
+
+    # Destination snapshot
+    if ($Profile.DestinationSnapshot -and $Profile.DestinationSnapshot.PersistentEnabled) {
+        $destPath = $Profile.Destination
+        Write-RobocurseLog -Message "Creating destination persistent snapshot for profile '$($Profile.Name)': $destPath" -Level 'Info' -Component 'Orchestration'
+
+        $isRemote = $destPath -match '^\\\\[^\\]+\\[^\\]+'
+
+        if ($isRemote) {
+            $destResult = Invoke-RemotePersistentSnapshot -Path $destPath -Side "Destination" -Config $Config
+        }
+        else {
+            $destResult = Invoke-LocalPersistentSnapshot -Path $destPath -Side "Destination" -Config $Config
+        }
+
+        if ($destResult.Success) {
+            $results.DestinationSnapshot = $destResult.Data.Snapshot
+            $results.DestinationRetention = $destResult.Data.Retention
+        }
+        else {
+            $results.Errors += "Destination: $($destResult.ErrorMessage)"
+        }
+    }
+    else {
+        Write-RobocurseLog -Message "Destination persistent snapshots not enabled for profile '$($Profile.Name)'" -Level 'Debug' -Component 'Orchestration'
+    }
+
+    $success = $results.Errors.Count -eq 0
+    $errorMessage = if ($results.Errors.Count -gt 0) { $results.Errors -join "; " } else { $null }
+
+    return New-OperationResult -Success $success -Data ([PSCustomObject]$results) -ErrorMessage $errorMessage
 }
 
 function Invoke-LocalPersistentSnapshot {
     <#
     .SYNOPSIS
-        Creates a persistent VSS snapshot for a local source path
+        Creates a persistent VSS snapshot for a local path
     .DESCRIPTION
         Creates a VSS snapshot for a local volume, enforcing retention policy first.
+        Uses Get-EffectiveVolumeRetention to compute MAX retention across all profiles
+        sharing this volume.
         The snapshot persists after backup completes for point-in-time recovery.
-    .PARAMETER SourcePath
-        The local source path to snapshot (used to determine volume)
+    .PARAMETER Path
+        The local path to snapshot (used to determine volume)
+    .PARAMETER Side
+        "Source" or "Destination" - which side this snapshot is for
     .PARAMETER Config
-        The full configuration object (for retention settings)
+        The full configuration object (for computing effective retention)
     .OUTPUTS
-        OperationResult with Data = snapshot info
+        OperationResult with Data containing Snapshot and Retention info
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$SourcePath,
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [ValidateSet("Source", "Destination")]
+        [string]$Side,
 
         [Parameter(Mandatory)]
         [PSCustomObject]$Config
     )
 
     # Get volume from path
-    $volume = Get-VolumeFromPath -Path $SourcePath
+    $volume = Get-VolumeFromPath -Path $Path
     if (-not $volume) {
-        return New-OperationResult -Success $false -ErrorMessage "Cannot determine volume from path: $SourcePath"
+        return New-OperationResult -Success $false -ErrorMessage "Cannot determine volume from path: $Path"
     }
 
-    # Get retention count for this volume
-    $keepCount = Get-VolumeRetentionCount -Volume $volume -Config $Config
+    # Get effective retention count for this volume (MAX across all profiles)
+    $keepCount = Get-EffectiveVolumeRetention -Volume $volume -Side $Side -Config $Config
 
-    Write-RobocurseLog -Message "Enforcing retention for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
+    Write-RobocurseLog -Message "Enforcing $Side retention for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
 
     # Step 1: Enforce retention BEFORE creating new snapshot
     $retentionResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $keepCount
+    $retentionInfo = $null
     if (-not $retentionResult.Success) {
         Write-RobocurseLog -Message "Retention enforcement failed: $($retentionResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
         # Continue anyway - we'll try to create the snapshot
     }
     else {
         Write-RobocurseLog -Message "Retention: deleted $($retentionResult.Data.DeletedCount), kept $($retentionResult.Data.KeptCount)" -Level 'Debug' -Component 'Orchestration'
+        $retentionInfo = [PSCustomObject]@{
+            Volume = $volume
+            Location = "Local"
+            KeptCount = $retentionResult.Data.KeptCount
+            DeletedCount = $retentionResult.Data.DeletedCount
+            TotalBefore = $retentionResult.Data.KeptCount + $retentionResult.Data.DeletedCount
+        }
     }
 
     # Step 2: Create new persistent snapshot
-    $snapshotResult = New-VssSnapshot -SourcePath $SourcePath
+    $snapshotResult = New-VssSnapshot -SourcePath $Path
     if (-not $snapshotResult.Success) {
         return New-OperationResult -Success $false -ErrorMessage "Failed to create persistent snapshot: $($snapshotResult.ErrorMessage)"
     }
 
     # Note: We do NOT track this snapshot for orphan cleanup - it's meant to persist
-    # Actually, we should still track it but mark it as persistent so Clear-OrphanVssSnapshots skips it
-    # For now, we'll remove it from tracking so it survives restarts
 
-    Write-RobocurseLog -Message "Created persistent snapshot: $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
+    Write-RobocurseLog -Message "Created persistent $Side snapshot: $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
 
-    return $snapshotResult
+    return New-OperationResult -Success $true -Data ([PSCustomObject]@{
+        Snapshot = $snapshotResult.Data
+        Retention = $retentionInfo
+    })
 }
 
 function Invoke-RemotePersistentSnapshot {
@@ -6539,29 +6660,36 @@ function Invoke-RemotePersistentSnapshot {
     .SYNOPSIS
         Creates a persistent VSS snapshot on a remote server
     .DESCRIPTION
-        Creates a VSS snapshot on a remote server for a UNC source path,
-        enforcing retention policy first. The snapshot persists after backup
-        completes for point-in-time recovery.
-    .PARAMETER SourcePath
-        The UNC source path to snapshot (e.g., \\server\share)
+        Creates a VSS snapshot on a remote server for a UNC path,
+        enforcing retention policy first. Uses Get-EffectiveVolumeRetention
+        to compute MAX retention across all profiles sharing that volume.
+        The snapshot persists after backup completes for point-in-time recovery.
+    .PARAMETER Path
+        The UNC path to snapshot (e.g., \\server\share)
+    .PARAMETER Side
+        "Source" or "Destination" - which side this snapshot is for
     .PARAMETER Config
-        The full configuration object (for retention settings)
+        The full configuration object (for computing effective retention)
     .OUTPUTS
-        OperationResult with Data = snapshot info
+        OperationResult with Data containing Snapshot and Retention info
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$SourcePath,
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [ValidateSet("Source", "Destination")]
+        [string]$Side,
 
         [Parameter(Mandatory)]
         [PSCustomObject]$Config
     )
 
     # Parse UNC path
-    $components = Get-UncPathComponents -UncPath $SourcePath
+    $components = Get-UncPathComponents -UncPath $Path
     if (-not $components) {
-        return New-OperationResult -Success $false -ErrorMessage "Invalid UNC path: $SourcePath"
+        return New-OperationResult -Success $false -ErrorMessage "Invalid UNC path: $Path"
     }
 
     $serverName = $components.ServerName
@@ -6581,41 +6709,60 @@ function Invoke-RemotePersistentSnapshot {
         return New-OperationResult -Success $false -ErrorMessage "Cannot determine volume from share path: $shareLocalPath"
     }
 
-    # Get retention count
-    $keepCount = Get-VolumeRetentionCount -Volume $volume -Config $Config
+    # Get effective retention count (MAX across all profiles sharing this volume)
+    $keepCount = Get-EffectiveVolumeRetention -Volume $volume -Side $Side -Config $Config
 
-    Write-RobocurseLog -Message "Enforcing remote retention on '$serverName' for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
+    Write-RobocurseLog -Message "Enforcing remote $Side retention on '$serverName' for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
 
     # Step 1: Enforce retention
     $retentionResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $keepCount
+    $retentionInfo = $null
     if (-not $retentionResult.Success) {
         Write-RobocurseLog -Message "Remote retention failed: $($retentionResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
     }
+    else {
+        $retentionInfo = [PSCustomObject]@{
+            Volume = $volume
+            Location = "Remote:$serverName"
+            KeptCount = $retentionResult.Data.KeptCount
+            DeletedCount = $retentionResult.Data.DeletedCount
+            TotalBefore = $retentionResult.Data.KeptCount + $retentionResult.Data.DeletedCount
+        }
+    }
 
     # Step 2: Create new persistent snapshot
-    $snapshotResult = New-RemoteVssSnapshot -UncPath $SourcePath
+    $snapshotResult = New-RemoteVssSnapshot -UncPath $Path
     if (-not $snapshotResult.Success) {
         return New-OperationResult -Success $false -ErrorMessage "Failed to create remote persistent snapshot: $($snapshotResult.ErrorMessage)"
     }
 
-    Write-RobocurseLog -Message "Created remote persistent snapshot on '$serverName': $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
+    Write-RobocurseLog -Message "Created remote persistent $Side snapshot on '$serverName': $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
 
-    return $snapshotResult
+    return New-OperationResult -Success $true -Data ([PSCustomObject]@{
+        Snapshot = $snapshotResult.Data
+        Retention = $retentionInfo
+    })
 }
 
-function Get-VolumeRetentionCount {
+function Get-EffectiveVolumeRetention {
     <#
     .SYNOPSIS
-        Gets the retention count for a specific volume from config
+        Computes the maximum retention count for a volume across all profiles
     .DESCRIPTION
-        Looks up the retention count for a volume, checking for volume-specific
-        overrides first, then falling back to the default retention count.
+        When multiple profiles have persistent snapshots enabled for the same
+        volume (source or destination), returns the MAX of all retention counts.
+        This ensures no profile's snapshots are prematurely deleted.
+
+        For example, if Profile A wants 3 snapshots on D: and Profile B wants 7
+        snapshots on D:, this function returns 7.
     .PARAMETER Volume
         The volume letter (e.g., "D:")
+    .PARAMETER Side
+        "Source" or "Destination" - which side to check
     .PARAMETER Config
-        The full configuration object containing SnapshotRetention settings
+        The full configuration object
     .OUTPUTS
-        Integer retention count
+        Integer - the maximum retention count for this volume (minimum 1 if any profile uses it)
     #>
     [CmdletBinding()]
     param(
@@ -6623,19 +6770,45 @@ function Get-VolumeRetentionCount {
         [string]$Volume,
 
         [Parameter(Mandatory)]
+        [ValidateSet("Source", "Destination")]
+        [string]$Side,
+
+        [Parameter(Mandatory)]
         [PSCustomObject]$Config
     )
 
     $volumeUpper = $Volume.ToUpper()
-    $retention = $Config.GlobalSettings.SnapshotRetention
+    $maxRetention = 0
 
-    # Check for volume-specific override
-    if ($retention.VolumeOverrides -and $retention.VolumeOverrides.ContainsKey($volumeUpper)) {
-        return $retention.VolumeOverrides[$volumeUpper]
+    foreach ($profile in $Config.SyncProfiles) {
+        # Determine path and snapshot config based on side
+        $path = if ($Side -eq "Source") { $profile.Source } else { $profile.Destination }
+        $snapshotConfig = if ($Side -eq "Source") { $profile.SourceSnapshot } else { $profile.DestinationSnapshot }
+
+        # Skip if no snapshot config or not enabled
+        if (-not $snapshotConfig -or -not $snapshotConfig.PersistentEnabled) {
+            continue
+        }
+
+        # Determine volume for this path
+        $pathVolume = Get-VolumeFromPath -Path $path
+        if (-not $pathVolume) { continue }
+
+        # Check if same volume
+        if ($pathVolume.ToUpper() -eq $volumeUpper) {
+            $retention = if ($snapshotConfig.RetentionCount) { $snapshotConfig.RetentionCount } else { 3 }
+            $maxRetention = [Math]::Max($maxRetention, $retention)
+            Write-RobocurseLog -Message "Profile '$($profile.Name)' wants $retention snapshots on $volumeUpper ($Side)" -Level 'Debug' -Component 'Orchestration'
+        }
     }
 
-    # Return default
-    return $retention.DefaultKeepCount
+    # Return at least 1 if any profile uses this volume
+    if ($maxRetention -eq 0) {
+        $maxRetention = 3  # Default fallback
+    }
+
+    Write-RobocurseLog -Message "Effective retention for $volumeUpper ($Side): $maxRetention (MAX across all profiles)" -Level 'Debug' -Component 'Orchestration'
+    return $maxRetention
 }
 
 function Start-ProfileReplication {
@@ -6722,15 +6895,22 @@ function Start-ProfileReplication {
         destination = $Profile.Destination
     }
 
-    # Create persistent snapshot if enabled (separate from temp VSS for backup)
-    $persistentSnapshotResult = Invoke-ProfilePersistentSnapshot -Profile $Profile -Config $script:Config
-    if (-not $persistentSnapshotResult.Success) {
-        Write-RobocurseLog -Message "Persistent snapshot creation failed: $($persistentSnapshotResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
+    # Create persistent snapshots if enabled (separate from temp VSS for file copying)
+    $snapshotResult = Invoke-ProfileSnapshots -Profile $Profile -Config $script:Config
+    if (-not $snapshotResult.Success) {
+        Write-RobocurseLog -Message "Persistent snapshot creation failed: $($snapshotResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
         # Don't fail the profile - persistent snapshots are optional enhancement
     }
-    elseif ($persistentSnapshotResult.Data) {
-        Write-RobocurseLog -Message "Persistent snapshot ready for point-in-time recovery" -Level 'Info' -Component 'Orchestration'
+    else {
+        if ($snapshotResult.Data.SourceSnapshot) {
+            Write-RobocurseLog -Message "Source persistent snapshot ready: $($snapshotResult.Data.SourceSnapshot.ShadowId)" -Level 'Info' -Component 'Orchestration'
+        }
+        if ($snapshotResult.Data.DestinationSnapshot) {
+            Write-RobocurseLog -Message "Destination persistent snapshot ready: $($snapshotResult.Data.DestinationSnapshot.ShadowId)" -Level 'Info' -Component 'Orchestration'
+        }
     }
+    # Store snapshot results in state for later email reporting
+    $state.LastSnapshotResult = $snapshotResult.Data
 
     # VSS snapshot handling - allows copying of locked files
     $state.CurrentVssSnapshot = $null
@@ -13524,27 +13704,7 @@ function Import-SettingsToForm {
         }
     }
 
-    # SNAPSHOT RETENTION Section
-    if ($script:Controls['txtDefaultKeepCount']) {
-        $defaultKeep = 3
-        if ($config.GlobalSettings.SnapshotRetention -and $config.GlobalSettings.SnapshotRetention.DefaultKeepCount) {
-            $defaultKeep = $config.GlobalSettings.SnapshotRetention.DefaultKeepCount
-        }
-        $script:Controls.txtDefaultKeepCount.Text = $defaultKeep.ToString()
-    }
-
-    if ($script:Controls['txtVolumeOverrides']) {
-        $overridesText = ""
-        if ($config.GlobalSettings.SnapshotRetention -and $config.GlobalSettings.SnapshotRetention.VolumeOverrides) {
-            $overrides = $config.GlobalSettings.SnapshotRetention.VolumeOverrides
-            $pairs = @()
-            foreach ($key in $overrides.Keys) {
-                $pairs += "$key=$($overrides[$key])"
-            }
-            $overridesText = $pairs -join ", "
-        }
-        $script:Controls.txtVolumeOverrides.Text = $overridesText
-    }
+    # Note: Snapshot retention is now per-profile, configured in the Profiles tab
 
     Write-GuiLog "Settings loaded from configuration"
 }
@@ -13630,44 +13790,7 @@ function Save-SettingsFromForm {
             }
         }
 
-        # SNAPSHOT RETENTION Section
-        if ($script:Controls['txtDefaultKeepCount']) {
-            # Ensure SnapshotRetention exists
-            if (-not $script:Config.GlobalSettings.SnapshotRetention) {
-                $script:Config.GlobalSettings | Add-Member -NotePropertyName SnapshotRetention -NotePropertyValue ([PSCustomObject]@{
-                    DefaultKeepCount = 3
-                    VolumeOverrides = @{}
-                }) -Force
-            }
-
-            $keepCount = 3
-            if ([int]::TryParse($script:Controls.txtDefaultKeepCount.Text.Trim(), [ref]$keepCount)) {
-                if ($keepCount -ge 0 -and $keepCount -le 100) {
-                    $script:Config.GlobalSettings.SnapshotRetention.DefaultKeepCount = $keepCount
-                }
-            }
-        }
-
-        if ($script:Controls['txtVolumeOverrides']) {
-            $overridesText = $script:Controls.txtVolumeOverrides.Text.Trim()
-            $overrides = @{}
-
-            if ($overridesText) {
-                # Parse "D:=5, E:=10" format
-                $pairs = $overridesText -split '\s*,\s*'
-                foreach ($pair in $pairs) {
-                    if ($pair -match '^([A-Za-z]:)\s*=\s*(\d+)$') {
-                        $volume = $Matches[1].ToUpper()
-                        $count = [int]$Matches[2]
-                        if ($count -ge 0 -and $count -le 100) {
-                            $overrides[$volume] = $count
-                        }
-                    }
-                }
-            }
-
-            $script:Config.GlobalSettings.SnapshotRetention.VolumeOverrides = $overrides
-        }
+        # Note: Snapshot retention is now per-profile, configured in the Profiles tab
 
         # Save configuration to file
         $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
@@ -13829,14 +13952,36 @@ function Import-ProfileToForm {
     $script:Controls.txtDest.Text = if ($Profile.Destination) { $Profile.Destination } else { "" }
     $script:Controls.chkUseVss.IsChecked = if ($null -ne $Profile.UseVSS) { $Profile.UseVSS } else { $false }
 
-    # Load PersistentSnapshot setting
-    if ($script:Controls['chkPersistentSnapshot']) {
-        $persistentEnabled = $false
-        if ($Profile.PersistentSnapshot -and $Profile.PersistentSnapshot.Enabled) {
-            $persistentEnabled = $true
+    # Load Source Snapshot settings
+    if ($script:Controls['chkSourcePersistentSnapshot']) {
+        $srcEnabled = $false
+        $srcRetention = 3
+        if ($Profile.SourceSnapshot) {
+            $srcEnabled = [bool]$Profile.SourceSnapshot.PersistentEnabled
+            if ($Profile.SourceSnapshot.RetentionCount) {
+                $srcRetention = $Profile.SourceSnapshot.RetentionCount
+            }
         }
-        $script:Controls.chkPersistentSnapshot.IsChecked = $persistentEnabled
+        $script:Controls.chkSourcePersistentSnapshot.IsChecked = $srcEnabled
+        $script:Controls.txtSourceRetentionCount.Text = $srcRetention.ToString()
     }
+
+    # Load Destination Snapshot settings
+    if ($script:Controls['chkDestPersistentSnapshot']) {
+        $destEnabled = $false
+        $destRetention = 3
+        if ($Profile.DestinationSnapshot) {
+            $destEnabled = [bool]$Profile.DestinationSnapshot.PersistentEnabled
+            if ($Profile.DestinationSnapshot.RetentionCount) {
+                $destRetention = $Profile.DestinationSnapshot.RetentionCount
+            }
+        }
+        $script:Controls.chkDestPersistentSnapshot.IsChecked = $destEnabled
+        $script:Controls.txtDestRetentionCount.Text = $destRetention.ToString()
+    }
+
+    # Refresh snapshot lists for this profile
+    Update-ProfileSnapshotLists
 
     # Set scan mode
     $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
@@ -13878,14 +14023,38 @@ function Save-ProfileFromForm {
     $selected.UseVSS = $script:Controls.chkUseVss.IsChecked
     $selected.ScanMode = $script:Controls.cmbScanMode.Text
 
-    # Update PersistentSnapshot setting
-    if ($script:Controls['chkPersistentSnapshot']) {
-        if (-not $selected.PersistentSnapshot) {
-            $selected | Add-Member -NotePropertyName PersistentSnapshot -NotePropertyValue ([PSCustomObject]@{
-                Enabled = $false
+    # Update Source Snapshot settings
+    if ($script:Controls['chkSourcePersistentSnapshot']) {
+        if (-not $selected.SourceSnapshot) {
+            $selected | Add-Member -NotePropertyName SourceSnapshot -NotePropertyValue ([PSCustomObject]@{
+                PersistentEnabled = $false
+                RetentionCount = 3
             }) -Force
         }
-        $selected.PersistentSnapshot.Enabled = $script:Controls.chkPersistentSnapshot.IsChecked
+        $selected.SourceSnapshot.PersistentEnabled = $script:Controls.chkSourcePersistentSnapshot.IsChecked
+        try {
+            $srcRetention = [int]$script:Controls.txtSourceRetentionCount.Text
+            $selected.SourceSnapshot.RetentionCount = [Math]::Max(1, [Math]::Min(100, $srcRetention))
+        } catch {
+            $selected.SourceSnapshot.RetentionCount = 3
+        }
+    }
+
+    # Update Destination Snapshot settings
+    if ($script:Controls['chkDestPersistentSnapshot']) {
+        if (-not $selected.DestinationSnapshot) {
+            $selected | Add-Member -NotePropertyName DestinationSnapshot -NotePropertyValue ([PSCustomObject]@{
+                PersistentEnabled = $false
+                RetentionCount = 3
+            }) -Force
+        }
+        $selected.DestinationSnapshot.PersistentEnabled = $script:Controls.chkDestPersistentSnapshot.IsChecked
+        try {
+            $destRetention = [int]$script:Controls.txtDestRetentionCount.Text
+            $selected.DestinationSnapshot.RetentionCount = [Math]::Max(1, [Math]::Min(100, $destRetention))
+        } catch {
+            $selected.DestinationSnapshot.RetentionCount = 3
+        }
     }
 
     # Parse numeric values with validation and bounds checking
@@ -13976,6 +14145,14 @@ function Add-NewProfile {
         ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
         ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
         ChunkMaxDepth = $script:DefaultMaxChunkDepth
+        SourceSnapshot = [PSCustomObject]@{
+            PersistentEnabled = $false
+            RetentionCount = 3
+        }
+        DestinationSnapshot = [PSCustomObject]@{
+            PersistentEnabled = $false
+            RetentionCount = 3
+        }
     }
 
     # Add to config
@@ -14033,6 +14210,110 @@ function Remove-SelectedProfile {
         }
 
         Write-GuiLog "Profile '$($selected.Name)' removed"
+    }
+}
+
+function Update-ProfileSnapshotLists {
+    <#
+    .SYNOPSIS
+        Refreshes the per-profile snapshot DataGrids based on selected profile's volumes
+    .DESCRIPTION
+        Loads existing VSS snapshots for the source and destination volumes of the
+        currently selected profile and populates the respective DataGrids.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $profile = $script:Controls.lstProfiles.SelectedItem
+    if (-not $profile) {
+        # Clear grids if no profile selected
+        if ($script:Controls['dgSourceSnapshots']) {
+            $script:Controls.dgSourceSnapshots.ItemsSource = @()
+        }
+        if ($script:Controls['dgDestSnapshots']) {
+            $script:Controls.dgDestSnapshots.ItemsSource = @()
+        }
+        return
+    }
+
+    # Get source volume and load snapshots
+    if ($script:Controls['dgSourceSnapshots'] -and $profile.Source) {
+        try {
+            $sourceVolume = Get-VolumeFromPath -Path $profile.Source
+            if ($sourceVolume) {
+                $result = Get-VssSnapshots -Volume $sourceVolume
+                if ($result.Success) {
+                    $script:Controls.dgSourceSnapshots.ItemsSource = @($result.Data)
+                } else {
+                    $script:Controls.dgSourceSnapshots.ItemsSource = @()
+                }
+            } else {
+                $script:Controls.dgSourceSnapshots.ItemsSource = @()
+            }
+        } catch {
+            Write-GuiLog "Error loading source snapshots: $($_.Exception.Message)"
+            $script:Controls.dgSourceSnapshots.ItemsSource = @()
+        }
+    }
+
+    # Get destination volume and load snapshots
+    if ($script:Controls['dgDestSnapshots'] -and $profile.Destination) {
+        try {
+            $destVolume = Get-VolumeFromPath -Path $profile.Destination
+            if ($destVolume) {
+                $result = Get-VssSnapshots -Volume $destVolume
+                if ($result.Success) {
+                    $script:Controls.dgDestSnapshots.ItemsSource = @($result.Data)
+                } else {
+                    $script:Controls.dgDestSnapshots.ItemsSource = @()
+                }
+            } else {
+                $script:Controls.dgDestSnapshots.ItemsSource = @()
+            }
+        } catch {
+            Write-GuiLog "Error loading destination snapshots: $($_.Exception.Message)"
+            $script:Controls.dgDestSnapshots.ItemsSource = @()
+        }
+    }
+}
+
+function Invoke-DeleteProfileSnapshot {
+    <#
+    .SYNOPSIS
+        Deletes the selected snapshot from a profile's snapshot grid
+    .PARAMETER SnapshotGrid
+        The DataGrid control containing the selected snapshot
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        $SnapshotGrid
+    )
+
+    $selected = $SnapshotGrid.SelectedItem
+    if (-not $selected) {
+        return
+    }
+
+    $confirmed = Show-ConfirmDialog `
+        -Title "Delete Snapshot" `
+        -Message "Are you sure you want to delete this VSS snapshot?`n`nShadow ID: $($selected.ShadowId)`nCreated: $($selected.CreatedAt)" `
+        -ConfirmText "Delete" `
+        -CancelText "Cancel"
+
+    if ($confirmed) {
+        $result = Remove-VssSnapshot -ShadowId $selected.ShadowId
+        if ($result.Success) {
+            Write-GuiLog "Snapshot deleted: $($selected.ShadowId)"
+            Update-ProfileSnapshotLists
+        } else {
+            [System.Windows.MessageBox]::Show(
+                "Failed to delete snapshot: $($result.ErrorMessage)",
+                "Error",
+                [System.Windows.MessageBoxButton]::OK,
+                [System.Windows.MessageBoxImage]::Error
+            )
+        }
     }
 }
 
@@ -18079,6 +18360,118 @@ function Initialize-RobocurseGui {
             <Setter Property="BorderBrush" Value="#3E3E3E"/>
         </Style>
 
+        <!-- ComboBox Toggle Button -->
+        <ControlTemplate x:Key="DarkComboBoxToggleButton" TargetType="ToggleButton">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition/>
+                    <ColumnDefinition Width="20"/>
+                </Grid.ColumnDefinitions>
+                <Border x:Name="Border" Grid.ColumnSpan="2" Background="#2D2D2D" BorderBrush="#3E3E3E" BorderThickness="1" CornerRadius="2"/>
+                <Border Grid.Column="0" Background="#2D2D2D" BorderBrush="#3E3E3E" BorderThickness="0" CornerRadius="2,0,0,2" Margin="1"/>
+                <Path x:Name="Arrow" Grid.Column="1" Fill="#E0E0E0" HorizontalAlignment="Center" VerticalAlignment="Center"
+                      Data="M 0 0 L 4 4 L 8 0 Z"/>
+            </Grid>
+        </ControlTemplate>
+
+        <Style x:Key="DarkComboBox" TargetType="ComboBox">
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="Padding" Value="5,3"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton x:Name="ToggleButton" Template="{StaticResource DarkComboBoxToggleButton}"
+                                          Focusable="False" ClickMode="Press"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"/>
+                            <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False"
+                                              Content="{TemplateBinding SelectionBoxItem}"
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                              Margin="6,3,23,3" VerticalAlignment="Center" HorizontalAlignment="Left"
+                                              TextElement.Foreground="#E0E0E0"/>
+                            <Popup x:Name="Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}"
+                                   AllowsTransparency="True" Focusable="False" PopupAnimation="Slide">
+                                <Grid x:Name="DropDown" SnapsToDevicePixels="True"
+                                      MinWidth="{TemplateBinding ActualWidth}" MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                    <Border x:Name="DropDownBorder" Background="#2D2D2D" BorderBrush="#3E3E3E" BorderThickness="1"/>
+                                    <ScrollViewer Margin="2" SnapsToDevicePixels="True">
+                                        <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Contained"/>
+                                    </ScrollViewer>
+                                </Grid>
+                            </Popup>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="DarkComboBoxItem" TargetType="ComboBoxItem">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="Padding" Value="5,3"/>
+            <Style.Triggers>
+                <Trigger Property="IsHighlighted" Value="True">
+                    <Setter Property="Background" Value="#0078D4"/>
+                    <Setter Property="Foreground" Value="White"/>
+                </Trigger>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#3E3E3E"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="DarkSlider" TargetType="Slider">
+            <Setter Property="Background" Value="#3E3E3E"/>
+            <Setter Property="Foreground" Value="#0078D4"/>
+        </Style>
+
+        <!-- Dark TabControl Styles -->
+        <Style x:Key="DarkTabControl" TargetType="TabControl">
+            <Setter Property="Background" Value="#1E1E1E"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="0"/>
+        </Style>
+
+        <Style x:Key="DarkTabItem" TargetType="TabItem">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Foreground" Value="#A0A0A0"/>
+            <Setter Property="BorderBrush" Value="#3E3E3E"/>
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TabItem">
+                        <Border x:Name="Border"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1,1,1,0"
+                                CornerRadius="4,4,0,0"
+                                Padding="{TemplateBinding Padding}"
+                                Margin="0,0,2,0">
+                            <ContentPresenter x:Name="ContentSite"
+                                              ContentSource="Header"
+                                              HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter Property="Background" Value="#3E3E3E"/>
+                                <Setter Property="Foreground" Value="#E0E0E0"/>
+                                <Setter TargetName="Border" Property="BorderBrush" Value="#0078D4"/>
+                                <Setter TargetName="Border" Property="BorderThickness" Value="1,2,1,0"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#3A3A3A"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Dark DataGrid Styles -->
         <Style x:Key="DarkDataGrid" TargetType="DataGrid">
             <Setter Property="Background" Value="#2D2D2D"/>
@@ -18303,6 +18696,7 @@ function Initialize-RobocurseGui {
 
                 <!-- Profile Settings Editor -->
                 <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="1" Background="#252525" CornerRadius="4" Padding="15">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <Grid x:Name="pnlProfileSettings">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -18337,28 +18731,124 @@ function Initialize-RobocurseGui {
                         <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
                                 Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                        <Label Grid.Row="3" Grid.Column="0" Content="Options:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,4,0,8"/>
+                        <Label Grid.Row="3" Grid.Column="0" Content="Scan:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,4,0,8"/>
                         <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,0,8">
-                            <CheckBox x:Name="chkUseVss" Content="Use VSS" Style="{StaticResource DarkCheckBox}" VerticalAlignment="Center"
-                                      ToolTip="Use Volume Shadow Copy"/>
-                            <Label Content="Scan:" Style="{StaticResource DarkLabel}" Margin="15,0,0,0" VerticalAlignment="Center"/>
-                            <ComboBox x:Name="cmbScanMode" Width="80" Margin="5,0,0,0" VerticalAlignment="Center"
+                            <ComboBox x:Name="cmbScanMode" Width="80" VerticalAlignment="Center"
+                                      Style="{StaticResource DarkComboBox}"
                                       ToolTip="Scan mode: Smart or Quick">
-                                <ComboBoxItem Content="Smart" IsSelected="True"/>
-                                <ComboBoxItem Content="Quick"/>
+                                <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
+                                <ComboBoxItem Content="Quick" Style="{StaticResource DarkComboBoxItem}"/>
                             </ComboBox>
                         </StackPanel>
 
-                        <!-- Persistent Snapshot Settings (after UseVss) -->
-                        <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,0">
-                            <CheckBox x:Name="chkPersistentSnapshot"
-                                      Content="Create persistent snapshot at backup start"
-                                      Foreground="#E0E0E0"
-                                      ToolTip="Creates a recoverable VSS snapshot before backup, with retention management"/>
-                        </StackPanel>
+                        <!-- Snapshot Configuration TabControl -->
+                        <TabControl Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="tabSnapshotConfig"
+                                    Style="{StaticResource DarkTabControl}" Margin="0,5,0,5" Height="130">
+                            <!-- Source Snapshots Tab -->
+                            <TabItem Header="Source Snapshots" Style="{StaticResource DarkTabItem}">
+                                <StackPanel Margin="10" Background="#252525">
+                                    <CheckBox x:Name="chkUseVss" Content="Use temporary VSS for backup (copy locked files)"
+                                              Foreground="#E0E0E0" Margin="0,0,0,8"
+                                              ToolTip="Create temporary VSS snapshot during sync to copy locked files"/>
+                                    <Border Background="#1E1E1E" CornerRadius="4" Padding="10">
+                                        <StackPanel>
+                                            <CheckBox x:Name="chkSourcePersistentSnapshot"
+                                                      Content="Create persistent snapshot before backup"
+                                                      Foreground="#E0E0E0" Margin="0,0,0,8"
+                                                      ToolTip="Creates a persistent VSS snapshot on SOURCE volume before backup"/>
+                                            <StackPanel Orientation="Horizontal" Margin="20,0,0,0">
+                                                <Label Content="Retention:" Foreground="#808080" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="txtSourceRetentionCount" Text="3" Width="50"
+                                                         Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
+                                                         TextAlignment="Center" Margin="5,0,5,0"
+                                                         ToolTip="Number of snapshots to keep on source volume"/>
+                                                <Label Content="snapshots" Foreground="#808080" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                </StackPanel>
+                            </TabItem>
+                            <!-- Destination Snapshots Tab -->
+                            <TabItem Header="Dest Snapshots" Style="{StaticResource DarkTabItem}">
+                                <StackPanel Margin="10" Background="#252525">
+                                    <Border Background="#1E1E1E" CornerRadius="4" Padding="10">
+                                        <StackPanel>
+                                            <CheckBox x:Name="chkDestPersistentSnapshot"
+                                                      Content="Create persistent snapshot before backup"
+                                                      Foreground="#E0E0E0" Margin="0,0,0,8"
+                                                      ToolTip="Creates a persistent VSS snapshot on DESTINATION volume before backup"/>
+                                            <StackPanel Orientation="Horizontal" Margin="20,0,0,0">
+                                                <Label Content="Retention:" Foreground="#808080" VerticalAlignment="Center"/>
+                                                <TextBox x:Name="txtDestRetentionCount" Text="3" Width="50"
+                                                         Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
+                                                         TextAlignment="Center" Margin="5,0,5,0"
+                                                         ToolTip="Number of snapshots to keep on destination volume"/>
+                                                <Label Content="snapshots" Foreground="#808080" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                    <TextBlock Text="Destination snapshots enable rollback if backup corrupts existing files."
+                                               Foreground="#606060" FontSize="10" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </TabItem>
+                        </TabControl>
 
-                        <TextBlock Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" Text="Persistent snapshots remain after backup for point-in-time recovery. Retention is configured in Settings."
-                                   Foreground="#888888" FontSize="10" Margin="0,2,0,5" TextWrapping="Wrap"/>
+                        <!-- Snapshot Management TabControl -->
+                        <TabControl Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" x:Name="tabProfileSnapshots"
+                                    Style="{StaticResource DarkTabControl}" Margin="0,0,0,5" Height="140">
+                            <!-- Source Snapshots List -->
+                            <TabItem Header="Source Snapshots" Style="{StaticResource DarkTabItem}">
+                                <Grid Margin="5">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <DataGrid x:Name="dgSourceSnapshots" Grid.Row="0"
+                                              Style="{StaticResource DarkDataGrid}"
+                                              ColumnHeaderStyle="{StaticResource DarkDataGridColumnHeader}"
+                                              CellStyle="{StaticResource DarkDataGridCell}"
+                                              RowStyle="{StaticResource DarkDataGridRow}"
+                                              AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Created" Binding="{Binding CreatedAt, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="120"/>
+                                            <DataGridTextColumn Header="Shadow ID" Binding="{Binding ShadowId}" Width="*"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,5,0,0">
+                                        <Button x:Name="btnRefreshSourceSnapshots" Content="Refresh" Width="70"
+                                                Style="{StaticResource DarkButton}" Margin="0,0,5,0"/>
+                                        <Button x:Name="btnDeleteSourceSnapshot" Content="Delete" Width="70"
+                                                Style="{StaticResource StopButton}" IsEnabled="False"/>
+                                    </StackPanel>
+                                </Grid>
+                            </TabItem>
+                            <!-- Destination Snapshots List -->
+                            <TabItem Header="Dest Snapshots" Style="{StaticResource DarkTabItem}">
+                                <Grid Margin="5">
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="*"/>
+                                        <RowDefinition Height="Auto"/>
+                                    </Grid.RowDefinitions>
+                                    <DataGrid x:Name="dgDestSnapshots" Grid.Row="0"
+                                              Style="{StaticResource DarkDataGrid}"
+                                              ColumnHeaderStyle="{StaticResource DarkDataGridColumnHeader}"
+                                              CellStyle="{StaticResource DarkDataGridCell}"
+                                              RowStyle="{StaticResource DarkDataGridRow}"
+                                              AutoGenerateColumns="False" IsReadOnly="True" SelectionMode="Single">
+                                        <DataGrid.Columns>
+                                            <DataGridTextColumn Header="Created" Binding="{Binding CreatedAt, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="120"/>
+                                            <DataGridTextColumn Header="Shadow ID" Binding="{Binding ShadowId}" Width="*"/>
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+                                    <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,5,0,0">
+                                        <Button x:Name="btnRefreshDestSnapshots" Content="Refresh" Width="70"
+                                                Style="{StaticResource DarkButton}" Margin="0,0,5,0"/>
+                                        <Button x:Name="btnDeleteDestSnapshot" Content="Delete" Width="70"
+                                                Style="{StaticResource StopButton}" IsEnabled="False"/>
+                                    </StackPanel>
+                                </Grid>
+                            </TabItem>
+                        </TabControl>
 
                         <Label Grid.Row="6" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
                         <StackPanel Grid.Row="6" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center">
@@ -18379,6 +18869,7 @@ function Initialize-RobocurseGui {
                                 HorizontalAlignment="Left" Width="120" Margin="0,10,0,0"
                                 ToolTip="Run pre-flight validation checks"/>
                     </Grid>
+                    </ScrollViewer>
                 </Border>
             </Grid>
 
@@ -18415,6 +18906,7 @@ function Initialize-RobocurseGui {
                                         <!-- Concurrent Jobs -->
                                         <Label Grid.Row="0" Content="Concurrent Jobs:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
                                         <Slider Grid.Row="0" Grid.Column="1" x:Name="sldSettingsJobs" Minimum="1" Maximum="16" Value="4"
+                                                Style="{StaticResource DarkSlider}"
                                                 TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center" Margin="0,0,10,10"/>
                                         <TextBlock Grid.Row="0" Grid.Column="2" x:Name="txtSettingsJobs" Text="4" Foreground="#E0E0E0"
                                                    VerticalAlignment="Center" Margin="0,0,0,10"/>
@@ -18422,6 +18914,7 @@ function Initialize-RobocurseGui {
                                         <!-- Threads per Job -->
                                         <Label Grid.Row="1" Content="Threads per Job:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,10"/>
                                         <Slider Grid.Row="1" Grid.Column="1" x:Name="sldSettingsThreads" Minimum="1" Maximum="32" Value="8"
+                                                Style="{StaticResource DarkSlider}"
                                                 TickFrequency="1" IsSnapToTickEnabled="True" VerticalAlignment="Center" Margin="0,0,10,10"/>
                                         <TextBlock Grid.Row="1" Grid.Column="2" x:Name="txtSettingsThreads" Text="8" Foreground="#E0E0E0"
                                                    VerticalAlignment="Center" Margin="0,0,0,10"/>
@@ -18555,45 +19048,17 @@ function Initialize-RobocurseGui {
                                     </Grid>
                                 </Border>
 
-                                <!-- Snapshot Retention Settings -->
+                                <!-- Snapshot Settings Info -->
                                 <Border BorderBrush="#3D3D3D" BorderThickness="0,1,0,0" Margin="0,15,0,0" Padding="0,15,0,0">
                                     <StackPanel>
-                                        <Label Content="Snapshot Retention" Style="{StaticResource DarkLabel}" FontWeight="Bold" FontSize="14"/>
-
-                                        <Grid Margin="0,10,0,0">
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="180"/>
-                                                <ColumnDefinition Width="80"/>
-                                                <ColumnDefinition Width="*"/>
-                                            </Grid.ColumnDefinitions>
-
-                                            <Label Content="Default snapshots to keep:" Style="{StaticResource DarkLabel}"
-                                                   Grid.Column="0" VerticalAlignment="Center"/>
-                                            <TextBox x:Name="txtDefaultKeepCount" Text="3" Width="60"
-                                                     Grid.Column="1" Style="{StaticResource DarkTextBox}"
-                                                     TextAlignment="Center"
-                                                     ToolTip="Number of snapshots to retain per volume (default)"/>
-                                            <Label Content="per volume" Style="{StaticResource DarkLabel}"
-                                                   Grid.Column="2" VerticalAlignment="Center" Foreground="#888888"/>
-                                        </Grid>
-
-                                        <!-- Volume Overrides -->
-                                        <StackPanel Margin="0,15,0,0">
-                                            <Label Content="Volume-specific overrides:" Style="{StaticResource DarkLabel}"/>
-                                            <TextBlock Text="Format: D:=5, E:=10 (comma-separated)" Foreground="#888888" FontSize="10" Margin="5,2,0,5"/>
-                                            <TextBox x:Name="txtVolumeOverrides" Width="300" Height="24"
-                                                     Style="{StaticResource DarkTextBox}"
-                                                     HorizontalAlignment="Left"
-                                                     ToolTip="Per-volume retention counts (e.g., D:=5, E:=10)"/>
-                                        </StackPanel>
-
-                                        <!-- Snapshot Schedules Link -->
-                                        <StackPanel Margin="0,15,0,0">
-                                            <TextBlock Foreground="#888888" FontSize="11" TextWrapping="Wrap">
-                                                <Run Text="Snapshot schedules can be configured via command line: "/>
-                                                <Run Text="Robocurse.ps1 -SnapshotSchedule" Foreground="#0078D4"/>
-                                            </TextBlock>
-                                        </StackPanel>
+                                        <Label Content="Snapshot Settings" Style="{StaticResource DarkLabel}" FontWeight="Bold" FontSize="14"/>
+                                        <TextBlock Foreground="#888888" FontSize="11" TextWrapping="Wrap" Margin="5,10,0,0">
+                                            <Run Text="Snapshot retention is now configured per-profile in the Profiles tab. Each profile can have independent source and destination snapshot settings with individual retention counts."/>
+                                        </TextBlock>
+                                        <TextBlock Foreground="#888888" FontSize="11" TextWrapping="Wrap" Margin="5,10,0,0">
+                                            <Run Text="Snapshot schedules can be configured via command line: "/>
+                                            <Run Text="Robocurse.ps1 -SnapshotSchedule" Foreground="#0078D4"/>
+                                        </TextBlock>
                                     </StackPanel>
                                 </Border>
                             </StackPanel>
@@ -18617,16 +19082,16 @@ function Initialize-RobocurseGui {
                         <StackPanel Orientation="Horizontal">
                             <Label Content="Volume:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
                             <ComboBox x:Name="cmbSnapshotVolume" Width="100" Margin="5,0"
-                                      Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
+                                      Style="{StaticResource DarkComboBox}"
                                       ToolTip="Filter by volume">
-                                <ComboBoxItem Content="All Volumes" IsSelected="True"/>
+                                <ComboBoxItem Content="All Volumes" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
                             </ComboBox>
 
                             <Label Content="Server:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="20,0,0,0"/>
                             <ComboBox x:Name="cmbSnapshotServer" Width="150" Margin="5,0"
-                                      Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
+                                      Style="{StaticResource DarkComboBox}"
                                       ToolTip="Filter by server (local or remote)">
-                                <ComboBoxItem Content="Local" IsSelected="True"/>
+                                <ComboBoxItem Content="Local" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
                             </ComboBox>
 
                             <Button x:Name="btnRefreshSnapshots" Content="Refresh" Width="80" Margin="20,0,0,0"
@@ -18884,7 +19349,7 @@ function Initialize-RobocurseGui {
                 <StackPanel Grid.Column="2" Orientation="Horizontal">
                     <Label Content="Workers:" Style="{StaticResource DarkLabel}" ToolTip="Number of parallel workers"/>
                     <Slider x:Name="sldWorkers" Width="80" Minimum="1" Maximum="16" Value="4"
-                            VerticalAlignment="Center"/>
+                            Style="{StaticResource DarkSlider}" VerticalAlignment="Center"/>
                     <TextBlock x:Name="txtWorkerCount" Text="4" Foreground="#E0E0E0"
                                Width="20" VerticalAlignment="Center" Margin="5,0,0,0"/>
                 </StackPanel>
@@ -18910,7 +19375,11 @@ function Initialize-RobocurseGui {
     @(
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
-        'chkUseVss', 'chkPersistentSnapshot', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'tabSnapshotConfig', 'chkSourcePersistentSnapshot', 'txtSourceRetentionCount',
+        'chkDestPersistentSnapshot', 'txtDestRetentionCount',
+        'tabProfileSnapshots', 'dgSourceSnapshots', 'dgDestSnapshots',
+        'btnRefreshSourceSnapshots', 'btnDeleteSourceSnapshot', 'btnRefreshDestSnapshots', 'btnDeleteDestSnapshot',
         'btnValidateProfile',
         'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
@@ -18927,7 +19396,6 @@ function Initialize-RobocurseGui {
         'chkSettingsEmailEnabled', 'txtSettingsSmtp', 'txtSettingsSmtpPort',
         'chkSettingsTls', 'txtSettingsCredential', 'btnSettingsSetCredential', 'txtSettingsEmailFrom', 'txtSettingsEmailTo',
         'btnSettingsSchedule', 'txtSettingsScheduleStatus', 'btnSettingsRevert', 'btnSettingsSave',
-        'txtDefaultKeepCount', 'txtVolumeOverrides',
         'cmbSnapshotVolume', 'cmbSnapshotServer', 'btnRefreshSnapshots', 'dgSnapshots',
         'btnCreateSnapshot', 'btnDeleteSnapshot',
         'cmChunks', 'miRetryChunk', 'miSkipChunk', 'miOpenLog'
@@ -19368,12 +19836,75 @@ function Initialize-EventHandlers {
     $script:Controls.chkUseVss.Add_Unchecked({
         Invoke-SafeEventHandler -HandlerName "VssCheckbox" -ScriptBlock { Save-ProfileFromForm }
     })
-    if ($script:Controls['chkPersistentSnapshot']) {
-        $script:Controls.chkPersistentSnapshot.Add_Checked({
-            Invoke-SafeEventHandler -HandlerName "PersistentSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+    # Source snapshot controls
+    if ($script:Controls['chkSourcePersistentSnapshot']) {
+        $script:Controls.chkSourcePersistentSnapshot.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "SourceSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
         })
-        $script:Controls.chkPersistentSnapshot.Add_Unchecked({
-            Invoke-SafeEventHandler -HandlerName "PersistentSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        $script:Controls.chkSourcePersistentSnapshot.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "SourceSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        })
+    }
+    if ($script:Controls['txtSourceRetentionCount']) {
+        $script:Controls.txtSourceRetentionCount.Add_LostFocus({
+            Invoke-SafeEventHandler -HandlerName "SourceRetention" -ScriptBlock { Save-ProfileFromForm }
+        })
+    }
+
+    # Destination snapshot controls
+    if ($script:Controls['chkDestPersistentSnapshot']) {
+        $script:Controls.chkDestPersistentSnapshot.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "DestSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        })
+        $script:Controls.chkDestPersistentSnapshot.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "DestSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        })
+    }
+    if ($script:Controls['txtDestRetentionCount']) {
+        $script:Controls.txtDestRetentionCount.Add_LostFocus({
+            Invoke-SafeEventHandler -HandlerName "DestRetention" -ScriptBlock { Save-ProfileFromForm }
+        })
+    }
+
+    # Profile snapshot management controls
+    if ($script:Controls['btnRefreshSourceSnapshots']) {
+        $script:Controls.btnRefreshSourceSnapshots.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "RefreshSourceSnapshots" -ScriptBlock { Update-ProfileSnapshotLists }
+        })
+    }
+    if ($script:Controls['btnRefreshDestSnapshots']) {
+        $script:Controls.btnRefreshDestSnapshots.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "RefreshDestSnapshots" -ScriptBlock { Update-ProfileSnapshotLists }
+        })
+    }
+    if ($script:Controls['btnDeleteSourceSnapshot']) {
+        $script:Controls.btnDeleteSourceSnapshot.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "DeleteSourceSnapshot" -ScriptBlock {
+                Invoke-DeleteProfileSnapshot -SnapshotGrid $script:Controls.dgSourceSnapshots
+            }
+        })
+    }
+    if ($script:Controls['btnDeleteDestSnapshot']) {
+        $script:Controls.btnDeleteDestSnapshot.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "DeleteDestSnapshot" -ScriptBlock {
+                Invoke-DeleteProfileSnapshot -SnapshotGrid $script:Controls.dgDestSnapshots
+            }
+        })
+    }
+
+    # DataGrid selection changed events for delete button enabling
+    if ($script:Controls['dgSourceSnapshots']) {
+        $script:Controls.dgSourceSnapshots.Add_SelectionChanged({
+            Invoke-SafeEventHandler -HandlerName "SourceSnapshotSelection" -ScriptBlock {
+                $script:Controls.btnDeleteSourceSnapshot.IsEnabled = ($null -ne $script:Controls.dgSourceSnapshots.SelectedItem)
+            }
+        })
+    }
+    if ($script:Controls['dgDestSnapshots']) {
+        $script:Controls.dgDestSnapshots.Add_SelectionChanged({
+            Invoke-SafeEventHandler -HandlerName "DestSnapshotSelection" -ScriptBlock {
+                $script:Controls.btnDeleteDestSnapshot.IsEnabled = ($null -ne $script:Controls.dgDestSnapshots.SelectedItem)
+            }
         })
     }
     $script:Controls.cmbScanMode.Add_SelectionChanged({
