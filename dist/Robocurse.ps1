@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-19 13:23:16
+    Built: 2025-12-19 13:25:16
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -19325,7 +19325,7 @@ function Initialize-RobocurseGui {
                     <Button x:Name="btnRunAll" Content="&#x25B6; Run All"
                             Style="{StaticResource RunButton}" Width="90" Margin="0,0,5,0"
                             ToolTip="Run all enabled profiles"/>
-                    <Button x:Name="btnRunSelected" Content="&#x25B6; Run Sel"
+                    <Button x:Name="btnRunSelected" Content="&#x25B6; Run"
                             Style="{StaticResource RunButton}" Width="90" Margin="0,0,5,0"
                             ToolTip="Run selected profile (Ctrl+R)"/>
                     <Button x:Name="btnStop" Content="&#x23F9; Stop"
