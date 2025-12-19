@@ -25,6 +25,19 @@ InModuleScope 'Robocurse' {
 
             # Initialize log session for tests
             Initialize-LogSession -LogRoot $script:LogDir | Out-Null
+
+            # Create a minimal config object for tests
+            $script:TestConfig = [PSCustomObject]@{
+                GlobalSettings = [PSCustomObject]@{
+                    LogPath = $script:LogDir
+                    MaxConcurrentJobs = 4
+                    SnapshotRetention = [PSCustomObject]@{
+                        DefaultKeepCount = 3
+                        VolumeOverrides = @{}
+                    }
+                }
+                SyncProfiles = @()
+            }
         }
 
         AfterAll {
@@ -124,7 +137,7 @@ InModuleScope 'Robocurse' {
                 }
 
                 # Run replication
-                { Start-ReplicationRun -Profiles @($profile) -MaxConcurrentJobs 1 } | Should -Not -Throw
+                { Start-ReplicationRun -Profiles @($profile) -Config $script:TestConfig -MaxConcurrentJobs 1 } | Should -Not -Throw
 
                 # Process the replication tick to complete jobs
                 Invoke-ReplicationTick -MaxConcurrentJobs 1
@@ -175,7 +188,7 @@ InModuleScope 'Robocurse' {
                     )
                 }
 
-                { Start-ReplicationRun -Profiles @($profile) -MaxConcurrentJobs 2 } | Should -Not -Throw
+                { Start-ReplicationRun -Profiles @($profile) -Config $script:TestConfig -MaxConcurrentJobs 2 } | Should -Not -Throw
 
                 # Verify that the orchestration state is properly initialized
                 $script:OrchestrationState | Should -Not -BeNullOrEmpty
@@ -199,7 +212,7 @@ InModuleScope 'Robocurse' {
                     UseVSS = $false
                 }
 
-                Start-ReplicationRun -Profiles @($profile) -MaxConcurrentJobs 1
+                Start-ReplicationRun -Profiles @($profile) -Config $script:TestConfig -MaxConcurrentJobs 1
                 Invoke-ReplicationTick -MaxConcurrentJobs 1
 
                 # Verify robocopy log files were created by our mock
@@ -373,7 +386,7 @@ InModuleScope 'Robocurse' {
                 }
 
                 # Should fail when trying to scan source
-                { Start-ReplicationRun -Profiles @($invalidProfile) -MaxConcurrentJobs 1 } | Should -Throw
+                { Start-ReplicationRun -Profiles @($invalidProfile) -Config $script:TestConfig -MaxConcurrentJobs 1 } | Should -Throw
             }
 
             It "Should validate profile has required fields" {
@@ -386,7 +399,7 @@ InModuleScope 'Robocurse' {
                 }
 
                 # Should handle empty source gracefully
-                { Start-ReplicationRun -Profiles @($profile) -MaxConcurrentJobs 1 } | Should -Throw
+                { Start-ReplicationRun -Profiles @($profile) -Config $script:TestConfig -MaxConcurrentJobs 1 } | Should -Throw
             }
         }
 
@@ -472,7 +485,7 @@ InModuleScope 'Robocurse' {
                 }
 
                 # Run replication with multiple profiles
-                { Start-ReplicationRun -Profiles @($profile1, $profile2) -MaxConcurrentJobs 1 } | Should -Not -Throw
+                { Start-ReplicationRun -Profiles @($profile1, $profile2) -Config $script:TestConfig -MaxConcurrentJobs 1 } | Should -Not -Throw
 
                 # Verify both profiles were registered
                 $script:OrchestrationState.Profiles.Count | Should -Be 2

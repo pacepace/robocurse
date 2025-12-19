@@ -42,6 +42,15 @@ function Import-ProfileToForm {
     $script:Controls.txtDest.Text = if ($Profile.Destination) { $Profile.Destination } else { "" }
     $script:Controls.chkUseVss.IsChecked = if ($null -ne $Profile.UseVSS) { $Profile.UseVSS } else { $false }
 
+    # Load PersistentSnapshot setting
+    if ($script:Controls['chkPersistentSnapshot']) {
+        $persistentEnabled = $false
+        if ($Profile.PersistentSnapshot -and $Profile.PersistentSnapshot.Enabled) {
+            $persistentEnabled = $true
+        }
+        $script:Controls.chkPersistentSnapshot.IsChecked = $persistentEnabled
+    }
+
     # Set scan mode
     $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
     $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Quick") { 1 } else { 0 }
@@ -81,6 +90,16 @@ function Save-ProfileFromForm {
     $selected.Destination = $script:Controls.txtDest.Text
     $selected.UseVSS = $script:Controls.chkUseVss.IsChecked
     $selected.ScanMode = $script:Controls.cmbScanMode.Text
+
+    # Update PersistentSnapshot setting
+    if ($script:Controls['chkPersistentSnapshot']) {
+        if (-not $selected.PersistentSnapshot) {
+            $selected | Add-Member -NotePropertyName PersistentSnapshot -NotePropertyValue ([PSCustomObject]@{
+                Enabled = $false
+            }) -Force
+        }
+        $selected.PersistentSnapshot.Enabled = $script:Controls.chkPersistentSnapshot.IsChecked
+    }
 
     # Parse numeric values with validation and bounds checking
     # Helper function to provide visual feedback for input corrections

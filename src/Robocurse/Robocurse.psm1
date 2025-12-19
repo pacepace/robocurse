@@ -190,6 +190,8 @@ $publicFunctionOrder = @(
     'VssRemote.ps1'
     'Email.ps1'
     'Scheduling.ps1'
+    'SnapshotSchedule.ps1'
+    'SnapshotCli.ps1'
     # GUI modules (split for maintainability)
     'GuiResources.ps1'
     'GuiSettings.ps1'
@@ -201,6 +203,8 @@ $publicFunctionOrder = @(
     'GuiReplication.ps1'
     'GuiProgress.ps1'
     'GuiChunkActions.ps1'  # Chunk context menu actions
+    'GuiSnapshots.ps1'     # Snapshot management panel
+    'GuiSnapshotDialogs.ps1'  # Snapshot dialogs (create/delete)
     'GuiMain.ps1'
     'Main.ps1'
 )

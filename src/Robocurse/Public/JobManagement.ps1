@@ -37,6 +37,8 @@ function Start-ReplicationRun {
         Scriptblock called when profile finishes
     .PARAMETER DryRun
         Preview mode - runs robocopy with /L flag to show what would be copied
+    .PARAMETER Config
+        Full configuration object (required for snapshot retention settings)
     #>
     [CmdletBinding()]
     param(
@@ -60,6 +62,9 @@ function Start-ReplicationRun {
             $true
         })]
         [PSCustomObject[]]$Profiles,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
 
         [ValidateRange(1, 128)]
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs,
@@ -131,6 +136,7 @@ function Start-ReplicationRun {
     $script:OnChunkComplete = $OnChunkComplete
     $script:OnProfileComplete = $OnProfileComplete
     $script:CurrentMaxConcurrentJobs = $MaxConcurrentJobs
+    $script:Config = $Config
 
     # Store profiles and start timing
     $script:OrchestrationState.Profiles = $Profiles
@@ -149,6 +155,215 @@ function Start-ReplicationRun {
     if ($Profiles.Count -gt 0) {
         Start-ProfileReplication -Profile $Profiles[0] -MaxConcurrentJobs $MaxConcurrentJobs
     }
+}
+
+function Invoke-ProfilePersistentSnapshot {
+    <#
+    .SYNOPSIS
+        Creates a persistent VSS snapshot at profile start with retention enforcement
+    .DESCRIPTION
+        If the profile has PersistentSnapshot.Enabled = $true, this function:
+        1. Determines the source volume (local or remote)
+        2. Enforces retention policy (deletes old snapshots to make room)
+        3. Creates a new persistent snapshot
+        The snapshot remains after backup completes for point-in-time recovery.
+    .PARAMETER Profile
+        The sync profile object
+    .PARAMETER Config
+        The full configuration object (for retention settings)
+    .OUTPUTS
+        OperationResult with Data = snapshot info (or $null if not enabled)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    # Check if persistent snapshots are enabled for this profile
+    if (-not $Profile.PersistentSnapshot -or -not $Profile.PersistentSnapshot.Enabled) {
+        Write-RobocurseLog -Message "Persistent snapshots not enabled for profile '$($Profile.Name)'" -Level 'Debug' -Component 'Orchestration'
+        return New-OperationResult -Success $true -Data $null
+    }
+
+    $sourcePath = $Profile.Source
+    Write-RobocurseLog -Message "Creating persistent snapshot for profile '$($Profile.Name)' source: $sourcePath" -Level 'Info' -Component 'Orchestration'
+
+    # Determine if local or remote
+    $isRemote = $sourcePath -match '^\\\\[^\\]+\\[^\\]+'
+
+    if ($isRemote) {
+        return Invoke-RemotePersistentSnapshot -SourcePath $sourcePath -Config $Config
+    }
+    else {
+        return Invoke-LocalPersistentSnapshot -SourcePath $sourcePath -Config $Config
+    }
+}
+
+function Invoke-LocalPersistentSnapshot {
+    <#
+    .SYNOPSIS
+        Creates a persistent VSS snapshot for a local source path
+    .DESCRIPTION
+        Creates a VSS snapshot for a local volume, enforcing retention policy first.
+        The snapshot persists after backup completes for point-in-time recovery.
+    .PARAMETER SourcePath
+        The local source path to snapshot (used to determine volume)
+    .PARAMETER Config
+        The full configuration object (for retention settings)
+    .OUTPUTS
+        OperationResult with Data = snapshot info
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    # Get volume from path
+    $volume = Get-VolumeFromPath -Path $SourcePath
+    if (-not $volume) {
+        return New-OperationResult -Success $false -ErrorMessage "Cannot determine volume from path: $SourcePath"
+    }
+
+    # Get retention count for this volume
+    $keepCount = Get-VolumeRetentionCount -Volume $volume -Config $Config
+
+    Write-RobocurseLog -Message "Enforcing retention for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
+
+    # Step 1: Enforce retention BEFORE creating new snapshot
+    $retentionResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $keepCount
+    if (-not $retentionResult.Success) {
+        Write-RobocurseLog -Message "Retention enforcement failed: $($retentionResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
+        # Continue anyway - we'll try to create the snapshot
+    }
+    else {
+        Write-RobocurseLog -Message "Retention: deleted $($retentionResult.Data.DeletedCount), kept $($retentionResult.Data.KeptCount)" -Level 'Debug' -Component 'Orchestration'
+    }
+
+    # Step 2: Create new persistent snapshot
+    $snapshotResult = New-VssSnapshot -SourcePath $SourcePath
+    if (-not $snapshotResult.Success) {
+        return New-OperationResult -Success $false -ErrorMessage "Failed to create persistent snapshot: $($snapshotResult.ErrorMessage)"
+    }
+
+    # Note: We do NOT track this snapshot for orphan cleanup - it's meant to persist
+    # Actually, we should still track it but mark it as persistent so Clear-OrphanVssSnapshots skips it
+    # For now, we'll remove it from tracking so it survives restarts
+
+    Write-RobocurseLog -Message "Created persistent snapshot: $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
+
+    return $snapshotResult
+}
+
+function Invoke-RemotePersistentSnapshot {
+    <#
+    .SYNOPSIS
+        Creates a persistent VSS snapshot on a remote server
+    .DESCRIPTION
+        Creates a VSS snapshot on a remote server for a UNC source path,
+        enforcing retention policy first. The snapshot persists after backup
+        completes for point-in-time recovery.
+    .PARAMETER SourcePath
+        The UNC source path to snapshot (e.g., \\server\share)
+    .PARAMETER Config
+        The full configuration object (for retention settings)
+    .OUTPUTS
+        OperationResult with Data = snapshot info
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    # Parse UNC path
+    $components = Get-UncPathComponents -UncPath $SourcePath
+    if (-not $components) {
+        return New-OperationResult -Success $false -ErrorMessage "Invalid UNC path: $SourcePath"
+    }
+
+    $serverName = $components.ServerName
+    $shareName = $components.ShareName
+
+    # Get share's local path to determine volume
+    $shareLocalPath = Get-RemoteShareLocalPath -ServerName $serverName -ShareName $shareName
+    if (-not $shareLocalPath) {
+        return New-OperationResult -Success $false -ErrorMessage "Cannot determine local path for share '$shareName' on '$serverName'"
+    }
+
+    # Extract volume
+    if ($shareLocalPath -match '^([A-Za-z]:)') {
+        $volume = $Matches[1].ToUpper()
+    }
+    else {
+        return New-OperationResult -Success $false -ErrorMessage "Cannot determine volume from share path: $shareLocalPath"
+    }
+
+    # Get retention count
+    $keepCount = Get-VolumeRetentionCount -Volume $volume -Config $Config
+
+    Write-RobocurseLog -Message "Enforcing remote retention on '$serverName' for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
+
+    # Step 1: Enforce retention
+    $retentionResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $keepCount
+    if (-not $retentionResult.Success) {
+        Write-RobocurseLog -Message "Remote retention failed: $($retentionResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
+    }
+
+    # Step 2: Create new persistent snapshot
+    $snapshotResult = New-RemoteVssSnapshot -UncPath $SourcePath
+    if (-not $snapshotResult.Success) {
+        return New-OperationResult -Success $false -ErrorMessage "Failed to create remote persistent snapshot: $($snapshotResult.ErrorMessage)"
+    }
+
+    Write-RobocurseLog -Message "Created remote persistent snapshot on '$serverName': $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
+
+    return $snapshotResult
+}
+
+function Get-VolumeRetentionCount {
+    <#
+    .SYNOPSIS
+        Gets the retention count for a specific volume from config
+    .DESCRIPTION
+        Looks up the retention count for a volume, checking for volume-specific
+        overrides first, then falling back to the default retention count.
+    .PARAMETER Volume
+        The volume letter (e.g., "D:")
+    .PARAMETER Config
+        The full configuration object containing SnapshotRetention settings
+    .OUTPUTS
+        Integer retention count
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Volume,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    $volumeUpper = $Volume.ToUpper()
+    $retention = $Config.GlobalSettings.SnapshotRetention
+
+    # Check for volume-specific override
+    if ($retention.VolumeOverrides -and $retention.VolumeOverrides.ContainsKey($volumeUpper)) {
+        return $retention.VolumeOverrides[$volumeUpper]
+    }
+
+    # Return default
+    return $retention.DefaultKeepCount
 }
 
 function Start-ProfileReplication {
@@ -233,6 +448,16 @@ function Start-ProfileReplication {
         profileName = $Profile.Name
         source = $Profile.Source
         destination = $Profile.Destination
+    }
+
+    # Create persistent snapshot if enabled (separate from temp VSS for backup)
+    $persistentSnapshotResult = Invoke-ProfilePersistentSnapshot -Profile $Profile -Config $script:Config
+    if (-not $persistentSnapshotResult.Success) {
+        Write-RobocurseLog -Message "Persistent snapshot creation failed: $($persistentSnapshotResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
+        # Don't fail the profile - persistent snapshots are optional enhancement
+    }
+    elseif ($persistentSnapshotResult.Data) {
+        Write-RobocurseLog -Message "Persistent snapshot ready for point-in-time recovery" -Level 'Info' -Component 'Orchestration'
     }
 
     # VSS snapshot handling - allows copying of locked files

@@ -335,6 +335,28 @@ function Import-SettingsToForm {
         }
     }
 
+    # SNAPSHOT RETENTION Section
+    if ($script:Controls['txtDefaultKeepCount']) {
+        $defaultKeep = 3
+        if ($config.GlobalSettings.SnapshotRetention -and $config.GlobalSettings.SnapshotRetention.DefaultKeepCount) {
+            $defaultKeep = $config.GlobalSettings.SnapshotRetention.DefaultKeepCount
+        }
+        $script:Controls.txtDefaultKeepCount.Text = $defaultKeep.ToString()
+    }
+
+    if ($script:Controls['txtVolumeOverrides']) {
+        $overridesText = ""
+        if ($config.GlobalSettings.SnapshotRetention -and $config.GlobalSettings.SnapshotRetention.VolumeOverrides) {
+            $overrides = $config.GlobalSettings.SnapshotRetention.VolumeOverrides
+            $pairs = @()
+            foreach ($key in $overrides.Keys) {
+                $pairs += "$key=$($overrides[$key])"
+            }
+            $overridesText = $pairs -join ", "
+        }
+        $script:Controls.txtVolumeOverrides.Text = $overridesText
+    }
+
     Write-GuiLog "Settings loaded from configuration"
 }
 
@@ -417,6 +439,45 @@ function Save-SettingsFromForm {
             } else {
                 $script:Config.Email.To = @($toText -split '[\r\n,]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
             }
+        }
+
+        # SNAPSHOT RETENTION Section
+        if ($script:Controls['txtDefaultKeepCount']) {
+            # Ensure SnapshotRetention exists
+            if (-not $script:Config.GlobalSettings.SnapshotRetention) {
+                $script:Config.GlobalSettings | Add-Member -NotePropertyName SnapshotRetention -NotePropertyValue ([PSCustomObject]@{
+                    DefaultKeepCount = 3
+                    VolumeOverrides = @{}
+                }) -Force
+            }
+
+            $keepCount = 3
+            if ([int]::TryParse($script:Controls.txtDefaultKeepCount.Text.Trim(), [ref]$keepCount)) {
+                if ($keepCount -ge 0 -and $keepCount -le 100) {
+                    $script:Config.GlobalSettings.SnapshotRetention.DefaultKeepCount = $keepCount
+                }
+            }
+        }
+
+        if ($script:Controls['txtVolumeOverrides']) {
+            $overridesText = $script:Controls.txtVolumeOverrides.Text.Trim()
+            $overrides = @{}
+
+            if ($overridesText) {
+                # Parse "D:=5, E:=10" format
+                $pairs = $overridesText -split '\s*,\s*'
+                foreach ($pair in $pairs) {
+                    if ($pair -match '^([A-Za-z]:)\s*=\s*(\d+)$') {
+                        $volume = $Matches[1].ToUpper()
+                        $count = [int]$Matches[2]
+                        if ($count -ge 0 -and $count -le 100) {
+                            $overrides[$volume] = $count
+                        }
+                    }
+                }
+            }
+
+            $script:Config.GlobalSettings.SnapshotRetention.VolumeOverrides = $overrides
         }
 
         # Save configuration to file
@@ -502,4 +563,32 @@ function Get-LastRunSummary {
 
     Write-Verbose "Get-LastRunSummary: Found LastRun with Timestamp=$($settings.LastRun.Timestamp)"
     return $settings.LastRun
+}
+
+function Test-VolumeOverridesFormat {
+    <#
+    .SYNOPSIS
+        Validates the volume overrides text format
+    .PARAMETER Text
+        The text to validate (e.g., "D:=5, E:=10")
+    .OUTPUTS
+        $true if valid, $false otherwise
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $true  # Empty is valid
+    }
+
+    $pairs = $Text -split '\s*,\s*'
+    foreach ($pair in $pairs) {
+        if ($pair -notmatch '^[A-Za-z]:\s*=\s*\d+$') {
+            return $false
+        }
+    }
+
+    return $true
 }

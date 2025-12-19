@@ -73,14 +73,14 @@ function Initialize-RobocurseGui {
     @(
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
-        'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'chkUseVss', 'chkPersistentSnapshot', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
         'btnValidateProfile',
         'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
         'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus',
         'pnlProfileErrors', 'pnlProfileErrorItems',
-        'btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs',
-        'panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs',
+        'btnNavProfiles', 'btnNavSettings', 'btnNavSnapshots', 'btnNavProgress', 'btnNavLogs',
+        'panelProfiles', 'panelSettings', 'panelSnapshots', 'panelProgress', 'panelLogs',
         'chkLogDebug', 'chkLogInfo', 'chkLogWarning', 'chkLogError',
         'chkLogAutoScroll', 'txtLogLineCount', 'txtLogContent',
         'btnLogClear', 'btnLogCopy', 'btnLogSave', 'btnLogPopOut',
@@ -90,6 +90,9 @@ function Initialize-RobocurseGui {
         'chkSettingsEmailEnabled', 'txtSettingsSmtp', 'txtSettingsSmtpPort',
         'chkSettingsTls', 'txtSettingsCredential', 'btnSettingsSetCredential', 'txtSettingsEmailFrom', 'txtSettingsEmailTo',
         'btnSettingsSchedule', 'txtSettingsScheduleStatus', 'btnSettingsRevert', 'btnSettingsSave',
+        'txtDefaultKeepCount', 'txtVolumeOverrides',
+        'cmbSnapshotVolume', 'cmbSnapshotServer', 'btnRefreshSnapshots', 'dgSnapshots',
+        'btnCreateSnapshot', 'btnDeleteSnapshot',
         'cmChunks', 'miRetryChunk', 'miSkipChunk', 'miOpenLog'
     ) | ForEach-Object {
         $script:Controls[$_] = $script:Window.FindName($_)
@@ -161,6 +164,9 @@ function Initialize-RobocurseGui {
     # Mark initialization complete - event handlers can now save
     $script:GuiInitializing = $false
 
+    # Initialize Snapshots panel
+    Initialize-SnapshotsPanel
+
     # Set active panel (from restored state or default to Profiles)
     $panelToActivate = if ($script:RestoredActivePanel) { $script:RestoredActivePanel } else { 'Profiles' }
     Set-ActivePanel -PanelName $panelToActivate
@@ -229,7 +235,7 @@ function Show-Panel {
     )
 
     # Hide all panels
-    @('panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs') | ForEach-Object {
+    @('panelProfiles', 'panelSettings', 'panelSnapshots', 'panelProgress', 'panelLogs') | ForEach-Object {
         if ($script:Controls[$_]) {
             $script:Controls[$_].Visibility = [System.Windows.Visibility]::Collapsed
         }
@@ -255,7 +261,7 @@ function Set-ActivePanel {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('Profiles', 'Settings', 'Progress', 'Logs')]
+        [ValidateSet('Profiles', 'Settings', 'Snapshots', 'Progress', 'Logs')]
         [string]$PanelName
     )
 
@@ -266,7 +272,7 @@ function Set-ActivePanel {
     $buttonControlName = "btnNav$PanelName"
 
     # Hide all panels
-    @('panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs') | ForEach-Object {
+    @('panelProfiles', 'panelSettings', 'panelSnapshots', 'panelProgress', 'panelLogs') | ForEach-Object {
         if ($script:Controls[$_]) {
             $script:Controls[$_].Visibility = [System.Windows.Visibility]::Collapsed
         }
@@ -279,7 +285,7 @@ function Set-ActivePanel {
 
     # Update button states - set IsChecked for the active button
     # RadioButtons in the same GroupName will automatically uncheck others
-    @('btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs') | ForEach-Object {
+    @('btnNavProfiles', 'btnNavSettings', 'btnNavSnapshots', 'btnNavProgress', 'btnNavLogs') | ForEach-Object {
         if ($script:Controls[$_]) {
             $script:Controls[$_].IsChecked = ($_ -eq $buttonControlName)
         }
@@ -289,6 +295,10 @@ function Set-ActivePanel {
     if ($PanelName -eq 'Settings') {
         # Load current settings into form when switching to Settings panel
         Import-SettingsToForm
+    }
+    elseif ($PanelName -eq 'Snapshots') {
+        # Refresh snapshot list when panel becomes visible
+        Update-SnapshotList
     }
     elseif ($PanelName -eq 'Progress') {
         # Show empty state if idle (no replication running)
@@ -394,6 +404,9 @@ function Initialize-EventHandlers {
     })
     $script:Controls.btnNavSettings.Add_Checked({
         Invoke-SafeEventHandler -HandlerName "NavSettings" -ScriptBlock { Set-ActivePanel -PanelName 'Settings' }
+    })
+    $script:Controls.btnNavSnapshots.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "NavSnapshots" -ScriptBlock { Set-ActivePanel -PanelName 'Snapshots' }
     })
     $script:Controls.btnNavProgress.Add_Checked({
         Invoke-SafeEventHandler -HandlerName "NavProgress" -ScriptBlock { Set-ActivePanel -PanelName 'Progress' }
@@ -518,6 +531,14 @@ function Initialize-EventHandlers {
     $script:Controls.chkUseVss.Add_Unchecked({
         Invoke-SafeEventHandler -HandlerName "VssCheckbox" -ScriptBlock { Save-ProfileFromForm }
     })
+    if ($script:Controls['chkPersistentSnapshot']) {
+        $script:Controls.chkPersistentSnapshot.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "PersistentSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        })
+        $script:Controls.chkPersistentSnapshot.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "PersistentSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        })
+    }
     $script:Controls.cmbScanMode.Add_SelectionChanged({
         Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock { Save-ProfileFromForm }
     })
@@ -560,6 +581,42 @@ function Initialize-EventHandlers {
                 $path = Show-FolderBrowser -Description "Select SIEM log folder"
                 if ($path -and $script:Controls['txtSettingsSiemPath']) {
                     $script:Controls.txtSettingsSiemPath.Text = $path
+                }
+            }
+        })
+    }
+
+    # Snapshot Retention validation
+    if ($script:Controls['txtVolumeOverrides']) {
+        $script:Controls.txtVolumeOverrides.Add_LostFocus({
+            Invoke-SafeEventHandler -HandlerName "VolumeOverridesValidation" -ScriptBlock {
+                $text = $script:Controls.txtVolumeOverrides.Text
+                if (-not (Test-VolumeOverridesFormat -Text $text)) {
+                    $script:Controls.txtVolumeOverrides.BorderBrush = [System.Windows.Media.Brushes]::OrangeRed
+                    $script:Controls.txtVolumeOverrides.ToolTip = "Invalid format. Use: D:=5, E:=10"
+                }
+                else {
+                    $script:Controls.txtVolumeOverrides.BorderBrush = [System.Windows.Media.Brushes]::Gray
+                    $script:Controls.txtVolumeOverrides.ToolTip = "Per-volume retention counts (e.g., D:=5, E:=10)"
+                    Save-SettingsFromForm
+                }
+            }
+        })
+    }
+
+    if ($script:Controls['txtDefaultKeepCount']) {
+        $script:Controls.txtDefaultKeepCount.Add_LostFocus({
+            Invoke-SafeEventHandler -HandlerName "DefaultKeepCountValidation" -ScriptBlock {
+                $text = $script:Controls.txtDefaultKeepCount.Text.Trim()
+                $count = 0
+                if (-not [int]::TryParse($text, [ref]$count) -or $count -lt 0 -or $count -gt 100) {
+                    $script:Controls.txtDefaultKeepCount.BorderBrush = [System.Windows.Media.Brushes]::OrangeRed
+                    $script:Controls.txtDefaultKeepCount.ToolTip = "Enter a number between 0 and 100"
+                }
+                else {
+                    $script:Controls.txtDefaultKeepCount.BorderBrush = [System.Windows.Media.Brushes]::Gray
+                    $script:Controls.txtDefaultKeepCount.ToolTip = "Number of snapshots to retain per volume (default)"
+                    Save-SettingsFromForm
                 }
             }
         })
@@ -892,6 +949,7 @@ function Get-PanelForKey {
         { $_ -in @('D2', 'NumPad2') } { return 'Settings' }
         { $_ -in @('D3', 'NumPad3') } { return 'Progress' }
         { $_ -in @('D4', 'NumPad4') } { return 'Logs' }
+        { $_ -in @('D5', 'NumPad5') } { return 'Snapshots' }
         default { return $null }
     }
 }

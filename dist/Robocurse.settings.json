@@ -6,7 +6,7 @@
     "WindowState":  "Normal",
     "WorkerCount":  4,
     "SelectedProfile":  "Test",
-    "ActivePanel":  "Progress",
+    "ActivePanel":  "Profiles",
     "LastRun":  {
                     "ChunksCompleted":  21,
                     "Timestamp":  "2025-12-06T22:36:48.9631370-08:00",
@@ -19,5 +19,5 @@
                     "ChunksTotal":  21,
                     "ChunksFailed":  0
                 },
-    "SavedAt":  "2025-12-06T22:36:54.5332932-08:00"
+    "SavedAt":  "2025-12-07T10:20:00.0270680-08:00"
 }

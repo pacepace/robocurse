@@ -82,6 +82,11 @@ function New-DefaultConfig {
             VerboseFileLogging = $false  # If true, log every file copied; if false, only log summary
             RedactPaths = $false  # If true, redact file paths in logs for security/privacy
             RedactServerNames = @()  # Array of server names to specifically redact from logs
+            SnapshotRetention = [PSCustomObject]@{
+                DefaultKeepCount = 3          # Default snapshots to keep per volume
+                VolumeOverrides = @{}         # Per-volume overrides: @{ "D:" = 5; "E:" = 10 }
+            }
+            SnapshotSchedules = @()  # Array of schedule definitions
         }
         Email = [PSCustomObject]@{
             Enabled = $false
@@ -260,6 +265,41 @@ function ConvertFrom-GlobalSettings {
         }
     }
 
+    # Snapshot retention settings
+    if ($RawGlobal.snapshotRetention) {
+        $Config.GlobalSettings.SnapshotRetention = [PSCustomObject]@{
+            DefaultKeepCount = if ($RawGlobal.snapshotRetention.defaultKeepCount) {
+                $RawGlobal.snapshotRetention.defaultKeepCount
+            } else { 3 }
+            VolumeOverrides = @{}
+        }
+        if ($RawGlobal.snapshotRetention.volumeOverrides) {
+            $overrides = @{}
+            $RawGlobal.snapshotRetention.volumeOverrides.PSObject.Properties | ForEach-Object {
+                $overrides[$_.Name.ToUpper()] = [int]$_.Value
+            }
+            $Config.GlobalSettings.SnapshotRetention.VolumeOverrides = $overrides
+        }
+    }
+
+    # Snapshot schedule settings
+    if ($RawGlobal.snapshotSchedules) {
+        $schedules = @()
+        foreach ($rawSched in $RawGlobal.snapshotSchedules) {
+            $schedules += [PSCustomObject]@{
+                Name = $rawSched.name
+                Volume = $rawSched.volume.ToUpper()
+                Schedule = $rawSched.schedule  # "Hourly", "Daily", "Weekly"
+                Time = $rawSched.time          # "HH:MM" format
+                DaysOfWeek = if ($rawSched.daysOfWeek) { @($rawSched.daysOfWeek) } else { @() }
+                KeepCount = if ($rawSched.keepCount) { [int]$rawSched.keepCount } else { 3 }
+                Enabled = if ($null -ne $rawSched.enabled) { [bool]$rawSched.enabled } else { $true }
+                ServerName = $rawSched.serverName  # For remote volumes
+            }
+        }
+        $Config.GlobalSettings.SnapshotSchedules = $schedules
+    }
+
     # Email settings
     if ($RawGlobal.email) {
         $Config.Email.Enabled = [bool]$RawGlobal.email.enabled
@@ -341,6 +381,10 @@ function ConvertFrom-FriendlyConfig {
                 ChunkMaxDepth = $script:DefaultMaxChunkDepth
                 RobocopyOptions = @{}
                 Enabled = $true
+                PersistentSnapshot = [PSCustomObject]@{
+                    Enabled = $false              # Enable persistent snapshots for this profile
+                    # Retention uses GlobalSettings.SnapshotRetention by default
+                }
             }
 
             # Handle source - "source" property (string or object with path/useVss)
@@ -358,6 +402,13 @@ function ConvertFrom-FriendlyConfig {
 
             # Handle destination
             $syncProfile.Destination = Get-DestinationPathFromRaw -RawDestination $rawProfile.destination
+
+            # Handle persistent snapshot settings
+            if ($rawProfile.persistentSnapshot) {
+                $syncProfile.PersistentSnapshot = [PSCustomObject]@{
+                    Enabled = [bool]$rawProfile.persistentSnapshot.enabled
+                }
+            }
 
             # Apply chunking settings
             ConvertTo-ChunkSettingsInternal -Profile $syncProfile -RawChunking $rawProfile.chunking
@@ -459,6 +510,13 @@ function ConvertTo-FriendlyConfig {
                     'Flat' { 'flat' }
                     default { 'auto' }
                 }
+            }
+        }
+
+        # Add persistent snapshot settings if enabled
+        if ($profile.PersistentSnapshot -and $profile.PersistentSnapshot.Enabled) {
+            $friendlyProfile.persistentSnapshot = [ordered]@{
+                enabled = $profile.PersistentSnapshot.Enabled
             }
         }
 

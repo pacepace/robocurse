@@ -378,6 +378,216 @@ function Test-VssSupported {
     }
 }
 
+function Get-VssSnapshots {
+    <#
+    .SYNOPSIS
+        Lists VSS snapshots on local volumes
+    .DESCRIPTION
+        Retrieves VSS shadow copies from the local system. Can filter by volume
+        or return all snapshots. Results include snapshot ID, device path,
+        volume, and creation time.
+    .PARAMETER Volume
+        Optional volume to filter (e.g., "C:", "D:"). If not specified, returns all.
+    .PARAMETER IncludeSystemSnapshots
+        If true, includes snapshots not created by Robocurse (default: false)
+    .OUTPUTS
+        OperationResult with Data = array of snapshot objects
+    .EXAMPLE
+        $result = Get-VssSnapshots -Volume "D:"
+        $result.Data | Format-Table ShadowId, CreatedAt, SourceVolume
+    #>
+    [CmdletBinding()]
+    param(
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Volume,
+
+        [switch]$IncludeSystemSnapshots
+    )
+
+    # Pre-flight check
+    if (-not (Test-IsWindowsPlatform)) {
+        return New-OperationResult -Success $false -ErrorMessage "VSS is only available on Windows"
+    }
+
+    try {
+        Write-RobocurseLog -Message "Listing VSS snapshots$(if ($Volume) { " for volume $Volume" })" -Level 'Debug' -Component 'VSS'
+
+        $snapshots = Get-CimInstance -ClassName Win32_ShadowCopy -ErrorAction Stop
+
+        if (-not $snapshots) {
+            return New-OperationResult -Success $true -Data @()
+        }
+
+        # Filter by volume if specified
+        if ($Volume) {
+            $volumeUpper = $Volume.ToUpper()
+            $snapshots = $snapshots | Where-Object {
+                # VolumeName format: \\?\Volume{guid}\ - need to resolve to drive letter
+                $snapshotVolume = Get-VolumeLetterFromVolumeName -VolumeName $_.VolumeName
+                $snapshotVolume -eq $volumeUpper
+            }
+        }
+
+        # Convert to our standard format
+        $result = @($snapshots | ForEach-Object {
+            $snapshotVolume = Get-VolumeLetterFromVolumeName -VolumeName $_.VolumeName
+            [PSCustomObject]@{
+                ShadowId     = $_.ID
+                ShadowPath   = $_.DeviceObject
+                SourceVolume = $snapshotVolume
+                CreatedAt    = $_.InstallDate
+                Provider     = $_.ProviderID
+                ClientAccessible = $_.ClientAccessible
+            }
+        })
+
+        # Sort by creation time (newest first)
+        $result = @($result | Sort-Object CreatedAt -Descending)
+
+        Write-RobocurseLog -Message "Found $($result.Count) VSS snapshot(s)" -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data $result
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to list VSS snapshots: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to list VSS snapshots: $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+function Get-VolumeLetterFromVolumeName {
+    <#
+    .SYNOPSIS
+        Converts a volume GUID path to a drive letter
+    .DESCRIPTION
+        Resolves \\?\Volume{guid}\ format to drive letter (C:, D:, etc.)
+    .PARAMETER VolumeName
+        The volume GUID path from Win32_ShadowCopy.VolumeName
+    .OUTPUTS
+        Drive letter (e.g., "C:") or $null if not found
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VolumeName
+    )
+
+    try {
+        # Get all volumes and match by GUID
+        $volumes = Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue |
+            Where-Object { $_.DriveLetter }
+
+        foreach ($vol in $volumes) {
+            # DeviceID format: \\?\Volume{guid}\
+            if ($vol.DeviceID -eq $VolumeName) {
+                return $vol.DriveLetter
+            }
+        }
+
+        # Fallback: try to extract from path patterns
+        Write-RobocurseLog -Message "Could not resolve volume name to drive letter: $VolumeName" -Level 'Debug' -Component 'VSS'
+        return $null
+    }
+    catch {
+        return $null
+    }
+}
+
+function Invoke-VssRetentionPolicy {
+    <#
+    .SYNOPSIS
+        Enforces VSS snapshot retention by removing old snapshots
+    .DESCRIPTION
+        For each volume, keeps the newest N snapshots and removes the rest.
+        This is typically called before creating a new snapshot.
+    .PARAMETER Volume
+        Volume to apply retention to (e.g., "D:"). Required.
+    .PARAMETER KeepCount
+        Number of snapshots to keep per volume (default: 3)
+    .PARAMETER WhatIf
+        If specified, shows what would be deleted without actually deleting
+    .OUTPUTS
+        OperationResult with Data containing:
+        - DeletedCount: Number of snapshots removed
+        - KeptCount: Number of snapshots retained
+        - Errors: Array of any deletion errors
+    .EXAMPLE
+        $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 5
+        if ($result.Success) { "Deleted $($result.Data.DeletedCount) old snapshots" }
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Volume,
+
+        [ValidateRange(0, 100)]
+        [int]$KeepCount = 3
+    )
+
+    Write-RobocurseLog -Message "Applying VSS retention policy for $Volume (keep: $KeepCount)" -Level 'Info' -Component 'VSS'
+
+    # Get current snapshots for this volume
+    $listResult = Get-VssSnapshots -Volume $Volume
+    if (-not $listResult.Success) {
+        return New-OperationResult -Success $false -ErrorMessage "Failed to list snapshots: $($listResult.ErrorMessage)"
+    }
+
+    $snapshots = @($listResult.Data)
+    $currentCount = $snapshots.Count
+
+    # Nothing to do if we're under the limit
+    if ($currentCount -le $KeepCount) {
+        Write-RobocurseLog -Message "Retention OK: $currentCount snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data @{
+            DeletedCount = 0
+            KeptCount    = $currentCount
+            Errors       = @()
+        }
+    }
+
+    # Sort by CreatedAt ascending (oldest first) and select ones to delete
+    $sortedSnapshots = $snapshots | Sort-Object CreatedAt
+    $toDelete = @($sortedSnapshots | Select-Object -First ($currentCount - $KeepCount))
+    $toKeep = @($sortedSnapshots | Select-Object -Last $KeepCount)
+
+    Write-RobocurseLog -Message "Retention: Deleting $($toDelete.Count) old snapshot(s), keeping $($toKeep.Count)" -Level 'Info' -Component 'VSS'
+
+    $deletedCount = 0
+    $errors = @()
+
+    foreach ($snapshot in $toDelete) {
+        $shadowId = $snapshot.ShadowId
+        $createdAt = $snapshot.CreatedAt
+
+        if ($PSCmdlet.ShouldProcess("$shadowId (created $createdAt)", "Remove VSS Snapshot")) {
+            $removeResult = Remove-VssSnapshot -ShadowId $shadowId
+            if ($removeResult.Success) {
+                $deletedCount++
+                Write-RobocurseLog -Message "Deleted snapshot $shadowId (created $createdAt)" -Level 'Debug' -Component 'VSS'
+            }
+            else {
+                $errors += "Failed to delete $shadowId`: $($removeResult.ErrorMessage)"
+                Write-RobocurseLog -Message "Failed to delete snapshot $shadowId`: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
+        }
+    }
+
+    $success = $errors.Count -eq 0
+    $resultData = @{
+        DeletedCount = $deletedCount
+        KeptCount    = $toKeep.Count
+        Errors       = $errors
+    }
+
+    if ($success) {
+        Write-RobocurseLog -Message "Retention policy applied: deleted $deletedCount, kept $($toKeep.Count)" -Level 'Info' -Component 'VSS'
+    }
+    else {
+        Write-RobocurseLog -Message "Retention policy completed with errors: deleted $deletedCount, errors: $($errors.Count)" -Level 'Warning' -Component 'VSS'
+    }
+
+    return New-OperationResult -Success $success -Data $resultData -ErrorMessage $(if (-not $success) { $errors -join "; " })
+}
+
 function Invoke-WithVssSnapshot {
     <#
     .SYNOPSIS

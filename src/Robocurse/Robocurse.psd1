@@ -141,6 +141,19 @@
         'Disable-RobocurseTask'
         'Test-RobocurseTaskExists'
 
+        # Snapshot Scheduling
+        'New-SnapshotScheduledTask'
+        'New-SnapshotTaskCommand'
+        'Remove-SnapshotScheduledTask'
+        'Get-SnapshotScheduledTasks'
+        'Sync-SnapshotSchedules'
+
+        # Snapshot CLI
+        'Invoke-ListSnapshotsCommand'
+        'Invoke-CreateSnapshotCommand'
+        'Invoke-DeleteSnapshotCommand'
+        'Invoke-SnapshotScheduleCommand'
+
         # GUI
         'Initialize-RobocurseGui'
         'Update-GuiProgress'
@@ -157,6 +170,19 @@
         # GUI Validation
         'Test-ProfileValidation'
         'Show-ValidationDialog'
+
+        # GUI Snapshots
+        'Initialize-SnapshotsPanel'
+        'Update-VolumeFilterDropdown'
+        'Update-SnapshotList'
+        'Add-RemoteServerToFilter'
+        'Get-SelectedSnapshot'
+
+        # GUI Snapshot Dialogs
+        'Show-CreateSnapshotDialog'
+        'Invoke-CreateSnapshotFromDialog'
+        'Show-DeleteSnapshotConfirmation'
+        'Invoke-DeleteSelectedSnapshot'
 
         # Main
         'Start-RobocurseMain'
