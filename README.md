@@ -281,6 +281,93 @@ VSS operations retry automatically for transient failures (lock contention, VSS 
 
 ---
 
+## Snapshot Management
+
+Robocurse provides CLI commands for managing VSS snapshots independently of replication jobs.
+
+### List Snapshots
+
+```powershell
+# List all local snapshots
+.\Robocurse.ps1 -ListSnapshots
+
+# List snapshots for specific volume
+.\Robocurse.ps1 -ListSnapshots -Volume D:
+
+# List snapshots on remote server
+.\Robocurse.ps1 -ListSnapshots -Server FileServer01
+.\Robocurse.ps1 -ListSnapshots -Volume D: -Server FileServer01
+```
+
+### Create Snapshots
+
+```powershell
+# Create snapshot on local volume
+.\Robocurse.ps1 -CreateSnapshot -Volume D:
+
+# Create on remote server
+.\Robocurse.ps1 -CreateSnapshot -Volume D: -Server FileServer01
+
+# Create with retention (keeps only N newest snapshots)
+.\Robocurse.ps1 -CreateSnapshot -Volume D: -KeepCount 5
+```
+
+### Delete Snapshots
+
+```powershell
+# Delete by shadow ID (get ID from -ListSnapshots)
+.\Robocurse.ps1 -DeleteSnapshot -ShadowId "{abc12345-...}"
+
+# Delete on remote server
+.\Robocurse.ps1 -DeleteSnapshot -ShadowId "{abc12345-...}" -Server FileServer01
+```
+
+### Snapshot Schedules
+
+Define schedules in your config file under `GlobalSettings.SnapshotSchedules`:
+
+```json
+{
+  "GlobalSettings": {
+    "SnapshotSchedules": [
+      {
+        "Name": "HourlyD",
+        "Volume": "D:",
+        "Schedule": "Hourly",
+        "Time": "00:00",
+        "KeepCount": 24,
+        "Enabled": true
+      },
+      {
+        "Name": "DailyE",
+        "Volume": "E:",
+        "Schedule": "Daily",
+        "Time": "02:00",
+        "KeepCount": 7,
+        "Enabled": true
+      }
+    ]
+  }
+}
+```
+
+Manage schedules via CLI:
+
+```powershell
+# List configured schedules
+.\Robocurse.ps1 -SnapshotSchedule
+
+# Sync schedules from config to Windows Task Scheduler
+.\Robocurse.ps1 -SnapshotSchedule -Sync
+
+# Remove a schedule
+.\Robocurse.ps1 -SnapshotSchedule -Remove -ScheduleName HourlyD
+```
+
+Schedule options: `Hourly`, `Daily`, `Weekly`, `Monthly`.
+
+---
+
 ## Logging
 
 Robocurse generates three log types:
@@ -309,7 +396,7 @@ src/Robocurse/           # Module source (edit here)
 
 build/                   # Build tools
 dist/                    # Built monolith (deploy this)
-tests/                   # Pester test suite (900+ cases)
+tests/                   # Pester test suite (2000+ cases)
 ```
 
 ### Building

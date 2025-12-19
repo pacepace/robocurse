@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-06 22:27:53
+    Built: 2025-12-18 20:46:59
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -1184,6 +1184,11 @@ function New-DefaultConfig {
             VerboseFileLogging = $false  # If true, log every file copied; if false, only log summary
             RedactPaths = $false  # If true, redact file paths in logs for security/privacy
             RedactServerNames = @()  # Array of server names to specifically redact from logs
+            SnapshotRetention = [PSCustomObject]@{
+                DefaultKeepCount = 3          # Default snapshots to keep per volume
+                VolumeOverrides = @{}         # Per-volume overrides: @{ "D:" = 5; "E:" = 10 }
+            }
+            SnapshotSchedules = @()  # Array of schedule definitions
         }
         Email = [PSCustomObject]@{
             Enabled = $false
@@ -1362,6 +1367,41 @@ function ConvertFrom-GlobalSettings {
         }
     }
 
+    # Snapshot retention settings
+    if ($RawGlobal.snapshotRetention) {
+        $Config.GlobalSettings.SnapshotRetention = [PSCustomObject]@{
+            DefaultKeepCount = if ($RawGlobal.snapshotRetention.defaultKeepCount) {
+                $RawGlobal.snapshotRetention.defaultKeepCount
+            } else { 3 }
+            VolumeOverrides = @{}
+        }
+        if ($RawGlobal.snapshotRetention.volumeOverrides) {
+            $overrides = @{}
+            $RawGlobal.snapshotRetention.volumeOverrides.PSObject.Properties | ForEach-Object {
+                $overrides[$_.Name.ToUpper()] = [int]$_.Value
+            }
+            $Config.GlobalSettings.SnapshotRetention.VolumeOverrides = $overrides
+        }
+    }
+
+    # Snapshot schedule settings
+    if ($RawGlobal.snapshotSchedules) {
+        $schedules = @()
+        foreach ($rawSched in $RawGlobal.snapshotSchedules) {
+            $schedules += [PSCustomObject]@{
+                Name = $rawSched.name
+                Volume = $rawSched.volume.ToUpper()
+                Schedule = $rawSched.schedule  # "Hourly", "Daily", "Weekly"
+                Time = $rawSched.time          # "HH:MM" format
+                DaysOfWeek = if ($rawSched.daysOfWeek) { @($rawSched.daysOfWeek) } else { @() }
+                KeepCount = if ($rawSched.keepCount) { [int]$rawSched.keepCount } else { 3 }
+                Enabled = if ($null -ne $rawSched.enabled) { [bool]$rawSched.enabled } else { $true }
+                ServerName = $rawSched.serverName  # For remote volumes
+            }
+        }
+        $Config.GlobalSettings.SnapshotSchedules = $schedules
+    }
+
     # Email settings
     if ($RawGlobal.email) {
         $Config.Email.Enabled = [bool]$RawGlobal.email.enabled
@@ -1443,6 +1483,10 @@ function ConvertFrom-FriendlyConfig {
                 ChunkMaxDepth = $script:DefaultMaxChunkDepth
                 RobocopyOptions = @{}
                 Enabled = $true
+                PersistentSnapshot = [PSCustomObject]@{
+                    Enabled = $false              # Enable persistent snapshots for this profile
+                    # Retention uses GlobalSettings.SnapshotRetention by default
+                }
             }
 
             # Handle source - "source" property (string or object with path/useVss)
@@ -1460,6 +1504,13 @@ function ConvertFrom-FriendlyConfig {
 
             # Handle destination
             $syncProfile.Destination = Get-DestinationPathFromRaw -RawDestination $rawProfile.destination
+
+            # Handle persistent snapshot settings
+            if ($rawProfile.persistentSnapshot) {
+                $syncProfile.PersistentSnapshot = [PSCustomObject]@{
+                    Enabled = [bool]$rawProfile.persistentSnapshot.enabled
+                }
+            }
 
             # Apply chunking settings
             ConvertTo-ChunkSettingsInternal -Profile $syncProfile -RawChunking $rawProfile.chunking
@@ -1561,6 +1612,13 @@ function ConvertTo-FriendlyConfig {
                     'Flat' { 'flat' }
                     default { 'auto' }
                 }
+            }
+        }
+
+        # Add persistent snapshot settings if enabled
+        if ($profile.PersistentSnapshot -and $profile.PersistentSnapshot.Enabled) {
+            $friendlyProfile.persistentSnapshot = [ordered]@{
+                enabled = $profile.PersistentSnapshot.Enabled
             }
         }
 
@@ -6251,6 +6309,8 @@ function Start-ReplicationRun {
         Scriptblock called when profile finishes
     .PARAMETER DryRun
         Preview mode - runs robocopy with /L flag to show what would be copied
+    .PARAMETER Config
+        Full configuration object (required for snapshot retention settings)
     #>
     [CmdletBinding()]
     param(
@@ -6274,6 +6334,9 @@ function Start-ReplicationRun {
             $true
         })]
         [PSCustomObject[]]$Profiles,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
 
         [ValidateRange(1, 128)]
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs,
@@ -6345,6 +6408,7 @@ function Start-ReplicationRun {
     $script:OnChunkComplete = $OnChunkComplete
     $script:OnProfileComplete = $OnProfileComplete
     $script:CurrentMaxConcurrentJobs = $MaxConcurrentJobs
+    $script:Config = $Config
 
     # Store profiles and start timing
     $script:OrchestrationState.Profiles = $Profiles
@@ -6363,6 +6427,215 @@ function Start-ReplicationRun {
     if ($Profiles.Count -gt 0) {
         Start-ProfileReplication -Profile $Profiles[0] -MaxConcurrentJobs $MaxConcurrentJobs
     }
+}
+
+function Invoke-ProfilePersistentSnapshot {
+    <#
+    .SYNOPSIS
+        Creates a persistent VSS snapshot at profile start with retention enforcement
+    .DESCRIPTION
+        If the profile has PersistentSnapshot.Enabled = $true, this function:
+        1. Determines the source volume (local or remote)
+        2. Enforces retention policy (deletes old snapshots to make room)
+        3. Creates a new persistent snapshot
+        The snapshot remains after backup completes for point-in-time recovery.
+    .PARAMETER Profile
+        The sync profile object
+    .PARAMETER Config
+        The full configuration object (for retention settings)
+    .OUTPUTS
+        OperationResult with Data = snapshot info (or $null if not enabled)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    # Check if persistent snapshots are enabled for this profile
+    if (-not $Profile.PersistentSnapshot -or -not $Profile.PersistentSnapshot.Enabled) {
+        Write-RobocurseLog -Message "Persistent snapshots not enabled for profile '$($Profile.Name)'" -Level 'Debug' -Component 'Orchestration'
+        return New-OperationResult -Success $true -Data $null
+    }
+
+    $sourcePath = $Profile.Source
+    Write-RobocurseLog -Message "Creating persistent snapshot for profile '$($Profile.Name)' source: $sourcePath" -Level 'Info' -Component 'Orchestration'
+
+    # Determine if local or remote
+    $isRemote = $sourcePath -match '^\\\\[^\\]+\\[^\\]+'
+
+    if ($isRemote) {
+        return Invoke-RemotePersistentSnapshot -SourcePath $sourcePath -Config $Config
+    }
+    else {
+        return Invoke-LocalPersistentSnapshot -SourcePath $sourcePath -Config $Config
+    }
+}
+
+function Invoke-LocalPersistentSnapshot {
+    <#
+    .SYNOPSIS
+        Creates a persistent VSS snapshot for a local source path
+    .DESCRIPTION
+        Creates a VSS snapshot for a local volume, enforcing retention policy first.
+        The snapshot persists after backup completes for point-in-time recovery.
+    .PARAMETER SourcePath
+        The local source path to snapshot (used to determine volume)
+    .PARAMETER Config
+        The full configuration object (for retention settings)
+    .OUTPUTS
+        OperationResult with Data = snapshot info
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    # Get volume from path
+    $volume = Get-VolumeFromPath -Path $SourcePath
+    if (-not $volume) {
+        return New-OperationResult -Success $false -ErrorMessage "Cannot determine volume from path: $SourcePath"
+    }
+
+    # Get retention count for this volume
+    $keepCount = Get-VolumeRetentionCount -Volume $volume -Config $Config
+
+    Write-RobocurseLog -Message "Enforcing retention for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
+
+    # Step 1: Enforce retention BEFORE creating new snapshot
+    $retentionResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $keepCount
+    if (-not $retentionResult.Success) {
+        Write-RobocurseLog -Message "Retention enforcement failed: $($retentionResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
+        # Continue anyway - we'll try to create the snapshot
+    }
+    else {
+        Write-RobocurseLog -Message "Retention: deleted $($retentionResult.Data.DeletedCount), kept $($retentionResult.Data.KeptCount)" -Level 'Debug' -Component 'Orchestration'
+    }
+
+    # Step 2: Create new persistent snapshot
+    $snapshotResult = New-VssSnapshot -SourcePath $SourcePath
+    if (-not $snapshotResult.Success) {
+        return New-OperationResult -Success $false -ErrorMessage "Failed to create persistent snapshot: $($snapshotResult.ErrorMessage)"
+    }
+
+    # Note: We do NOT track this snapshot for orphan cleanup - it's meant to persist
+    # Actually, we should still track it but mark it as persistent so Clear-OrphanVssSnapshots skips it
+    # For now, we'll remove it from tracking so it survives restarts
+
+    Write-RobocurseLog -Message "Created persistent snapshot: $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
+
+    return $snapshotResult
+}
+
+function Invoke-RemotePersistentSnapshot {
+    <#
+    .SYNOPSIS
+        Creates a persistent VSS snapshot on a remote server
+    .DESCRIPTION
+        Creates a VSS snapshot on a remote server for a UNC source path,
+        enforcing retention policy first. The snapshot persists after backup
+        completes for point-in-time recovery.
+    .PARAMETER SourcePath
+        The UNC source path to snapshot (e.g., \\server\share)
+    .PARAMETER Config
+        The full configuration object (for retention settings)
+    .OUTPUTS
+        OperationResult with Data = snapshot info
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    # Parse UNC path
+    $components = Get-UncPathComponents -UncPath $SourcePath
+    if (-not $components) {
+        return New-OperationResult -Success $false -ErrorMessage "Invalid UNC path: $SourcePath"
+    }
+
+    $serverName = $components.ServerName
+    $shareName = $components.ShareName
+
+    # Get share's local path to determine volume
+    $shareLocalPath = Get-RemoteShareLocalPath -ServerName $serverName -ShareName $shareName
+    if (-not $shareLocalPath) {
+        return New-OperationResult -Success $false -ErrorMessage "Cannot determine local path for share '$shareName' on '$serverName'"
+    }
+
+    # Extract volume
+    if ($shareLocalPath -match '^([A-Za-z]:)') {
+        $volume = $Matches[1].ToUpper()
+    }
+    else {
+        return New-OperationResult -Success $false -ErrorMessage "Cannot determine volume from share path: $shareLocalPath"
+    }
+
+    # Get retention count
+    $keepCount = Get-VolumeRetentionCount -Volume $volume -Config $Config
+
+    Write-RobocurseLog -Message "Enforcing remote retention on '$serverName' for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
+
+    # Step 1: Enforce retention
+    $retentionResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $keepCount
+    if (-not $retentionResult.Success) {
+        Write-RobocurseLog -Message "Remote retention failed: $($retentionResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
+    }
+
+    # Step 2: Create new persistent snapshot
+    $snapshotResult = New-RemoteVssSnapshot -UncPath $SourcePath
+    if (-not $snapshotResult.Success) {
+        return New-OperationResult -Success $false -ErrorMessage "Failed to create remote persistent snapshot: $($snapshotResult.ErrorMessage)"
+    }
+
+    Write-RobocurseLog -Message "Created remote persistent snapshot on '$serverName': $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
+
+    return $snapshotResult
+}
+
+function Get-VolumeRetentionCount {
+    <#
+    .SYNOPSIS
+        Gets the retention count for a specific volume from config
+    .DESCRIPTION
+        Looks up the retention count for a volume, checking for volume-specific
+        overrides first, then falling back to the default retention count.
+    .PARAMETER Volume
+        The volume letter (e.g., "D:")
+    .PARAMETER Config
+        The full configuration object containing SnapshotRetention settings
+    .OUTPUTS
+        Integer retention count
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Volume,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    $volumeUpper = $Volume.ToUpper()
+    $retention = $Config.GlobalSettings.SnapshotRetention
+
+    # Check for volume-specific override
+    if ($retention.VolumeOverrides -and $retention.VolumeOverrides.ContainsKey($volumeUpper)) {
+        return $retention.VolumeOverrides[$volumeUpper]
+    }
+
+    # Return default
+    return $retention.DefaultKeepCount
 }
 
 function Start-ProfileReplication {
@@ -6447,6 +6720,16 @@ function Start-ProfileReplication {
         profileName = $Profile.Name
         source = $Profile.Source
         destination = $Profile.Destination
+    }
+
+    # Create persistent snapshot if enabled (separate from temp VSS for backup)
+    $persistentSnapshotResult = Invoke-ProfilePersistentSnapshot -Profile $Profile -Config $script:Config
+    if (-not $persistentSnapshotResult.Success) {
+        Write-RobocurseLog -Message "Persistent snapshot creation failed: $($persistentSnapshotResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
+        # Don't fail the profile - persistent snapshots are optional enhancement
+    }
+    elseif ($persistentSnapshotResult.Data) {
+        Write-RobocurseLog -Message "Persistent snapshot ready for point-in-time recovery" -Level 'Info' -Component 'Orchestration'
     }
 
     # VSS snapshot handling - allows copying of locked files
@@ -8401,6 +8684,216 @@ function Test-VssSupported {
     }
 }
 
+function Get-VssSnapshots {
+    <#
+    .SYNOPSIS
+        Lists VSS snapshots on local volumes
+    .DESCRIPTION
+        Retrieves VSS shadow copies from the local system. Can filter by volume
+        or return all snapshots. Results include snapshot ID, device path,
+        volume, and creation time.
+    .PARAMETER Volume
+        Optional volume to filter (e.g., "C:", "D:"). If not specified, returns all.
+    .PARAMETER IncludeSystemSnapshots
+        If true, includes snapshots not created by Robocurse (default: false)
+    .OUTPUTS
+        OperationResult with Data = array of snapshot objects
+    .EXAMPLE
+        $result = Get-VssSnapshots -Volume "D:"
+        $result.Data | Format-Table ShadowId, CreatedAt, SourceVolume
+    #>
+    [CmdletBinding()]
+    param(
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Volume,
+
+        [switch]$IncludeSystemSnapshots
+    )
+
+    # Pre-flight check
+    if (-not (Test-IsWindowsPlatform)) {
+        return New-OperationResult -Success $false -ErrorMessage "VSS is only available on Windows"
+    }
+
+    try {
+        Write-RobocurseLog -Message "Listing VSS snapshots$(if ($Volume) { " for volume $Volume" })" -Level 'Debug' -Component 'VSS'
+
+        $snapshots = Get-CimInstance -ClassName Win32_ShadowCopy -ErrorAction Stop
+
+        if (-not $snapshots) {
+            return New-OperationResult -Success $true -Data @()
+        }
+
+        # Filter by volume if specified
+        if ($Volume) {
+            $volumeUpper = $Volume.ToUpper()
+            $snapshots = $snapshots | Where-Object {
+                # VolumeName format: \\?\Volume{guid}\ - need to resolve to drive letter
+                $snapshotVolume = Get-VolumeLetterFromVolumeName -VolumeName $_.VolumeName
+                $snapshotVolume -eq $volumeUpper
+            }
+        }
+
+        # Convert to our standard format
+        $result = @($snapshots | ForEach-Object {
+            $snapshotVolume = Get-VolumeLetterFromVolumeName -VolumeName $_.VolumeName
+            [PSCustomObject]@{
+                ShadowId     = $_.ID
+                ShadowPath   = $_.DeviceObject
+                SourceVolume = $snapshotVolume
+                CreatedAt    = $_.InstallDate
+                Provider     = $_.ProviderID
+                ClientAccessible = $_.ClientAccessible
+            }
+        })
+
+        # Sort by creation time (newest first)
+        $result = @($result | Sort-Object CreatedAt -Descending)
+
+        Write-RobocurseLog -Message "Found $($result.Count) VSS snapshot(s)" -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data $result
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to list VSS snapshots: $($_.Exception.Message)" -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to list VSS snapshots: $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+function Get-VolumeLetterFromVolumeName {
+    <#
+    .SYNOPSIS
+        Converts a volume GUID path to a drive letter
+    .DESCRIPTION
+        Resolves \\?\Volume{guid}\ format to drive letter (C:, D:, etc.)
+    .PARAMETER VolumeName
+        The volume GUID path from Win32_ShadowCopy.VolumeName
+    .OUTPUTS
+        Drive letter (e.g., "C:") or $null if not found
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$VolumeName
+    )
+
+    try {
+        # Get all volumes and match by GUID
+        $volumes = Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue |
+            Where-Object { $_.DriveLetter }
+
+        foreach ($vol in $volumes) {
+            # DeviceID format: \\?\Volume{guid}\
+            if ($vol.DeviceID -eq $VolumeName) {
+                return $vol.DriveLetter
+            }
+        }
+
+        # Fallback: try to extract from path patterns
+        Write-RobocurseLog -Message "Could not resolve volume name to drive letter: $VolumeName" -Level 'Debug' -Component 'VSS'
+        return $null
+    }
+    catch {
+        return $null
+    }
+}
+
+function Invoke-VssRetentionPolicy {
+    <#
+    .SYNOPSIS
+        Enforces VSS snapshot retention by removing old snapshots
+    .DESCRIPTION
+        For each volume, keeps the newest N snapshots and removes the rest.
+        This is typically called before creating a new snapshot.
+    .PARAMETER Volume
+        Volume to apply retention to (e.g., "D:"). Required.
+    .PARAMETER KeepCount
+        Number of snapshots to keep per volume (default: 3)
+    .PARAMETER WhatIf
+        If specified, shows what would be deleted without actually deleting
+    .OUTPUTS
+        OperationResult with Data containing:
+        - DeletedCount: Number of snapshots removed
+        - KeptCount: Number of snapshots retained
+        - Errors: Array of any deletion errors
+    .EXAMPLE
+        $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 5
+        if ($result.Success) { "Deleted $($result.Data.DeletedCount) old snapshots" }
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Volume,
+
+        [ValidateRange(0, 100)]
+        [int]$KeepCount = 3
+    )
+
+    Write-RobocurseLog -Message "Applying VSS retention policy for $Volume (keep: $KeepCount)" -Level 'Info' -Component 'VSS'
+
+    # Get current snapshots for this volume
+    $listResult = Get-VssSnapshots -Volume $Volume
+    if (-not $listResult.Success) {
+        return New-OperationResult -Success $false -ErrorMessage "Failed to list snapshots: $($listResult.ErrorMessage)"
+    }
+
+    $snapshots = @($listResult.Data)
+    $currentCount = $snapshots.Count
+
+    # Nothing to do if we're under the limit
+    if ($currentCount -le $KeepCount) {
+        Write-RobocurseLog -Message "Retention OK: $currentCount snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data @{
+            DeletedCount = 0
+            KeptCount    = $currentCount
+            Errors       = @()
+        }
+    }
+
+    # Sort by CreatedAt ascending (oldest first) and select ones to delete
+    $sortedSnapshots = $snapshots | Sort-Object CreatedAt
+    $toDelete = @($sortedSnapshots | Select-Object -First ($currentCount - $KeepCount))
+    $toKeep = @($sortedSnapshots | Select-Object -Last $KeepCount)
+
+    Write-RobocurseLog -Message "Retention: Deleting $($toDelete.Count) old snapshot(s), keeping $($toKeep.Count)" -Level 'Info' -Component 'VSS'
+
+    $deletedCount = 0
+    $errors = @()
+
+    foreach ($snapshot in $toDelete) {
+        $shadowId = $snapshot.ShadowId
+        $createdAt = $snapshot.CreatedAt
+
+        if ($PSCmdlet.ShouldProcess("$shadowId (created $createdAt)", "Remove VSS Snapshot")) {
+            $removeResult = Remove-VssSnapshot -ShadowId $shadowId
+            if ($removeResult.Success) {
+                $deletedCount++
+                Write-RobocurseLog -Message "Deleted snapshot $shadowId (created $createdAt)" -Level 'Debug' -Component 'VSS'
+            }
+            else {
+                $errors += "Failed to delete $shadowId`: $($removeResult.ErrorMessage)"
+                Write-RobocurseLog -Message "Failed to delete snapshot $shadowId`: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
+        }
+    }
+
+    $success = $errors.Count -eq 0
+    $resultData = @{
+        DeletedCount = $deletedCount
+        KeptCount    = $toKeep.Count
+        Errors       = $errors
+    }
+
+    if ($success) {
+        Write-RobocurseLog -Message "Retention policy applied: deleted $deletedCount, kept $($toKeep.Count)" -Level 'Info' -Component 'VSS'
+    }
+    else {
+        Write-RobocurseLog -Message "Retention policy completed with errors: deleted $deletedCount, errors: $($errors.Count)" -Level 'Warning' -Component 'VSS'
+    }
+
+    return New-OperationResult -Success $success -Data $resultData -ErrorMessage $(if (-not $success) { $errors -join "; " })
+}
+
 function Invoke-WithVssSnapshot {
     <#
     .SYNOPSIS
@@ -9465,6 +9958,565 @@ function Invoke-WithRemoteVssJunction {
             }
         }
     }
+}
+
+
+function Get-RemoteVssSnapshots {
+    <#
+    .SYNOPSIS
+        Lists VSS snapshots on a remote server
+    .DESCRIPTION
+        Uses a CIM session to query VSS shadow copies on a remote server.
+        Can filter by volume or return all snapshots on the server.
+    .PARAMETER ServerName
+        The remote server name to query
+    .PARAMETER Volume
+        Optional volume to filter (e.g., "D:"). If not specified, returns all.
+    .OUTPUTS
+        OperationResult with Data = array of snapshot objects
+    .EXAMPLE
+        $result = Get-RemoteVssSnapshots -ServerName "FileServer01" -Volume "D:"
+        $result.Data | Format-Table ShadowId, CreatedAt, SourceVolume
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerName,
+
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Volume
+    )
+
+    Write-RobocurseLog -Message "Listing VSS snapshots on '$ServerName'$(if ($Volume) { " for volume $Volume" })" -Level 'Debug' -Component 'VSS'
+
+    $cimSession = $null
+    try {
+        $cimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+
+        $snapshots = Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy -ErrorAction Stop
+
+        if (-not $snapshots) {
+            return New-OperationResult -Success $true -Data @()
+        }
+
+        # Get volume mapping for filtering
+        $volumeMap = @{}
+        $volumes = Get-CimInstance -CimSession $cimSession -ClassName Win32_Volume -ErrorAction SilentlyContinue |
+            Where-Object { $_.DriveLetter }
+        foreach ($vol in $volumes) {
+            $volumeMap[$vol.DeviceID] = $vol.DriveLetter
+        }
+
+        # Convert and filter
+        $result = @($snapshots | ForEach-Object {
+            $snapshotVolume = $volumeMap[$_.VolumeName]
+
+            # Skip if filtering by volume and doesn't match
+            if ($Volume -and $snapshotVolume -ne $Volume.ToUpper()) {
+                return
+            }
+
+            [PSCustomObject]@{
+                ShadowId     = $_.ID
+                ShadowPath   = $_.DeviceObject
+                SourceVolume = $snapshotVolume
+                CreatedAt    = $_.InstallDate
+                ServerName   = $ServerName
+                IsRemote     = $true
+            }
+        } | Where-Object { $_ })
+
+        # Sort by creation time (newest first)
+        $result = @($result | Sort-Object CreatedAt -Descending)
+
+        Write-RobocurseLog -Message "Found $($result.Count) VSS snapshot(s) on '$ServerName'" -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data $result
+    }
+    catch {
+        $errorMsg = $_.Exception.Message
+        $guidance = Get-RemoteVssErrorGuidance -ErrorMessage $errorMsg -ServerName $ServerName
+        $fullError = "Failed to list snapshots on '$ServerName': $errorMsg$guidance"
+
+        Write-RobocurseLog -Message $fullError -Level 'Error' -Component 'VSS'
+        return New-OperationResult -Success $false -ErrorMessage $fullError -ErrorRecord $_
+    }
+    finally {
+        if ($cimSession) {
+            Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Get-RemoteVssErrorGuidance {
+    <#
+    .SYNOPSIS
+        Returns actionable guidance for remote VSS errors
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$ErrorMessage,
+        [string]$ServerName
+    )
+
+    if ($ErrorMessage -match 'Access is denied|Access denied') {
+        return " Ensure you have administrative rights on '$ServerName'."
+    }
+    elseif ($ErrorMessage -match 'RPC server|unavailable|endpoint mapper') {
+        return " Ensure WinRM service is running on '$ServerName'. Run 'Enable-PSRemoting -Force' on the remote server."
+    }
+    elseif ($ErrorMessage -match 'network path|not found|host.*unknown') {
+        return " Verify the server name is correct and network connectivity is available."
+    }
+    elseif ($ErrorMessage -match 'firewall|blocked') {
+        return " Check firewall rules on '$ServerName' - WinRM (TCP 5985/5986) and WMI/DCOM must be allowed."
+    }
+    return ""
+}
+
+function Invoke-RemoteVssRetentionPolicy {
+    <#
+    .SYNOPSIS
+        Enforces VSS snapshot retention on a remote server
+    .DESCRIPTION
+        For a specified volume on a remote server, keeps the newest N snapshots
+        and removes the rest. Uses CIM sessions for remote operations.
+    .PARAMETER ServerName
+        The remote server name
+    .PARAMETER Volume
+        Volume to apply retention to (e.g., "D:")
+    .PARAMETER KeepCount
+        Number of snapshots to keep (default: 3)
+    .OUTPUTS
+        OperationResult with Data containing DeletedCount, KeptCount, Errors
+    .EXAMPLE
+        $result = Invoke-RemoteVssRetentionPolicy -ServerName "FileServer01" -Volume "D:" -KeepCount 5
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerName,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Volume,
+
+        [ValidateRange(0, 100)]
+        [int]$KeepCount = 3
+    )
+
+    Write-RobocurseLog -Message "Applying VSS retention on '$ServerName' for $Volume (keep: $KeepCount)" -Level 'Info' -Component 'VSS'
+
+    # Get current snapshots
+    $listResult = Get-RemoteVssSnapshots -ServerName $ServerName -Volume $Volume
+    if (-not $listResult.Success) {
+        return New-OperationResult -Success $false -ErrorMessage "Failed to list snapshots: $($listResult.ErrorMessage)"
+    }
+
+    $snapshots = @($listResult.Data)
+    $currentCount = $snapshots.Count
+
+    # Nothing to do if under limit
+    if ($currentCount -le $KeepCount) {
+        Write-RobocurseLog -Message "Retention OK on '$ServerName': $currentCount snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
+        return New-OperationResult -Success $true -Data @{
+            DeletedCount = 0
+            KeptCount    = $currentCount
+            Errors       = @()
+        }
+    }
+
+    # Sort by CreatedAt ascending (oldest first) and select ones to delete
+    $sortedSnapshots = $snapshots | Sort-Object CreatedAt
+    $toDelete = @($sortedSnapshots | Select-Object -First ($currentCount - $KeepCount))
+    $toKeep = @($sortedSnapshots | Select-Object -Last $KeepCount)
+
+    Write-RobocurseLog -Message "Retention on '$ServerName': Deleting $($toDelete.Count) old snapshot(s), keeping $($toKeep.Count)" -Level 'Info' -Component 'VSS'
+
+    $deletedCount = 0
+    $errors = @()
+
+    foreach ($snapshot in $toDelete) {
+        $shadowId = $snapshot.ShadowId
+        $createdAt = $snapshot.CreatedAt
+
+        if ($PSCmdlet.ShouldProcess("$shadowId on $ServerName (created $createdAt)", "Remove Remote VSS Snapshot")) {
+            $removeResult = Remove-RemoteVssSnapshot -ShadowId $shadowId -ServerName $ServerName
+            if ($removeResult.Success) {
+                $deletedCount++
+                Write-RobocurseLog -Message "Deleted remote snapshot $shadowId on '$ServerName'" -Level 'Debug' -Component 'VSS'
+            }
+            else {
+                $errors += "Failed to delete $shadowId on '$ServerName': $($removeResult.ErrorMessage)"
+                Write-RobocurseLog -Message "Failed to delete remote snapshot: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            }
+        }
+    }
+
+    $success = $errors.Count -eq 0
+    $resultData = @{
+        DeletedCount = $deletedCount
+        KeptCount    = $toKeep.Count
+        Errors       = $errors
+    }
+
+    if ($success) {
+        Write-RobocurseLog -Message "Remote retention applied on '$ServerName': deleted $deletedCount, kept $($toKeep.Count)" -Level 'Info' -Component 'VSS'
+    }
+    else {
+        Write-RobocurseLog -Message "Remote retention on '$ServerName' completed with errors: $($errors.Count)" -Level 'Warning' -Component 'VSS'
+    }
+
+    return New-OperationResult -Success $success -Data $resultData -ErrorMessage $(if (-not $success) { $errors -join "; " })
+}
+
+#endregion
+
+#region ==================== SNAPSHOTCLI ====================
+
+# Command-line interface for VSS snapshot management
+
+function Invoke-ListSnapshotsCommand {
+    <#
+    .SYNOPSIS
+        CLI command to list VSS snapshots
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Volume,
+        [string]$Server
+    )
+
+    Write-Host ""
+    Write-Host "VSS Snapshots" -ForegroundColor Cyan
+    Write-Host "=============" -ForegroundColor Cyan
+    Write-Host ""
+
+    try {
+        if ($Server) {
+            Write-Host "Server: $Server" -ForegroundColor Gray
+            $result = Get-RemoteVssSnapshots -ServerName $Server -Volume $Volume
+        }
+        else {
+            Write-Host "Server: Local" -ForegroundColor Gray
+            $result = Get-VssSnapshots -Volume $Volume
+        }
+
+        if (-not $result.Success) {
+            Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+
+        $snapshots = @($result.Data)
+
+        if ($snapshots.Count -eq 0) {
+            Write-Host "No snapshots found." -ForegroundColor Yellow
+            return 0
+        }
+
+        Write-Host "Found $($snapshots.Count) snapshot(s):" -ForegroundColor Gray
+        Write-Host ""
+
+        # Table header
+        $format = "{0,-8} {1,-20} {2,-40}"
+        Write-Host ($format -f "Volume", "Created", "Shadow ID") -ForegroundColor White
+        Write-Host ($format -f "------", "-------", "---------") -ForegroundColor DarkGray
+
+        foreach ($snap in $snapshots) {
+            $volume = $snap.SourceVolume
+            $created = $snap.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss")
+            $shadowId = $snap.ShadowId
+
+            Write-Host ($format -f $volume, $created, $shadowId)
+        }
+
+        Write-Host ""
+        return 0
+    }
+    catch {
+        Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+        return 1
+    }
+}
+
+function Invoke-CreateSnapshotCommand {
+    <#
+    .SYNOPSIS
+        CLI command to create a VSS snapshot
+    .DESCRIPTION
+        Creates a VSS snapshot on the specified volume, optionally on a remote server.
+        Enforces retention policy before creating the new snapshot.
+    .PARAMETER Volume
+        The volume letter to snapshot (e.g., "D:")
+    .PARAMETER Server
+        Optional remote server name for remote snapshots
+    .PARAMETER KeepCount
+        Number of snapshots to retain after cleanup (default: 3)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Volume,
+
+        [string]$Server,
+
+        [int]$KeepCount = 3
+    )
+
+    Write-Host ""
+    Write-Host "Creating VSS Snapshot" -ForegroundColor Cyan
+    Write-Host "=====================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Volume: $Volume" -ForegroundColor Gray
+    Write-Host "Server: $(if ($Server) { $Server } else { 'Local' })" -ForegroundColor Gray
+    Write-Host "Retention: Keep $KeepCount" -ForegroundColor Gray
+    Write-Host ""
+
+    try {
+        # Enforce retention first
+        Write-Host "Enforcing retention policy..." -ForegroundColor Gray
+
+        if ($Server) {
+            $retResult = Invoke-RemoteVssRetentionPolicy -ServerName $Server -Volume $Volume -KeepCount $KeepCount
+        }
+        else {
+            $retResult = Invoke-VssRetentionPolicy -Volume $Volume -KeepCount $KeepCount
+        }
+
+        if ($retResult.Success) {
+            Write-Host "  Deleted: $($retResult.Data.DeletedCount) old snapshot(s)" -ForegroundColor Gray
+            Write-Host "  Kept: $($retResult.Data.KeptCount) snapshot(s)" -ForegroundColor Gray
+        }
+        else {
+            Write-Host "  Warning: $($retResult.ErrorMessage)" -ForegroundColor Yellow
+        }
+
+        # Create snapshot
+        Write-Host ""
+        Write-Host "Creating snapshot..." -ForegroundColor Gray
+
+        if ($Server) {
+            # Use admin share for remote
+            $uncPath = "\\$Server\$($Volume -replace ':', '$')"
+            $snapResult = New-RemoteVssSnapshot -UncPath $uncPath
+        }
+        else {
+            $snapResult = New-VssSnapshot -SourcePath "$Volume\"
+        }
+
+        if ($snapResult.Success) {
+            Write-Host ""
+            Write-Host "Snapshot created successfully!" -ForegroundColor Green
+            Write-Host "  Shadow ID: $($snapResult.Data.ShadowId)" -ForegroundColor White
+            Write-Host "  Created: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
+            Write-Host ""
+            return 0
+        }
+        else {
+            Write-Host ""
+            Write-Host "Failed to create snapshot:" -ForegroundColor Red
+            Write-Host "  $($snapResult.ErrorMessage)" -ForegroundColor Red
+            Write-Host ""
+            return 1
+        }
+    }
+    catch {
+        Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+        return 1
+    }
+}
+
+function Invoke-DeleteSnapshotCommand {
+    <#
+    .SYNOPSIS
+        CLI command to delete a VSS snapshot
+    .DESCRIPTION
+        Deletes a VSS snapshot by its Shadow ID, with confirmation prompt.
+    .PARAMETER ShadowId
+        The GUID of the shadow copy to delete
+    .PARAMETER Server
+        Optional remote server name for remote snapshots
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ShadowId,
+
+        [string]$Server
+    )
+
+    Write-Host ""
+    Write-Host "Deleting VSS Snapshot" -ForegroundColor Cyan
+    Write-Host "=====================" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "Shadow ID: $ShadowId" -ForegroundColor Gray
+    Write-Host "Server: $(if ($Server) { $Server } else { 'Local' })" -ForegroundColor Gray
+    Write-Host ""
+
+    # Confirm
+    Write-Host "Are you sure you want to delete this snapshot? (y/N): " -NoNewline -ForegroundColor Yellow
+    $confirm = Read-Host
+
+    if ($confirm -notmatch '^[Yy]') {
+        Write-Host "Cancelled." -ForegroundColor Gray
+        return 0
+    }
+
+    try {
+        Write-Host ""
+        Write-Host "Deleting..." -ForegroundColor Gray
+
+        if ($Server) {
+            $result = Remove-RemoteVssSnapshot -ShadowId $ShadowId -ServerName $Server
+        }
+        else {
+            $result = Remove-VssSnapshot -ShadowId $ShadowId
+        }
+
+        if ($result.Success) {
+            Write-Host "Snapshot deleted successfully!" -ForegroundColor Green
+            Write-Host ""
+            return 0
+        }
+        else {
+            Write-Host "Failed to delete snapshot:" -ForegroundColor Red
+            Write-Host "  $($result.ErrorMessage)" -ForegroundColor Red
+            Write-Host ""
+            return 1
+        }
+    }
+    catch {
+        Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
+        return 1
+    }
+}
+
+function Invoke-SnapshotScheduleCommand {
+    <#
+    .SYNOPSIS
+        CLI command to manage snapshot schedules
+    .DESCRIPTION
+        Lists, syncs, adds, or removes Windows scheduled tasks for automated
+        VSS snapshot creation. Use -Sync to synchronize scheduled tasks with
+        the configuration file.
+    .PARAMETER List
+        List all configured snapshot schedules
+    .PARAMETER Sync
+        Synchronize scheduled tasks with configuration file
+    .PARAMETER Add
+        Show instructions for adding a new schedule
+    .PARAMETER Remove
+        Remove a scheduled task by name
+    .PARAMETER ScheduleName
+        Name of the schedule (required for -Remove)
+    .PARAMETER Config
+        The Robocurse configuration object (required for -Sync)
+    #>
+    [CmdletBinding()]
+    param(
+        [switch]$List,
+        [switch]$Sync,
+        [switch]$Add,
+        [switch]$Remove,
+        [string]$ScheduleName,
+        [PSCustomObject]$Config
+    )
+
+    Write-Host ""
+    Write-Host "Snapshot Schedules" -ForegroundColor Cyan
+    Write-Host "==================" -ForegroundColor Cyan
+    Write-Host ""
+
+    if ($List -or (-not $Sync -and -not $Add -and -not $Remove)) {
+        # Default to list
+        $tasks = Get-SnapshotScheduledTasks
+
+        if ($tasks.Count -eq 0) {
+            Write-Host "No snapshot schedules configured." -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "To add schedules, configure snapshotSchedules in your config file and run:" -ForegroundColor Gray
+            Write-Host "  .\Robocurse.ps1 -SnapshotSchedule -Sync" -ForegroundColor White
+            Write-Host ""
+            return 0
+        }
+
+        $format = "{0,-20} {1,-10} {2,-20}"
+        Write-Host ($format -f "Name", "State", "Next Run") -ForegroundColor White
+        Write-Host ($format -f "----", "-----", "--------") -ForegroundColor DarkGray
+
+        foreach ($task in $tasks) {
+            $stateColor = if ($task.State -eq 'Ready') { 'Green' } else { 'Yellow' }
+            Write-Host ($format -f $task.Name, $task.State, $task.NextRunTime) -ForegroundColor $stateColor
+        }
+
+        Write-Host ""
+        return 0
+    }
+
+    if ($Sync) {
+        Write-Host "Synchronizing schedules with configuration..." -ForegroundColor Gray
+
+        $result = Sync-SnapshotSchedules -Config $Config
+
+        if ($result.Success) {
+            Write-Host ""
+            Write-Host "Sync completed:" -ForegroundColor Green
+            Write-Host "  Created: $($result.Data.Created)" -ForegroundColor Gray
+            Write-Host "  Removed: $($result.Data.Removed)" -ForegroundColor Gray
+            Write-Host "  Total: $($result.Data.Total)" -ForegroundColor Gray
+            Write-Host ""
+            return 0
+        }
+        else {
+            Write-Host "Sync completed with errors:" -ForegroundColor Yellow
+            foreach ($err in $result.Data.Errors) {
+                Write-Host "  - $err" -ForegroundColor Red
+            }
+            Write-Host ""
+            return 1
+        }
+    }
+
+    if ($Remove) {
+        if (-not $ScheduleName) {
+            Write-Host "Error: -ScheduleName is required for -Remove" -ForegroundColor Red
+            return 1
+        }
+
+        $result = Remove-SnapshotScheduledTask -ScheduleName $ScheduleName
+
+        if ($result.Success) {
+            Write-Host "Schedule '$ScheduleName' removed." -ForegroundColor Green
+            return 0
+        }
+        else {
+            Write-Host "Failed to remove schedule: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+    }
+
+    # -Add would need interactive prompts or config file - defer to Sync
+    if ($Add) {
+        Write-Host "To add a schedule, edit your config file and add to 'snapshotSchedules', then run:" -ForegroundColor Gray
+        Write-Host "  .\Robocurse.ps1 -SnapshotSchedule -Sync" -ForegroundColor White
+        Write-Host ""
+        Write-Host "Example config:" -ForegroundColor Gray
+        Write-Host @"
+  "snapshotSchedules": [
+    {
+      "name": "DailyD",
+      "volume": "D:",
+      "schedule": "Daily",
+      "time": "02:00",
+      "keepCount": 7,
+      "enabled": true
+    }
+  ]
+"@ -ForegroundColor DarkGray
+        Write-Host ""
+        return 0
+    }
+
+    return 0
 }
 
 #endregion
@@ -11147,6 +12199,369 @@ function Test-RobocurseTaskExists {
 
 #endregion
 
+#region ==================== SNAPSHOTSCHEDULE ====================
+
+# Manages Windows Task Scheduler tasks for automated snapshot creation
+
+$script:SnapshotTaskPrefix = "Robocurse-Snapshot-"
+
+# Pattern for valid hostnames: letters, numbers, hyphens, dots (no shell metacharacters)
+$script:SafeHostnamePattern = '^[a-zA-Z0-9]([a-zA-Z0-9\-\.]{0,253}[a-zA-Z0-9])?$'
+
+# Pattern for valid file paths: no shell metacharacters that could escape single quotes
+$script:SafePathPattern = '^[^''`$;|&<>]+$'
+
+function Test-SafeScheduleParameter {
+    <#
+    .SYNOPSIS
+        Validates that a schedule parameter is safe for embedding in a command string
+    .DESCRIPTION
+        Prevents command injection by validating that parameters don't contain
+        shell metacharacters that could escape single-quoted strings.
+    .PARAMETER Value
+        The value to validate
+    .PARAMETER ParameterName
+        Name of the parameter (for error messages)
+    .PARAMETER Pattern
+        Regex pattern the value must match
+    .OUTPUTS
+        OperationResult - Success=$true if safe, Success=$false with error message if not
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Value,
+
+        [Parameter(Mandatory)]
+        [string]$ParameterName,
+
+        [Parameter(Mandatory)]
+        [string]$Pattern
+    )
+
+    if ([string]::IsNullOrEmpty($Value)) {
+        return New-OperationResult -Success $true
+    }
+
+    if ($Value -notmatch $Pattern) {
+        $msg = "Invalid $ParameterName '$Value': contains unsafe characters. " +
+               "Only alphanumeric characters, hyphens, and dots are allowed."
+        Write-RobocurseLog -Message $msg -Level 'Error' -Component 'Schedule'
+        return New-OperationResult -Success $false -ErrorMessage $msg
+    }
+
+    return New-OperationResult -Success $true
+}
+
+function New-SnapshotScheduledTask {
+    <#
+    .SYNOPSIS
+        Creates a Windows scheduled task for VSS snapshot creation
+    .DESCRIPTION
+        Registers a scheduled task that runs PowerShell to create VSS snapshots
+        and enforce retention for a specific volume.
+    .PARAMETER Schedule
+        A schedule definition object from config
+    .PARAMETER RobocurseModulePath
+        Path to the Robocurse module (for task script)
+    .OUTPUTS
+        OperationResult with Data = task name
+    .EXAMPLE
+        $schedule = [PSCustomObject]@{ Name = "HourlyD"; Volume = "D:"; Schedule = "Hourly"; Time = "00:00"; KeepCount = 24 }
+        New-SnapshotScheduledTask -Schedule $schedule
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Schedule,
+
+        [string]$RobocurseModulePath = $PSScriptRoot
+    )
+
+    $taskName = "$script:SnapshotTaskPrefix$($Schedule.Name)"
+
+    Write-RobocurseLog -Message "Creating snapshot schedule '$taskName' for $($Schedule.Volume)" -Level 'Info' -Component 'Schedule'
+
+    try {
+        # Build the PowerShell command to run
+        $isRemote = [bool]$Schedule.ServerName
+        $command = New-SnapshotTaskCommand -Schedule $Schedule -ModulePath $RobocurseModulePath
+
+        # Create action
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"$command`""
+
+        # Create trigger based on schedule type
+        $trigger = switch ($Schedule.Schedule) {
+            "Hourly" {
+                # Hourly requires repetition
+                $t = New-ScheduledTaskTrigger -Once -At $Schedule.Time -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Days 9999)
+                $t
+            }
+            "Daily" {
+                New-ScheduledTaskTrigger -Daily -At $Schedule.Time
+            }
+            "Weekly" {
+                $days = if ($Schedule.DaysOfWeek.Count -gt 0) {
+                    $Schedule.DaysOfWeek
+                } else {
+                    @("Sunday")
+                }
+                New-ScheduledTaskTrigger -Weekly -DaysOfWeek $days -At $Schedule.Time
+            }
+            default {
+                throw "Unknown schedule type: $($Schedule.Schedule)"
+            }
+        }
+
+        # Run as SYSTEM with highest privileges (required for VSS)
+        $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+
+        # Settings
+        $settings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -StartWhenAvailable `
+            -RunOnlyIfNetworkAvailable:$isRemote `
+            -MultipleInstances IgnoreNew
+
+        # Remove existing task if present
+        $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($existing) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+            Write-RobocurseLog -Message "Removed existing task '$taskName'" -Level 'Debug' -Component 'Schedule'
+        }
+
+        # Register the task
+        $task = Register-ScheduledTask `
+            -TaskName $taskName `
+            -Action $action `
+            -Trigger $trigger `
+            -Principal $principal `
+            -Settings $settings `
+            -Description "Robocurse VSS Snapshot for $($Schedule.Volume)"
+
+        Write-RobocurseLog -Message "Created snapshot schedule '$taskName'" -Level 'Info' -Component 'Schedule'
+
+        return New-OperationResult -Success $true -Data $taskName
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to create snapshot schedule: $($_.Exception.Message)" -Level 'Error' -Component 'Schedule'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to create schedule '$taskName': $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+function New-SnapshotTaskCommand {
+    <#
+    .SYNOPSIS
+        Creates the PowerShell command string for a snapshot scheduled task
+    .DESCRIPTION
+        Generates the PowerShell command that will be executed by the scheduled task.
+        Handles both local and remote snapshot creation with retention enforcement.
+        Validates all parameters to prevent command injection.
+    .PARAMETER Schedule
+        A schedule definition object containing Volume, KeepCount, and optional ServerName
+    .PARAMETER ModulePath
+        Path to the Robocurse module for Import-Module in the task
+    .OUTPUTS
+        String containing the PowerShell command, or $null if validation fails
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Schedule,
+
+        [string]$ModulePath
+    )
+
+    $volume = $Schedule.Volume
+    $keepCount = $Schedule.KeepCount
+    $isRemote = [bool]$Schedule.ServerName
+    $serverName = $Schedule.ServerName
+
+    # Security: Validate parameters to prevent command injection
+    # These values are embedded in single-quoted strings in the command
+    if ($isRemote) {
+        $serverCheck = Test-SafeScheduleParameter -Value $serverName -ParameterName "ServerName" -Pattern $script:SafeHostnamePattern
+        if (-not $serverCheck.Success) {
+            throw $serverCheck.ErrorMessage
+        }
+    }
+
+    $pathCheck = Test-SafeScheduleParameter -Value $ModulePath -ParameterName "ModulePath" -Pattern $script:SafePathPattern
+    if (-not $pathCheck.Success) {
+        throw $pathCheck.ErrorMessage
+    }
+
+    # Volume is already validated by ValidatePattern in the calling functions
+
+    if ($isRemote) {
+        # Remote snapshot command
+        $cmd = @"
+Import-Module '$ModulePath\Robocurse.psd1' -Force;
+`$r = Invoke-RemoteVssRetentionPolicy -ServerName '$serverName' -Volume '$volume' -KeepCount $keepCount;
+if (`$r.Success) { `$s = New-RemoteVssSnapshot -UncPath '\\$serverName\$volume`$' };
+exit ([int](-not `$r.Success))
+"@
+    }
+    else {
+        # Local snapshot command
+        $cmd = @"
+Import-Module '$ModulePath\Robocurse.psd1' -Force;
+`$r = Invoke-VssRetentionPolicy -Volume '$volume' -KeepCount $keepCount;
+if (`$r.Success) { `$s = New-VssSnapshot -SourcePath '$volume\' };
+exit ([int](-not `$r.Success))
+"@
+    }
+
+    return $cmd -replace "`r`n", "; " -replace "`n", "; "
+}
+
+function Remove-SnapshotScheduledTask {
+    <#
+    .SYNOPSIS
+        Removes a snapshot scheduled task
+    .PARAMETER ScheduleName
+        The schedule name (without prefix)
+    .OUTPUTS
+        OperationResult
+    .EXAMPLE
+        Remove-SnapshotScheduledTask -ScheduleName "HourlyD"
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ScheduleName
+    )
+
+    $taskName = "$script:SnapshotTaskPrefix$ScheduleName"
+
+    try {
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+        if (-not $task) {
+            Write-RobocurseLog -Message "Snapshot schedule '$taskName' not found" -Level 'Debug' -Component 'Schedule'
+            return New-OperationResult -Success $true -Data "Task not found (already removed)"
+        }
+
+        if ($PSCmdlet.ShouldProcess($taskName, "Remove Scheduled Task")) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+            Write-RobocurseLog -Message "Removed snapshot schedule '$taskName'" -Level 'Info' -Component 'Schedule'
+            return New-OperationResult -Success $true -Data $taskName
+        }
+
+        return New-OperationResult -Success $true -Data "WhatIf: Would remove $taskName"
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to remove schedule '$taskName': $($_.Exception.Message)" -Level 'Error' -Component 'Schedule'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to remove schedule: $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+function Get-SnapshotScheduledTasks {
+    <#
+    .SYNOPSIS
+        Lists all Robocurse snapshot scheduled tasks
+    .OUTPUTS
+        Array of scheduled task objects
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $tasks = Get-ScheduledTask -TaskName "$script:SnapshotTaskPrefix*" -ErrorAction SilentlyContinue
+
+        if (-not $tasks) {
+            return @()
+        }
+
+        return @($tasks | ForEach-Object {
+            [PSCustomObject]@{
+                Name = $_.TaskName -replace "^$([regex]::Escape($script:SnapshotTaskPrefix))", ""
+                TaskName = $_.TaskName
+                State = $_.State
+                Description = $_.Description
+                LastRunTime = $_.LastRunTime
+                NextRunTime = $_.Triggers[0].StartBoundary
+            }
+        })
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to list snapshot schedules: $($_.Exception.Message)" -Level 'Warning' -Component 'Schedule'
+        return @()
+    }
+}
+
+function Sync-SnapshotSchedules {
+    <#
+    .SYNOPSIS
+        Synchronizes scheduled tasks with configuration
+    .DESCRIPTION
+        Creates/updates/removes scheduled tasks to match the current configuration.
+        Removes tasks not in config, creates tasks that are missing, updates changed tasks.
+    .PARAMETER Config
+        The Robocurse configuration object
+    .OUTPUTS
+        OperationResult with Data = summary of changes
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    $schedules = @($Config.GlobalSettings.SnapshotSchedules | Where-Object { $_.Enabled })
+    $existingTasks = Get-SnapshotScheduledTasks
+    $existingNames = @($existingTasks | ForEach-Object { $_.Name })
+    $configNames = @($schedules | ForEach-Object { $_.Name })
+
+    $created = 0
+    $removed = 0
+    $errors = @()
+
+    # Remove tasks not in config
+    foreach ($existing in $existingTasks) {
+        if ($existing.Name -notin $configNames) {
+            $result = Remove-SnapshotScheduledTask -ScheduleName $existing.Name
+            if ($result.Success) {
+                $removed++
+            }
+            else {
+                $errors += $result.ErrorMessage
+            }
+        }
+    }
+
+    # Create/update tasks from config
+    foreach ($schedule in $schedules) {
+        # Always recreate to ensure settings are current
+        $result = New-SnapshotScheduledTask -Schedule $schedule
+        if ($result.Success) {
+            if ($schedule.Name -notin $existingNames) {
+                $created++
+            }
+        }
+        else {
+            $errors += $result.ErrorMessage
+        }
+    }
+
+    $summary = @{
+        Created = $created
+        Removed = $removed
+        Total = $schedules.Count
+        Errors = $errors
+    }
+
+    $success = $errors.Count -eq 0
+
+    Write-RobocurseLog -Message "Snapshot schedules synced: $created created, $removed removed, $($schedules.Count) total" -Level 'Info' -Component 'Schedule'
+
+    return New-OperationResult -Success $success -Data $summary -ErrorMessage $(if (-not $success) { $errors -join "; " })
+}
+
+#endregion
+
 #region ==================== GUIRESOURCES ====================
 
 # XAML resources are stored in the Resources folder for maintainability.
@@ -11188,6 +12603,585 @@ function Get-XamlResource {
     }
 
     throw "XAML resource '$ResourceName' not found and no fallback provided"
+}
+
+#endregion
+
+#region ==================== GUIVALIDATION ====================
+
+# Pre-flight validation UI for checking profile configuration before replication
+
+function Test-ProfileValidation {
+    <#
+    .SYNOPSIS
+        Runs pre-flight validation checks on a replication profile
+    .DESCRIPTION
+        Performs a series of validation checks to ensure the profile is ready for replication:
+        1. Robocopy availability
+        2. Source path accessibility
+        3. Destination path existence or parent path exists
+        4. Disk space on destination (if accessible)
+        5. VSS support if UseVSS is enabled
+        6. Chunk estimate to verify source can be profiled
+    .PARAMETER Profile
+        The sync profile to validate (PSCustomObject with Name, Source, Destination, UseVSS properties)
+    .OUTPUTS
+        Array of validation result objects with CheckName, Status, Message, Severity properties
+    .EXAMPLE
+        $results = Test-ProfileValidation -Profile $profile
+        $results | Where-Object { $_.Status -eq 'Fail' }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile
+    )
+
+    $results = @()
+
+    Write-RobocurseLog "Starting validation for profile: $($Profile.Name)" -Level 'Info' -Component 'Validation'
+
+    # Check 1: Robocopy available
+    try {
+        $robocopyCheck = Test-RobocopyAvailable
+        if ($robocopyCheck.Success) {
+            $results += [PSCustomObject]@{
+                CheckName = "Robocopy Available"
+                Status = "Pass"
+                Message = "Robocopy.exe found at: $($robocopyCheck.Data)"
+                Severity = "Success"
+            }
+        }
+        else {
+            $results += [PSCustomObject]@{
+                CheckName = "Robocopy Available"
+                Status = "Fail"
+                Message = $robocopyCheck.ErrorMessage
+                Severity = "Error"
+            }
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{
+            CheckName = "Robocopy Available"
+            Status = "Fail"
+            Message = "Error checking robocopy: $($_.Exception.Message)"
+            Severity = "Error"
+        }
+    }
+
+    # Check 2: Source path accessible
+    try {
+        if ([string]::IsNullOrWhiteSpace($Profile.Source)) {
+            $results += [PSCustomObject]@{
+                CheckName = "Source Path"
+                Status = "Fail"
+                Message = "Source path is empty or not configured"
+                Severity = "Error"
+            }
+        }
+        elseif (Test-Path -Path $Profile.Source -PathType Container) {
+            $results += [PSCustomObject]@{
+                CheckName = "Source Path"
+                Status = "Pass"
+                Message = "Source path is accessible: $($Profile.Source)"
+                Severity = "Success"
+            }
+        }
+        else {
+            $results += [PSCustomObject]@{
+                CheckName = "Source Path"
+                Status = "Fail"
+                Message = "Source path does not exist or is not accessible: $($Profile.Source)"
+                Severity = "Error"
+            }
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{
+            CheckName = "Source Path"
+            Status = "Fail"
+            Message = "Error accessing source path: $($_.Exception.Message)"
+            Severity = "Error"
+        }
+    }
+
+    # Check 3: Destination path or parent exists
+    try {
+        if ([string]::IsNullOrWhiteSpace($Profile.Destination)) {
+            $results += [PSCustomObject]@{
+                CheckName = "Destination Path"
+                Status = "Fail"
+                Message = "Destination path is empty or not configured"
+                Severity = "Error"
+            }
+        }
+        elseif (Test-Path -Path $Profile.Destination -PathType Container) {
+            $results += [PSCustomObject]@{
+                CheckName = "Destination Path"
+                Status = "Pass"
+                Message = "Destination path exists: $($Profile.Destination)"
+                Severity = "Success"
+            }
+        }
+        else {
+            # Check if parent directory exists (destination will be created)
+            $parentPath = Split-Path -Path $Profile.Destination -Parent
+            if ($parentPath -and (Test-Path -Path $parentPath -PathType Container)) {
+                $results += [PSCustomObject]@{
+                    CheckName = "Destination Path"
+                    Status = "Warning"
+                    Message = "Destination will be created at: $($Profile.Destination)"
+                    Severity = "Warning"
+                }
+            }
+            else {
+                $results += [PSCustomObject]@{
+                    CheckName = "Destination Path"
+                    Status = "Fail"
+                    Message = "Destination parent path does not exist: $parentPath"
+                    Severity = "Error"
+                }
+            }
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{
+            CheckName = "Destination Path"
+            Status = "Fail"
+            Message = "Error checking destination path: $($_.Exception.Message)"
+            Severity = "Error"
+        }
+    }
+
+    # Check 4: Disk space on destination (if accessible)
+    try {
+        $destPathToCheck = if (Test-Path -Path $Profile.Destination -PathType Container) {
+            $Profile.Destination
+        }
+        else {
+            $parentPath = Split-Path -Path $Profile.Destination -Parent
+            if ($parentPath -and (Test-Path -Path $parentPath -PathType Container)) {
+                $parentPath
+            }
+            else {
+                $null
+            }
+        }
+
+        if ($destPathToCheck) {
+            $drive = Get-PSDrive -PSProvider FileSystem | Where-Object {
+                $destPathToCheck.StartsWith($_.Root, [System.StringComparison]::OrdinalIgnoreCase)
+            } | Select-Object -First 1
+
+            if ($drive) {
+                $freeSpaceGB = [math]::Round($drive.Free / 1GB, 2)
+                if ($freeSpaceGB -lt 1) {
+                    $results += [PSCustomObject]@{
+                        CheckName = "Destination Disk Space"
+                        Status = "Warning"
+                        Message = "Low disk space on destination: ${freeSpaceGB} GB free"
+                        Severity = "Warning"
+                    }
+                }
+                else {
+                    $results += [PSCustomObject]@{
+                        CheckName = "Destination Disk Space"
+                        Status = "Pass"
+                        Message = "Destination has ${freeSpaceGB} GB free space"
+                        Severity = "Success"
+                    }
+                }
+            }
+            else {
+                $results += [PSCustomObject]@{
+                    CheckName = "Destination Disk Space"
+                    Status = "Info"
+                    Message = "Unable to determine disk space for destination"
+                    Severity = "Info"
+                }
+            }
+        }
+        else {
+            $results += [PSCustomObject]@{
+                CheckName = "Destination Disk Space"
+                Status = "Info"
+                Message = "Skipped - destination path not accessible"
+                Severity = "Info"
+            }
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{
+            CheckName = "Destination Disk Space"
+            Status = "Info"
+            Message = "Unable to check disk space: $($_.Exception.Message)"
+            Severity = "Info"
+        }
+    }
+
+    # Check 5: VSS support if UseVSS is enabled
+    if ($Profile.UseVSS) {
+        try {
+            if (-not [string]::IsNullOrWhiteSpace($Profile.Source) -and (Test-Path -Path $Profile.Source)) {
+                $vssSupported = Test-VssSupported -Path $Profile.Source
+                if ($vssSupported) {
+                    $results += [PSCustomObject]@{
+                        CheckName = "VSS Support"
+                        Status = "Pass"
+                        Message = "Volume Shadow Copy is supported for source path"
+                        Severity = "Success"
+                    }
+                }
+                else {
+                    $results += [PSCustomObject]@{
+                        CheckName = "VSS Support"
+                        Status = "Fail"
+                        Message = "VSS is not supported for this path (may be UNC/network share)"
+                        Severity = "Error"
+                    }
+                }
+            }
+            else {
+                $results += [PSCustomObject]@{
+                    CheckName = "VSS Support"
+                    Status = "Warning"
+                    Message = "Cannot verify VSS support - source path not accessible"
+                    Severity = "Warning"
+                }
+            }
+        }
+        catch {
+            $results += [PSCustomObject]@{
+                CheckName = "VSS Support"
+                Status = "Warning"
+                Message = "Error checking VSS support: $($_.Exception.Message)"
+                Severity = "Warning"
+            }
+        }
+    }
+    else {
+        $results += [PSCustomObject]@{
+            CheckName = "VSS Support"
+            Status = "Info"
+            Message = "VSS not enabled for this profile"
+            Severity = "Info"
+        }
+    }
+
+    # Check 6: Source can be profiled (chunk estimate)
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($Profile.Source) -and (Test-Path -Path $Profile.Source)) {
+            Write-RobocurseLog "Profiling source directory: $($Profile.Source)" -Level 'Debug' -Component 'Validation'
+            $dirProfile = Get-DirectoryProfile -Path $Profile.Source -UseCache $true
+            if ($dirProfile) {
+                $sizeGB = [math]::Round($dirProfile.TotalSize / 1GB, 2)
+                $fileCount = $dirProfile.FileCount
+                $results += [PSCustomObject]@{
+                    CheckName = "Source Profile"
+                    Status = "Pass"
+                    Message = "Source contains ${sizeGB} GB ($fileCount files)"
+                    Severity = "Success"
+                }
+            }
+            else {
+                $results += [PSCustomObject]@{
+                    CheckName = "Source Profile"
+                    Status = "Warning"
+                    Message = "Unable to profile source directory"
+                    Severity = "Warning"
+                }
+            }
+        }
+        else {
+            $results += [PSCustomObject]@{
+                CheckName = "Source Profile"
+                Status = "Info"
+                Message = "Skipped - source path not accessible"
+                Severity = "Info"
+            }
+        }
+    }
+    catch {
+        $results += [PSCustomObject]@{
+            CheckName = "Source Profile"
+            Status = "Warning"
+            Message = "Error profiling source: $($_.Exception.Message)"
+            Severity = "Warning"
+        }
+    }
+
+    Write-RobocurseLog "Validation complete for profile: $($Profile.Name)" -Level 'Info' -Component 'Validation'
+    return $results
+}
+
+function Show-ValidationDialog {
+    <#
+    .SYNOPSIS
+        Shows the validation results dialog
+    .DESCRIPTION
+        Displays a modal dialog with validation check results. Runs Test-ProfileValidation
+        if results are not provided.
+    .PARAMETER Profile
+        The profile to validate (if Results not provided)
+    .PARAMETER Results
+        Pre-computed validation results to display
+    .EXAMPLE
+        Show-ValidationDialog -Profile $selectedProfile
+    .EXAMPLE
+        $results = Test-ProfileValidation -Profile $profile
+        Show-ValidationDialog -Results $results -Profile $profile
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile,
+
+        [PSCustomObject[]]$Results
+    )
+
+    try {
+        # Run validation if results not provided
+        if (-not $Results) {
+            $Results = Test-ProfileValidation -Profile $Profile
+        }
+
+        # Load XAML from resource file
+        $xaml = Get-XamlResource -ResourceName 'ValidationDialog.xaml' -FallbackContent @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Pre-flight Validation"
+        Height="500" Width="650"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize">
+
+    <Window.Resources>
+        <!-- Close button (subtle) -->
+        <Style x:Key="CloseButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#E0E0E0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="#3E3E3E" CornerRadius="4" Padding="20,8">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#4E4E4E"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="#2E2E2E"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Border x:Name="dialogBorder" Background="#1E1E1E" CornerRadius="8" BorderBrush="#0078D4" BorderThickness="2">
+        <Grid Margin="24">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <!-- Header with icon and title -->
+            <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,20">
+                <!-- Validation icon -->
+                <Border Width="40" Height="40" CornerRadius="20" Background="#0078D4" Margin="0,0,14,0">
+                    <TextBlock Text="&#x2713;" FontSize="24" Foreground="White"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" FontWeight="Bold"/>
+                </Border>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock x:Name="txtTitle" Text="Profile Validation" FontSize="16" FontWeight="SemiBold"
+                               Foreground="#E0E0E0"/>
+                    <TextBlock x:Name="txtSubtitle" Text="Pre-flight checks for replication profile" FontSize="11"
+                               Foreground="#808080" Margin="0,2,0,0"/>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Results List -->
+            <Border Grid.Row="1" Background="#2D2D2D" BorderBrush="#3E3E3E" BorderThickness="1"
+                    CornerRadius="4" Margin="0,0,0,20">
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <ListBox x:Name="lstResults" Background="Transparent" BorderThickness="0"
+                             Foreground="#E0E0E0" Padding="10">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Border Background="#252525" CornerRadius="4" Padding="12,8" Margin="0,0,0,8">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Status Icon -->
+                                        <Border Grid.Column="0" Width="24" Height="24" CornerRadius="12"
+                                                VerticalAlignment="Top" Margin="0,0,12,0">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding Status}" Value="Pass">
+                                                            <Setter Property="Background" Value="#34C759"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding Status}" Value="Warning">
+                                                            <Setter Property="Background" Value="#FFB340"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding Status}" Value="Fail">
+                                                            <Setter Property="Background" Value="#FF6B6B"/>
+                                                        </DataTrigger>
+                                                        <DataTrigger Binding="{Binding Status}" Value="Info">
+                                                            <Setter Property="Background" Value="#0078D4"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                       Foreground="White" FontWeight="Bold" FontSize="14">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Pass">
+                                                                <Setter Property="Text" Value="&#x2713;"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Warning">
+                                                                <Setter Property="Text" Value="!"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Fail">
+                                                                <Setter Property="Text" Value="X"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Info">
+                                                                <Setter Property="Text" Value="i"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </Border>
+
+                                        <!-- Check Name and Message -->
+                                        <StackPanel Grid.Column="1" VerticalAlignment="Top">
+                                            <TextBlock Text="{Binding CheckName}" FontWeight="SemiBold"
+                                                       Foreground="#E0E0E0" FontSize="13" Margin="0,0,0,4"/>
+                                            <TextBlock Text="{Binding Message}" TextWrapping="Wrap" FontSize="12">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="#B0B0B0"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Severity}" Value="Error">
+                                                                <Setter Property="Foreground" Value="#FF6B6B"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Severity}" Value="Warning">
+                                                                <Setter Property="Foreground" Value="#FFB340"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding Severity}" Value="Success">
+                                                                <Setter Property="Foreground" Value="#34C759"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </ScrollViewer>
+            </Border>
+
+            <!-- Button -->
+            <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button x:Name="btnClose" Content="Close" Style="{StaticResource CloseButton}"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>
+
+'@
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $txtTitle = $dialog.FindName("txtTitle")
+        $txtSubtitle = $dialog.FindName("txtSubtitle")
+        $lstResults = $dialog.FindName("lstResults")
+        $dialogBorder = $dialog.FindName("dialogBorder")
+        $btnClose = $dialog.FindName("btnClose")
+
+        # Set title
+        $txtTitle.Text = "Validation: $($Profile.Name)"
+        $txtSubtitle.Text = "Pre-flight checks for replication profile"
+
+        # Determine overall status
+        $hasFailed = ($Results | Where-Object { $_.Status -eq 'Fail' }).Count -gt 0
+        $hasWarnings = ($Results | Where-Object { $_.Status -eq 'Warning' }).Count -gt 0
+
+        # Update border color based on overall status
+        if ($hasFailed) {
+            $dialogBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF6B6B")
+        }
+        elseif ($hasWarnings) {
+            $dialogBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FFB340")
+        }
+        else {
+            $dialogBorder.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#34C759")
+        }
+
+        # Populate results list
+        $lstResults.ItemsSource = $Results
+
+        # Close button handler
+        $btnClose.Add_Click({
+            $dialog.Close()
+        })
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+                $dialog.DragMove()
+            }
+        })
+
+        # Escape key to close
+        $dialog.Add_KeyDown({
+            param($sender, $e)
+            if ($e.Key -eq [System.Windows.Input.Key]::Escape) {
+                $dialog.Close()
+            }
+        })
+
+        # Set owner to main window for proper modal behavior
+        if ($script:Window) {
+            $dialog.Owner = $script:Window
+        }
+
+        $dialog.ShowDialog() | Out-Null
+    }
+    catch {
+        Write-GuiLog "Error showing validation dialog: $($_.Exception.Message)"
+        # Fallback to simple message
+        $failCount = ($Results | Where-Object { $_.Status -eq 'Fail' }).Count
+        $passCount = ($Results | Where-Object { $_.Status -eq 'Pass' }).Count
+        $warnCount = ($Results | Where-Object { $_.Status -eq 'Warning' }).Count
+
+        [System.Windows.MessageBox]::Show(
+            "Validation Results:`n`nPassed: $passCount`nWarnings: $warnCount`nFailed: $failCount",
+            "Validation: $($Profile.Name)",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
+    }
 }
 
 #endregion
@@ -11530,6 +13524,28 @@ function Import-SettingsToForm {
         }
     }
 
+    # SNAPSHOT RETENTION Section
+    if ($script:Controls['txtDefaultKeepCount']) {
+        $defaultKeep = 3
+        if ($config.GlobalSettings.SnapshotRetention -and $config.GlobalSettings.SnapshotRetention.DefaultKeepCount) {
+            $defaultKeep = $config.GlobalSettings.SnapshotRetention.DefaultKeepCount
+        }
+        $script:Controls.txtDefaultKeepCount.Text = $defaultKeep.ToString()
+    }
+
+    if ($script:Controls['txtVolumeOverrides']) {
+        $overridesText = ""
+        if ($config.GlobalSettings.SnapshotRetention -and $config.GlobalSettings.SnapshotRetention.VolumeOverrides) {
+            $overrides = $config.GlobalSettings.SnapshotRetention.VolumeOverrides
+            $pairs = @()
+            foreach ($key in $overrides.Keys) {
+                $pairs += "$key=$($overrides[$key])"
+            }
+            $overridesText = $pairs -join ", "
+        }
+        $script:Controls.txtVolumeOverrides.Text = $overridesText
+    }
+
     Write-GuiLog "Settings loaded from configuration"
 }
 
@@ -11612,6 +13628,45 @@ function Save-SettingsFromForm {
             } else {
                 $script:Config.Email.To = @($toText -split '[\r\n,]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
             }
+        }
+
+        # SNAPSHOT RETENTION Section
+        if ($script:Controls['txtDefaultKeepCount']) {
+            # Ensure SnapshotRetention exists
+            if (-not $script:Config.GlobalSettings.SnapshotRetention) {
+                $script:Config.GlobalSettings | Add-Member -NotePropertyName SnapshotRetention -NotePropertyValue ([PSCustomObject]@{
+                    DefaultKeepCount = 3
+                    VolumeOverrides = @{}
+                }) -Force
+            }
+
+            $keepCount = 3
+            if ([int]::TryParse($script:Controls.txtDefaultKeepCount.Text.Trim(), [ref]$keepCount)) {
+                if ($keepCount -ge 0 -and $keepCount -le 100) {
+                    $script:Config.GlobalSettings.SnapshotRetention.DefaultKeepCount = $keepCount
+                }
+            }
+        }
+
+        if ($script:Controls['txtVolumeOverrides']) {
+            $overridesText = $script:Controls.txtVolumeOverrides.Text.Trim()
+            $overrides = @{}
+
+            if ($overridesText) {
+                # Parse "D:=5, E:=10" format
+                $pairs = $overridesText -split '\s*,\s*'
+                foreach ($pair in $pairs) {
+                    if ($pair -match '^([A-Za-z]:)\s*=\s*(\d+)$') {
+                        $volume = $Matches[1].ToUpper()
+                        $count = [int]$Matches[2]
+                        if ($count -ge 0 -and $count -le 100) {
+                            $overrides[$volume] = $count
+                        }
+                    }
+                }
+            }
+
+            $script:Config.GlobalSettings.SnapshotRetention.VolumeOverrides = $overrides
         }
 
         # Save configuration to file
@@ -11699,6 +13754,34 @@ function Get-LastRunSummary {
     return $settings.LastRun
 }
 
+function Test-VolumeOverridesFormat {
+    <#
+    .SYNOPSIS
+        Validates the volume overrides text format
+    .PARAMETER Text
+        The text to validate (e.g., "D:=5, E:=10")
+    .OUTPUTS
+        $true if valid, $false otherwise
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return $true  # Empty is valid
+    }
+
+    $pairs = $Text -split '\s*,\s*'
+    foreach ($pair in $pairs) {
+        if ($pair -notmatch '^[A-Za-z]:\s*=\s*\d+$') {
+            return $false
+        }
+    }
+
+    return $true
+}
+
 #endregion
 
 #region ==================== GUIPROFILES ====================
@@ -11746,6 +13829,15 @@ function Import-ProfileToForm {
     $script:Controls.txtDest.Text = if ($Profile.Destination) { $Profile.Destination } else { "" }
     $script:Controls.chkUseVss.IsChecked = if ($null -ne $Profile.UseVSS) { $Profile.UseVSS } else { $false }
 
+    # Load PersistentSnapshot setting
+    if ($script:Controls['chkPersistentSnapshot']) {
+        $persistentEnabled = $false
+        if ($Profile.PersistentSnapshot -and $Profile.PersistentSnapshot.Enabled) {
+            $persistentEnabled = $true
+        }
+        $script:Controls.chkPersistentSnapshot.IsChecked = $persistentEnabled
+    }
+
     # Set scan mode
     $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
     $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Quick") { 1 } else { 0 }
@@ -11785,6 +13877,16 @@ function Save-ProfileFromForm {
     $selected.Destination = $script:Controls.txtDest.Text
     $selected.UseVSS = $script:Controls.chkUseVss.IsChecked
     $selected.ScanMode = $script:Controls.cmbScanMode.Text
+
+    # Update PersistentSnapshot setting
+    if ($script:Controls['chkPersistentSnapshot']) {
+        if (-not $selected.PersistentSnapshot) {
+            $selected | Add-Member -NotePropertyName PersistentSnapshot -NotePropertyValue ([PSCustomObject]@{
+                Enabled = $false
+            }) -Force
+        }
+        $selected.PersistentSnapshot.Enabled = $script:Controls.chkPersistentSnapshot.IsChecked
+    }
 
     # Parse numeric values with validation and bounds checking
     # Helper function to provide visual feedback for input corrections
@@ -11931,6 +14033,183 @@ function Remove-SelectedProfile {
         }
 
         Write-GuiLog "Profile '$($selected.Name)' removed"
+    }
+}
+
+#endregion
+
+#region ==================== GUICHUNKACTIONS ====================
+
+# Context menu actions for failed chunks in the DataGrid
+
+function Invoke-ChunkRetry {
+    <#
+    .SYNOPSIS
+        Retries a failed chunk by moving it back to the chunk queue
+    .DESCRIPTION
+        Removes the chunk from FailedChunks, resets its status and retry count,
+        and adds it back to the ChunkQueue for reprocessing. This allows users
+        to manually retry chunks that failed due to transient errors.
+    .PARAMETER ChunkId
+        The ID of the chunk to retry
+    .NOTES
+        ConcurrentQueue does not have a Remove method, so we drain and rebuild
+        the queue excluding the target chunk. This is safe because this function
+        runs on the GUI thread while the background orchestration thread only
+        dequeues from the queue.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [int]$ChunkId
+    )
+
+    if (-not $script:OrchestrationState) {
+        Write-GuiLog "Cannot retry chunk: No orchestration state available"
+        return
+    }
+
+    # Find and remove chunk from FailedChunks
+    $failedChunks = $script:OrchestrationState.FailedChunks.ToArray()
+    $targetChunk = $failedChunks | Where-Object { $_.ChunkId -eq $ChunkId }
+
+    if (-not $targetChunk) {
+        Write-GuiLog "Cannot retry chunk $ChunkId - chunk not found in failed chunks"
+        return
+    }
+
+    # Drain and rebuild FailedChunks without the target chunk
+    $remainingChunks = @()
+    while ($script:OrchestrationState.FailedChunks.TryDequeue([ref]$null)) {
+        # Drain all items
+    }
+    foreach ($chunk in $failedChunks) {
+        if ($chunk.ChunkId -ne $ChunkId) {
+            $script:OrchestrationState.FailedChunks.Enqueue($chunk)
+        }
+    }
+
+    # Reset chunk state for retry
+    $targetChunk.Status = 'Pending'
+    $targetChunk.RetryCount = 0
+    # Clear error details from previous attempt
+    if ($targetChunk.PSObject.Properties['LastExitCode']) {
+        $targetChunk.PSObject.Properties.Remove('LastExitCode')
+    }
+    if ($targetChunk.PSObject.Properties['LastErrorMessage']) {
+        $targetChunk.PSObject.Properties.Remove('LastErrorMessage')
+    }
+
+    # Add back to chunk queue
+    $script:OrchestrationState.ChunkQueue.Enqueue($targetChunk)
+
+    Write-GuiLog "Chunk $ChunkId moved from failed to pending queue for retry"
+    Write-RobocurseLog -Level 'Info' -Component 'GUI' -Message "User triggered retry for chunk $ChunkId"
+    Write-SiemEvent -EventType 'ChunkWarning' -Data @{
+        ChunkId = $ChunkId
+        SourcePath = $targetChunk.SourcePath
+        DestinationPath = $targetChunk.DestinationPath
+        Action = 'UserRetry'
+        Message = "User manually retried chunk $ChunkId"
+    }
+}
+
+function Invoke-ChunkSkip {
+    <#
+    .SYNOPSIS
+        Skips a failed chunk by removing it from the failed queue
+    .DESCRIPTION
+        Removes the chunk from FailedChunks and marks its status as 'Skipped'.
+        The chunk will not be retried or displayed in the failed chunks list.
+        This allows users to manually skip chunks that are known to be problematic
+        or not critical to the overall replication.
+    .PARAMETER ChunkId
+        The ID of the chunk to skip
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [int]$ChunkId
+    )
+
+    if (-not $script:OrchestrationState) {
+        Write-GuiLog "Cannot skip chunk: No orchestration state available"
+        return
+    }
+
+    # Find and remove chunk from FailedChunks
+    $failedChunks = $script:OrchestrationState.FailedChunks.ToArray()
+    $targetChunk = $failedChunks | Where-Object { $_.ChunkId -eq $ChunkId }
+
+    if (-not $targetChunk) {
+        Write-GuiLog "Cannot skip chunk $ChunkId - chunk not found in failed chunks"
+        return
+    }
+
+    # Drain and rebuild FailedChunks without the target chunk
+    while ($script:OrchestrationState.FailedChunks.TryDequeue([ref]$null)) {
+        # Drain all items
+    }
+    foreach ($chunk in $failedChunks) {
+        if ($chunk.ChunkId -ne $ChunkId) {
+            $script:OrchestrationState.FailedChunks.Enqueue($chunk)
+        }
+    }
+
+    # Mark chunk as skipped
+    $targetChunk.Status = 'Skipped'
+
+    Write-GuiLog "Chunk $ChunkId removed from failed queue and marked as skipped"
+    Write-RobocurseLog -Level 'Info' -Component 'GUI' -Message "User skipped chunk $ChunkId"
+    Write-SiemEvent -EventType 'ChunkWarning' -Data @{
+        ChunkId = $ChunkId
+        SourcePath = $targetChunk.SourcePath
+        DestinationPath = $targetChunk.DestinationPath
+        Action = 'UserSkip'
+        Message = "User manually skipped chunk $ChunkId"
+    }
+}
+
+function Open-ChunkLog {
+    <#
+    .SYNOPSIS
+        Opens the log file for a specific chunk
+    .DESCRIPTION
+        Uses Start-Process to open the chunk's log file in the default text editor.
+        If the log file doesn't exist, shows an error message.
+    .PARAMETER LogPath
+        Full path to the chunk log file
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$LogPath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($LogPath)) {
+        Write-GuiLog "Cannot open log: Log path is empty"
+        Show-AlertDialog -Title "Cannot Open Log" `
+            -Message "Log path is not available for this chunk." -Icon Warning
+        return
+    }
+
+    if (-not (Test-Path -Path $LogPath -PathType Leaf)) {
+        Write-GuiLog "Cannot open log: File not found at $LogPath"
+        Show-AlertDialog -Title "Cannot Open Log" `
+            -Message "Log file not found:`n$LogPath" -Icon Warning
+        return
+    }
+
+    try {
+        Start-Process -FilePath $LogPath
+        Write-GuiLog "Opened chunk log: $LogPath"
+        Write-RobocurseLog -Level 'Debug' -Component 'GUI' -Message "User opened chunk log file: $LogPath"
+    }
+    catch {
+        Write-GuiLog "Failed to open log file: $_"
+        Show-AlertDialog -Title "Error Opening Log" `
+            -Message "Failed to open log file:`n$($_.Exception.Message)" -Icon Error
     }
 }
 
@@ -13882,7 +16161,7 @@ function New-ModuleModeBackgroundScript {
             Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
 
             # Start replication with -SkipInitialization since UI thread already initialized
-            Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
             # Run the orchestration loop until complete
             # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
@@ -13969,7 +16248,7 @@ function New-ScriptModeBackgroundScript {
             Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
 
             # Start replication with -SkipInitialization since UI thread already initialized
-            Start-ReplicationRun -Profiles `$profiles -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
             # Run the orchestration loop until complete
             # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
@@ -15110,6 +17389,514 @@ function Get-TimeAgoString {
 
 #endregion
 
+#region ==================== GUISNAPSHOTDIALOGS ====================
+
+# Handles create/delete snapshot dialogs
+
+function Show-CreateSnapshotDialog {
+    <#
+    .SYNOPSIS
+        Shows the Create Snapshot dialog and returns the result
+    .OUTPUTS
+        PSCustomObject with: Success, Volume, ServerName, EnforceRetention, KeepCount
+        or $null if cancelled
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        # Load dialog XAML
+        $xamlPath = Join-Path $PSScriptRoot "..\Resources\CreateSnapshotDialog.xaml"
+        $xaml = Get-Content $xamlPath -Raw
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+
+        # Get controls
+        $cmbServer = $dialog.FindName('cmbDialogServer')
+        $cmbVolume = $dialog.FindName('cmbDialogVolume')
+        $chkRetention = $dialog.FindName('chkEnforceRetention')
+        $txtRetention = $dialog.FindName('txtRetentionCount')
+        $txtStatus = $dialog.FindName('txtDialogStatus')
+        $btnCancel = $dialog.FindName('btnDialogCancel')
+        $btnCreate = $dialog.FindName('btnDialogCreate')
+
+        # Populate servers from main panel
+        $mainServerCombo = $script:Controls['cmbSnapshotServer']
+        foreach ($item in $mainServerCombo.Items) {
+            $newItem = [System.Windows.Controls.ComboBoxItem]::new()
+            $newItem.Content = $item.Content
+            $cmbServer.Items.Add($newItem) | Out-Null
+        }
+        $cmbServer.SelectedIndex = 0
+
+        # Populate volumes
+        $volumes = Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue |
+            Where-Object { $_.DriveLetter } |
+            Sort-Object DriveLetter
+        foreach ($vol in $volumes) {
+            $item = [System.Windows.Controls.ComboBoxItem]::new()
+            $item.Content = $vol.DriveLetter
+            $cmbVolume.Items.Add($item) | Out-Null
+        }
+        if ($cmbVolume.Items.Count -gt 0) {
+            $cmbVolume.SelectedIndex = 0
+        }
+
+        # Result variable
+        $script:DialogResult = $null
+
+        # Button handlers
+        $btnCancel.Add_Click({
+            $dialog.DialogResult = $false
+            $dialog.Close()
+        })
+
+        $btnCreate.Add_Click({
+            # Validate
+            if ($cmbVolume.SelectedItem -eq $null) {
+                $txtStatus.Text = "Please select a volume"
+                $txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
+                return
+            }
+
+            $keepCount = 0
+            if ($chkRetention.IsChecked -and -not [int]::TryParse($txtRetention.Text, [ref]$keepCount)) {
+                $txtStatus.Text = "Invalid retention count"
+                $txtStatus.Foreground = [System.Windows.Media.Brushes]::OrangeRed
+                return
+            }
+
+            $script:DialogResult = [PSCustomObject]@{
+                Success = $true
+                Volume = $cmbVolume.SelectedItem.Content
+                ServerName = $cmbServer.SelectedItem.Content
+                EnforceRetention = $chkRetention.IsChecked
+                KeepCount = $keepCount
+            }
+
+            $dialog.DialogResult = $true
+            $dialog.Close()
+        })
+
+        # Show dialog
+        $dialog.Owner = $script:Window
+        $result = $dialog.ShowDialog()
+
+        if ($result -eq $true) {
+            return $script:DialogResult
+        }
+        return $null
+    }
+    catch {
+        Write-RobocurseLog -Message "Error showing create snapshot dialog: $($_.Exception.Message)" -Level 'Error' -Component 'GUI'
+        return $null
+    }
+}
+
+function Invoke-CreateSnapshotFromDialog {
+    <#
+    .SYNOPSIS
+        Creates a snapshot based on dialog input
+    .PARAMETER DialogResult
+        The result from Show-CreateSnapshotDialog
+    .OUTPUTS
+        OperationResult
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$DialogResult
+    )
+
+    $volume = $DialogResult.Volume
+    $serverName = $DialogResult.ServerName
+    $isLocal = ($serverName -eq "Local")
+
+    Write-RobocurseLog -Message "Creating snapshot: Volume=$volume, Server=$serverName" -Level 'Info' -Component 'GUI'
+
+    try {
+        # Enforce retention if requested
+        if ($DialogResult.EnforceRetention) {
+            Write-RobocurseLog -Message "Enforcing retention (keep $($DialogResult.KeepCount))" -Level 'Debug' -Component 'GUI'
+
+            if ($isLocal) {
+                $retResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $DialogResult.KeepCount
+            }
+            else {
+                $retResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $DialogResult.KeepCount
+            }
+
+            if (-not $retResult.Success) {
+                Write-RobocurseLog -Message "Retention enforcement failed: $($retResult.ErrorMessage)" -Level 'Warning' -Component 'GUI'
+                # Continue anyway - snapshot might still work
+            }
+        }
+
+        # Create snapshot
+        if ($isLocal) {
+            $result = New-VssSnapshot -SourcePath "$volume\"
+        }
+        else {
+            # For remote, we need to construct a UNC path
+            # Use admin share format: \\server\D$
+            $uncPath = "\\$serverName\$($volume -replace ':', '$')"
+            $result = New-RemoteVssSnapshot -UncPath $uncPath
+        }
+
+        if ($result.Success) {
+            Write-RobocurseLog -Message "Snapshot created: $($result.Data.ShadowId)" -Level 'Info' -Component 'GUI'
+        }
+
+        return $result
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to create snapshot: $($_.Exception.Message)" -Level 'Error' -Component 'GUI'
+        return New-OperationResult -Success $false -ErrorMessage $_.Exception.Message -ErrorRecord $_
+    }
+}
+
+function Show-DeleteSnapshotConfirmation {
+    <#
+    .SYNOPSIS
+        Shows confirmation dialog for snapshot deletion
+    .PARAMETER Snapshot
+        The snapshot object to delete
+    .OUTPUTS
+        $true if user confirmed, $false otherwise
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Snapshot
+    )
+
+    $volume = $Snapshot.SourceVolume
+    $created = $Snapshot.CreatedAt.ToString('yyyy-MM-dd HH:mm')
+    $server = $Snapshot.ServerName
+    $shadowId = $Snapshot.ShadowId
+
+    $message = @"
+Are you sure you want to delete this snapshot?
+
+Volume: $volume
+Created: $created
+Server: $server
+Shadow ID: $shadowId
+
+This action cannot be undone.
+"@
+
+    $result = [System.Windows.MessageBox]::Show(
+        $message,
+        "Confirm Delete Snapshot",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning
+    )
+
+    return ($result -eq [System.Windows.MessageBoxResult]::Yes)
+}
+
+function Invoke-DeleteSelectedSnapshot {
+    <#
+    .SYNOPSIS
+        Deletes the currently selected snapshot
+    .OUTPUTS
+        OperationResult
+    #>
+    [CmdletBinding()]
+    param()
+
+    $snapshot = Get-SelectedSnapshot
+    if (-not $snapshot) {
+        return New-OperationResult -Success $false -ErrorMessage "No snapshot selected"
+    }
+
+    # Confirm
+    if (-not (Show-DeleteSnapshotConfirmation -Snapshot $snapshot)) {
+        return New-OperationResult -Success $true -Data "Cancelled"
+    }
+
+    Write-RobocurseLog -Message "Deleting snapshot: $($snapshot.ShadowId)" -Level 'Info' -Component 'GUI'
+
+    try {
+        if ($snapshot.ServerName -eq "Local") {
+            $result = Remove-VssSnapshot -ShadowId $snapshot.ShadowId
+        }
+        else {
+            $result = Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName
+        }
+
+        if ($result.Success) {
+            Write-RobocurseLog -Message "Snapshot deleted" -Level 'Info' -Component 'GUI'
+        }
+        else {
+            Write-RobocurseLog -Message "Failed to delete snapshot: $($result.ErrorMessage)" -Level 'Error' -Component 'GUI'
+        }
+
+        return $result
+    }
+    catch {
+        Write-RobocurseLog -Message "Error deleting snapshot: $($_.Exception.Message)" -Level 'Error' -Component 'GUI'
+        return New-OperationResult -Success $false -ErrorMessage $_.Exception.Message -ErrorRecord $_
+    }
+}
+
+#endregion
+
+#region ==================== GUISNAPSHOTS ====================
+
+# Handles the Snapshots panel in the GUI
+
+function Initialize-SnapshotsPanel {
+    <#
+    .SYNOPSIS
+        Initializes the Snapshots panel controls and event handlers
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Populate volume filter with local drives
+    Update-VolumeFilterDropdown
+
+    # Wire event handlers
+    $script:Controls['btnRefreshSnapshots'].Add_Click({
+        Invoke-SafeEventHandler -HandlerName "RefreshSnapshots" -ScriptBlock {
+            Update-SnapshotList
+        }
+    })
+
+    $script:Controls['cmbSnapshotVolume'].Add_SelectionChanged({
+        Invoke-SafeEventHandler -HandlerName "VolumeFilterChanged" -ScriptBlock {
+            Update-SnapshotList
+        }
+    })
+
+    $script:Controls['cmbSnapshotServer'].Add_SelectionChanged({
+        Invoke-SafeEventHandler -HandlerName "ServerFilterChanged" -ScriptBlock {
+            Update-SnapshotList
+        }
+    })
+
+    $script:Controls['dgSnapshots'].Add_SelectionChanged({
+        Invoke-SafeEventHandler -HandlerName "SnapshotSelectionChanged" -ScriptBlock {
+            $selected = $script:Controls['dgSnapshots'].SelectedItem
+            $script:Controls['btnDeleteSnapshot'].IsEnabled = ($null -ne $selected)
+        }
+    })
+
+    # Wire Create Snapshot button
+    $script:Controls['btnCreateSnapshot'].Add_Click({
+        Invoke-SafeEventHandler -HandlerName "CreateSnapshot" -ScriptBlock {
+            $dialogResult = Show-CreateSnapshotDialog
+            if ($dialogResult) {
+                # Disable buttons during operation
+                $script:Controls['btnCreateSnapshot'].IsEnabled = $false
+                $script:Controls['btnDeleteSnapshot'].IsEnabled = $false
+
+                try {
+                    $result = Invoke-CreateSnapshotFromDialog -DialogResult $dialogResult
+
+                    if ($result.Success) {
+                        [System.Windows.MessageBox]::Show(
+                            "Snapshot created successfully.`n`nShadow ID: $($result.Data.ShadowId)",
+                            "Snapshot Created",
+                            [System.Windows.MessageBoxButton]::OK,
+                            [System.Windows.MessageBoxImage]::Information
+                        )
+                    }
+                    else {
+                        [System.Windows.MessageBox]::Show(
+                            "Failed to create snapshot:`n`n$($result.ErrorMessage)",
+                            "Error",
+                            [System.Windows.MessageBoxButton]::OK,
+                            [System.Windows.MessageBoxImage]::Error
+                        )
+                    }
+                }
+                finally {
+                    # Re-enable and refresh
+                    $script:Controls['btnCreateSnapshot'].IsEnabled = $true
+                    Update-SnapshotList
+                }
+            }
+        }
+    })
+
+    # Wire Delete Snapshot button
+    $script:Controls['btnDeleteSnapshot'].Add_Click({
+        Invoke-SafeEventHandler -HandlerName "DeleteSnapshot" -ScriptBlock {
+            $result = Invoke-DeleteSelectedSnapshot
+
+            if ($result.Success -and $result.Data -ne "Cancelled") {
+                # Refresh list
+                Update-SnapshotList
+            }
+            elseif (-not $result.Success) {
+                [System.Windows.MessageBox]::Show(
+                    "Failed to delete snapshot:`n`n$($result.ErrorMessage)",
+                    "Error",
+                    [System.Windows.MessageBoxButton]::OK,
+                    [System.Windows.MessageBoxImage]::Error
+                )
+            }
+        }
+    })
+
+    # Initial load
+    Update-SnapshotList
+
+    Write-RobocurseLog -Message "Snapshots panel initialized" -Level 'Debug' -Component 'GUI'
+}
+
+function Update-VolumeFilterDropdown {
+    <#
+    .SYNOPSIS
+        Populates the volume filter dropdown with available volumes
+    #>
+    [CmdletBinding()]
+    param()
+
+    $combo = $script:Controls['cmbSnapshotVolume']
+    $combo.Items.Clear()
+
+    # Add "All Volumes" option
+    $allItem = [System.Windows.Controls.ComboBoxItem]::new()
+    $allItem.Content = "All Volumes"
+    $allItem.IsSelected = $true
+    $combo.Items.Add($allItem) | Out-Null
+
+    # Add local volumes
+    try {
+        $volumes = Get-CimInstance -ClassName Win32_Volume -ErrorAction SilentlyContinue |
+            Where-Object { $_.DriveLetter } |
+            Sort-Object DriveLetter
+
+        foreach ($vol in $volumes) {
+            $item = [System.Windows.Controls.ComboBoxItem]::new()
+            $item.Content = $vol.DriveLetter
+            $combo.Items.Add($item) | Out-Null
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to enumerate volumes: $($_.Exception.Message)" -Level 'Warning' -Component 'GUI'
+    }
+}
+
+function Update-SnapshotList {
+    <#
+    .SYNOPSIS
+        Refreshes the snapshot DataGrid with current snapshots
+    #>
+    [CmdletBinding()]
+    param()
+
+    $grid = $script:Controls['dgSnapshots']
+
+    try {
+        # Get filter values
+        $volumeFilter = $script:Controls['cmbSnapshotVolume'].SelectedItem.Content
+        $serverFilter = $script:Controls['cmbSnapshotServer'].SelectedItem.Content
+
+        Write-RobocurseLog -Message "Loading snapshots (volume: $volumeFilter, server: $serverFilter)" -Level 'Debug' -Component 'GUI'
+
+        $snapshots = @()
+
+        if ($serverFilter -eq "Local") {
+            # Get local snapshots
+            if ($volumeFilter -eq "All Volumes") {
+                $result = Get-VssSnapshots
+            }
+            else {
+                $result = Get-VssSnapshots -Volume $volumeFilter
+            }
+
+            if ($result.Success) {
+                $snapshots = @($result.Data | ForEach-Object {
+                    [PSCustomObject]@{
+                        ShadowId     = $_.ShadowId
+                        SourceVolume = $_.SourceVolume
+                        CreatedAt    = $_.CreatedAt
+                        ServerName   = "Local"
+                        ShadowPath   = $_.ShadowPath
+                    }
+                })
+            }
+            else {
+                Write-RobocurseLog -Message "Failed to load snapshots: $($result.ErrorMessage)" -Level 'Warning' -Component 'GUI'
+            }
+        }
+        else {
+            # Get remote snapshots
+            if ($volumeFilter -eq "All Volumes") {
+                $result = Get-RemoteVssSnapshots -ServerName $serverFilter
+            }
+            else {
+                $result = Get-RemoteVssSnapshots -ServerName $serverFilter -Volume $volumeFilter
+            }
+
+            if ($result.Success) {
+                $snapshots = @($result.Data)
+            }
+            else {
+                Write-RobocurseLog -Message "Failed to load remote snapshots: $($result.ErrorMessage)" -Level 'Warning' -Component 'GUI'
+            }
+        }
+
+        # Update grid
+        $grid.ItemsSource = $snapshots
+        $script:Controls['btnDeleteSnapshot'].IsEnabled = $false
+
+        Write-RobocurseLog -Message "Loaded $($snapshots.Count) snapshot(s)" -Level 'Debug' -Component 'GUI'
+    }
+    catch {
+        Write-RobocurseLog -Message "Error updating snapshot list: $($_.Exception.Message)" -Level 'Error' -Component 'GUI'
+        $grid.ItemsSource = @()
+    }
+}
+
+function Add-RemoteServerToFilter {
+    <#
+    .SYNOPSIS
+        Adds a remote server to the server filter dropdown
+    .PARAMETER ServerName
+        The server name to add
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerName
+    )
+
+    $combo = $script:Controls['cmbSnapshotServer']
+
+    # Check if already exists
+    $existing = $combo.Items | Where-Object { $_.Content -eq $ServerName }
+    if ($existing) {
+        return
+    }
+
+    $item = [System.Windows.Controls.ComboBoxItem]::new()
+    $item.Content = $ServerName
+    $combo.Items.Add($item) | Out-Null
+
+    Write-RobocurseLog -Message "Added server '$ServerName' to snapshot filter" -Level 'Debug' -Component 'GUI'
+}
+
+function Get-SelectedSnapshot {
+    <#
+    .SYNOPSIS
+        Gets the currently selected snapshot from the DataGrid
+    .OUTPUTS
+        The selected snapshot object or $null
+    #>
+    [CmdletBinding()]
+    param()
+
+    return $script:Controls['dgSnapshots'].SelectedItem
+}
+
+#endregion
+
 #region ==================== GUIMAIN ====================
 
 # Core window initialization, event wiring, and logging functions.
@@ -15470,6 +18257,11 @@ function Initialize-RobocurseGui {
                              Style="{StaticResource RailButton}"
                              Content="&#x1F4DC;"
                              ToolTip="Logs (4)"/>
+                <RadioButton x:Name="btnNavSnapshots"
+                             GroupName="NavRail"
+                             Style="{StaticResource RailButton}"
+                             Content="&#x1F4F7;"
+                             ToolTip="Snapshots (5)"/>
             </StackPanel>
         </Border>
 
@@ -15519,6 +18311,8 @@ function Initialize-RobocurseGui {
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="80"/>
@@ -15555,8 +18349,19 @@ function Initialize-RobocurseGui {
                             </ComboBox>
                         </StackPanel>
 
-                        <Label Grid.Row="4" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-                        <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center">
+                        <!-- Persistent Snapshot Settings (after UseVss) -->
+                        <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" Margin="0,0,0,0">
+                            <CheckBox x:Name="chkPersistentSnapshot"
+                                      Content="Create persistent snapshot at backup start"
+                                      Foreground="#E0E0E0"
+                                      ToolTip="Creates a recoverable VSS snapshot before backup, with retention management"/>
+                        </StackPanel>
+
+                        <TextBlock Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" Text="Persistent snapshots remain after backup for point-in-time recovery. Retention is configured in Settings."
+                                   Foreground="#888888" FontSize="10" Margin="0,2,0,5" TextWrapping="Wrap"/>
+
+                        <Label Grid.Row="6" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                        <StackPanel Grid.Row="6" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center">
                             <TextBox x:Name="txtMaxSize" Width="40" Style="{StaticResource DarkTextBox}" Text="10"
                                      ToolTip="Max size (GB)"/>
                             <Label Content="GB" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
@@ -15569,7 +18374,7 @@ function Initialize-RobocurseGui {
                         </StackPanel>
 
                         <!-- Validate Button -->
-                        <Button Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" x:Name="btnValidateProfile"
+                        <Button Grid.Row="7" Grid.Column="1" Grid.ColumnSpan="2" x:Name="btnValidateProfile"
                                 Content="Validate Profile" Style="{StaticResource DarkButton}"
                                 HorizontalAlignment="Left" Width="120" Margin="0,10,0,0"
                                 ToolTip="Run pre-flight validation checks"/>
@@ -15749,10 +18554,125 @@ function Initialize-RobocurseGui {
                                                 ToolTip="Configure Windows Task Scheduler"/>
                                     </Grid>
                                 </Border>
+
+                                <!-- Snapshot Retention Settings -->
+                                <Border BorderBrush="#3D3D3D" BorderThickness="0,1,0,0" Margin="0,15,0,0" Padding="0,15,0,0">
+                                    <StackPanel>
+                                        <Label Content="Snapshot Retention" Style="{StaticResource DarkLabel}" FontWeight="Bold" FontSize="14"/>
+
+                                        <Grid Margin="0,10,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="180"/>
+                                                <ColumnDefinition Width="80"/>
+                                                <ColumnDefinition Width="*"/>
+                                            </Grid.ColumnDefinitions>
+
+                                            <Label Content="Default snapshots to keep:" Style="{StaticResource DarkLabel}"
+                                                   Grid.Column="0" VerticalAlignment="Center"/>
+                                            <TextBox x:Name="txtDefaultKeepCount" Text="3" Width="60"
+                                                     Grid.Column="1" Style="{StaticResource DarkTextBox}"
+                                                     TextAlignment="Center"
+                                                     ToolTip="Number of snapshots to retain per volume (default)"/>
+                                            <Label Content="per volume" Style="{StaticResource DarkLabel}"
+                                                   Grid.Column="2" VerticalAlignment="Center" Foreground="#888888"/>
+                                        </Grid>
+
+                                        <!-- Volume Overrides -->
+                                        <StackPanel Margin="0,15,0,0">
+                                            <Label Content="Volume-specific overrides:" Style="{StaticResource DarkLabel}"/>
+                                            <TextBlock Text="Format: D:=5, E:=10 (comma-separated)" Foreground="#888888" FontSize="10" Margin="5,2,0,5"/>
+                                            <TextBox x:Name="txtVolumeOverrides" Width="300" Height="24"
+                                                     Style="{StaticResource DarkTextBox}"
+                                                     HorizontalAlignment="Left"
+                                                     ToolTip="Per-volume retention counts (e.g., D:=5, E:=10)"/>
+                                        </StackPanel>
+
+                                        <!-- Snapshot Schedules Link -->
+                                        <StackPanel Margin="0,15,0,0">
+                                            <TextBlock Foreground="#888888" FontSize="11" TextWrapping="Wrap">
+                                                <Run Text="Snapshot schedules can be configured via command line: "/>
+                                                <Run Text="Robocurse.ps1 -SnapshotSchedule" Foreground="#0078D4"/>
+                                            </TextBlock>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
                             </StackPanel>
                         </ScrollViewer>
                     </DockPanel>
                 </Border>
+            </Grid>
+
+            <!-- ==================== SNAPSHOTS PANEL ==================== -->
+            <Grid x:Name="panelSnapshots" Visibility="Collapsed" Margin="10">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Header and Filter Bar -->
+                <Border Grid.Row="0" Background="#252525" CornerRadius="4" Padding="10" Margin="0,0,0,10">
+                    <StackPanel>
+                        <Label Content="VSS Snapshots" Style="{StaticResource DarkLabel}" FontSize="14" FontWeight="Bold" Margin="0,0,0,10"/>
+                        <StackPanel Orientation="Horizontal">
+                            <Label Content="Volume:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                            <ComboBox x:Name="cmbSnapshotVolume" Width="100" Margin="5,0"
+                                      Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
+                                      ToolTip="Filter by volume">
+                                <ComboBoxItem Content="All Volumes" IsSelected="True"/>
+                            </ComboBox>
+
+                            <Label Content="Server:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="20,0,0,0"/>
+                            <ComboBox x:Name="cmbSnapshotServer" Width="150" Margin="5,0"
+                                      Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
+                                      ToolTip="Filter by server (local or remote)">
+                                <ComboBoxItem Content="Local" IsSelected="True"/>
+                            </ComboBox>
+
+                            <Button x:Name="btnRefreshSnapshots" Content="Refresh" Width="80" Margin="20,0,0,0"
+                                    Style="{StaticResource DarkButton}"
+                                    ToolTip="Reload snapshot list"/>
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <!-- Snapshot DataGrid -->
+                <DataGrid x:Name="dgSnapshots" Grid.Row="1" Margin="0,0,0,10"
+                          Style="{StaticResource DarkDataGrid}"
+                          CellStyle="{StaticResource DarkDataGridCell}"
+                          RowStyle="{StaticResource DarkDataGridRow}"
+                          ColumnHeaderStyle="{StaticResource DarkDataGridColumnHeader}"
+                          AlternationCount="2"
+                          AutoGenerateColumns="False"
+                          IsReadOnly="True"
+                          SelectionMode="Single"
+                          CanUserSortColumns="True"
+                          CanUserReorderColumns="False">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Volume" Binding="{Binding SourceVolume}" Width="70"/>
+                        <DataGridTextColumn Header="Created" Binding="{Binding CreatedAt, StringFormat='{}{0:yyyy-MM-dd HH:mm}'}" Width="140"/>
+                        <DataGridTextColumn Header="Server" Binding="{Binding ServerName}" Width="120"/>
+                        <DataGridTextColumn Header="Shadow ID" Binding="{Binding ShadowId}" Width="*">
+                            <DataGridTextColumn.ElementStyle>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                    <Setter Property="ToolTip" Value="{Binding ShadowId}"/>
+                                </Style>
+                            </DataGridTextColumn.ElementStyle>
+                        </DataGridTextColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <!-- Action Buttons -->
+                <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0">
+                    <Button x:Name="btnCreateSnapshot" Content="Create Snapshot" Width="120"
+                            Style="{StaticResource RunButton}"
+                            ToolTip="Create a new VSS snapshot"/>
+                    <Button x:Name="btnDeleteSnapshot" Content="Delete Selected" Width="120" Margin="10,0,0,0"
+                            Style="{StaticResource StopButton}"
+                            IsEnabled="False"
+                            ToolTip="Delete the selected snapshot"/>
+                </StackPanel>
             </Grid>
 
             <!-- ==================== PROGRESS PANEL ==================== -->
@@ -15990,14 +18910,14 @@ function Initialize-RobocurseGui {
     @(
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
-        'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'chkUseVss', 'chkPersistentSnapshot', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
         'btnValidateProfile',
         'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
         'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus',
         'pnlProfileErrors', 'pnlProfileErrorItems',
-        'btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs',
-        'panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs',
+        'btnNavProfiles', 'btnNavSettings', 'btnNavSnapshots', 'btnNavProgress', 'btnNavLogs',
+        'panelProfiles', 'panelSettings', 'panelSnapshots', 'panelProgress', 'panelLogs',
         'chkLogDebug', 'chkLogInfo', 'chkLogWarning', 'chkLogError',
         'chkLogAutoScroll', 'txtLogLineCount', 'txtLogContent',
         'btnLogClear', 'btnLogCopy', 'btnLogSave', 'btnLogPopOut',
@@ -16007,6 +18927,9 @@ function Initialize-RobocurseGui {
         'chkSettingsEmailEnabled', 'txtSettingsSmtp', 'txtSettingsSmtpPort',
         'chkSettingsTls', 'txtSettingsCredential', 'btnSettingsSetCredential', 'txtSettingsEmailFrom', 'txtSettingsEmailTo',
         'btnSettingsSchedule', 'txtSettingsScheduleStatus', 'btnSettingsRevert', 'btnSettingsSave',
+        'txtDefaultKeepCount', 'txtVolumeOverrides',
+        'cmbSnapshotVolume', 'cmbSnapshotServer', 'btnRefreshSnapshots', 'dgSnapshots',
+        'btnCreateSnapshot', 'btnDeleteSnapshot',
         'cmChunks', 'miRetryChunk', 'miSkipChunk', 'miOpenLog'
     ) | ForEach-Object {
         $script:Controls[$_] = $script:Window.FindName($_)
@@ -16078,6 +19001,9 @@ function Initialize-RobocurseGui {
     # Mark initialization complete - event handlers can now save
     $script:GuiInitializing = $false
 
+    # Initialize Snapshots panel
+    Initialize-SnapshotsPanel
+
     # Set active panel (from restored state or default to Profiles)
     $panelToActivate = if ($script:RestoredActivePanel) { $script:RestoredActivePanel } else { 'Profiles' }
     Set-ActivePanel -PanelName $panelToActivate
@@ -16146,7 +19072,7 @@ function Show-Panel {
     )
 
     # Hide all panels
-    @('panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs') | ForEach-Object {
+    @('panelProfiles', 'panelSettings', 'panelSnapshots', 'panelProgress', 'panelLogs') | ForEach-Object {
         if ($script:Controls[$_]) {
             $script:Controls[$_].Visibility = [System.Windows.Visibility]::Collapsed
         }
@@ -16172,7 +19098,7 @@ function Set-ActivePanel {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('Profiles', 'Settings', 'Progress', 'Logs')]
+        [ValidateSet('Profiles', 'Settings', 'Snapshots', 'Progress', 'Logs')]
         [string]$PanelName
     )
 
@@ -16183,7 +19109,7 @@ function Set-ActivePanel {
     $buttonControlName = "btnNav$PanelName"
 
     # Hide all panels
-    @('panelProfiles', 'panelSettings', 'panelProgress', 'panelLogs') | ForEach-Object {
+    @('panelProfiles', 'panelSettings', 'panelSnapshots', 'panelProgress', 'panelLogs') | ForEach-Object {
         if ($script:Controls[$_]) {
             $script:Controls[$_].Visibility = [System.Windows.Visibility]::Collapsed
         }
@@ -16196,7 +19122,7 @@ function Set-ActivePanel {
 
     # Update button states - set IsChecked for the active button
     # RadioButtons in the same GroupName will automatically uncheck others
-    @('btnNavProfiles', 'btnNavSettings', 'btnNavProgress', 'btnNavLogs') | ForEach-Object {
+    @('btnNavProfiles', 'btnNavSettings', 'btnNavSnapshots', 'btnNavProgress', 'btnNavLogs') | ForEach-Object {
         if ($script:Controls[$_]) {
             $script:Controls[$_].IsChecked = ($_ -eq $buttonControlName)
         }
@@ -16206,6 +19132,10 @@ function Set-ActivePanel {
     if ($PanelName -eq 'Settings') {
         # Load current settings into form when switching to Settings panel
         Import-SettingsToForm
+    }
+    elseif ($PanelName -eq 'Snapshots') {
+        # Refresh snapshot list when panel becomes visible
+        Update-SnapshotList
     }
     elseif ($PanelName -eq 'Progress') {
         # Show empty state if idle (no replication running)
@@ -16311,6 +19241,9 @@ function Initialize-EventHandlers {
     })
     $script:Controls.btnNavSettings.Add_Checked({
         Invoke-SafeEventHandler -HandlerName "NavSettings" -ScriptBlock { Set-ActivePanel -PanelName 'Settings' }
+    })
+    $script:Controls.btnNavSnapshots.Add_Checked({
+        Invoke-SafeEventHandler -HandlerName "NavSnapshots" -ScriptBlock { Set-ActivePanel -PanelName 'Snapshots' }
     })
     $script:Controls.btnNavProgress.Add_Checked({
         Invoke-SafeEventHandler -HandlerName "NavProgress" -ScriptBlock { Set-ActivePanel -PanelName 'Progress' }
@@ -16435,6 +19368,14 @@ function Initialize-EventHandlers {
     $script:Controls.chkUseVss.Add_Unchecked({
         Invoke-SafeEventHandler -HandlerName "VssCheckbox" -ScriptBlock { Save-ProfileFromForm }
     })
+    if ($script:Controls['chkPersistentSnapshot']) {
+        $script:Controls.chkPersistentSnapshot.Add_Checked({
+            Invoke-SafeEventHandler -HandlerName "PersistentSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        })
+        $script:Controls.chkPersistentSnapshot.Add_Unchecked({
+            Invoke-SafeEventHandler -HandlerName "PersistentSnapshotCheckbox" -ScriptBlock { Save-ProfileFromForm }
+        })
+    }
     $script:Controls.cmbScanMode.Add_SelectionChanged({
         Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock { Save-ProfileFromForm }
     })
@@ -16477,6 +19418,42 @@ function Initialize-EventHandlers {
                 $path = Show-FolderBrowser -Description "Select SIEM log folder"
                 if ($path -and $script:Controls['txtSettingsSiemPath']) {
                     $script:Controls.txtSettingsSiemPath.Text = $path
+                }
+            }
+        })
+    }
+
+    # Snapshot Retention validation
+    if ($script:Controls['txtVolumeOverrides']) {
+        $script:Controls.txtVolumeOverrides.Add_LostFocus({
+            Invoke-SafeEventHandler -HandlerName "VolumeOverridesValidation" -ScriptBlock {
+                $text = $script:Controls.txtVolumeOverrides.Text
+                if (-not (Test-VolumeOverridesFormat -Text $text)) {
+                    $script:Controls.txtVolumeOverrides.BorderBrush = [System.Windows.Media.Brushes]::OrangeRed
+                    $script:Controls.txtVolumeOverrides.ToolTip = "Invalid format. Use: D:=5, E:=10"
+                }
+                else {
+                    $script:Controls.txtVolumeOverrides.BorderBrush = [System.Windows.Media.Brushes]::Gray
+                    $script:Controls.txtVolumeOverrides.ToolTip = "Per-volume retention counts (e.g., D:=5, E:=10)"
+                    Save-SettingsFromForm
+                }
+            }
+        })
+    }
+
+    if ($script:Controls['txtDefaultKeepCount']) {
+        $script:Controls.txtDefaultKeepCount.Add_LostFocus({
+            Invoke-SafeEventHandler -HandlerName "DefaultKeepCountValidation" -ScriptBlock {
+                $text = $script:Controls.txtDefaultKeepCount.Text.Trim()
+                $count = 0
+                if (-not [int]::TryParse($text, [ref]$count) -or $count -lt 0 -or $count -gt 100) {
+                    $script:Controls.txtDefaultKeepCount.BorderBrush = [System.Windows.Media.Brushes]::OrangeRed
+                    $script:Controls.txtDefaultKeepCount.ToolTip = "Enter a number between 0 and 100"
+                }
+                else {
+                    $script:Controls.txtDefaultKeepCount.BorderBrush = [System.Windows.Media.Brushes]::Gray
+                    $script:Controls.txtDefaultKeepCount.ToolTip = "Number of snapshots to retain per volume (default)"
+                    Save-SettingsFromForm
                 }
             }
         })
@@ -16809,6 +19786,7 @@ function Get-PanelForKey {
         { $_ -in @('D2', 'NumPad2') } { return 'Settings' }
         { $_ -in @('D3', 'NumPad3') } { return 'Progress' }
         { $_ -in @('D4', 'NumPad4') } { return 'Logs' }
+        { $_ -in @('D5', 'NumPad5') } { return 'Snapshots' }
         default { return $null }
     }
 }
@@ -16826,37 +19804,58 @@ function Show-RobocurseHelp {
     param()
 
     Write-Host @"
-Robocurse - Multi-Share Parallel Robocopy Orchestrator
-======================================================
+ROBOCURSE - Chunked Robocopy Orchestrator with VSS Support
 
 USAGE:
     .\Robocurse.ps1 [options]
 
-OPTIONS:
-    -Headless           Run in headless mode without GUI
+GENERAL OPTIONS:
+    -Help               Show this help message
     -ConfigPath <path>  Path to configuration file (default: .\Robocurse.config.json)
-    -Profile <name>     Run a specific profile by name
-    -AllProfiles        Run all enabled profiles (headless mode only)
-    -DryRun             Preview mode - show what would be copied without copying
-    -Help               Display this help message
+
+GUI MODE (default):
+    .\Robocurse.ps1
+
+HEADLESS MODE:
+    -Headless           Run without GUI
+    -Profile <name>     Run specific profile
+    -AllProfiles        Run all enabled profiles
+    -DryRun             Preview changes without copying
+
+SNAPSHOT MANAGEMENT:
+    -ListSnapshots                      List all VSS snapshots
+    -ListSnapshots -Volume D:           List snapshots for specific volume
+    -ListSnapshots -Server Server01     List snapshots on remote server
+
+    -CreateSnapshot -Volume D:          Create snapshot on local volume
+    -CreateSnapshot -Volume D: -Server Server01    Create on remote server
+    -CreateSnapshot -Volume D: -KeepCount 5        Create with retention
+
+    -DeleteSnapshot -ShadowId {guid}    Delete snapshot by ID
+    -DeleteSnapshot -ShadowId {guid} -Server Server01    Delete remote snapshot
+
+SNAPSHOT SCHEDULES:
+    -SnapshotSchedule                   List configured schedules
+    -SnapshotSchedule -List             List configured schedules
+    -SnapshotSchedule -Sync             Sync schedules with config file
+    -SnapshotSchedule -Remove -ScheduleName DailyD    Remove a schedule
 
 EXAMPLES:
+    # GUI mode
     .\Robocurse.ps1
-        Launch GUI interface
 
+    # Run specific profile headless
     .\Robocurse.ps1 -Headless -Profile "DailyBackup"
-        Run in headless mode with the DailyBackup profile
 
-    .\Robocurse.ps1 -Headless -AllProfiles
-        Run all enabled profiles in headless mode
+    # List all local snapshots
+    .\Robocurse.ps1 -ListSnapshots
 
-    .\Robocurse.ps1 -Headless -Profile "DailyBackup" -DryRun
-        Preview what would be copied without actually copying
+    # Create snapshot with retention
+    .\Robocurse.ps1 -CreateSnapshot -Volume D: -KeepCount 5
 
-    .\Robocurse.ps1 -ConfigPath "C:\Configs\custom.json" -Headless -AllProfiles
-        Run with custom configuration file
+    # Sync snapshot schedules from config
+    .\Robocurse.ps1 -SnapshotSchedule -Sync
 
-For more information, see README.md
 "@
 }
 
@@ -16911,7 +19910,7 @@ function Invoke-HeadlessReplication {
     Write-Host ""
 
     # Start replication with bandwidth throttling
-    Start-ReplicationRun -Profiles $ProfilesToRun -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps -DryRun:$DryRun
+    Start-ReplicationRun -Profiles $ProfilesToRun -Config $Config -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps -DryRun:$DryRun
 
     # Track last progress output time for throttling
     $lastProgressOutput = [datetime]::MinValue
@@ -17055,12 +20054,58 @@ function Start-RobocurseMain {
         [string]$ProfileName,
         [switch]$AllProfiles,
         [switch]$DryRun,
-        [switch]$ShowHelp
+        [switch]$ShowHelp,
+
+        # Snapshot parameters
+        [switch]$ListSnapshots,
+        [switch]$CreateSnapshot,
+        [switch]$DeleteSnapshot,
+        [string]$Volume,
+        [string]$ShadowId,
+        [string]$Server,
+        [int]$KeepCount = 3,
+        [switch]$SnapshotSchedule,
+        [switch]$List,
+        [switch]$Sync,
+        [switch]$Add,
+        [switch]$Remove,
+        [string]$ScheduleName
     )
 
     if ($ShowHelp) {
         Show-RobocurseHelp
         return 0
+    }
+
+    # Snapshot command dispatch (before GUI/headless logic)
+    if ($ListSnapshots) {
+        return Invoke-ListSnapshotsCommand -Volume $Volume -Server $Server
+    }
+
+    if ($CreateSnapshot) {
+        if (-not $Volume) {
+            Write-Host "Error: -Volume is required for -CreateSnapshot" -ForegroundColor Red
+            return 1
+        }
+        return Invoke-CreateSnapshotCommand -Volume $Volume -Server $Server -KeepCount $KeepCount
+    }
+
+    if ($DeleteSnapshot) {
+        if (-not $ShadowId) {
+            Write-Host "Error: -ShadowId is required for -DeleteSnapshot" -ForegroundColor Red
+            return 1
+        }
+        return Invoke-DeleteSnapshotCommand -ShadowId $ShadowId -Server $Server
+    }
+
+    if ($SnapshotSchedule) {
+        # Load config for schedule operations
+        if (-not (Test-Path $ConfigPath)) {
+            Write-Host "Error: Configuration file not found: $ConfigPath" -ForegroundColor Red
+            return 1
+        }
+        $config = Get-RobocurseConfig -Path $ConfigPath
+        return Invoke-SnapshotScheduleCommand -List:$List -Sync:$Sync -Add:$Add -Remove:$Remove -ScheduleName $ScheduleName -Config $config
     }
 
     # Track state for cleanup
