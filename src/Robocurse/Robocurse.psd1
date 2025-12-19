@@ -114,12 +114,22 @@
         'Update-ProgressStats'
         'Get-ETAEstimate'
 
-        # VSS
+        # VSS Local
         'Test-VssPrivileges'
         'New-VssSnapshot'
         'Remove-VssSnapshot'
         'Get-VssPath'
         'Clear-OrphanVssSnapshots'
+        'Get-VssSnapshots'
+        'Invoke-VssRetentionPolicy'
+
+        # VSS Remote
+        'Get-RemoteVssSnapshots'
+        'Invoke-RemoteVssRetentionPolicy'
+        'Get-RemoteVssErrorGuidance'
+
+        # Profile Snapshot Integration
+        'Invoke-ProfilePersistentSnapshot'
 
         # Email
         'Initialize-CredentialManager'
