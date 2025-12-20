@@ -450,6 +450,167 @@ Example operational log entry:
 2024-01-15 14:32:45 [INFO] [Orchestrator] Start-ReplicationJob:1234 - Starting profile 'DailyBackup'
 ```
 
+### SIEM Event Schema
+
+SIEM logs are written in JSON Lines format for easy ingestion by security monitoring tools. Each line is a self-contained JSON object.
+
+#### Event Types
+
+| Event Type | Trigger | Key Fields |
+|------------|---------|------------|
+| `ChunkComplete` | Chunk replication finished | `chunkId`, `profileName`, `filesCopied`, `bytesCopied`, `durationSeconds` |
+| `ChunkError` | Chunk failed with error | `chunkId`, `profileName`, `exitCode`, `errorMessage`, `flags` |
+| `VSSSnapshot` | Snapshot created/deleted | `action`, `volumePath`, `shadowId`, `isRemote` |
+| `EmailSent` | Notification email sent | `recipients`, `status` |
+| `SecurityWarning` | Potential security issue | `type`, `field` (e.g., CRLF injection attempt) |
+| `ConfigChange` | Configuration/credential access | `action`, `source`, `target` |
+
+#### Example Events
+
+**ChunkComplete:**
+```json
+{
+  "timestamp": "2024-01-15T14:32:45.123Z",
+  "eventType": "ChunkComplete",
+  "sessionId": "abc123",
+  "data": {
+    "chunkId": 42,
+    "profileName": "DailyBackup",
+    "sourcePath": "\\\\server\\share\\data",
+    "destinationPath": "D:\\Backups\\data",
+    "exitCode": 1,
+    "exitSeverity": "Success",
+    "durationSeconds": 45.2,
+    "filesCopied": 1250,
+    "filesSkipped": 50,
+    "filesFailed": 0,
+    "bytesCopied": 5368709120,
+    "bytesPerSecond": 118755424,
+    "dryRun": false,
+    "flags": {
+      "filesCopied": true,
+      "extrasDetected": false,
+      "mismatchesFound": false,
+      "copyErrors": false,
+      "fatalError": false
+    }
+  }
+}
+```
+
+**SecurityWarning:**
+```json
+{
+  "timestamp": "2024-01-15T14:32:45.123Z",
+  "eventType": "SecurityWarning",
+  "sessionId": "abc123",
+  "data": {
+    "type": "CRLFInjectionAttempt",
+    "field": "From"
+  }
+}
+```
+
+#### Integration Notes
+
+- **File rotation**: New file created daily (`Audit_YYYY-MM-DD.jsonl`)
+- **Compression**: Files older than 7 days are gzipped (configurable)
+- **Retention**: Files older than 30 days are deleted (configurable)
+- **Path redaction**: Enable `PathRedaction` to obscure sensitive paths in SIEM events
+
+---
+
+## Architecture
+
+### System Overview
+
+```mermaid
+flowchart TB
+    subgraph Entry["Entry Points"]
+        GUI["GUI Mode<br/>(WPF/XAML)"]
+        Headless["Headless Mode<br/>(Scheduled)"]
+        CLI["Snapshot CLI<br/>Management"]
+    end
+
+    subgraph Orchestration["Orchestration Layer"]
+        direction TB
+        ProfileMgr["Profile Manager"]
+        ChunkQueue["Chunk Queue"]
+        CircuitBreaker["Circuit Breaker"]
+        Checkpoint["Checkpoint Recovery"]
+
+        subgraph State["OrchestrationState (C# Thread-Safe)"]
+            ConcurrentQueue["ConcurrentQueue&lt;Chunk&gt;"]
+            ConcurrentDict["ConcurrentDictionary&lt;Jobs&gt;"]
+            Interlocked["Interlocked Counters"]
+            Volatile["Volatile Flags"]
+        end
+    end
+
+    subgraph Core["Core Services"]
+        DirProfile["Directory Profiling<br/>+ Chunking"]
+        Robocopy["Robocopy Wrapper<br/>(Parallel Jobs)"]
+        VSS["VSS Manager<br/>(Local/Remote)"]
+    end
+
+    subgraph Infra["Infrastructure Layer"]
+        Logging["Logging<br/>(3 types)"]
+        Email["Email<br/>Notifier"]
+        Config["Config<br/>Manager"]
+        Health["Health<br/>Monitor"]
+    end
+
+    subgraph External["External Systems"]
+        Source[("Source<br/>Volumes")]
+        Dest[("Destination<br/>Volumes")]
+        SIEM[("SIEM<br/>System")]
+    end
+
+    GUI --> Orchestration
+    Headless --> Orchestration
+    CLI --> Orchestration
+
+    Orchestration --> DirProfile
+    Orchestration --> Robocopy
+    Orchestration --> VSS
+
+    DirProfile --> Infra
+    Robocopy --> Infra
+    VSS --> Infra
+
+    Robocopy --> Source
+    Robocopy --> Dest
+    Logging --> SIEM
+```
+
+### Key Design Patterns
+
+| Pattern | Implementation | Purpose |
+|---------|----------------|---------|
+| **Circuit Breaker** | `OrchestrationCore.ps1` | Stops after 10 consecutive failures |
+| **Exponential Backoff** | `JobManagement.ps1` | Retry delays: 5s → 10s → 20s → ... |
+| **Lazy Loading** | `Initialize-OrchestrationStateType` | Defer C# compilation until needed |
+| **Thread-Safe State** | C# `OrchestrationState` class | Cross-runspace communication |
+| **Atomic File Writes** | VSS tracking, checkpoints | Write-to-temp then rename |
+
+### Module Dependencies
+
+```mermaid
+flowchart LR
+    Main["Main.ps1"] --> Orch["Orchestration"]
+    Main --> Config["Configuration"]
+    Main --> Log["Logging"]
+    Main --> GUI["GUI*<br/>(10 modules)"]
+
+    Orch --> Job["JobManagement"]
+    Orch --> Chunk["Chunking"]
+    Orch --> VSS["VSS<br/>(Core/Local/Remote)"]
+
+    Job --> Robo["Robocopy"]
+    Chunk --> DirProf["DirectoryProfiling"]
+    Log --> SIEM["SIEM Events"]
+```
+
 ---
 
 ## Development
@@ -458,12 +619,20 @@ Example operational log entry:
 
 ```
 src/Robocurse/           # Module source (edit here)
-├── Public/              # 26 function files
-└── Resources/           # XAML templates
+├── Public/              # 32 function files
+├── Resources/           # 10 XAML templates
+├── Robocurse.psm1       # Module loader + 100 constants
+└── Robocurse.psd1       # Module manifest
 
 build/                   # Build tools
 dist/                    # Built monolith (deploy this)
-tests/                   # Pester test suite (2000+ cases)
+tests/                   # Pester test suite
+├── Unit/                # 42 unit test files
+├── Integration/         # 9 integration tests
+└── Enforcement/         # 5 AST-based pattern tests
+scripts/                 # Utility scripts
+schemas/                 # JSON schema for config validation
+docs/                    # Task-based development docs
 ```
 
 ### Building
@@ -480,8 +649,40 @@ Output: `dist/Robocurse.ps1` with SHA256 hash.
 # All tests (recommended - avoids output truncation)
 .\scripts\run-tests.ps1
 
-# Specific tests
+# View test results
+Get-Content $env:TEMP\pester-summary.txt   # Quick pass/fail counts
+Get-Content $env:TEMP\pester-failures.txt  # Failure details if any
+
+# Specific test categories
 Invoke-Pester ./tests/Unit -Output Detailed
+Invoke-Pester ./tests/Integration -Output Detailed
+Invoke-Pester ./tests/Enforcement -Output Detailed
+
+# Code coverage report
+Invoke-Pester ./tests -CodeCoverage src/Robocurse/Public/*.ps1
+```
+
+#### Test Categories
+
+| Category | Count | Purpose |
+|----------|-------|---------|
+| **Unit** | 42 files | Individual function testing with mocks |
+| **Integration** | 9 files | End-to-end workflows, real robocopy |
+| **Enforcement** | 5 files | AST-based pattern verification |
+
+#### Skipped Tests
+
+Some tests require environment setup and are skipped by default:
+
+| Requirement | Environment Variable | Description |
+|-------------|---------------------|-------------|
+| Remote VSS | `ROBOCURSE_TEST_REMOTE_SHARE` | UNC path to test share (e.g., `\\server\share`) |
+| Platform | N/A | VSS/scheduling tests skip on non-Windows |
+
+To run remote VSS tests:
+```powershell
+$env:ROBOCURSE_TEST_REMOTE_SHARE = "\\FileServer\TestShare"
+.\scripts\run-tests.ps1
 ```
 
 ---
@@ -511,17 +712,68 @@ Before replication, Robocurse checks:
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| VSS errors | Run as Administrator; check `Test-VssPrivileges` |
-| Script won't load | `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` |
-| Exit code confusion | Use `Get-RobocopyExitMeaning` for interpretation |
+### Common Issues
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| **VSS errors** | Insufficient privileges | Run as Administrator; verify with `Test-VssPrivileges` |
+| **Script won't load** | Execution policy | `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` |
+| **Exit code confusion** | Robocopy bitmask codes | Use `Get-RobocopyExitMeaning -ExitCode <n>` |
+| **Remote VSS fails** | WinRM not enabled | Run `Enable-PSRemoting -Force` on remote server |
+| **Chunks too large** | Default 10GB limit | Adjust `ChunkMaxSizeGB` in profile config |
+| **Email not sending** | Missing credentials | Run `cmdkey /list:Robocurse-SMTP` to verify |
+| **Circuit breaker trips** | 10+ consecutive failures | Check logs for root cause; may be access/path issue |
+
+### Diagnostic Commands
+
+```powershell
+# Check VSS prerequisites
+Test-VssPrivileges
+
+# Test remote server connectivity
+Test-RemoteVssSupported -UncPath "\\Server\Share"
+
+# Interpret robocopy exit codes
+Get-RobocopyExitMeaning -ExitCode 8
+
+# View active log session
+Get-LogPath -Type Operational
+
+# Check profile cache statistics
+Get-ProfileCacheStatistics
+```
+
+### Log Locations
+
+| Log Type | Location | Format |
+|----------|----------|--------|
+| Operational | `{LogPath}/{date}/Session_*.log` | Timestamped text with caller info |
+| Robocopy | `{LogPath}/{date}/Jobs/Chunk_*.log` | Per-chunk robocopy output |
+| SIEM | `{LogPath}/{date}/Audit_*.jsonl` | JSON Lines for ingestion |
 
 ### Custom Robocopy Path
 
 ```powershell
 Set-RobocopyPath -Path "D:\Tools\robocopy.exe"
 Clear-RobocopyPath  # Revert to auto-detection
+```
+
+### Debug Mode
+
+For verbose debugging, set the log level before running:
+
+```powershell
+# In your script or before calling Robocurse functions
+Set-RobocurseLogLevel -Level 'Debug'
+```
+
+### Path Redaction for Sensitive Environments
+
+To redact server names and paths from logs (useful for sharing logs or SIEM compliance):
+
+```powershell
+Enable-PathRedaction -ServerNames @('PRODSERVER01', 'FILESERVER')
+# Logs will show [UNC]\filename instead of \\PRODSERVER01\share\path\filename
 ```
 
 ---
