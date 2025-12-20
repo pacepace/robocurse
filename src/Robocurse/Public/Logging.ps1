@@ -374,10 +374,11 @@ function Initialize-LogSession {
         [int]$DeleteAfterDays = $script:LogDeleteAfterDays
     )
 
-    # Validate that CompressAfterDays is less than DeleteAfterDays
+    # Validate that CompressAfterDays is less than DeleteAfterDays - auto-adjust if misconfigured
     if ($CompressAfterDays -ge $DeleteAfterDays) {
-        Write-Warning "CompressAfterDays ($CompressAfterDays) should be less than DeleteAfterDays ($DeleteAfterDays). Adjusting CompressAfterDays to $([Math]::Max(1, $DeleteAfterDays - 7))."
-        $CompressAfterDays = [Math]::Max(1, $DeleteAfterDays - 7)
+        $adjustedValue = [Math]::Max(1, $DeleteAfterDays - 7)
+        Write-Verbose "Auto-adjusted CompressAfterDays from $CompressAfterDays to $adjustedValue (must be < DeleteAfterDays: $DeleteAfterDays)"
+        $CompressAfterDays = $adjustedValue
     }
 
     # Generate unique session ID based on timestamp
@@ -738,10 +739,11 @@ function Invoke-LogRotation {
         return
     }
 
-    # Validate that CompressAfterDays is less than DeleteAfterDays
+    # Validate that CompressAfterDays is less than DeleteAfterDays - auto-adjust if misconfigured
     if ($CompressAfterDays -ge $DeleteAfterDays) {
-        Write-Warning "CompressAfterDays ($CompressAfterDays) should be less than DeleteAfterDays ($DeleteAfterDays). Adjusting CompressAfterDays to $([Math]::Max(1, $DeleteAfterDays - 7))."
-        $CompressAfterDays = [Math]::Max(1, $DeleteAfterDays - 7)
+        $adjustedValue = [Math]::Max(1, $DeleteAfterDays - 7)
+        Write-Verbose "Auto-adjusted CompressAfterDays from $CompressAfterDays to $adjustedValue (must be < DeleteAfterDays: $DeleteAfterDays)"
+        $CompressAfterDays = $adjustedValue
     }
 
     $now = Get-Date

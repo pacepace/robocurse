@@ -125,10 +125,10 @@ function Invoke-HeadlessReplication {
     if ($Config.Email -and $Config.Email.Enabled) {
         if (-not (Test-SmtpCredential -Target $Config.Email.CredentialTarget)) {
             Write-Host ""
-            Write-Host "WARNING: Email notifications are enabled but SMTP credentials are not configured!" -ForegroundColor Yellow
-            Write-Host "         Target: $($Config.Email.CredentialTarget)" -ForegroundColor Yellow
-            Write-Host "         Completion emails will NOT be sent until credentials are configured." -ForegroundColor Yellow
-            Write-Host "         Use the GUI 'Settings' panel to configure SMTP credentials." -ForegroundColor Yellow
+            Write-Host "WARNING: Email notifications enabled but SMTP credentials not configured." -ForegroundColor Yellow
+            Write-Host "         Credential target: $($Config.Email.CredentialTarget)" -ForegroundColor Yellow
+            Write-Host "         Headless: Save-SmtpCredential -Target '$($Config.Email.CredentialTarget)'" -ForegroundColor Yellow
+            Write-Host "         GUI: Settings panel > Configure SMTP Credentials" -ForegroundColor Yellow
             Write-Host ""
             Write-RobocurseLog -Message "Email enabled but SMTP credential not found: $($Config.Email.CredentialTarget). Emails will not be sent." -Level 'Warning' -Component 'Email'
         }

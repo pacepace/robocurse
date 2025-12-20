@@ -1,12 +1,23 @@
-{
-    "WindowLeft": 100,
-    "WindowTop": 100,
-    "WindowWidth": 920,
-    "WindowHeight": 644,
-    "WindowState": "Normal",
-    "WorkerCount": 4,
-    "SelectedProfile": null,
-    "ActivePanel": "Profiles",
-    "LastRun": null,
-    "SavedAt": null
+﻿{
+    "WindowLeft":  100,
+    "WindowTop":  100,
+    "WindowWidth":  650,
+    "WindowHeight":  550,
+    "WindowState":  "Normal",
+    "WorkerCount":  4,
+    "SelectedProfile":  null,
+    "ActivePanel":  "Profiles",
+    "LastRun":  {
+                    "ChunksCompleted":  145,
+                    "Timestamp":  "2025-12-19T19:17:10.8888004-08:00",
+                    "ProfilesRun":  [
+                                        "IntegrationProfile"
+                                    ],
+                    "BytesCopied":  5368709120,
+                    "Status":  "PartialFailure",
+                    "Duration":  "02:15:30",
+                    "ChunksTotal":  150,
+                    "ChunksFailed":  5
+                },
+    "SavedAt":  "2025-12-19T19:17:10.9006358-08:00"
 }

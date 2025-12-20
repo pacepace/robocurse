@@ -213,16 +213,16 @@ InModuleScope 'Robocurse' {
         }
 
         Context "CompressAfterDays Validation" {
-            It "Should emit warning when CompressAfterDays >= DeleteAfterDays" {
+            It "Should emit verbose message when CompressAfterDays >= DeleteAfterDays" {
                 # CompressAfterDays should be less than DeleteAfterDays
-                # Use Pester's Should -Invoke to verify Write-Warning is called
-                Mock Write-Warning { }
+                # Auto-adjustment is logged via Write-Verbose (not noisy Write-Warning)
+                Mock Write-Verbose { }
 
                 $null = Initialize-LogSession -LogRoot $script:TestLogRoot `
                     -CompressAfterDays 30 -DeleteAfterDays 30
 
-                Should -Invoke Write-Warning -Times 1 -ParameterFilter {
-                    $Message -match "CompressAfterDays.*should be less than"
+                Should -Invoke Write-Verbose -Times 1 -ParameterFilter {
+                    $Message -match "Auto-adjusted CompressAfterDays"
                 }
             }
 

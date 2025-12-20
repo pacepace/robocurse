@@ -265,25 +265,6 @@ function ConvertFrom-GlobalSettings {
         }
     }
 
-    # Snapshot retention settings (DEPRECATED - now per-profile)
-    # Kept for migration purposes only - new configs should use per-profile sourceSnapshot/destinationSnapshot
-    if ($RawGlobal.snapshotRetention) {
-        Write-Warning "Global snapshotRetention settings are deprecated. Snapshot retention is now configured per-profile using sourceSnapshot and destinationSnapshot. These settings will be used for migration only."
-        $Config.GlobalSettings.SnapshotRetention = [PSCustomObject]@{
-            DefaultKeepCount = if ($RawGlobal.snapshotRetention.defaultKeepCount) {
-                $RawGlobal.snapshotRetention.defaultKeepCount
-            } else { 3 }
-            VolumeOverrides = @{}
-        }
-        if ($RawGlobal.snapshotRetention.volumeOverrides) {
-            $overrides = @{}
-            $RawGlobal.snapshotRetention.volumeOverrides.PSObject.Properties | ForEach-Object {
-                $overrides[$_.Name.ToUpper()] = [int]$_.Value
-            }
-            $Config.GlobalSettings.SnapshotRetention.VolumeOverrides = $overrides
-        }
-    }
-
     # Snapshot schedule settings
     if ($RawGlobal.snapshotSchedules) {
         $schedules = @()

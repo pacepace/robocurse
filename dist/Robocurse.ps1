@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-19 18:00:56
+    Built: 2025-12-19 19:18:23
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -1367,25 +1367,6 @@ function ConvertFrom-GlobalSettings {
         }
     }
 
-    # Snapshot retention settings (DEPRECATED - now per-profile)
-    # Kept for migration purposes only - new configs should use per-profile sourceSnapshot/destinationSnapshot
-    if ($RawGlobal.snapshotRetention) {
-        Write-Warning "Global snapshotRetention settings are deprecated. Snapshot retention is now configured per-profile using sourceSnapshot and destinationSnapshot. These settings will be used for migration only."
-        $Config.GlobalSettings.SnapshotRetention = [PSCustomObject]@{
-            DefaultKeepCount = if ($RawGlobal.snapshotRetention.defaultKeepCount) {
-                $RawGlobal.snapshotRetention.defaultKeepCount
-            } else { 3 }
-            VolumeOverrides = @{}
-        }
-        if ($RawGlobal.snapshotRetention.volumeOverrides) {
-            $overrides = @{}
-            $RawGlobal.snapshotRetention.volumeOverrides.PSObject.Properties | ForEach-Object {
-                $overrides[$_.Name.ToUpper()] = [int]$_.Value
-            }
-            $Config.GlobalSettings.SnapshotRetention.VolumeOverrides = $overrides
-        }
-    }
-
     # Snapshot schedule settings
     if ($RawGlobal.snapshotSchedules) {
         $schedules = @()
@@ -2438,10 +2419,11 @@ function Initialize-LogSession {
         [int]$DeleteAfterDays = $script:LogDeleteAfterDays
     )
 
-    # Validate that CompressAfterDays is less than DeleteAfterDays
+    # Validate that CompressAfterDays is less than DeleteAfterDays - auto-adjust if misconfigured
     if ($CompressAfterDays -ge $DeleteAfterDays) {
-        Write-Warning "CompressAfterDays ($CompressAfterDays) should be less than DeleteAfterDays ($DeleteAfterDays). Adjusting CompressAfterDays to $([Math]::Max(1, $DeleteAfterDays - 7))."
-        $CompressAfterDays = [Math]::Max(1, $DeleteAfterDays - 7)
+        $adjustedValue = [Math]::Max(1, $DeleteAfterDays - 7)
+        Write-Verbose "Auto-adjusted CompressAfterDays from $CompressAfterDays to $adjustedValue (must be < DeleteAfterDays: $DeleteAfterDays)"
+        $CompressAfterDays = $adjustedValue
     }
 
     # Generate unique session ID based on timestamp
@@ -2802,10 +2784,11 @@ function Invoke-LogRotation {
         return
     }
 
-    # Validate that CompressAfterDays is less than DeleteAfterDays
+    # Validate that CompressAfterDays is less than DeleteAfterDays - auto-adjust if misconfigured
     if ($CompressAfterDays -ge $DeleteAfterDays) {
-        Write-Warning "CompressAfterDays ($CompressAfterDays) should be less than DeleteAfterDays ($DeleteAfterDays). Adjusting CompressAfterDays to $([Math]::Max(1, $DeleteAfterDays - 7))."
-        $CompressAfterDays = [Math]::Max(1, $DeleteAfterDays - 7)
+        $adjustedValue = [Math]::Max(1, $DeleteAfterDays - 7)
+        Write-Verbose "Auto-adjusted CompressAfterDays from $CompressAfterDays to $adjustedValue (must be < DeleteAfterDays: $DeleteAfterDays)"
+        $CompressAfterDays = $adjustedValue
     }
 
     $now = Get-Date
@@ -20657,10 +20640,10 @@ function Invoke-HeadlessReplication {
     if ($Config.Email -and $Config.Email.Enabled) {
         if (-not (Test-SmtpCredential -Target $Config.Email.CredentialTarget)) {
             Write-Host ""
-            Write-Host "WARNING: Email notifications are enabled but SMTP credentials are not configured!" -ForegroundColor Yellow
-            Write-Host "         Target: $($Config.Email.CredentialTarget)" -ForegroundColor Yellow
-            Write-Host "         Completion emails will NOT be sent until credentials are configured." -ForegroundColor Yellow
-            Write-Host "         Use the GUI 'Settings' panel to configure SMTP credentials." -ForegroundColor Yellow
+            Write-Host "WARNING: Email notifications enabled but SMTP credentials not configured." -ForegroundColor Yellow
+            Write-Host "         Credential target: $($Config.Email.CredentialTarget)" -ForegroundColor Yellow
+            Write-Host "         Headless: Save-SmtpCredential -Target '$($Config.Email.CredentialTarget)'" -ForegroundColor Yellow
+            Write-Host "         GUI: Settings panel > Configure SMTP Credentials" -ForegroundColor Yellow
             Write-Host ""
             Write-RobocurseLog -Message "Email enabled but SMTP credential not found: $($Config.Email.CredentialTarget). Emails will not be sent." -Level 'Warning' -Component 'Email'
         }
