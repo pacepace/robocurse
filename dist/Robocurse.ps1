@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-19 19:18:23
+    Built: 2025-12-19 21:31:16
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -11973,10 +11973,10 @@ function Get-UniqueTaskName {
     .PARAMETER Prefix
         Optional prefix for the task name. Default: "Robocurse"
     .OUTPUTS
-        String - Unique task name like "Robocurse-A1B2C3D4"
+        String - Unique task name like "Robocurse-A1B2C3D4E5F6A7B8"
     .EXAMPLE
         Get-UniqueTaskName -ConfigPath "C:\configs\backup.json"
-        # Returns something like "Robocurse-7F3A2B1C"
+        # Returns something like "Robocurse-7F3A2B1C9D4E5F6A"
     #>
     [CmdletBinding()]
     param(
@@ -11989,17 +11989,80 @@ function Get-UniqueTaskName {
     # Normalize path for consistent hashing
     $normalizedPath = [System.IO.Path]::GetFullPath($ConfigPath).ToLowerInvariant()
 
-    # Create a short hash (first 8 chars of SHA256)
+    # Create a hash (first 16 chars of SHA256 for collision resistance)
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     try {
         $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($normalizedPath))
-        $hashString = [BitConverter]::ToString($hashBytes).Replace("-", "").Substring(0, 8)
+        $hashString = [BitConverter]::ToString($hashBytes).Replace("-", "").Substring(0, 16)
     }
     finally {
         $sha256.Dispose()
     }
 
     return "$Prefix-$hashString"
+}
+
+function Test-ConfigHasUncPaths {
+    <#
+    .SYNOPSIS
+        Checks if a configuration file contains UNC paths
+    .DESCRIPTION
+        Loads the configuration and checks if any profile source or destination
+        uses UNC paths (paths starting with \\). This is used to warn users that
+        scheduled tasks with S4U logon cannot access network shares.
+    .PARAMETER ConfigPath
+        Path to the configuration file
+    .OUTPUTS
+        PSCustomObject with HasUncPaths (bool) and UncPaths (array of paths found)
+    .EXAMPLE
+        $result = Test-ConfigHasUncPaths -ConfigPath "C:\config.json"
+        if ($result.HasUncPaths) { "Config uses UNC paths: $($result.UncPaths -join ', ')" }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    $uncPaths = @()
+
+    try {
+        # Load the config file
+        $content = Get-Content -Path $ConfigPath -Raw -Encoding UTF8 -ErrorAction Stop
+        $config = $content | ConvertFrom-Json -ErrorAction Stop
+
+        # Check each profile for UNC paths
+        if ($config.profiles) {
+            foreach ($profileName in $config.profiles.PSObject.Properties.Name) {
+                $profile = $config.profiles.$profileName
+
+                # Check source path
+                if ($profile.source -and $profile.source.path) {
+                    $sourcePath = $profile.source.path
+                    if ($sourcePath -match '^\\\\') {
+                        $uncPaths += $sourcePath
+                    }
+                }
+
+                # Check destination path
+                if ($profile.destination -and $profile.destination.path) {
+                    $destPath = $profile.destination.path
+                    if ($destPath -match '^\\\\') {
+                        $uncPaths += $destPath
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Could not parse config for UNC path check: $($_.Exception.Message)" `
+            -Level 'Warning' -Component 'Scheduler'
+    }
+
+    return [PSCustomObject]@{
+        HasUncPaths = ($uncPaths.Count -gt 0)
+        UncPaths    = $uncPaths
+    }
 }
 
 function Register-RobocurseTask {
@@ -12019,7 +12082,7 @@ function Register-RobocurseTask {
         scripts in protected directories (e.g., Program Files) that require admin to modify.
     .PARAMETER TaskName
         Name for the scheduled task. If not specified, a unique name is auto-generated
-        based on the config file path (e.g., "Robocurse-7F3A2B1C"). This ensures
+        based on the config file path (e.g., "Robocurse-7F3A2B1C9D4E5F6A"). This ensures
         multiple Robocurse instances can coexist without task name collisions.
     .PARAMETER ConfigPath
         Path to config file (mandatory)
@@ -12105,6 +12168,21 @@ function Register-RobocurseTask {
         # Validate config path exists (inside function body so mocks can intercept)
         if (-not (Test-Path -Path $ConfigPath -PathType Leaf)) {
             return New-OperationResult -Success $false -ErrorMessage "ConfigPath '$ConfigPath' does not exist or is not a file"
+        }
+
+        # Check if config has UNC paths - these require proper credentials to access
+        # S4U logon (default) cannot access network shares
+        if (-not $RunAsSystem -and -not $Credential) {
+            $uncCheck = Test-ConfigHasUncPaths -ConfigPath $ConfigPath
+            if ($uncCheck.HasUncPaths) {
+                $uncPathList = $uncCheck.UncPaths -join ', '
+                $errorMsg = "Configuration contains UNC paths ($uncPathList) but no credentials were provided. " +
+                    "Scheduled tasks using S4U logon cannot access network shares. " +
+                    "Use -Credential parameter to provide domain/local credentials for network access, " +
+                    "or use -RunAsSystem if the computer account has access to the shares."
+                Write-RobocurseLog -Message $errorMsg -Level 'Error' -Component 'Scheduler'
+                return New-OperationResult -Success $false -ErrorMessage $errorMsg
+            }
         }
 
         # Auto-generate unique task name if not specified
@@ -12316,7 +12394,7 @@ function Unregister-RobocurseTask {
     .OUTPUTS
         OperationResult - Success=$true with Data=$TaskName on success, Success=$false with ErrorMessage on failure
     .EXAMPLE
-        $result = Unregister-RobocurseTask -TaskName "Robocurse-7F3A2B1C"
+        $result = Unregister-RobocurseTask -TaskName "Robocurse-7F3A2B1C9D4E5F6A"
         if ($result.Success) { "Task removed" }
     .EXAMPLE
         $result = Unregister-RobocurseTask -ConfigPath "C:\config.json"
