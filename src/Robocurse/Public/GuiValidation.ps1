@@ -214,21 +214,47 @@ function Test-ProfileValidation {
     if ($Profile.UseVSS) {
         try {
             if (-not [string]::IsNullOrWhiteSpace($Profile.Source) -and (Test-Path -Path $Profile.Source)) {
-                $vssSupported = Test-VssSupported -Path $Profile.Source
-                if ($vssSupported) {
-                    $results += [PSCustomObject]@{
-                        CheckName = "VSS Support"
-                        Status = "Pass"
-                        Message = "Volume Shadow Copy is supported for source path"
-                        Severity = "Success"
+                # Check if this is a UNC path (network share)
+                $isUncPath = $Profile.Source -match '^\\\\[^\\]+\\[^\\]+'
+
+                if ($isUncPath) {
+                    # Use remote VSS check which provides detailed error messages
+                    $remoteResult = Test-RemoteVssSupported -UncPath $Profile.Source
+                    if ($remoteResult.Success) {
+                        $results += [PSCustomObject]@{
+                            CheckName = "VSS Support (Remote)"
+                            Status = "Pass"
+                            Message = "Remote VSS is supported on server '$($remoteResult.Data.ServerName)'"
+                            Severity = "Success"
+                        }
+                    }
+                    else {
+                        $results += [PSCustomObject]@{
+                            CheckName = "VSS Support (Remote)"
+                            Status = "Fail"
+                            Message = $remoteResult.ErrorMessage
+                            Severity = "Error"
+                        }
                     }
                 }
                 else {
-                    $results += [PSCustomObject]@{
-                        CheckName = "VSS Support"
-                        Status = "Fail"
-                        Message = "VSS is not supported for this path (may be UNC/network share)"
-                        Severity = "Error"
+                    # Local path - use local VSS check
+                    $vssSupported = Test-VssSupported -Path $Profile.Source
+                    if ($vssSupported) {
+                        $results += [PSCustomObject]@{
+                            CheckName = "VSS Support"
+                            Status = "Pass"
+                            Message = "Volume Shadow Copy is supported for source path"
+                            Severity = "Success"
+                        }
+                    }
+                    else {
+                        $results += [PSCustomObject]@{
+                            CheckName = "VSS Support"
+                            Status = "Fail"
+                            Message = "VSS is not supported for this local path"
+                            Severity = "Error"
+                        }
                     }
                 }
             }

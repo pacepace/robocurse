@@ -85,6 +85,7 @@ function Initialize-RobocurseGui {
         'pnlProfileErrors', 'pnlProfileErrorItems',
         'btnNavProfiles', 'btnNavSettings', 'btnNavSnapshots', 'btnNavProgress', 'btnNavLogs',
         'panelProfiles', 'panelSettings', 'panelSnapshots', 'panelProgress', 'panelLogs',
+        'pnlProfileSettingsContent', 'pnlNoProfileMessage',
         'chkLogDebug', 'chkLogInfo', 'chkLogWarning', 'chkLogError',
         'chkLogAutoScroll', 'txtLogLineCount', 'txtLogContent',
         'btnLogClear', 'btnLogCopy', 'btnLogSave', 'btnLogPopOut',
@@ -328,6 +329,7 @@ function Initialize-EventHandlers {
     # Profile list selection
     $script:Controls.lstProfiles.Add_SelectionChanged({
         Invoke-SafeEventHandler -HandlerName "ProfileSelection" -ScriptBlock {
+            Update-ProfileSettingsVisibility
             $selected = $script:Controls.lstProfiles.SelectedItem
             if ($selected) {
                 Import-ProfileToForm -Profile $selected

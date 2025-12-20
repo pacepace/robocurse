@@ -1,6 +1,27 @@
 # Robocurse GUI Profile Management
 # Handles profile CRUD operations and form synchronization.
 
+function Update-ProfileSettingsVisibility {
+    <#
+    .SYNOPSIS
+        Shows or hides the profile settings panel based on whether a profile is selected
+    #>
+    [CmdletBinding()]
+    param()
+
+    $hasProfile = $null -ne $script:Controls.lstProfiles.SelectedItem
+
+    if ($script:Controls['pnlProfileSettingsContent'] -and $script:Controls['pnlNoProfileMessage']) {
+        if ($hasProfile) {
+            $script:Controls.pnlProfileSettingsContent.Visibility = [System.Windows.Visibility]::Visible
+            $script:Controls.pnlNoProfileMessage.Visibility = [System.Windows.Visibility]::Collapsed
+        } else {
+            $script:Controls.pnlProfileSettingsContent.Visibility = [System.Windows.Visibility]::Collapsed
+            $script:Controls.pnlNoProfileMessage.Visibility = [System.Windows.Visibility]::Visible
+        }
+    }
+}
+
 function Update-ProfileList {
     <#
     .SYNOPSIS
@@ -21,6 +42,9 @@ function Update-ProfileList {
     if ($script:Controls.lstProfiles.Items.Count -gt 0) {
         $script:Controls.lstProfiles.SelectedIndex = 0
     }
+
+    # Update visibility of settings panel
+    Update-ProfileSettingsVisibility
 }
 
 function Import-ProfileToForm {
@@ -292,6 +316,7 @@ function Remove-SelectedProfile {
     if ($confirmed) {
         $script:Config.SyncProfiles = @($script:Config.SyncProfiles | Where-Object { $_ -ne $selected })
         Update-ProfileList
+        Update-ProfileSettingsVisibility
 
         # Auto-save config to disk
         $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath

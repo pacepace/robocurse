@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-20 12:12:48
+    Built: 2025-12-20 14:46:27
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -13806,21 +13806,47 @@ function Test-ProfileValidation {
     if ($Profile.UseVSS) {
         try {
             if (-not [string]::IsNullOrWhiteSpace($Profile.Source) -and (Test-Path -Path $Profile.Source)) {
-                $vssSupported = Test-VssSupported -Path $Profile.Source
-                if ($vssSupported) {
-                    $results += [PSCustomObject]@{
-                        CheckName = "VSS Support"
-                        Status = "Pass"
-                        Message = "Volume Shadow Copy is supported for source path"
-                        Severity = "Success"
+                # Check if this is a UNC path (network share)
+                $isUncPath = $Profile.Source -match '^\\\\[^\\]+\\[^\\]+'
+
+                if ($isUncPath) {
+                    # Use remote VSS check which provides detailed error messages
+                    $remoteResult = Test-RemoteVssSupported -UncPath $Profile.Source
+                    if ($remoteResult.Success) {
+                        $results += [PSCustomObject]@{
+                            CheckName = "VSS Support (Remote)"
+                            Status = "Pass"
+                            Message = "Remote VSS is supported on server '$($remoteResult.Data.ServerName)'"
+                            Severity = "Success"
+                        }
+                    }
+                    else {
+                        $results += [PSCustomObject]@{
+                            CheckName = "VSS Support (Remote)"
+                            Status = "Fail"
+                            Message = $remoteResult.ErrorMessage
+                            Severity = "Error"
+                        }
                     }
                 }
                 else {
-                    $results += [PSCustomObject]@{
-                        CheckName = "VSS Support"
-                        Status = "Fail"
-                        Message = "VSS is not supported for this path (may be UNC/network share)"
-                        Severity = "Error"
+                    # Local path - use local VSS check
+                    $vssSupported = Test-VssSupported -Path $Profile.Source
+                    if ($vssSupported) {
+                        $results += [PSCustomObject]@{
+                            CheckName = "VSS Support"
+                            Status = "Pass"
+                            Message = "Volume Shadow Copy is supported for source path"
+                            Severity = "Success"
+                        }
+                    }
+                    else {
+                        $results += [PSCustomObject]@{
+                            CheckName = "VSS Support"
+                            Status = "Fail"
+                            Message = "VSS is not supported for this local path"
+                            Severity = "Error"
+                        }
                     }
                 }
             }
@@ -14713,6 +14739,27 @@ function Test-VolumeOverridesFormat {
 
 # Handles profile CRUD operations and form synchronization.
 
+function Update-ProfileSettingsVisibility {
+    <#
+    .SYNOPSIS
+        Shows or hides the profile settings panel based on whether a profile is selected
+    #>
+    [CmdletBinding()]
+    param()
+
+    $hasProfile = $null -ne $script:Controls.lstProfiles.SelectedItem
+
+    if ($script:Controls['pnlProfileSettingsContent'] -and $script:Controls['pnlNoProfileMessage']) {
+        if ($hasProfile) {
+            $script:Controls.pnlProfileSettingsContent.Visibility = [System.Windows.Visibility]::Visible
+            $script:Controls.pnlNoProfileMessage.Visibility = [System.Windows.Visibility]::Collapsed
+        } else {
+            $script:Controls.pnlProfileSettingsContent.Visibility = [System.Windows.Visibility]::Collapsed
+            $script:Controls.pnlNoProfileMessage.Visibility = [System.Windows.Visibility]::Visible
+        }
+    }
+}
+
 function Update-ProfileList {
     <#
     .SYNOPSIS
@@ -14733,6 +14780,9 @@ function Update-ProfileList {
     if ($script:Controls.lstProfiles.Items.Count -gt 0) {
         $script:Controls.lstProfiles.SelectedIndex = 0
     }
+
+    # Update visibility of settings panel
+    Update-ProfileSettingsVisibility
 }
 
 function Import-ProfileToForm {
@@ -15004,6 +15054,7 @@ function Remove-SelectedProfile {
     if ($confirmed) {
         $script:Config.SyncProfiles = @($script:Config.SyncProfiles | Where-Object { $_ -ne $selected })
         Update-ProfileList
+        Update-ProfileSettingsVisibility
 
         # Auto-save config to disk
         $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
@@ -19150,8 +19201,8 @@ function Initialize-RobocurseGui {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Robocurse - Multi-Share Replication"
-        Height="550" Width="650"
-        MinHeight="400" MinWidth="500"
+        Height="630" Width="900"
+        MinHeight="630" MinWidth="900"
         WindowStartupLocation="CenterScreen"
         Background="#1E1E1E">
 
@@ -19254,6 +19305,20 @@ function Initialize-RobocurseGui {
                 <Trigger Property="IsEnabled" Value="False">
                     <Setter Property="Background" Value="#5A4A30"/>
                     <Setter Property="Foreground" Value="#8A7A5A"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Teal Validate button style -->
+        <Style x:Key="ValidateButton" TargetType="Button" BasedOn="{StaticResource DarkButton}">
+            <Setter Property="Background" Value="#17A2B8"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#1FC8E3"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#2A4A50"/>
+                    <Setter Property="Foreground" Value="#5A7A80"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
@@ -19604,100 +19669,126 @@ function Initialize-RobocurseGui {
 
                 <!-- Profile Settings Editor -->
                 <Border Grid.Row="0" Grid.RowSpan="2" Grid.Column="1" Background="#252525" CornerRadius="4" Padding="15">
-                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                    <Grid x:Name="pnlProfileSettings">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                            <RowDefinition Height="Auto"/>
-                        </Grid.RowDefinitions>
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="80"/>
-                            <ColumnDefinition Width="*"/>
-                            <ColumnDefinition Width="70"/>
-                        </Grid.ColumnDefinitions>
+                    <Grid>
+                        <!-- Main profile settings content -->
+                        <Grid x:Name="pnlProfileSettingsContent">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*" MinHeight="80"/>
+                            </Grid.RowDefinitions>
 
-                        <Label Grid.Row="0" Content="Name:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                        <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtProfileName"
-                                 Style="{StaticResource DarkTextBox}" Margin="0,0,0,8"
-                                 ToolTip="Profile display name"/>
+                            <!-- Scrollable settings area - expands first -->
+                            <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="80"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="70"/>
+                                </Grid.ColumnDefinitions>
 
-                        <Label Grid.Row="1" Content="Source:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                        <TextBox Grid.Row="1" Grid.Column="1" x:Name="txtSource" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
-                                 ToolTip="Source path to copy from"/>
-                        <Button Grid.Row="1" Grid.Column="2" x:Name="btnBrowseSource" Content="Browse"
-                                Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                <Label Grid.Row="0" Content="Name:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                <TextBox Grid.Row="0" Grid.Column="1" Grid.ColumnSpan="2" x:Name="txtProfileName"
+                                         Style="{StaticResource DarkTextBox}" Margin="0,0,0,8"
+                                         ToolTip="Profile display name"/>
 
-                        <Label Grid.Row="2" Content="Destination:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                        <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtDest" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
-                                 ToolTip="Destination path"/>
-                        <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
-                                Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                <Label Grid.Row="1" Content="Source:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                <TextBox Grid.Row="1" Grid.Column="1" x:Name="txtSource" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
+                                         ToolTip="Source path to copy from"/>
+                                <Button Grid.Row="1" Grid.Column="2" x:Name="btnBrowseSource" Content="Browse"
+                                        Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                        <Label Grid.Row="3" Grid.Column="0" Content="Scan:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,4,0,8"/>
-                        <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,4,0,8">
-                            <ComboBox x:Name="cmbScanMode" Width="80" VerticalAlignment="Center"
-                                      Style="{StaticResource DarkComboBox}"
-                                      ToolTip="Scan mode: Smart or Quick">
-                                <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
-                                <ComboBoxItem Content="Quick" Style="{StaticResource DarkComboBoxItem}"/>
-                            </ComboBox>
-                        </StackPanel>
+                                <Label Grid.Row="2" Content="Destination:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                <TextBox Grid.Row="2" Grid.Column="1" x:Name="txtDest" Style="{StaticResource DarkTextBox}" Margin="0,0,5,8"
+                                         ToolTip="Destination path"/>
+                                <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
+                                        Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                        <!-- Snapshot Configuration TabControl -->
-                        <TabControl Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" x:Name="tabSnapshotConfig"
-                                    Style="{StaticResource DarkTabControl}" Margin="0,5,0,5" Height="130">
-                            <!-- Source Snapshots Tab -->
-                            <TabItem Header="Source Snapshots" Style="{StaticResource DarkTabItem}">
-                                <Border Margin="5" Background="#252525" CornerRadius="4" Padding="10">
-                                    <StackPanel>
-                                        <CheckBox x:Name="chkUseVss" Content="Use temporary VSS for backup (copy locked files)"
-                                                  Foreground="#E0E0E0" Margin="0,0,0,8"
-                                                  ToolTip="Create temporary VSS snapshot during sync to copy locked files"/>
-                                        <CheckBox x:Name="chkSourcePersistentSnapshot"
-                                                  Content="Create persistent snapshot before backup"
-                                                  Foreground="#E0E0E0" Margin="0,0,0,8"
-                                                  ToolTip="Creates a persistent VSS snapshot on SOURCE volume before backup"/>
-                                        <StackPanel Orientation="Horizontal" Margin="20,0,0,0">
-                                            <Label Content="Retention:" Foreground="#808080" VerticalAlignment="Center" Padding="0,0,5,0"/>
-                                            <TextBox x:Name="txtSourceRetentionCount" Text="3" Width="50"
-                                                     Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
-                                                     TextAlignment="Center" Margin="0,0,5,0"
-                                                     ToolTip="Number of snapshots to keep on source volume"/>
-                                            <Label Content="snapshots" Foreground="#808080" VerticalAlignment="Center" Padding="0"/>
-                                        </StackPanel>
-                                    </StackPanel>
-                                </Border>
-                            </TabItem>
-                            <!-- Destination Snapshots Tab -->
-                            <TabItem Header="Dest Snapshots" Style="{StaticResource DarkTabItem}">
-                                <Border Margin="5" Background="#252525" CornerRadius="4" Padding="10">
-                                    <StackPanel>
-                                        <CheckBox x:Name="chkDestPersistentSnapshot"
-                                                  Content="Create persistent snapshot before backup"
-                                                  Foreground="#E0E0E0" Margin="0,0,0,8"
-                                                  ToolTip="Creates a persistent VSS snapshot on DESTINATION volume before backup"/>
-                                        <StackPanel Orientation="Horizontal" Margin="20,0,0,0">
-                                            <Label Content="Retention:" Foreground="#808080" VerticalAlignment="Center" Padding="0,0,5,0"/>
-                                            <TextBox x:Name="txtDestRetentionCount" Text="3" Width="50"
-                                                     Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
-                                                     TextAlignment="Center" Margin="0,0,5,0"
-                                                     ToolTip="Number of snapshots to keep on destination volume"/>
-                                            <Label Content="snapshots" Foreground="#808080" VerticalAlignment="Center" Padding="0"/>
-                                        </StackPanel>
-                                    </StackPanel>
-                                </Border>
-                            </TabItem>
-                        </TabControl>
+                                <!-- Chunking - after Destination -->
+                                <Label Grid.Row="3" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,8">
+                                    <TextBox x:Name="txtMaxSize" Width="40" Style="{StaticResource DarkTextBox}" Text="10"
+                                             ToolTip="Max size (GB)"/>
+                                    <Label Content="GB" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="txtMaxFiles" Width="50" Style="{StaticResource DarkTextBox}" Text="50000" Margin="10,0,0,0"
+                                             ToolTip="Max files"/>
+                                    <Label Content="files" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                                    <TextBox x:Name="txtMaxDepth" Width="30" Style="{StaticResource DarkTextBox}" Text="5" Margin="10,0,0,0"
+                                             ToolTip="Max depth"/>
+                                    <Label Content="depth" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                                </StackPanel>
 
-                        <!-- Snapshot Management TabControl -->
-                        <TabControl Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" x:Name="tabProfileSnapshots"
-                                    Style="{StaticResource DarkTabControl}" Margin="0,0,0,5" Height="140">
+                                <!-- Scan + Validate on same row -->
+                                <Label Grid.Row="4" Grid.Column="0" Content="Scan:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                <ComboBox Grid.Row="4" Grid.Column="1" x:Name="cmbScanMode" Width="80" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="0,0,0,8"
+                                          Style="{StaticResource DarkComboBox}"
+                                          ToolTip="Scan mode: Smart or Quick">
+                                    <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
+                                    <ComboBoxItem Content="Quick" Style="{StaticResource DarkComboBoxItem}"/>
+                                </ComboBox>
+                                <Button Grid.Row="4" Grid.Column="2" x:Name="btnValidateProfile"
+                                        Content="Validate" Style="{StaticResource ValidateButton}"
+                                        VerticalAlignment="Center" Margin="0,0,0,8"
+                                        ToolTip="Run pre-flight validation checks"/>
+
+                                <!-- Snapshot Configuration TabControl -->
+                                <TabControl Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" x:Name="tabSnapshotConfig"
+                                            Style="{StaticResource DarkTabControl}" Margin="0,5,0,5" Height="130">
+                                    <!-- Source Snapshots Tab -->
+                                    <TabItem Header="Source Snapshots" Style="{StaticResource DarkTabItem}">
+                                        <Border Margin="5" Background="#252525" CornerRadius="4" Padding="10">
+                                            <StackPanel>
+                                                <CheckBox x:Name="chkUseVss" Content="Use temporary VSS for backup (copy locked files)"
+                                                          Foreground="#E0E0E0" Margin="0,0,0,8"
+                                                          ToolTip="Create temporary VSS snapshot during sync to copy locked files"/>
+                                                <CheckBox x:Name="chkSourcePersistentSnapshot"
+                                                          Content="Create persistent snapshot before backup"
+                                                          Foreground="#E0E0E0" Margin="0,0,0,8"
+                                                          ToolTip="Creates a persistent VSS snapshot on SOURCE volume before backup"/>
+                                                <StackPanel Orientation="Horizontal" Margin="20,0,0,0">
+                                                    <Label Content="Retention:" Foreground="#808080" VerticalAlignment="Center" Padding="0,0,5,0"/>
+                                                    <TextBox x:Name="txtSourceRetentionCount" Text="3" Width="50"
+                                                             Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
+                                                             TextAlignment="Center" Margin="0,0,5,0"
+                                                             ToolTip="Number of snapshots to keep on source volume"/>
+                                                    <Label Content="snapshots" Foreground="#808080" VerticalAlignment="Center" Padding="0"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+                                    </TabItem>
+                                    <!-- Destination Snapshots Tab -->
+                                    <TabItem Header="Dest Snapshots" Style="{StaticResource DarkTabItem}">
+                                        <Border Margin="5" Background="#252525" CornerRadius="4" Padding="10">
+                                            <StackPanel>
+                                                <CheckBox x:Name="chkDestPersistentSnapshot"
+                                                          Content="Create persistent snapshot before backup"
+                                                          Foreground="#E0E0E0" Margin="0,0,0,8"
+                                                          ToolTip="Creates a persistent VSS snapshot on DESTINATION volume before backup"/>
+                                                <StackPanel Orientation="Horizontal" Margin="20,0,0,0">
+                                                    <Label Content="Retention:" Foreground="#808080" VerticalAlignment="Center" Padding="0,0,5,0"/>
+                                                    <TextBox x:Name="txtDestRetentionCount" Text="3" Width="50"
+                                                             Background="#2D2D2D" Foreground="#E0E0E0" BorderBrush="#3E3E3E"
+                                                             TextAlignment="Center" Margin="0,0,5,0"
+                                                             ToolTip="Number of snapshots to keep on destination volume"/>
+                                                    <Label Content="snapshots" Foreground="#808080" VerticalAlignment="Center" Padding="0"/>
+                                                </StackPanel>
+                                            </StackPanel>
+                                        </Border>
+                                    </TabItem>
+                                </TabControl>
+                            </Grid>
+                        </ScrollViewer>
+
+                        <!-- Snapshot Management TabControl - OUTSIDE ScrollViewer so it expands -->
+                        <TabControl Grid.Row="1" x:Name="tabProfileSnapshots"
+                                    Style="{StaticResource DarkTabControl}" Margin="0,10,0,0">
                             <!-- Source Snapshots List -->
                             <TabItem Header="Source Snapshots" Style="{StaticResource DarkTabItem}">
                                 <Grid Margin="5">
@@ -19751,27 +19842,20 @@ function Initialize-RobocurseGui {
                                 </Grid>
                             </TabItem>
                         </TabControl>
+                        </Grid>
 
-                        <Label Grid.Row="6" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-                        <StackPanel Grid.Row="6" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBox x:Name="txtMaxSize" Width="40" Style="{StaticResource DarkTextBox}" Text="10"
-                                     ToolTip="Max size (GB)"/>
-                            <Label Content="GB" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-                            <TextBox x:Name="txtMaxFiles" Width="50" Style="{StaticResource DarkTextBox}" Text="50000" Margin="10,0,0,0"
-                                     ToolTip="Max files"/>
-                            <Label Content="files" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-                            <TextBox x:Name="txtMaxDepth" Width="30" Style="{StaticResource DarkTextBox}" Text="5" Margin="10,0,0,0"
-                                     ToolTip="Max depth"/>
-                            <Label Content="depth" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-                        </StackPanel>
-
-                        <!-- Validate Button -->
-                        <Button Grid.Row="7" Grid.Column="1" Grid.ColumnSpan="2" x:Name="btnValidateProfile"
-                                Content="Validate Profile" Style="{StaticResource DarkButton}"
-                                HorizontalAlignment="Left" Width="120" Margin="0,10,0,0"
-                                ToolTip="Run pre-flight validation checks"/>
+                        <!-- No Profile Selected Overlay -->
+                        <Border x:Name="pnlNoProfileMessage" Background="#252525" Visibility="Visible">
+                            <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                                <TextBlock Text="No Profile Selected"
+                                           FontSize="18" FontWeight="SemiBold" Foreground="#808080"
+                                           HorizontalAlignment="Center" Margin="0,0,0,10"/>
+                                <TextBlock Text="Click '+ Add' to create a profile"
+                                           FontSize="13" Foreground="#606060"
+                                           HorizontalAlignment="Center"/>
+                            </StackPanel>
+                        </Border>
                     </Grid>
-                    </ScrollViewer>
                 </Border>
             </Grid>
 
@@ -20289,6 +20373,7 @@ function Initialize-RobocurseGui {
         'pnlProfileErrors', 'pnlProfileErrorItems',
         'btnNavProfiles', 'btnNavSettings', 'btnNavSnapshots', 'btnNavProgress', 'btnNavLogs',
         'panelProfiles', 'panelSettings', 'panelSnapshots', 'panelProgress', 'panelLogs',
+        'pnlProfileSettingsContent', 'pnlNoProfileMessage',
         'chkLogDebug', 'chkLogInfo', 'chkLogWarning', 'chkLogError',
         'chkLogAutoScroll', 'txtLogLineCount', 'txtLogContent',
         'btnLogClear', 'btnLogCopy', 'btnLogSave', 'btnLogPopOut',
@@ -20532,6 +20617,7 @@ function Initialize-EventHandlers {
     # Profile list selection
     $script:Controls.lstProfiles.Add_SelectionChanged({
         Invoke-SafeEventHandler -HandlerName "ProfileSelection" -ScriptBlock {
+            Update-ProfileSettingsVisibility
             $selected = $script:Controls.lstProfiles.SelectedItem
             if ($selected) {
                 Import-ProfileToForm -Profile $selected
