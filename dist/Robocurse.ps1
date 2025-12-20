@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-19 13:25:16
+    Built: 2025-12-19 18:00:56
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -3501,7 +3501,9 @@ function Get-DirectoryProfilesParallel {
 
             try {
                 # Run robocopy in list mode
-                $output = & robocopy $Path "\\?\NULL" /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
+                # Use random temp path as destination - \\?\NULL breaks on some Windows versions
+                $nullDest = Join-Path $env:TEMP "robocurse-null-$(Get-Random)"
+                $output = & robocopy $Path $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
 
                 $totalSize = 0
                 $fileCount = 0
@@ -5213,6 +5215,9 @@ function Get-CheckpointPath {
     <#
     .SYNOPSIS
         Returns the checkpoint file path based on log directory
+    .DESCRIPTION
+        Uses the log directory if available, otherwise falls back to TEMP directory.
+        This ensures checkpoints are always written to a writable location.
     .OUTPUTS
         Path to checkpoint file
     #>
@@ -5222,7 +5227,9 @@ function Get-CheckpointPath {
     $logDir = if ($script:CurrentOperationalLogPath) {
         Split-Path $script:CurrentOperationalLogPath -Parent
     } else {
-        "."
+        # Fall back to TEMP directory instead of current directory
+        # Current directory may be read-only or unexpected (e.g., system32)
+        if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
     }
     return Join-Path $logDir $script:CheckpointFileName
 }
@@ -6225,7 +6232,7 @@ function Get-HealthCheckStatus {
         hung or crashed replication processes that stopped updating the health file.
     .PARAMETER MaxAgeSeconds
         Maximum age in seconds before the status is considered stale.
-        If the status file's LastUpdate is older than this, the returned
+        If the status file's Timestamp is older than this, the returned
         object will have IsStale=$true and Healthy=$false.
         Default: 0 (no staleness check)
     .OUTPUTS
@@ -6260,8 +6267,8 @@ function Get-HealthCheckStatus {
         $status = $content | ConvertFrom-Json
 
         # Add staleness detection if MaxAgeSeconds specified
-        if ($MaxAgeSeconds -gt 0 -and $status.LastUpdate) {
-            $lastUpdate = [datetime]::Parse($status.LastUpdate)
+        if ($MaxAgeSeconds -gt 0 -and $status.Timestamp) {
+            $lastUpdate = [datetime]::Parse($status.Timestamp)
             $ageSeconds = ([datetime]::Now - $lastUpdate).TotalSeconds
 
             # Add staleness properties
@@ -10347,6 +10354,209 @@ function Invoke-RemoteVssRetentionPolicy {
     }
 
     return New-OperationResult -Success $success -Data $resultData -ErrorMessage $(if (-not $success) { $errors -join "; " })
+}
+
+function Test-RemoteVssPrerequisites {
+    <#
+    .SYNOPSIS
+        Tests remote VSS prerequisites on a server
+    .DESCRIPTION
+        Performs diagnostic checks to verify a remote server is properly configured
+        for VSS operations. Checks include:
+        - WinRM/PSRemoting connectivity
+        - CIM session establishment
+        - VSS service status
+        - Admin privileges on remote server
+        - Firewall accessibility
+
+        Use this before deploying to a customer site to identify configuration issues.
+    .PARAMETER ServerName
+        The remote server to test
+    .PARAMETER Detailed
+        Show detailed output for each check
+    .OUTPUTS
+        OperationResult with Data containing array of check results
+    .EXAMPLE
+        $result = Test-RemoteVssPrerequisites -ServerName "FileServer01" -Detailed
+        if ($result.Success) { "All checks passed" } else { $result.ErrorMessage }
+    .EXAMPLE
+        .\Robocurse.ps1 -TestRemote -Server "FileServer01"
+        Tests remote VSS prerequisites from command line
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerName,
+
+        [switch]$Detailed
+    )
+
+    $checks = @()
+    $allPassed = $true
+    $cimSession = $null
+
+    Write-Host "Testing remote VSS prerequisites on: $ServerName" -ForegroundColor Cyan
+    Write-Host ("=" * 60)
+
+    # Check 1: Basic connectivity (ping)
+    Write-Host "`n[1/5] Testing network connectivity..." -NoNewline
+    try {
+        $ping = Test-Connection -ComputerName $ServerName -Count 1 -Quiet -ErrorAction Stop
+        if ($ping) {
+            Write-Host " PASS" -ForegroundColor Green
+            $checks += [PSCustomObject]@{ Check = "Network Connectivity"; Status = "Pass"; Message = "Server responds to ping" }
+        }
+        else {
+            Write-Host " FAIL" -ForegroundColor Red
+            $checks += [PSCustomObject]@{ Check = "Network Connectivity"; Status = "Fail"; Message = "Server does not respond to ping" }
+            $allPassed = $false
+        }
+    }
+    catch {
+        Write-Host " FAIL" -ForegroundColor Red
+        $checks += [PSCustomObject]@{ Check = "Network Connectivity"; Status = "Fail"; Message = $_.Exception.Message }
+        $allPassed = $false
+    }
+
+    # Check 2: WinRM connectivity
+    Write-Host "[2/5] Testing WinRM connectivity (port 5985/5986)..." -NoNewline
+    try {
+        $wsmanTest = Test-WSMan -ComputerName $ServerName -ErrorAction Stop
+        Write-Host " PASS" -ForegroundColor Green
+        $checks += [PSCustomObject]@{ Check = "WinRM Connectivity"; Status = "Pass"; Message = "WinRM is accessible" }
+    }
+    catch {
+        Write-Host " FAIL" -ForegroundColor Red
+        $msg = $_.Exception.Message
+        if ($msg -match "Access is denied") {
+            $msg = "Access denied - check credentials and remote access permissions"
+        }
+        elseif ($msg -match "cannot connect") {
+            $msg = "Cannot connect - ensure WinRM is enabled: Enable-PSRemoting -Force"
+        }
+        $checks += [PSCustomObject]@{ Check = "WinRM Connectivity"; Status = "Fail"; Message = $msg }
+        $allPassed = $false
+    }
+
+    # Check 3: CIM session
+    Write-Host "[3/5] Testing CIM session establishment..." -NoNewline
+    try {
+        $cimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+        Write-Host " PASS" -ForegroundColor Green
+        $checks += [PSCustomObject]@{ Check = "CIM Session"; Status = "Pass"; Message = "CIM session established successfully" }
+    }
+    catch {
+        Write-Host " FAIL" -ForegroundColor Red
+        $msg = $_.Exception.Message
+        if ($msg -match "Access is denied") {
+            $msg = "Access denied - ensure you have admin rights on the remote server"
+        }
+        elseif ($msg -match "RPC server") {
+            $msg = "RPC error - check firewall rules for DCOM/WMI (TCP 135, dynamic ports)"
+        }
+        $checks += [PSCustomObject]@{ Check = "CIM Session"; Status = "Fail"; Message = $msg }
+        $allPassed = $false
+    }
+
+    # Check 4: VSS service status (requires CIM session)
+    Write-Host "[4/5] Testing VSS service status..." -NoNewline
+    if ($cimSession) {
+        try {
+            $vssService = Get-CimInstance -CimSession $cimSession -ClassName Win32_Service -Filter "Name='VSS'" -ErrorAction Stop
+            if ($vssService) {
+                $status = "$($vssService.State) ($($vssService.StartMode))"
+                if ($vssService.State -eq 'Running' -or $vssService.StartMode -in @('Auto', 'Manual')) {
+                    Write-Host " PASS" -ForegroundColor Green
+                    $checks += [PSCustomObject]@{ Check = "VSS Service"; Status = "Pass"; Message = "VSS service: $status" }
+                }
+                else {
+                    Write-Host " WARN" -ForegroundColor Yellow
+                    $checks += [PSCustomObject]@{ Check = "VSS Service"; Status = "Warning"; Message = "VSS service is $status - may need to be started" }
+                }
+            }
+            else {
+                Write-Host " FAIL" -ForegroundColor Red
+                $checks += [PSCustomObject]@{ Check = "VSS Service"; Status = "Fail"; Message = "VSS service not found on remote server" }
+                $allPassed = $false
+            }
+        }
+        catch {
+            Write-Host " FAIL" -ForegroundColor Red
+            $checks += [PSCustomObject]@{ Check = "VSS Service"; Status = "Fail"; Message = $_.Exception.Message }
+            $allPassed = $false
+        }
+    }
+    else {
+        Write-Host " SKIP" -ForegroundColor Yellow
+        $checks += [PSCustomObject]@{ Check = "VSS Service"; Status = "Skipped"; Message = "CIM session required" }
+    }
+
+    # Check 5: VSS snapshot capability (requires CIM session)
+    Write-Host "[5/5] Testing VSS snapshot query capability..." -NoNewline
+    if ($cimSession) {
+        try {
+            # Just try to query - don't need actual snapshots to exist
+            $null = Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy -ErrorAction Stop
+            Write-Host " PASS" -ForegroundColor Green
+            $checks += [PSCustomObject]@{ Check = "VSS Query"; Status = "Pass"; Message = "Can query Win32_ShadowCopy class" }
+        }
+        catch {
+            Write-Host " FAIL" -ForegroundColor Red
+            $msg = $_.Exception.Message
+            if ($msg -match "Access denied") {
+                $msg = "Access denied to Win32_ShadowCopy - admin rights required"
+            }
+            $checks += [PSCustomObject]@{ Check = "VSS Query"; Status = "Fail"; Message = $msg }
+            $allPassed = $false
+        }
+    }
+    else {
+        Write-Host " SKIP" -ForegroundColor Yellow
+        $checks += [PSCustomObject]@{ Check = "VSS Query"; Status = "Skipped"; Message = "CIM session required" }
+    }
+
+    # Cleanup
+    if ($cimSession) {
+        Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
+    }
+
+    # Summary
+    Write-Host "`n$("=" * 60)"
+    $passCount = ($checks | Where-Object { $_.Status -eq 'Pass' }).Count
+    $failCount = ($checks | Where-Object { $_.Status -eq 'Fail' }).Count
+    $warnCount = ($checks | Where-Object { $_.Status -eq 'Warning' }).Count
+
+    if ($allPassed -and $failCount -eq 0) {
+        Write-Host "RESULT: All prerequisites passed!" -ForegroundColor Green
+        Write-Host "        Server '$ServerName' is ready for remote VSS operations."
+    }
+    else {
+        Write-Host "RESULT: $failCount check(s) failed, $warnCount warning(s)" -ForegroundColor Red
+        Write-Host "`nFailed checks:"
+        foreach ($check in ($checks | Where-Object { $_.Status -eq 'Fail' })) {
+            Write-Host "  - $($check.Check): $($check.Message)" -ForegroundColor Red
+        }
+        if ($warnCount -gt 0) {
+            Write-Host "`nWarnings:"
+            foreach ($check in ($checks | Where-Object { $_.Status -eq 'Warning' })) {
+                Write-Host "  - $($check.Check): $($check.Message)" -ForegroundColor Yellow
+            }
+        }
+    }
+
+    if ($Detailed) {
+        Write-Host "`nDetailed Results:" -ForegroundColor Cyan
+        $checks | Format-Table -AutoSize
+    }
+
+    # Return result
+    if ($allPassed -and $failCount -eq 0) {
+        return New-OperationResult -Success $true -Data $checks
+    }
+    else {
+        $errorSummary = ($checks | Where-Object { $_.Status -eq 'Fail' } | ForEach-Object { $_.Check }) -join ", "
+        return New-OperationResult -Success $false -ErrorMessage "Failed checks: $errorSummary" -Data $checks
+    }
 }
 
 #endregion
@@ -20367,6 +20577,10 @@ SNAPSHOT SCHEDULES:
     -SnapshotSchedule -Sync             Sync schedules with config file
     -SnapshotSchedule -Remove -ScheduleName DailyD    Remove a schedule
 
+DIAGNOSTICS:
+    -TestRemote -Server <name>          Test remote VSS prerequisites
+                                        Checks: network, WinRM, CIM, VSS service
+
 EXAMPLES:
     # GUI mode
     .\Robocurse.ps1
@@ -20382,6 +20596,9 @@ EXAMPLES:
 
     # Sync snapshot schedules from config
     .\Robocurse.ps1 -SnapshotSchedule -Sync
+
+    # Test remote VSS prerequisites before deployment
+    .\Robocurse.ps1 -TestRemote -Server FileServer01
 
 "@
 }
@@ -20434,6 +20651,21 @@ function Invoke-HeadlessReplication {
     if ($DryRun) {
         Write-Host "*** DRY-RUN MODE: No files will be copied ***" -ForegroundColor Yellow
     }
+
+    # Pre-flight check: Warn if email is enabled but credentials are missing
+    # This gives immediate feedback rather than discovering at completion time
+    if ($Config.Email -and $Config.Email.Enabled) {
+        if (-not (Test-SmtpCredential -Target $Config.Email.CredentialTarget)) {
+            Write-Host ""
+            Write-Host "WARNING: Email notifications are enabled but SMTP credentials are not configured!" -ForegroundColor Yellow
+            Write-Host "         Target: $($Config.Email.CredentialTarget)" -ForegroundColor Yellow
+            Write-Host "         Completion emails will NOT be sent until credentials are configured." -ForegroundColor Yellow
+            Write-Host "         Use the GUI 'Settings' panel to configure SMTP credentials." -ForegroundColor Yellow
+            Write-Host ""
+            Write-RobocurseLog -Message "Email enabled but SMTP credential not found: $($Config.Email.CredentialTarget). Emails will not be sent." -Level 'Warning' -Component 'Email'
+        }
+    }
+
     Write-Host ""
 
     # Start replication with bandwidth throttling
@@ -20596,7 +20828,10 @@ function Start-RobocurseMain {
         [switch]$Sync,
         [switch]$Add,
         [switch]$Remove,
-        [string]$ScheduleName
+        [string]$ScheduleName,
+
+        # Diagnostic parameters
+        [switch]$TestRemote
     )
 
     if ($ShowHelp) {
@@ -20633,6 +20868,17 @@ function Start-RobocurseMain {
         }
         $config = Get-RobocurseConfig -Path $ConfigPath
         return Invoke-SnapshotScheduleCommand -List:$List -Sync:$Sync -Add:$Add -Remove:$Remove -ScheduleName $ScheduleName -Config $config
+    }
+
+    # Remote VSS prerequisites test
+    if ($TestRemote) {
+        if (-not $Server) {
+            Write-Host "Error: -Server is required for -TestRemote" -ForegroundColor Red
+            Write-Host "Usage: .\Robocurse.ps1 -TestRemote -Server <ServerName>" -ForegroundColor Gray
+            return 1
+        }
+        $result = Test-RemoteVssPrerequisites -ServerName $Server -Detailed
+        return $(if ($result.Success) { 0 } else { 1 })
     }
 
     # Track state for cleanup
