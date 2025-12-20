@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-20 14:46:27
+    Built: 2025-12-20 14:50:27
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -14019,9 +14019,16 @@ function Show-ValidationDialog {
             <!-- Results List -->
             <Border Grid.Row="1" Background="#2D2D2D" BorderBrush="#3E3E3E" BorderThickness="1"
                     CornerRadius="4" Margin="0,0,0,20">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                     <ListBox x:Name="lstResults" Background="Transparent" BorderThickness="0"
-                             Foreground="#E0E0E0" Padding="10">
+                             Foreground="#E0E0E0" Padding="10"
+                             HorizontalContentAlignment="Stretch"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
                         <ListBox.ItemTemplate>
                             <DataTemplate>
                                 <Border Background="#252525" CornerRadius="4" Padding="12,8" Margin="0,0,0,8">
