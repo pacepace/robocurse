@@ -133,7 +133,7 @@ function Get-HealthCheckStatus {
         hung or crashed replication processes that stopped updating the health file.
     .PARAMETER MaxAgeSeconds
         Maximum age in seconds before the status is considered stale.
-        If the status file's LastUpdate is older than this, the returned
+        If the status file's Timestamp is older than this, the returned
         object will have IsStale=$true and Healthy=$false.
         Default: 0 (no staleness check)
     .OUTPUTS
@@ -168,8 +168,8 @@ function Get-HealthCheckStatus {
         $status = $content | ConvertFrom-Json
 
         # Add staleness detection if MaxAgeSeconds specified
-        if ($MaxAgeSeconds -gt 0 -and $status.LastUpdate) {
-            $lastUpdate = [datetime]::Parse($status.LastUpdate)
+        if ($MaxAgeSeconds -gt 0 -and $status.Timestamp) {
+            $lastUpdate = [datetime]::Parse($status.Timestamp)
             $ageSeconds = ([datetime]::Now - $lastUpdate).TotalSeconds
 
             # Add staleness properties

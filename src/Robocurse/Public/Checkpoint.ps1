@@ -7,6 +7,9 @@ function Get-CheckpointPath {
     <#
     .SYNOPSIS
         Returns the checkpoint file path based on log directory
+    .DESCRIPTION
+        Uses the log directory if available, otherwise falls back to TEMP directory.
+        This ensures checkpoints are always written to a writable location.
     .OUTPUTS
         Path to checkpoint file
     #>
@@ -16,7 +19,9 @@ function Get-CheckpointPath {
     $logDir = if ($script:CurrentOperationalLogPath) {
         Split-Path $script:CurrentOperationalLogPath -Parent
     } else {
-        "."
+        # Fall back to TEMP directory instead of current directory
+        # Current directory may be read-only or unexpected (e.g., system32)
+        if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
     }
     return Join-Path $logDir $script:CheckpointFileName
 }

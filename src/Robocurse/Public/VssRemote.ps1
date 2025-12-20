@@ -954,3 +954,206 @@ function Invoke-RemoteVssRetentionPolicy {
 
     return New-OperationResult -Success $success -Data $resultData -ErrorMessage $(if (-not $success) { $errors -join "; " })
 }
+
+function Test-RemoteVssPrerequisites {
+    <#
+    .SYNOPSIS
+        Tests remote VSS prerequisites on a server
+    .DESCRIPTION
+        Performs diagnostic checks to verify a remote server is properly configured
+        for VSS operations. Checks include:
+        - WinRM/PSRemoting connectivity
+        - CIM session establishment
+        - VSS service status
+        - Admin privileges on remote server
+        - Firewall accessibility
+
+        Use this before deploying to a customer site to identify configuration issues.
+    .PARAMETER ServerName
+        The remote server to test
+    .PARAMETER Detailed
+        Show detailed output for each check
+    .OUTPUTS
+        OperationResult with Data containing array of check results
+    .EXAMPLE
+        $result = Test-RemoteVssPrerequisites -ServerName "FileServer01" -Detailed
+        if ($result.Success) { "All checks passed" } else { $result.ErrorMessage }
+    .EXAMPLE
+        .\Robocurse.ps1 -TestRemote -Server "FileServer01"
+        Tests remote VSS prerequisites from command line
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ServerName,
+
+        [switch]$Detailed
+    )
+
+    $checks = @()
+    $allPassed = $true
+    $cimSession = $null
+
+    Write-Host "Testing remote VSS prerequisites on: $ServerName" -ForegroundColor Cyan
+    Write-Host ("=" * 60)
+
+    # Check 1: Basic connectivity (ping)
+    Write-Host "`n[1/5] Testing network connectivity..." -NoNewline
+    try {
+        $ping = Test-Connection -ComputerName $ServerName -Count 1 -Quiet -ErrorAction Stop
+        if ($ping) {
+            Write-Host " PASS" -ForegroundColor Green
+            $checks += [PSCustomObject]@{ Check = "Network Connectivity"; Status = "Pass"; Message = "Server responds to ping" }
+        }
+        else {
+            Write-Host " FAIL" -ForegroundColor Red
+            $checks += [PSCustomObject]@{ Check = "Network Connectivity"; Status = "Fail"; Message = "Server does not respond to ping" }
+            $allPassed = $false
+        }
+    }
+    catch {
+        Write-Host " FAIL" -ForegroundColor Red
+        $checks += [PSCustomObject]@{ Check = "Network Connectivity"; Status = "Fail"; Message = $_.Exception.Message }
+        $allPassed = $false
+    }
+
+    # Check 2: WinRM connectivity
+    Write-Host "[2/5] Testing WinRM connectivity (port 5985/5986)..." -NoNewline
+    try {
+        $wsmanTest = Test-WSMan -ComputerName $ServerName -ErrorAction Stop
+        Write-Host " PASS" -ForegroundColor Green
+        $checks += [PSCustomObject]@{ Check = "WinRM Connectivity"; Status = "Pass"; Message = "WinRM is accessible" }
+    }
+    catch {
+        Write-Host " FAIL" -ForegroundColor Red
+        $msg = $_.Exception.Message
+        if ($msg -match "Access is denied") {
+            $msg = "Access denied - check credentials and remote access permissions"
+        }
+        elseif ($msg -match "cannot connect") {
+            $msg = "Cannot connect - ensure WinRM is enabled: Enable-PSRemoting -Force"
+        }
+        $checks += [PSCustomObject]@{ Check = "WinRM Connectivity"; Status = "Fail"; Message = $msg }
+        $allPassed = $false
+    }
+
+    # Check 3: CIM session
+    Write-Host "[3/5] Testing CIM session establishment..." -NoNewline
+    try {
+        $cimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+        Write-Host " PASS" -ForegroundColor Green
+        $checks += [PSCustomObject]@{ Check = "CIM Session"; Status = "Pass"; Message = "CIM session established successfully" }
+    }
+    catch {
+        Write-Host " FAIL" -ForegroundColor Red
+        $msg = $_.Exception.Message
+        if ($msg -match "Access is denied") {
+            $msg = "Access denied - ensure you have admin rights on the remote server"
+        }
+        elseif ($msg -match "RPC server") {
+            $msg = "RPC error - check firewall rules for DCOM/WMI (TCP 135, dynamic ports)"
+        }
+        $checks += [PSCustomObject]@{ Check = "CIM Session"; Status = "Fail"; Message = $msg }
+        $allPassed = $false
+    }
+
+    # Check 4: VSS service status (requires CIM session)
+    Write-Host "[4/5] Testing VSS service status..." -NoNewline
+    if ($cimSession) {
+        try {
+            $vssService = Get-CimInstance -CimSession $cimSession -ClassName Win32_Service -Filter "Name='VSS'" -ErrorAction Stop
+            if ($vssService) {
+                $status = "$($vssService.State) ($($vssService.StartMode))"
+                if ($vssService.State -eq 'Running' -or $vssService.StartMode -in @('Auto', 'Manual')) {
+                    Write-Host " PASS" -ForegroundColor Green
+                    $checks += [PSCustomObject]@{ Check = "VSS Service"; Status = "Pass"; Message = "VSS service: $status" }
+                }
+                else {
+                    Write-Host " WARN" -ForegroundColor Yellow
+                    $checks += [PSCustomObject]@{ Check = "VSS Service"; Status = "Warning"; Message = "VSS service is $status - may need to be started" }
+                }
+            }
+            else {
+                Write-Host " FAIL" -ForegroundColor Red
+                $checks += [PSCustomObject]@{ Check = "VSS Service"; Status = "Fail"; Message = "VSS service not found on remote server" }
+                $allPassed = $false
+            }
+        }
+        catch {
+            Write-Host " FAIL" -ForegroundColor Red
+            $checks += [PSCustomObject]@{ Check = "VSS Service"; Status = "Fail"; Message = $_.Exception.Message }
+            $allPassed = $false
+        }
+    }
+    else {
+        Write-Host " SKIP" -ForegroundColor Yellow
+        $checks += [PSCustomObject]@{ Check = "VSS Service"; Status = "Skipped"; Message = "CIM session required" }
+    }
+
+    # Check 5: VSS snapshot capability (requires CIM session)
+    Write-Host "[5/5] Testing VSS snapshot query capability..." -NoNewline
+    if ($cimSession) {
+        try {
+            # Just try to query - don't need actual snapshots to exist
+            $null = Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy -ErrorAction Stop
+            Write-Host " PASS" -ForegroundColor Green
+            $checks += [PSCustomObject]@{ Check = "VSS Query"; Status = "Pass"; Message = "Can query Win32_ShadowCopy class" }
+        }
+        catch {
+            Write-Host " FAIL" -ForegroundColor Red
+            $msg = $_.Exception.Message
+            if ($msg -match "Access denied") {
+                $msg = "Access denied to Win32_ShadowCopy - admin rights required"
+            }
+            $checks += [PSCustomObject]@{ Check = "VSS Query"; Status = "Fail"; Message = $msg }
+            $allPassed = $false
+        }
+    }
+    else {
+        Write-Host " SKIP" -ForegroundColor Yellow
+        $checks += [PSCustomObject]@{ Check = "VSS Query"; Status = "Skipped"; Message = "CIM session required" }
+    }
+
+    # Cleanup
+    if ($cimSession) {
+        Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue
+    }
+
+    # Summary
+    Write-Host "`n$("=" * 60)"
+    $passCount = ($checks | Where-Object { $_.Status -eq 'Pass' }).Count
+    $failCount = ($checks | Where-Object { $_.Status -eq 'Fail' }).Count
+    $warnCount = ($checks | Where-Object { $_.Status -eq 'Warning' }).Count
+
+    if ($allPassed -and $failCount -eq 0) {
+        Write-Host "RESULT: All prerequisites passed!" -ForegroundColor Green
+        Write-Host "        Server '$ServerName' is ready for remote VSS operations."
+    }
+    else {
+        Write-Host "RESULT: $failCount check(s) failed, $warnCount warning(s)" -ForegroundColor Red
+        Write-Host "`nFailed checks:"
+        foreach ($check in ($checks | Where-Object { $_.Status -eq 'Fail' })) {
+            Write-Host "  - $($check.Check): $($check.Message)" -ForegroundColor Red
+        }
+        if ($warnCount -gt 0) {
+            Write-Host "`nWarnings:"
+            foreach ($check in ($checks | Where-Object { $_.Status -eq 'Warning' })) {
+                Write-Host "  - $($check.Check): $($check.Message)" -ForegroundColor Yellow
+            }
+        }
+    }
+
+    if ($Detailed) {
+        Write-Host "`nDetailed Results:" -ForegroundColor Cyan
+        $checks | Format-Table -AutoSize
+    }
+
+    # Return result
+    if ($allPassed -and $failCount -eq 0) {
+        return New-OperationResult -Success $true -Data $checks
+    }
+    else {
+        $errorSummary = ($checks | Where-Object { $_.Status -eq 'Fail' } | ForEach-Object { $_.Check }) -join ", "
+        return New-OperationResult -Success $false -ErrorMessage "Failed checks: $errorSummary" -Data $checks
+    }
+}

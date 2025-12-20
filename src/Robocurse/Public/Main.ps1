@@ -45,6 +45,10 @@ SNAPSHOT SCHEDULES:
     -SnapshotSchedule -Sync             Sync schedules with config file
     -SnapshotSchedule -Remove -ScheduleName DailyD    Remove a schedule
 
+DIAGNOSTICS:
+    -TestRemote -Server <name>          Test remote VSS prerequisites
+                                        Checks: network, WinRM, CIM, VSS service
+
 EXAMPLES:
     # GUI mode
     .\Robocurse.ps1
@@ -60,6 +64,9 @@ EXAMPLES:
 
     # Sync snapshot schedules from config
     .\Robocurse.ps1 -SnapshotSchedule -Sync
+
+    # Test remote VSS prerequisites before deployment
+    .\Robocurse.ps1 -TestRemote -Server FileServer01
 
 "@
 }
@@ -112,6 +119,21 @@ function Invoke-HeadlessReplication {
     if ($DryRun) {
         Write-Host "*** DRY-RUN MODE: No files will be copied ***" -ForegroundColor Yellow
     }
+
+    # Pre-flight check: Warn if email is enabled but credentials are missing
+    # This gives immediate feedback rather than discovering at completion time
+    if ($Config.Email -and $Config.Email.Enabled) {
+        if (-not (Test-SmtpCredential -Target $Config.Email.CredentialTarget)) {
+            Write-Host ""
+            Write-Host "WARNING: Email notifications are enabled but SMTP credentials are not configured!" -ForegroundColor Yellow
+            Write-Host "         Target: $($Config.Email.CredentialTarget)" -ForegroundColor Yellow
+            Write-Host "         Completion emails will NOT be sent until credentials are configured." -ForegroundColor Yellow
+            Write-Host "         Use the GUI 'Settings' panel to configure SMTP credentials." -ForegroundColor Yellow
+            Write-Host ""
+            Write-RobocurseLog -Message "Email enabled but SMTP credential not found: $($Config.Email.CredentialTarget). Emails will not be sent." -Level 'Warning' -Component 'Email'
+        }
+    }
+
     Write-Host ""
 
     # Start replication with bandwidth throttling
@@ -274,7 +296,10 @@ function Start-RobocurseMain {
         [switch]$Sync,
         [switch]$Add,
         [switch]$Remove,
-        [string]$ScheduleName
+        [string]$ScheduleName,
+
+        # Diagnostic parameters
+        [switch]$TestRemote
     )
 
     if ($ShowHelp) {
@@ -311,6 +336,17 @@ function Start-RobocurseMain {
         }
         $config = Get-RobocurseConfig -Path $ConfigPath
         return Invoke-SnapshotScheduleCommand -List:$List -Sync:$Sync -Add:$Add -Remove:$Remove -ScheduleName $ScheduleName -Config $config
+    }
+
+    # Remote VSS prerequisites test
+    if ($TestRemote) {
+        if (-not $Server) {
+            Write-Host "Error: -Server is required for -TestRemote" -ForegroundColor Red
+            Write-Host "Usage: .\Robocurse.ps1 -TestRemote -Server <ServerName>" -ForegroundColor Gray
+            return 1
+        }
+        $result = Test-RemoteVssPrerequisites -ServerName $Server -Detailed
+        return $(if ($result.Success) { 0 } else { 1 })
     }
 
     # Track state for cleanup

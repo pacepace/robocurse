@@ -543,7 +543,9 @@ function Get-DirectoryProfilesParallel {
 
             try {
                 # Run robocopy in list mode
-                $output = & robocopy $Path "\\?\NULL" /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
+                # Use random temp path as destination - \\?\NULL breaks on some Windows versions
+                $nullDest = Join-Path $env:TEMP "robocurse-null-$(Get-Random)"
+                $output = & robocopy $Path $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
 
                 $totalSize = 0
                 $fileCount = 0

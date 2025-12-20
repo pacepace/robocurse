@@ -6,7 +6,11 @@
       "Bash(powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command \"./scripts/run-tests.ps1\")",
       "Bash(powershell.exe -NoProfile -Command \"Get-Content ''$env:TEMP\\\\pester-summary.txt''\")",
       "Bash(powershell.exe:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(tree:*)",
+      "Bash(wc:*)",
+      "Bash(find:*)",
+      "Bash(git -C \"C:\\\\Users\\\\pace\\\\pub\\\\dev-wsl\\\\vscode\\\\robocurse\" log --oneline -20)"
     ]
   }
 }
