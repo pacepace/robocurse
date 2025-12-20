@@ -1,39 +1,111 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Enables or disables PowerShell Remoting (WinRM).
+    Enables or disables PowerShell Remoting (WinRM) with optional IP restrictions.
 
 .DESCRIPTION
-    Configures PowerShell Remoting with optional IP address restrictions.
-    When enabling with -AllowedIPs, firewall rules are scoped to those addresses only.
+    Configures PowerShell Remoting (WinRM) for remote management via Enter-PSSession
+    and Invoke-Command. Can restrict access to specific IP addresses for security.
+
+    PowerShell Remoting uses:
+    - Port 5985 (HTTP) - default, used by this script
+    - Port 5986 (HTTPS) - for certificate-based auth (not managed by this script)
+
+    When enabled:
+    - WinRM service is started and set to Automatic
+    - HTTP listener is configured on port 5985
+    - Firewall rules allow inbound connections (optionally restricted by IP)
+
+    When disabled:
+    - PSRemoting session configurations are unregistered
+    - WinRM firewall rules are disabled
+    - WinRM service is stopped and set to Disabled
+
+    Disabling WinRM does NOT affect:
+    - RDP (Remote Desktop) - uses port 3389
+    - SMB file sharing - uses ports 139/445
+    - Remote MMC snap-ins - use RPC/SMB
+    - Scheduled tasks, Group Policy, or other domain management
+
+    WinRM is only required for PowerShell Remoting and Windows Admin Center.
 
 .PARAMETER Enable
-    Enable PowerShell Remoting and start WinRM service.
+    Enables PowerShell Remoting:
+    - Runs Enable-PSRemoting to configure the service and listener
+    - Configures firewall rules (default WinRM rules or custom IP-restricted rule)
+    - Starts the WinRM service
 
 .PARAMETER Disable
-    Disable PowerShell Remoting and stop WinRM service.
+    Disables PowerShell Remoting:
+    - Unregisters PS session configurations
+    - Disables all WinRM firewall rules (both default and custom)
+    - Stops and disables the WinRM service
 
 .PARAMETER AllowedIPs
-    IP addresses or subnets allowed to connect (e.g., "192.168.1.100", "10.0.0.0/24").
-    Only used with -Enable. If omitted, allows any IP.
+    One or more IP addresses or CIDR subnets allowed to connect.
+    Only used with -Enable.
+
+    When specified:
+    - Default WinRM firewall rules are disabled
+    - A custom rule (Robocurse-WinRM-HTTP) is created allowing only these IPs
+
+    When omitted:
+    - Default WinRM firewall rules are used (allows any IP)
+
+    Examples: "192.168.1.100", "10.0.0.0/24", "192.168.1.0/24"
 
 .PARAMETER Status
-    Show current WinRM status without making changes.
+    Displays the current state of WinRM without making changes:
+    - Service status and startup type
+    - HTTP listener configuration
+    - Firewall rules and allowed IPs
 
 .EXAMPLE
     .\Set-PsRemoting.ps1 -Enable
 
+    Enables PowerShell Remoting with default firewall rules (any IP can connect).
+
 .EXAMPLE
     .\Set-PsRemoting.ps1 -Enable -AllowedIPs "192.168.1.100"
 
+    Enables remoting, but only allows connections from 192.168.1.100.
+
 .EXAMPLE
-    .\Set-PsRemoting.ps1 -Enable -AllowedIPs "192.168.1.100","10.0.0.0/24"
+    .\Set-PsRemoting.ps1 -Enable -AllowedIPs "10.0.0.0/8","192.168.0.0/16"
+
+    Enables remoting for multiple subnets (internal networks only).
 
 .EXAMPLE
     .\Set-PsRemoting.ps1 -Disable
 
+    Completely disables PowerShell Remoting.
+
 .EXAMPLE
     .\Set-PsRemoting.ps1 -Status
+
+    Shows current WinRM configuration without making changes.
+
+.NOTES
+    Requires: Administrator privileges
+
+    Firewall rules managed by this script:
+    - Robocurse-WinRM-HTTP (custom IP-restricted rule, when -AllowedIPs is used)
+    - "Windows Remote Management" group (default rules, enabled/disabled as needed)
+
+    To test connectivity from another machine:
+        Test-WSMan -ComputerName <servername>
+        Enter-PSSession -ComputerName <servername>
+
+    For HTTPS (port 5986), you need to configure a certificate separately.
+    This script only manages HTTP on port 5985.
+
+    Unlike SMB, disabling WinRM has minimal impact on traditional Windows
+    administration tools. Most MMC snap-ins use RPC (port 135), not WinRM.
+
+.LINK
+    Set-SmbFirewall.ps1
+    Set-FileSharing.ps1
+    https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.core/enable-psremoting
 #>
 [CmdletBinding()]
 param(
@@ -175,6 +247,15 @@ if ($Enable) {
 if ($Disable) {
     Write-Host "Disabling PowerShell Remoting..." -ForegroundColor Cyan
 
+    # Disable PSRemoting config first (while service is still running)
+    # This unregisters the PS session configurations
+    try {
+        Disable-PSRemoting -Force -WarningAction SilentlyContinue -ErrorAction SilentlyContinue | Out-Null
+        Write-Host "  Disabled PSRemoting configuration" -ForegroundColor Green
+    } catch {
+        Write-Host "  PSRemoting configuration already disabled" -ForegroundColor Cyan
+    }
+
     # Remove custom firewall rule
     $existing = Get-NetFirewallRule -Name $customRuleName -ErrorAction SilentlyContinue
     if ($existing) {
@@ -196,10 +277,6 @@ if ($Disable) {
     }
     Set-Service -Name WinRM -StartupType Disabled
     Write-Host "  Stopped and disabled WinRM service" -ForegroundColor Green
-
-    # Disable PSRemoting config
-    Disable-PSRemoting -Force -WarningAction SilentlyContinue | Out-Null
-    Write-Host "  Disabled PSRemoting configuration" -ForegroundColor Green
 
     Write-Host "`nPowerShell Remoting disabled" -ForegroundColor Green
     Get-RemotingStatus

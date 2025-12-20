@@ -1,38 +1,94 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Blocks or allows SMB ports 139 and 445 in Windows Firewall.
+    Blocks or allows SMB traffic (ports 139 and 445) at the Windows Firewall level.
 
 .DESCRIPTION
-    Creates or removes firewall rules to block inbound traffic on ports 139 and 445.
-    Use -Block to deny SMB access, -Allow to permit it.
+    Creates or removes Windows Firewall rules to block inbound SMB traffic.
+    This provides network-level protection that works even if the LanmanServer
+    service is running.
+
+    SMB (Server Message Block) is used for:
+    - File sharing (shared folders, admin shares like C$ and ADMIN$)
+    - Named pipes (used by many Windows services and tools)
+    - Printer sharing
+
+    When blocked, the following will stop working FROM OTHER MACHINES:
+    - Access to shared folders on this server
+    - Admin shares (\\server\c$, \\server\admin$)
+    - PsExec and similar remote execution tools
+    - Remote Registry access
+    - Event Viewer remote log access
+    - Other MMC snap-in features that fetch data over SMB
+
+    The following will STILL WORK:
+    - RDP (Remote Desktop) - uses port 3389
+    - PowerShell Remoting (WinRM) - uses port 5985/5986
+    - Core MMC operations that use RPC - uses port 135
+    - This machine connecting to OTHER file shares (outbound SMB)
+
+    This script only manages rules it creates (named Robocurse-Block-SMB-*).
+    It does not modify any other firewall rules.
 
 .PARAMETER Block
-    Create firewall rules blocking ports 139 and 445.
+    Creates firewall rules to block inbound TCP traffic on ports 139 and 445.
+    Prompts for confirmation unless -Force is specified.
 
 .PARAMETER Allow
-    Remove the blocking rules (allows SMB traffic).
-
-.PARAMETER Status
-    Show current firewall rule status without making changes.
+    Removes the Robocurse block rules, allowing SMB traffic.
+    Equivalent to -Delete.
 
 .PARAMETER Delete
-    Remove all Robocurse SMB firewall rules.
+    Removes all Robocurse SMB firewall rules.
+    Equivalent to -Allow.
+
+.PARAMETER Status
+    Displays the current state of Robocurse SMB firewall rules without making changes.
 
 .PARAMETER Force
-    Skip confirmation prompt when blocking.
+    Skips the confirmation prompt when using -Block.
+    Useful for scripted/automated deployments.
 
 .EXAMPLE
     .\Set-SmbFirewall.ps1 -Block
 
+    Blocks SMB ports after showing a warning and prompting for confirmation.
+
+.EXAMPLE
+    .\Set-SmbFirewall.ps1 -Block -Force
+
+    Blocks SMB ports without prompting. Use in scripts or scheduled tasks.
+
 .EXAMPLE
     .\Set-SmbFirewall.ps1 -Allow
 
-.EXAMPLE
-    .\Set-SmbFirewall.ps1 -Delete
+    Removes the block rules, allowing SMB traffic again.
 
 .EXAMPLE
     .\Set-SmbFirewall.ps1 -Status
+
+    Shows whether SMB is currently blocked without making changes.
+
+.NOTES
+    Requires: Administrator privileges
+
+    Firewall rules created by this script:
+    - Robocurse-Block-SMB-139 (NetBIOS Session Service)
+    - Robocurse-Block-SMB-445 (SMB Direct / CIFS)
+
+    For complete SMB lockdown, also disable the LanmanServer service using
+    Set-FileSharing.ps1 -Disable. Defense in depth.
+
+    Port 139 is NetBIOS over TCP, used by older SMB1 clients.
+    Port 445 is SMB Direct, used by SMB2/SMB3 and modern Windows.
+    Both are blocked for comprehensive protection.
+
+    This script blocks INBOUND traffic only. This machine can still connect
+    to file shares on other servers.
+
+.LINK
+    Set-FileSharing.ps1
+    Set-PsRemoting.ps1
 #>
 [CmdletBinding()]
 param(

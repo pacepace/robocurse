@@ -1,29 +1,66 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Enables or disables the LanmanServer (Server) service for file sharing.
+    Enables or disables Windows file sharing by controlling the LanmanServer service.
 
 .DESCRIPTION
-    Toggles the LanmanServer service startup type and starts/stops it accordingly.
-    Use -Enable to allow file sharing, -Disable to prevent it.
+    Controls the LanmanServer (Server) service, which is responsible for SMB file sharing
+    on Windows. This is the service that allows other computers to access shared folders,
+    admin shares (C$, ADMIN$), and printers on this machine.
+
+    When disabled:
+    - No one can access shared folders on this machine
+    - Admin shares (\\server\c$) become inaccessible
+    - PsExec and similar tools cannot connect
+    - Remote MMC snap-ins lose access to file-based data
+
+    When enabled:
+    - Standard Windows file sharing is available
+    - The service is set to start automatically on boot
+
+    This script controls the service layer only. To block SMB at the firewall level
+    (which is more secure), use Set-SmbFirewall.ps1 instead.
 
 .PARAMETER Enable
-    Enable and start the LanmanServer service.
+    Sets the LanmanServer service to Automatic startup and starts it immediately.
 
 .PARAMETER Disable
-    Stop and disable the LanmanServer service.
+    Stops the LanmanServer service and sets it to Disabled startup.
+    The service will not start on reboot.
 
 .PARAMETER Status
-    Show current service status without making changes.
+    Displays the current service state and startup type without making changes.
 
 .EXAMPLE
     .\Set-FileSharing.ps1 -Enable
 
+    Enables file sharing and starts the service.
+
 .EXAMPLE
     .\Set-FileSharing.ps1 -Disable
 
+    Stops file sharing and prevents the service from starting on boot.
+
 .EXAMPLE
     .\Set-FileSharing.ps1 -Status
+
+    Shows the current state without making changes.
+
+.NOTES
+    Requires: Administrator privileges
+
+    Related services:
+    - LanmanServer (Server): Handles incoming SMB connections (this script)
+    - LanmanWorkstation (Workstation): Handles outgoing SMB connections to other servers
+
+    Disabling LanmanServer does NOT affect this machine's ability to connect to
+    other file shares. It only prevents others from connecting to this machine.
+
+    For defense in depth, combine with Set-SmbFirewall.ps1 to block at the
+    firewall level as well.
+
+.LINK
+    Set-SmbFirewall.ps1
 #>
 [CmdletBinding()]
 param(
