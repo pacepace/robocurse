@@ -503,7 +503,8 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
         }
 
         It "Should output progress during replication" {
-            InModuleScope 'Robocurse' {
+            InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
+                param($TestConfigPath)
                 Initialize-OrchestrationStateType | Out-Null
                 $script:OrchestrationState.Reset()
                 $config = [PSCustomObject]@{
@@ -539,7 +540,7 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
                 Mock Format-FileSize { "500 KB" }
 
                 # Capture Write-Host output
-                $output = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1
+                $output = Invoke-HeadlessReplication -Config $config -ConfigPath $TestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1
 
                 $outputText = $output -join "`n"
                 $outputText | Should -Match "Starting replication"
@@ -548,7 +549,8 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
         }
 
         It "Should send email on completion when configured" {
-            InModuleScope 'Robocurse' {
+            InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
+                param($TestConfigPath)
                 $config = [PSCustomObject]@{
                     Email = @{
                         Enabled = $true
@@ -584,14 +586,15 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
                 }
                 Mock Format-FileSize { "1 KB" }
 
-                Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4
+                Invoke-HeadlessReplication -Config $config -ConfigPath $TestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4
 
                 $script:EmailSent | Should -Be $true
             }
         }
 
         It "Should handle email send failure gracefully" {
-            InModuleScope 'Robocurse' {
+            InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
+                param($TestConfigPath)
                 $config = [PSCustomObject]@{
                     Email = @{
                         Enabled = $true
@@ -627,12 +630,13 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
                 Mock Format-FileSize { "1 KB" }
 
                 # Should not throw
-                { Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 } | Should -Not -Throw
+                { Invoke-HeadlessReplication -Config $config -ConfigPath $TestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 } | Should -Not -Throw
             }
         }
 
         It "Should display DryRun mode indicator" {
-            InModuleScope 'Robocurse' {
+            InModuleScope 'Robocurse' -ArgumentList $script:TestConfigPath {
+                param($TestConfigPath)
                 $config = [PSCustomObject]@{
                     Email = @{ Enabled = $false }
                 }
@@ -658,7 +662,7 @@ Describe "Main Entry Point Tests" -Tag "Main", "Integration" {
                 }
                 Mock Format-FileSize { "0 B" }
 
-                $output = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 -DryRun 6>&1
+                $output = Invoke-HeadlessReplication -Config $config -ConfigPath $TestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 -DryRun 6>&1
 
                 $outputText = $output -join "`n"
                 $outputText | Should -Match "DRY-RUN"

@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-19 23:01:54
+    Built: 2025-12-20 12:12:48
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -1206,6 +1206,11 @@ function New-DefaultConfig {
             TaskName = ""  # Custom task name; empty = auto-generate unique name
         }
         SyncProfiles = @()
+        SnapshotRegistry = [PSCustomObject]@{
+            # Tracks persistent snapshot IDs created by Robocurse per volume
+            # Format: { "D:": ["{guid1}", "{guid2}"], "E:": ["{guid3}"] }
+            # Used for accurate retention counting and to avoid touching external snapshots
+        }
     }
 
     # Ensure arrays are not null by explicitly setting them if needed
@@ -1545,6 +1550,14 @@ function ConvertFrom-FriendlyConfig {
 
     $config.SyncProfiles = $syncProfiles
 
+    # Load snapshot registry (tracks which snapshot IDs we created per volume)
+    if ($RawConfig.snapshotRegistry) {
+        $config.SnapshotRegistry = $RawConfig.snapshotRegistry
+    }
+    else {
+        $config.SnapshotRegistry = [PSCustomObject]@{}
+    }
+
     Write-Verbose "Converted config: $($syncProfiles.Count) profiles loaded"
     return $config
 }
@@ -1659,6 +1672,14 @@ function ConvertTo-FriendlyConfig {
         }
 
         $friendly.profiles[$profile.Name] = [PSCustomObject]$friendlyProfile
+    }
+
+    # Add snapshot registry (tracks which snapshot IDs we created per volume)
+    if ($Config.SnapshotRegistry) {
+        $friendly.snapshotRegistry = $Config.SnapshotRegistry
+    }
+    else {
+        $friendly.snapshotRegistry = [ordered]@{}
     }
 
     return [PSCustomObject]$friendly
@@ -6349,6 +6370,8 @@ function Start-ReplicationRun {
         Preview mode - runs robocopy with /L flag to show what would be copied
     .PARAMETER Config
         Full configuration object (required for snapshot retention settings)
+    .PARAMETER ConfigPath
+        Path to config file (required for snapshot registry updates)
     #>
     [CmdletBinding()]
     param(
@@ -6375,6 +6398,9 @@ function Start-ReplicationRun {
 
         [Parameter(Mandatory)]
         [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath,
 
         [ValidateRange(1, 128)]
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs,
@@ -6447,6 +6473,7 @@ function Start-ReplicationRun {
     $script:OnProfileComplete = $OnProfileComplete
     $script:CurrentMaxConcurrentJobs = $MaxConcurrentJobs
     $script:Config = $Config
+    $script:ConfigPath = $ConfigPath
 
     # Store profiles and start timing
     $script:OrchestrationState.Profiles = $Profiles
@@ -6481,12 +6508,15 @@ function Invoke-ProfileSnapshots {
         - Computes effective retention using MAX across all profiles sharing that volume
         - Enforces retention policy (deletes old snapshots to make room)
         - Creates a new persistent snapshot
+        - Registers the snapshot in the config's SnapshotRegistry
 
         The snapshots remain after backup completes for point-in-time recovery.
     .PARAMETER Profile
         The sync profile object
     .PARAMETER Config
         The full configuration object (for computing effective retention)
+    .PARAMETER ConfigPath
+        Path to the config file (for saving registry updates)
     .OUTPUTS
         OperationResult with Data containing:
         - SourceSnapshot: snapshot info or $null
@@ -6500,7 +6530,10 @@ function Invoke-ProfileSnapshots {
         [PSCustomObject]$Profile,
 
         [Parameter(Mandatory)]
-        [PSCustomObject]$Config
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     $results = @{
@@ -6519,10 +6552,10 @@ function Invoke-ProfileSnapshots {
         $isRemote = $sourcePath -match '^\\\\[^\\]+\\[^\\]+'
 
         if ($isRemote) {
-            $sourceResult = Invoke-RemotePersistentSnapshot -Path $sourcePath -Side "Source" -Config $Config
+            $sourceResult = Invoke-RemotePersistentSnapshot -Path $sourcePath -Side "Source" -Config $Config -ConfigPath $ConfigPath
         }
         else {
-            $sourceResult = Invoke-LocalPersistentSnapshot -Path $sourcePath -Side "Source" -Config $Config
+            $sourceResult = Invoke-LocalPersistentSnapshot -Path $sourcePath -Side "Source" -Config $Config -ConfigPath $ConfigPath
         }
 
         if ($sourceResult.Success) {
@@ -6545,10 +6578,10 @@ function Invoke-ProfileSnapshots {
         $isRemote = $destPath -match '^\\\\[^\\]+\\[^\\]+'
 
         if ($isRemote) {
-            $destResult = Invoke-RemotePersistentSnapshot -Path $destPath -Side "Destination" -Config $Config
+            $destResult = Invoke-RemotePersistentSnapshot -Path $destPath -Side "Destination" -Config $Config -ConfigPath $ConfigPath
         }
         else {
-            $destResult = Invoke-LocalPersistentSnapshot -Path $destPath -Side "Destination" -Config $Config
+            $destResult = Invoke-LocalPersistentSnapshot -Path $destPath -Side "Destination" -Config $Config -ConfigPath $ConfigPath
         }
 
         if ($destResult.Success) {
@@ -6578,12 +6611,15 @@ function Invoke-LocalPersistentSnapshot {
         Uses Get-EffectiveVolumeRetention to compute MAX retention across all profiles
         sharing this volume.
         The snapshot persists after backup completes for point-in-time recovery.
+        Registers the snapshot ID in the config's SnapshotRegistry for tracking.
     .PARAMETER Path
         The local path to snapshot (used to determine volume)
     .PARAMETER Side
         "Source" or "Destination" - which side this snapshot is for
     .PARAMETER Config
         The full configuration object (for computing effective retention)
+    .PARAMETER ConfigPath
+        Path to the config file (for saving registry updates)
     .OUTPUTS
         OperationResult with Data containing Snapshot and Retention info
     #>
@@ -6597,7 +6633,10 @@ function Invoke-LocalPersistentSnapshot {
         [string]$Side,
 
         [Parameter(Mandatory)]
-        [PSCustomObject]$Config
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     # Get volume from path
@@ -6611,8 +6650,10 @@ function Invoke-LocalPersistentSnapshot {
 
     Write-RobocurseLog -Message "Enforcing $Side retention for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
 
-    # Step 1: Enforce retention BEFORE creating new snapshot
-    $retentionResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $keepCount
+    # Step 1: Enforce retention BEFORE creating new snapshot (only our registered snapshots)
+    # Use KeepCount-1 to make room for the new snapshot we're about to create
+    $retentionTarget = [Math]::Max(0, $keepCount - 1)
+    $retentionResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $retentionTarget -Config $Config -ConfigPath $ConfigPath
     $retentionInfo = $null
     if (-not $retentionResult.Success) {
         Write-RobocurseLog -Message "Retention enforcement failed: $($retentionResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
@@ -6629,13 +6670,17 @@ function Invoke-LocalPersistentSnapshot {
         }
     }
 
-    # Step 2: Create new persistent snapshot
-    $snapshotResult = New-VssSnapshot -SourcePath $Path
+    # Step 2: Create new persistent snapshot (skip tracking so it survives restarts)
+    $snapshotResult = New-VssSnapshot -SourcePath $Path -SkipTracking
     if (-not $snapshotResult.Success) {
         return New-OperationResult -Success $false -ErrorMessage "Failed to create persistent snapshot: $($snapshotResult.ErrorMessage)"
     }
 
-    # Note: We do NOT track this snapshot for orphan cleanup - it's meant to persist
+    # Step 3: Register the snapshot in our registry
+    $registered = Register-PersistentSnapshot -Config $Config -Volume $volume -ShadowId $snapshotResult.Data.ShadowId -ConfigPath $ConfigPath
+    if (-not $registered.Success) {
+        Write-RobocurseLog -Message "Warning: Failed to register snapshot in registry: $($registered.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
+    }
 
     Write-RobocurseLog -Message "Created persistent $Side snapshot: $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
 
@@ -6654,12 +6699,15 @@ function Invoke-RemotePersistentSnapshot {
         enforcing retention policy first. Uses Get-EffectiveVolumeRetention
         to compute MAX retention across all profiles sharing that volume.
         The snapshot persists after backup completes for point-in-time recovery.
+        Registers the snapshot ID in the config's SnapshotRegistry for tracking.
     .PARAMETER Path
         The UNC path to snapshot (e.g., \\server\share)
     .PARAMETER Side
         "Source" or "Destination" - which side this snapshot is for
     .PARAMETER Config
         The full configuration object (for computing effective retention)
+    .PARAMETER ConfigPath
+        Path to the config file (for saving registry updates)
     .OUTPUTS
         OperationResult with Data containing Snapshot and Retention info
     #>
@@ -6673,7 +6721,10 @@ function Invoke-RemotePersistentSnapshot {
         [string]$Side,
 
         [Parameter(Mandatory)]
-        [PSCustomObject]$Config
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     # Parse UNC path
@@ -6704,13 +6755,16 @@ function Invoke-RemotePersistentSnapshot {
 
     Write-RobocurseLog -Message "Enforcing remote $Side retention on '$serverName' for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
 
-    # Step 1: Enforce retention
-    $retentionResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $keepCount
+    # Step 1: Enforce retention (only our registered snapshots)
+    # Use KeepCount-1 to make room for the new snapshot we're about to create
+    $retentionTarget = [Math]::Max(0, $keepCount - 1)
+    $retentionResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $retentionTarget -Config $Config -ConfigPath $ConfigPath
     $retentionInfo = $null
     if (-not $retentionResult.Success) {
         Write-RobocurseLog -Message "Remote retention failed: $($retentionResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
     }
     else {
+        Write-RobocurseLog -Message "Remote retention: deleted $($retentionResult.Data.DeletedCount), kept $($retentionResult.Data.KeptCount)" -Level 'Debug' -Component 'Orchestration'
         $retentionInfo = [PSCustomObject]@{
             Volume = $volume
             Location = "Remote:$serverName"
@@ -6720,10 +6774,16 @@ function Invoke-RemotePersistentSnapshot {
         }
     }
 
-    # Step 2: Create new persistent snapshot
-    $snapshotResult = New-RemoteVssSnapshot -UncPath $Path
+    # Step 2: Create new persistent snapshot (skip tracking so it survives restarts)
+    $snapshotResult = New-RemoteVssSnapshot -UncPath $Path -SkipTracking
     if (-not $snapshotResult.Success) {
         return New-OperationResult -Success $false -ErrorMessage "Failed to create remote persistent snapshot: $($snapshotResult.ErrorMessage)"
+    }
+
+    # Step 3: Register the snapshot in our registry
+    $registered = Register-PersistentSnapshot -Config $Config -Volume $volume -ShadowId $snapshotResult.Data.ShadowId -ConfigPath $ConfigPath
+    if (-not $registered.Success) {
+        Write-RobocurseLog -Message "Warning: Failed to register remote snapshot in registry: $($registered.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
     }
 
     Write-RobocurseLog -Message "Created remote persistent $Side snapshot on '$serverName': $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
@@ -6886,7 +6946,7 @@ function Start-ProfileReplication {
     }
 
     # Create persistent snapshots if enabled (separate from temp VSS for file copying)
-    $snapshotResult = Invoke-ProfileSnapshots -Profile $Profile -Config $script:Config
+    $snapshotResult = Invoke-ProfileSnapshots -Profile $Profile -Config $script:Config -ConfigPath $script:ConfigPath
     if (-not $snapshotResult.Success) {
         Write-RobocurseLog -Message "Persistent snapshot creation failed: $($snapshotResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
         # Don't fail the profile - persistent snapshots are optional enhancement
@@ -8471,6 +8531,259 @@ function Get-VssPath {
     return $vssPath
 }
 
+# ============================================================================
+# Snapshot Registry Functions
+# Track which snapshot IDs we created (stored in config file)
+# ============================================================================
+
+function Register-PersistentSnapshot {
+    <#
+    .SYNOPSIS
+        Registers a snapshot ID in the config's snapshot registry
+    .DESCRIPTION
+        Adds a snapshot ID to the config's SnapshotRegistry for a given volume.
+        This tracks which snapshots we created for accurate retention counting.
+    .PARAMETER Config
+        The config object (will be modified in place)
+    .PARAMETER Volume
+        The volume (e.g., "D:")
+    .PARAMETER ShadowId
+        The snapshot GUID to register
+    .PARAMETER ConfigPath
+        Path to config file (for saving)
+    .OUTPUTS
+        OperationResult - Success=$true if registered, Success=$false with ErrorMessage on failure
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$Volume,
+
+        [Parameter(Mandatory)]
+        [string]$ShadowId,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    $volumeKey = $Volume.ToUpper()
+
+    # Ensure SnapshotRegistry exists
+    if (-not $Config.SnapshotRegistry) {
+        $Config | Add-Member -NotePropertyName SnapshotRegistry -NotePropertyValue ([PSCustomObject]@{}) -Force
+    }
+
+    # Get or create the array for this volume
+    $existingIds = @()
+    if ($Config.SnapshotRegistry.PSObject.Properties[$volumeKey]) {
+        $existingIds = @($Config.SnapshotRegistry.$volumeKey)
+    }
+
+    # Add if not already present
+    if ($ShadowId -notin $existingIds) {
+        $existingIds += $ShadowId
+        $Config.SnapshotRegistry | Add-Member -NotePropertyName $volumeKey -NotePropertyValue $existingIds -Force
+        Write-RobocurseLog -Message "Registered persistent snapshot $ShadowId for volume $volumeKey" -Level 'Debug' -Component 'VSS'
+
+        # Save config to persist the registry
+        $saveResult = Save-RobocurseConfig -Config $Config -Path $ConfigPath
+        if (-not $saveResult.Success) {
+            Write-RobocurseLog -Message "Failed to save snapshot registry: $($saveResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            return New-OperationResult -Success $false -ErrorMessage "Failed to save snapshot registry: $($saveResult.ErrorMessage)"
+        }
+    }
+
+    return New-OperationResult -Success $true -Data $ShadowId
+}
+
+function Unregister-PersistentSnapshot {
+    <#
+    .SYNOPSIS
+        Removes a snapshot ID from the config's snapshot registry
+    .DESCRIPTION
+        Removes a snapshot ID from the SnapshotRegistry when the snapshot is deleted.
+    .PARAMETER Config
+        The config object (will be modified in place)
+    .PARAMETER ShadowId
+        The snapshot GUID to unregister
+    .PARAMETER ConfigPath
+        Path to config file (for saving)
+    .OUTPUTS
+        $true if successfully unregistered (or wasn't registered)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ShadowId,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    if (-not $Config.SnapshotRegistry) {
+        return $true  # Nothing to unregister from
+    }
+
+    $found = $false
+    foreach ($prop in $Config.SnapshotRegistry.PSObject.Properties) {
+        $volumeKey = $prop.Name
+        $ids = @($prop.Value)
+        if ($ShadowId -in $ids) {
+            $newIds = @($ids | Where-Object { $_ -ne $ShadowId })
+            $Config.SnapshotRegistry | Add-Member -NotePropertyName $volumeKey -NotePropertyValue $newIds -Force
+            $found = $true
+            Write-RobocurseLog -Message "Unregistered snapshot $ShadowId from volume $volumeKey" -Level 'Debug' -Component 'VSS'
+        }
+    }
+
+    if ($found) {
+        # Save config to persist the registry change
+        $saveResult = Save-RobocurseConfig -Config $Config -Path $ConfigPath
+        if (-not $saveResult.Success) {
+            Write-RobocurseLog -Message "Failed to save snapshot registry after unregister: $($saveResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-SnapshotRegistered {
+    <#
+    .SYNOPSIS
+        Checks if a snapshot ID is registered in our registry
+    .DESCRIPTION
+        Returns $true if the snapshot was created by Robocurse (tracked in registry),
+        $false if it's an external/untracked snapshot.
+    .PARAMETER Config
+        The config object
+    .PARAMETER ShadowId
+        The snapshot GUID to check
+    .OUTPUTS
+        $true if registered, $false otherwise
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ShadowId
+    )
+
+    if (-not $Config.SnapshotRegistry) {
+        return $false
+    }
+
+    foreach ($prop in $Config.SnapshotRegistry.PSObject.Properties) {
+        $ids = @($prop.Value)
+        if ($ShadowId -in $ids) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-RegisteredSnapshots {
+    <#
+    .SYNOPSIS
+        Gets all registered snapshot IDs for a volume
+    .DESCRIPTION
+        Returns an array of snapshot IDs that we created for the specified volume.
+    .PARAMETER Config
+        The config object
+    .PARAMETER Volume
+        The volume (e.g., "D:")
+    .OUTPUTS
+        Array of snapshot GUID strings
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$Volume
+    )
+
+    $volumeKey = $Volume.ToUpper()
+
+    if (-not $Config.SnapshotRegistry) {
+        return @()
+    }
+
+    if ($Config.SnapshotRegistry.PSObject.Properties[$volumeKey]) {
+        return @($Config.SnapshotRegistry.$volumeKey)
+    }
+
+    return @()
+}
+
+function Get-SnapshotSummaryForEmail {
+    <#
+    .SYNOPSIS
+        Builds snapshot summary for email reports
+    .DESCRIPTION
+        Gets all local VSS snapshots and counts tracked vs external per volume.
+        Returns a hashtable suitable for inclusion in email Results object.
+    .PARAMETER Config
+        The config object (for checking snapshot registry)
+    .OUTPUTS
+        Hashtable with volume as key, value = @{ Tracked = N; External = M }
+    .EXAMPLE
+        $summary = Get-SnapshotSummaryForEmail -Config $config
+        # Returns: @{ "C:" = @{Tracked=3; External=1}; "D:" = @{Tracked=2; External=0} }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    $summary = @{}
+
+    try {
+        # Get all local snapshots
+        $result = Get-VssSnapshots
+        if (-not $result.Success) {
+            Write-RobocurseLog -Message "Could not get snapshots for email summary: $($result.ErrorMessage)" -Level 'Debug' -Component 'Email'
+            return $summary
+        }
+
+        $snapshots = @($result.Data)
+        if ($snapshots.Count -eq 0) {
+            return $summary
+        }
+
+        # Count per volume
+        foreach ($snap in $snapshots) {
+            $vol = $snap.SourceVolume
+            if (-not $summary.ContainsKey($vol)) {
+                $summary[$vol] = @{ Tracked = 0; External = 0 }
+            }
+
+            if (Test-SnapshotRegistered -Config $Config -ShadowId $snap.ShadowId) {
+                $summary[$vol].Tracked++
+            }
+            else {
+                $summary[$vol].External++
+            }
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Error building snapshot summary: $($_.Exception.Message)" -Level 'Debug' -Component 'Email'
+    }
+
+    return $summary
+}
+
 #endregion
 
 #region ==================== VSSLOCAL ====================
@@ -8584,6 +8897,9 @@ function New-VssSnapshot {
         Configurable via -RetryCount and -RetryDelaySeconds parameters.
     .PARAMETER SourcePath
         Path on the volume to snapshot (used to determine volume)
+    .PARAMETER SkipTracking
+        If set, does not add snapshot to orphan tracking file. Use for persistent
+        snapshots that should survive application restarts.
     .PARAMETER RetryCount
         Number of retry attempts for transient failures (default: 3)
     .PARAMETER RetryDelaySeconds
@@ -8614,6 +8930,8 @@ function New-VssSnapshot {
             $true
         })]
         [string]$SourcePath,
+
+        [switch]$SkipTracking,
 
         [ValidateRange(0, 10)]
         [int]$RetryCount = 3,
@@ -8653,7 +8971,7 @@ function New-VssSnapshot {
             Start-Sleep -Seconds $RetryDelaySeconds
         }
 
-        $result = New-VssSnapshotInternal -SourcePath $SourcePath
+        $result = New-VssSnapshotInternal -SourcePath $SourcePath -SkipTracking:$SkipTracking
         if ($result.Success) {
             if ($isRetry) {
                 Write-RobocurseLog -Message "VSS snapshot succeeded on retry $($attempt - 1)" -Level 'Info' -Component 'VSS'
@@ -8685,11 +9003,15 @@ function New-VssSnapshotInternal {
         Called by New-VssSnapshot. Separated for retry logic.
     .PARAMETER SourcePath
         Path to create snapshot for (volume will be determined from this path)
+    .PARAMETER SkipTracking
+        If set, does not add snapshot to orphan tracking file
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$SourcePath
+        [string]$SourcePath,
+
+        [switch]$SkipTracking
     )
 
     try {
@@ -8735,8 +9057,13 @@ function New-VssSnapshotInternal {
 
         Write-RobocurseLog -Message "VSS snapshot ready. Shadow path: $($snapshotInfo.ShadowPath)" -Level 'Info' -Component 'VSS'
 
-        # Track snapshot for orphan cleanup in case of crash
-        Add-VssToTracking -SnapshotInfo $snapshotInfo
+        # Track snapshot for orphan cleanup in case of crash (unless SkipTracking for persistent snapshots)
+        if (-not $SkipTracking) {
+            Add-VssToTracking -SnapshotInfo $snapshotInfo
+        }
+        else {
+            Write-RobocurseLog -Message "Skipping orphan tracking for persistent snapshot: $shadowId" -Level 'Debug' -Component 'VSS'
+        }
 
         return New-OperationResult -Success $true -Data $snapshotInfo
     }
@@ -8974,10 +9301,16 @@ function Invoke-VssRetentionPolicy {
     .DESCRIPTION
         For each volume, keeps the newest N snapshots and removes the rest.
         This is typically called before creating a new snapshot.
+        Only considers snapshots registered in our snapshot registry
+        (external snapshots are ignored and not counted against retention).
     .PARAMETER Volume
         Volume to apply retention to (e.g., "D:"). Required.
     .PARAMETER KeepCount
         Number of snapshots to keep per volume (default: 3)
+    .PARAMETER Config
+        Config object containing the snapshot registry.
+    .PARAMETER ConfigPath
+        Path to config file for saving after unregister.
     .PARAMETER WhatIf
         If specified, shows what would be deleted without actually deleting
     .OUTPUTS
@@ -8985,8 +9318,9 @@ function Invoke-VssRetentionPolicy {
         - DeletedCount: Number of snapshots removed
         - KeptCount: Number of snapshots retained
         - Errors: Array of any deletion errors
+        - ExternalCount: Number of unregistered snapshots on volume
     .EXAMPLE
-        $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 5
+        $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 5 -Config $config -ConfigPath $configPath
         if ($result.Success) { "Deleted $($result.Data.DeletedCount) old snapshots" }
     #>
     [CmdletBinding(SupportsShouldProcess)]
@@ -8996,7 +9330,13 @@ function Invoke-VssRetentionPolicy {
         [string]$Volume,
 
         [ValidateRange(0, 100)]
-        [int]$KeepCount = 3
+        [int]$KeepCount = 3,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     Write-RobocurseLog -Message "Applying VSS retention policy for $Volume (keep: $KeepCount)" -Level 'Info' -Component 'VSS'
@@ -9007,16 +9347,33 @@ function Invoke-VssRetentionPolicy {
         return New-OperationResult -Success $false -ErrorMessage "Failed to list snapshots: $($listResult.ErrorMessage)"
     }
 
-    $snapshots = @($listResult.Data)
+    $allSnapshots = @($listResult.Data)
+    $externalCount = 0
+
+    # Filter to only our registered snapshots (external snapshots are not counted against retention)
+    $snapshots = @()
+    foreach ($snap in $allSnapshots) {
+        if (Test-SnapshotRegistered -Config $Config -ShadowId $snap.ShadowId) {
+            $snapshots += $snap
+        }
+        else {
+            $externalCount++
+        }
+    }
+    if ($externalCount -gt 0) {
+        Write-RobocurseLog -Message "Found $externalCount external/untracked snapshot(s) on $Volume (not counting against retention)" -Level 'Info' -Component 'VSS'
+    }
+
     $currentCount = $snapshots.Count
 
     # Nothing to do if we're under the limit
     if ($currentCount -le $KeepCount) {
-        Write-RobocurseLog -Message "Retention OK: $currentCount snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
+        Write-RobocurseLog -Message "Retention OK: $currentCount registered snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
         return New-OperationResult -Success $true -Data @{
-            DeletedCount = 0
-            KeptCount    = $currentCount
-            Errors       = @()
+            DeletedCount  = 0
+            KeptCount     = $currentCount
+            Errors        = @()
+            ExternalCount = $externalCount
         }
     }
 
@@ -9039,6 +9396,8 @@ function Invoke-VssRetentionPolicy {
             if ($removeResult.Success) {
                 $deletedCount++
                 Write-RobocurseLog -Message "Deleted snapshot $shadowId (created $createdAt)" -Level 'Debug' -Component 'VSS'
+                # Unregister from snapshot registry
+                $null = Unregister-PersistentSnapshot -Config $Config -ShadowId $shadowId -ConfigPath $ConfigPath
             }
             else {
                 $errors += "Failed to delete $shadowId`: $($removeResult.ErrorMessage)"
@@ -9049,9 +9408,10 @@ function Invoke-VssRetentionPolicy {
 
     $success = $errors.Count -eq 0
     $resultData = @{
-        DeletedCount = $deletedCount
-        KeptCount    = $toKeep.Count
-        Errors       = $errors
+        DeletedCount  = $deletedCount
+        KeptCount     = $toKeep.Count
+        Errors        = $errors
+        ExternalCount = $externalCount
     }
 
     if ($success) {
@@ -9573,6 +9933,9 @@ function New-RemoteVssSnapshot {
         that hosts the specified UNC path.
     .PARAMETER UncPath
         The UNC path to the share/folder to snapshot
+    .PARAMETER SkipTracking
+        If set, does not add snapshot to orphan tracking file. Use for persistent
+        snapshots that should survive application restarts.
     .PARAMETER RetryCount
         Number of retry attempts for transient failures (default: 3)
     .PARAMETER RetryDelaySeconds
@@ -9595,6 +9958,8 @@ function New-RemoteVssSnapshot {
         [Parameter(Mandatory)]
         [ValidatePattern('^\\\\[^\\]+\\[^\\]+')]
         [string]$UncPath,
+
+        [switch]$SkipTracking,
 
         [ValidateRange(0, 10)]
         [int]$RetryCount = 3,
@@ -9689,14 +10054,19 @@ function New-RemoteVssSnapshot {
 
                 Write-RobocurseLog -Message "Remote VSS snapshot ready on '$serverName'. Shadow path: $($snapshotInfo.ShadowPath)" -Level 'Info' -Component 'VSS'
 
-                # Track for orphan cleanup
-                Add-VssToTracking -SnapshotInfo ([PSCustomObject]@{
-                    ShadowId     = $shadowId
-                    SourceVolume = "$serverName`:$volume"  # Include server name for remote tracking
-                    CreatedAt    = $snapshotInfo.CreatedAt
-                    ServerName   = $serverName
-                    IsRemote     = $true
-                })
+                # Track for orphan cleanup (unless SkipTracking for persistent snapshots)
+                if (-not $SkipTracking) {
+                    Add-VssToTracking -SnapshotInfo ([PSCustomObject]@{
+                        ShadowId     = $shadowId
+                        SourceVolume = "$serverName`:$volume"  # Include server name for remote tracking
+                        CreatedAt    = $snapshotInfo.CreatedAt
+                        ServerName   = $serverName
+                        IsRemote     = $true
+                    })
+                }
+                else {
+                    Write-RobocurseLog -Message "Skipping orphan tracking for persistent remote snapshot: $shadowId" -Level 'Debug' -Component 'VSS'
+                }
 
                 return New-OperationResult -Success $true -Data $snapshotInfo
             }
@@ -10250,16 +10620,22 @@ function Invoke-RemoteVssRetentionPolicy {
     .DESCRIPTION
         For a specified volume on a remote server, keeps the newest N snapshots
         and removes the rest. Uses CIM sessions for remote operations.
+        Only considers snapshots registered in our snapshot registry
+        (external snapshots are ignored and not counted against retention).
     .PARAMETER ServerName
         The remote server name
     .PARAMETER Volume
         Volume to apply retention to (e.g., "D:")
     .PARAMETER KeepCount
         Number of snapshots to keep (default: 3)
+    .PARAMETER Config
+        Config object containing the snapshot registry.
+    .PARAMETER ConfigPath
+        Path to config file for saving after unregister.
     .OUTPUTS
-        OperationResult with Data containing DeletedCount, KeptCount, Errors
+        OperationResult with Data containing DeletedCount, KeptCount, Errors, ExternalCount
     .EXAMPLE
-        $result = Invoke-RemoteVssRetentionPolicy -ServerName "FileServer01" -Volume "D:" -KeepCount 5
+        $result = Invoke-RemoteVssRetentionPolicy -ServerName "FileServer01" -Volume "D:" -KeepCount 5 -Config $config -ConfigPath $configPath
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -10271,7 +10647,13 @@ function Invoke-RemoteVssRetentionPolicy {
         [string]$Volume,
 
         [ValidateRange(0, 100)]
-        [int]$KeepCount = 3
+        [int]$KeepCount = 3,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     Write-RobocurseLog -Message "Applying VSS retention on '$ServerName' for $Volume (keep: $KeepCount)" -Level 'Info' -Component 'VSS'
@@ -10282,16 +10664,33 @@ function Invoke-RemoteVssRetentionPolicy {
         return New-OperationResult -Success $false -ErrorMessage "Failed to list snapshots: $($listResult.ErrorMessage)"
     }
 
-    $snapshots = @($listResult.Data)
+    $allSnapshots = @($listResult.Data)
+    $externalCount = 0
+
+    # Filter to only our registered snapshots (external snapshots are not counted against retention)
+    $snapshots = @()
+    foreach ($snap in $allSnapshots) {
+        if (Test-SnapshotRegistered -Config $Config -ShadowId $snap.ShadowId) {
+            $snapshots += $snap
+        }
+        else {
+            $externalCount++
+        }
+    }
+    if ($externalCount -gt 0) {
+        Write-RobocurseLog -Message "Found $externalCount external/untracked snapshot(s) on $ServerName $Volume (not counting against retention)" -Level 'Info' -Component 'VSS'
+    }
+
     $currentCount = $snapshots.Count
 
     # Nothing to do if under limit
     if ($currentCount -le $KeepCount) {
-        Write-RobocurseLog -Message "Retention OK on '$ServerName': $currentCount snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
+        Write-RobocurseLog -Message "Retention OK on '$ServerName': $currentCount registered snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
         return New-OperationResult -Success $true -Data @{
-            DeletedCount = 0
-            KeptCount    = $currentCount
-            Errors       = @()
+            DeletedCount  = 0
+            KeptCount     = $currentCount
+            Errors        = @()
+            ExternalCount = $externalCount
         }
     }
 
@@ -10314,6 +10713,8 @@ function Invoke-RemoteVssRetentionPolicy {
             if ($removeResult.Success) {
                 $deletedCount++
                 Write-RobocurseLog -Message "Deleted remote snapshot $shadowId on '$ServerName'" -Level 'Debug' -Component 'VSS'
+                # Unregister from snapshot registry
+                $null = Unregister-PersistentSnapshot -Config $Config -ShadowId $shadowId -ConfigPath $ConfigPath
             }
             else {
                 $errors += "Failed to delete $shadowId on '$ServerName': $($removeResult.ErrorMessage)"
@@ -10324,9 +10725,10 @@ function Invoke-RemoteVssRetentionPolicy {
 
     $success = $errors.Count -eq 0
     $resultData = @{
-        DeletedCount = $deletedCount
-        KeptCount    = $toKeep.Count
-        Errors       = $errors
+        DeletedCount  = $deletedCount
+        KeptCount     = $toKeep.Count
+        Errors        = $errors
+        ExternalCount = $externalCount
     }
 
     if ($success) {
@@ -10552,11 +10954,21 @@ function Invoke-ListSnapshotsCommand {
     <#
     .SYNOPSIS
         CLI command to list VSS snapshots
+    .DESCRIPTION
+        Lists all VSS snapshots on the specified volume/server. If Config is provided,
+        shows which snapshots are tracked (created by Robocurse) vs untracked (external).
+    .PARAMETER Volume
+        Optional volume filter (e.g., "D:")
+    .PARAMETER Server
+        Optional remote server name
+    .PARAMETER Config
+        Optional config object (for showing tracked/untracked status)
     #>
     [CmdletBinding()]
     param(
         [string]$Volume,
-        [string]$Server
+        [string]$Server,
+        [PSCustomObject]$Config
     )
 
     Write-Host ""
@@ -10586,23 +10998,57 @@ function Invoke-ListSnapshotsCommand {
             return 0
         }
 
-        Write-Host "Found $($snapshots.Count) snapshot(s):" -ForegroundColor Gray
+        # Count tracked vs untracked
+        $trackedCount = 0
+        $untrackedCount = 0
+        if ($Config) {
+            foreach ($snap in $snapshots) {
+                if (Test-SnapshotRegistered -Config $Config -ShadowId $snap.ShadowId) {
+                    $trackedCount++
+                } else {
+                    $untrackedCount++
+                }
+            }
+            Write-Host "Found $($snapshots.Count) snapshot(s): $trackedCount tracked, $untrackedCount untracked" -ForegroundColor Gray
+        } else {
+            Write-Host "Found $($snapshots.Count) snapshot(s):" -ForegroundColor Gray
+        }
         Write-Host ""
 
-        # Table header
-        $format = "{0,-8} {1,-20} {2,-40}"
-        Write-Host ($format -f "Volume", "Created", "Shadow ID") -ForegroundColor White
-        Write-Host ($format -f "------", "-------", "---------") -ForegroundColor DarkGray
+        # Table header - include Status column if config available
+        if ($Config) {
+            $format = "{0,-8} {1,-20} {2,-10} {3,-40}"
+            Write-Host ($format -f "Volume", "Created", "Status", "Shadow ID") -ForegroundColor White
+            Write-Host ($format -f "------", "-------", "------", "---------") -ForegroundColor DarkGray
+        } else {
+            $format = "{0,-8} {1,-20} {2,-40}"
+            Write-Host ($format -f "Volume", "Created", "Shadow ID") -ForegroundColor White
+            Write-Host ($format -f "------", "-------", "---------") -ForegroundColor DarkGray
+        }
 
         foreach ($snap in $snapshots) {
             $volume = $snap.SourceVolume
             $created = $snap.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss")
             $shadowId = $snap.ShadowId
 
-            Write-Host ($format -f $volume, $created, $shadowId)
+            if ($Config) {
+                $isTracked = Test-SnapshotRegistered -Config $Config -ShadowId $shadowId
+                if ($isTracked) {
+                    Write-Host ($format -f $volume, $created, "Tracked", $shadowId) -ForegroundColor Green
+                } else {
+                    Write-Host ($format -f $volume, $created, "EXTERNAL", $shadowId) -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host ($format -f $volume, $created, $shadowId)
+            }
         }
 
         Write-Host ""
+        if ($untrackedCount -gt 0) {
+            Write-Host "Note: $untrackedCount snapshot(s) marked EXTERNAL were not created by Robocurse." -ForegroundColor Yellow
+            Write-Host "      They will not count against retention limits and will not be auto-deleted." -ForegroundColor Yellow
+            Write-Host ""
+        }
         return 0
     }
     catch {
@@ -10624,6 +11070,10 @@ function Invoke-CreateSnapshotCommand {
         Optional remote server name for remote snapshots
     .PARAMETER KeepCount
         Number of snapshots to retain after cleanup (default: 3)
+    .PARAMETER Config
+        Config object for snapshot registry
+    .PARAMETER ConfigPath
+        Path to config file for saving registry updates
     #>
     [CmdletBinding()]
     param(
@@ -10632,7 +11082,13 @@ function Invoke-CreateSnapshotCommand {
 
         [string]$Server,
 
-        [int]$KeepCount = 3
+        [int]$KeepCount = 3,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     Write-Host ""
@@ -10649,10 +11105,10 @@ function Invoke-CreateSnapshotCommand {
         Write-Host "Enforcing retention policy..." -ForegroundColor Gray
 
         if ($Server) {
-            $retResult = Invoke-RemoteVssRetentionPolicy -ServerName $Server -Volume $Volume -KeepCount $KeepCount
+            $retResult = Invoke-RemoteVssRetentionPolicy -ServerName $Server -Volume $Volume -KeepCount $KeepCount -Config $Config -ConfigPath $ConfigPath
         }
         else {
-            $retResult = Invoke-VssRetentionPolicy -Volume $Volume -KeepCount $KeepCount
+            $retResult = Invoke-VssRetentionPolicy -Volume $Volume -KeepCount $KeepCount -Config $Config -ConfigPath $ConfigPath
         }
 
         if ($retResult.Success) {
@@ -10677,6 +11133,12 @@ function Invoke-CreateSnapshotCommand {
         }
 
         if ($snapResult.Success) {
+            # Register the snapshot in the config
+            $registered = Register-PersistentSnapshot -Config $Config -Volume $Volume -ShadowId $snapResult.Data.ShadowId -ConfigPath $ConfigPath
+            if (-not $registered.Success) {
+                Write-Host "  Warning: Failed to register snapshot: $($registered.ErrorMessage)" -ForegroundColor Yellow
+            }
+
             Write-Host ""
             Write-Host "Snapshot created successfully!" -ForegroundColor Green
             Write-Host "  Shadow ID: $($snapResult.Data.ShadowId)" -ForegroundColor White
@@ -10704,17 +11166,26 @@ function Invoke-DeleteSnapshotCommand {
         CLI command to delete a VSS snapshot
     .DESCRIPTION
         Deletes a VSS snapshot by its Shadow ID, with confirmation prompt.
+        If Config and ConfigPath are provided, also unregisters the snapshot from the registry.
     .PARAMETER ShadowId
         The GUID of the shadow copy to delete
     .PARAMETER Server
         Optional remote server name for remote snapshots
+    .PARAMETER Config
+        Optional config object (for unregistering from snapshot registry)
+    .PARAMETER ConfigPath
+        Optional config file path (required if Config is provided)
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$ShadowId,
 
-        [string]$Server
+        [string]$Server,
+
+        [PSCustomObject]$Config,
+
+        [string]$ConfigPath
     )
 
     Write-Host ""
@@ -10746,6 +11217,10 @@ function Invoke-DeleteSnapshotCommand {
         }
 
         if ($result.Success) {
+            # Unregister from snapshot registry if config provided
+            if ($Config -and $ConfigPath) {
+                $null = Unregister-PersistentSnapshot -Config $Config -ShadowId $ShadowId -ConfigPath $ConfigPath
+            }
             Write-Host "Snapshot deleted successfully!" -ForegroundColor Green
             Write-Host ""
             return 0
@@ -10783,6 +11258,8 @@ function Invoke-SnapshotScheduleCommand {
         Name of the schedule (required for -Remove)
     .PARAMETER Config
         The Robocurse configuration object (required for -Sync)
+    .PARAMETER ConfigPath
+        Path to configuration file (required for -Sync)
     #>
     [CmdletBinding()]
     param(
@@ -10791,7 +11268,8 @@ function Invoke-SnapshotScheduleCommand {
         [switch]$Add,
         [switch]$Remove,
         [string]$ScheduleName,
-        [PSCustomObject]$Config
+        [PSCustomObject]$Config,
+        [string]$ConfigPath
     )
 
     Write-Host ""
@@ -10828,7 +11306,7 @@ function Invoke-SnapshotScheduleCommand {
     if ($Sync) {
         Write-Host "Synchronizing schedules with configuration..." -ForegroundColor Gray
 
-        $result = Sync-SnapshotSchedules -Config $Config
+        $result = Sync-SnapshotSchedules -Config $Config -ConfigPath $ConfigPath
 
         if ($result.Success) {
             Write-Host ""
@@ -11561,6 +12039,22 @@ $additionalErrors
 $profilesHtml
             </div>
 
+$(if ($Results.SnapshotSummary) {
+    $snapshotHtml = ""
+    $hasExternal = $false
+    foreach ($vol in $Results.SnapshotSummary.Keys | Sort-Object) {
+        $info = $Results.SnapshotSummary[$vol]
+        $snapshotHtml += "                <div class=`"profile-item profile-success`">$vol`: $($info.Tracked) tracked, $($info.External) external</div>`n"
+        if ($info.External -gt 0) { $hasExternal = $true }
+    }
+@"
+            <h3>Snapshot Summary</h3>
+            <div class="profile-list">
+$snapshotHtml            </div>
+$(if ($hasExternal) { "            <p style='color: #FF9800;'><em>External snapshots were not created by Robocurse and will not count against retention.</em></p>" })
+"@
+})
+
 $errorsHtml
         </div>
         <div class="footer">
@@ -11649,6 +12143,21 @@ Errors:       $($Results.TotalErrors)
 
 "@
         }
+    }
+
+    # Add snapshot summary if present
+    if ($Results.SnapshotSummary -and $Results.SnapshotSummary.Count -gt 0) {
+        $text += "SNAPSHOTS`n---------`n"
+        $hasExternal = $false
+        foreach ($vol in $Results.SnapshotSummary.Keys | Sort-Object) {
+            $info = $Results.SnapshotSummary[$vol]
+            $text += "* ${vol}: $($info.Tracked) tracked, $($info.External) external`n"
+            if ($info.External -gt 0) { $hasExternal = $true }
+        }
+        if ($hasExternal) {
+            $text += "  (External snapshots were not created by Robocurse)`n"
+        }
+        $text += "`n"
     }
 
     # Add errors if any
@@ -12716,18 +13225,23 @@ function New-SnapshotScheduledTask {
         A schedule definition object from config
     .PARAMETER RobocurseModulePath
         Path to the Robocurse module (for task script)
+    .PARAMETER ConfigPath
+        Path to the Robocurse config file (required for snapshot registry)
     .OUTPUTS
         OperationResult with Data = task name
     .EXAMPLE
         $schedule = [PSCustomObject]@{ Name = "HourlyD"; Volume = "D:"; Schedule = "Hourly"; Time = "00:00"; KeepCount = 24 }
-        New-SnapshotScheduledTask -Schedule $schedule
+        New-SnapshotScheduledTask -Schedule $schedule -ConfigPath "C:\Robocurse\config.json"
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Schedule,
 
-        [string]$RobocurseModulePath = $PSScriptRoot
+        [string]$RobocurseModulePath = $PSScriptRoot,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     $taskName = "$script:SnapshotTaskPrefix$($Schedule.Name)"
@@ -12737,7 +13251,7 @@ function New-SnapshotScheduledTask {
     try {
         # Build the PowerShell command to run
         $isRemote = [bool]$Schedule.ServerName
-        $command = New-SnapshotTaskCommand -Schedule $Schedule -ModulePath $RobocurseModulePath
+        $command = New-SnapshotTaskCommand -Schedule $Schedule -ModulePath $RobocurseModulePath -ConfigPath $ConfigPath
 
         # Create action
         $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"$command`""
@@ -12814,6 +13328,8 @@ function New-SnapshotTaskCommand {
         A schedule definition object containing Volume, KeepCount, and optional ServerName
     .PARAMETER ModulePath
         Path to the Robocurse module for Import-Module in the task
+    .PARAMETER ConfigPath
+        Path to the Robocurse config file (required for snapshot registry)
     .OUTPUTS
         String containing the PowerShell command, or $null if validation fails
     #>
@@ -12822,7 +13338,10 @@ function New-SnapshotTaskCommand {
         [Parameter(Mandatory)]
         [PSCustomObject]$Schedule,
 
-        [string]$ModulePath
+        [string]$ModulePath,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     $volume = $Schedule.Volume
@@ -12844,14 +13363,20 @@ function New-SnapshotTaskCommand {
         throw $pathCheck.ErrorMessage
     }
 
+    $configPathCheck = Test-SafeScheduleParameter -Value $ConfigPath -ParameterName "ConfigPath" -Pattern $script:SafePathPattern
+    if (-not $configPathCheck.Success) {
+        throw $configPathCheck.ErrorMessage
+    }
+
     # Volume is already validated by ValidatePattern in the calling functions
 
     if ($isRemote) {
         # Remote snapshot command
         $cmd = @"
 Import-Module '$ModulePath\Robocurse.psd1' -Force;
-`$r = Invoke-RemoteVssRetentionPolicy -ServerName '$serverName' -Volume '$volume' -KeepCount $keepCount;
-if (`$r.Success) { `$s = New-RemoteVssSnapshot -UncPath '\\$serverName\$volume`$' };
+`$cfg = Get-RobocurseConfig -Path '$ConfigPath';
+`$r = Invoke-RemoteVssRetentionPolicy -ServerName '$serverName' -Volume '$volume' -KeepCount $keepCount -Config `$cfg -ConfigPath '$ConfigPath';
+if (`$r.Success) { `$s = New-RemoteVssSnapshot -UncPath '\\$serverName\$volume`$'; if (`$s.Success) { Register-PersistentSnapshot -Config `$cfg -Volume '$volume' -ShadowId `$s.Data.ShadowId -ConfigPath '$ConfigPath' } };
 exit ([int](-not `$r.Success))
 "@
     }
@@ -12859,8 +13384,9 @@ exit ([int](-not `$r.Success))
         # Local snapshot command
         $cmd = @"
 Import-Module '$ModulePath\Robocurse.psd1' -Force;
-`$r = Invoke-VssRetentionPolicy -Volume '$volume' -KeepCount $keepCount;
-if (`$r.Success) { `$s = New-VssSnapshot -SourcePath '$volume\' };
+`$cfg = Get-RobocurseConfig -Path '$ConfigPath';
+`$r = Invoke-VssRetentionPolicy -Volume '$volume' -KeepCount $keepCount -Config `$cfg -ConfigPath '$ConfigPath';
+if (`$r.Success) { `$s = New-VssSnapshot -SourcePath '$volume\'; if (`$s.Success) { Register-PersistentSnapshot -Config `$cfg -Volume '$volume' -ShadowId `$s.Data.ShadowId -ConfigPath '$ConfigPath' } };
 exit ([int](-not `$r.Success))
 "@
     }
@@ -12952,13 +13478,18 @@ function Sync-SnapshotSchedules {
         Removes tasks not in config, creates tasks that are missing, updates changed tasks.
     .PARAMETER Config
         The Robocurse configuration object
+    .PARAMETER ConfigPath
+        Path to the configuration file (required for snapshot registry in scheduled tasks)
     .OUTPUTS
         OperationResult with Data = summary of changes
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [PSCustomObject]$Config
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     $schedules = @($Config.GlobalSettings.SnapshotSchedules | Where-Object { $_.Enabled })
@@ -12986,7 +13517,7 @@ function Sync-SnapshotSchedules {
     # Create/update tasks from config
     foreach ($schedule in $schedules) {
         # Always recreate to ensure settings are current
-        $result = New-SnapshotScheduledTask -Schedule $schedule
+        $result = New-SnapshotScheduledTask -Schedule $schedule -ConfigPath $ConfigPath
         if ($result.Success) {
             if ($schedule.Name -notin $existingNames) {
                 $created++
@@ -14491,6 +15022,7 @@ function Update-ProfileSnapshotLists {
     .DESCRIPTION
         Loads existing VSS snapshots for the source and destination volumes of the
         currently selected profile and populates the respective DataGrids.
+        Adds a Status property to indicate tracked (Robocurse) vs external snapshots.
     #>
     [CmdletBinding()]
     param()
@@ -14507,6 +15039,26 @@ function Update-ProfileSnapshotLists {
         return
     }
 
+    # Helper function to add Status property to snapshots
+    $addStatusToSnapshots = {
+        param($snapshots)
+        $result = @()
+        foreach ($snap in $snapshots) {
+            $isTracked = if ($script:Config) {
+                Test-SnapshotRegistered -Config $script:Config -ShadowId $snap.ShadowId
+            } else { $false }
+            $snapWithStatus = [PSCustomObject]@{
+                ShadowId = $snap.ShadowId
+                SourceVolume = $snap.SourceVolume
+                CreatedAt = $snap.CreatedAt
+                DeviceObject = $snap.DeviceObject
+                Status = if ($isTracked) { "Tracked" } else { "EXTERNAL" }
+            }
+            $result += $snapWithStatus
+        }
+        return $result
+    }
+
     # Get source volume and load snapshots
     if ($script:Controls['dgSourceSnapshots'] -and $profile.Source) {
         try {
@@ -14514,7 +15066,8 @@ function Update-ProfileSnapshotLists {
             if ($sourceVolume) {
                 $result = Get-VssSnapshots -Volume $sourceVolume
                 if ($result.Success) {
-                    $script:Controls.dgSourceSnapshots.ItemsSource = @($result.Data)
+                    $snapsWithStatus = & $addStatusToSnapshots @($result.Data)
+                    $script:Controls.dgSourceSnapshots.ItemsSource = @($snapsWithStatus)
                 } else {
                     $script:Controls.dgSourceSnapshots.ItemsSource = @()
                 }
@@ -14534,7 +15087,8 @@ function Update-ProfileSnapshotLists {
             if ($destVolume) {
                 $result = Get-VssSnapshots -Volume $destVolume
                 if ($result.Success) {
-                    $script:Controls.dgDestSnapshots.ItemsSource = @($result.Data)
+                    $snapsWithStatus = & $addStatusToSnapshots @($result.Data)
+                    $script:Controls.dgDestSnapshots.ItemsSource = @($snapsWithStatus)
                 } else {
                     $script:Controls.dgDestSnapshots.ItemsSource = @()
                 }
@@ -14552,6 +15106,9 @@ function Invoke-DeleteProfileSnapshot {
     <#
     .SYNOPSIS
         Deletes the selected snapshot from a profile's snapshot grid
+    .DESCRIPTION
+        Deletes the snapshot and unregisters it from the config's snapshot registry
+        if Config and ConfigPath are available in script scope.
     .PARAMETER SnapshotGrid
         The DataGrid control containing the selected snapshot
     #>
@@ -14576,6 +15133,10 @@ function Invoke-DeleteProfileSnapshot {
         $result = Remove-VssSnapshot -ShadowId $selected.ShadowId
         if ($result.Success) {
             Write-GuiLog "Snapshot deleted: $($selected.ShadowId)"
+            # Unregister from snapshot registry if config is available
+            if ($script:Config -and $script:ConfigPath) {
+                $null = Unregister-PersistentSnapshot -Config $script:Config -ShadowId $selected.ShadowId -ConfigPath $script:ConfigPath
+            }
             Update-ProfileSnapshotLists
         } else {
             [System.Windows.MessageBox]::Show(
@@ -16713,7 +17274,7 @@ function New-ModuleModeBackgroundScript {
             Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
 
             # Start replication with -SkipInitialization since UI thread already initialized
-            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$ConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
             # Run the orchestration loop until complete
             # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
@@ -16800,7 +17361,7 @@ function New-ScriptModeBackgroundScript {
             Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
 
             # Start replication with -SkipInitialization since UI thread already initialized
-            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$GuiConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
             # Run the orchestration loop until complete
             # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
@@ -16973,6 +17534,14 @@ function Start-GuiReplication {
     # without first clicking elsewhere to trigger LostFocus
     Save-ProfileFromForm
 
+    # Persist in-memory config to disk before creating snapshot
+    # This ensures background runspace sees current settings (snapshot/retention, etc.)
+    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+    if (-not $saveResult.Success) {
+        Write-GuiLog "Warning: Could not save config before replication: $($saveResult.ErrorMessage)"
+        # Continue anyway - the in-memory config might still work for current session
+    }
+
     # Get and validate profiles (force array context to handle PowerShell's single-item unwrapping)
     $profilesToRun = @(Get-ProfilesToRun -AllProfiles:$AllProfiles -SelectedOnly:$SelectedOnly)
     if ($profilesToRun.Count -eq 0) { return }
@@ -17142,6 +17711,34 @@ function Complete-GuiReplication {
         Write-GuiLog "Warning: Failed to save last run summary: $_"
     }
 
+    # Merge snapshot registry from temp config back to original config
+    # The background runspace wrote registry updates to the snapshot, not the original
+    try {
+        if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath) -and (Test-Path $script:ConfigSnapshotPath)) {
+            $snapshotConfig = Get-Content $script:ConfigSnapshotPath -Raw | ConvertFrom-Json
+            if ($snapshotConfig.snapshotRegistry) {
+                # Merge snapshot registry entries into the live config
+                $snapshotConfig.snapshotRegistry.PSObject.Properties | ForEach-Object {
+                    $volumeKey = $_.Name
+                    $snapshotIds = $_.Value
+                    if ($snapshotIds -and $snapshotIds.Count -gt 0) {
+                        $script:Config.SnapshotRegistry | Add-Member -NotePropertyName $volumeKey -NotePropertyValue $snapshotIds -Force
+                    }
+                }
+                # Save the merged config to the original path
+                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+                if ($saveResult.Success) {
+                    Write-GuiLog "Snapshot registry merged from background runspace"
+                } else {
+                    Write-GuiLog "Warning: Failed to save merged snapshot registry: $($saveResult.ErrorMessage)"
+                }
+            }
+        }
+    }
+    catch {
+        Write-GuiLog "Warning: Failed to merge snapshot registry: $($_.Exception.Message)"
+    }
+
     # Send email notification if configured
     try {
         if ($script:Config.Email -and $script:Config.Email.Enabled) {
@@ -17167,6 +17764,9 @@ function Complete-GuiReplication {
                 'Failed'
             }
 
+            # Build snapshot summary for email (tracked vs external per volume)
+            $snapshotSummary = Get-SnapshotSummaryForEmail -Config $script:Config
+
             # Build results object matching what Send-CompletionEmail expects
             $emailResults = [PSCustomObject]@{
                 Duration = $emailElapsed
@@ -17186,6 +17786,7 @@ function Complete-GuiReplication {
                     }
                 })
                 Errors = @()
+                SnapshotSummary = $snapshotSummary
             }
 
             # Get session ID from orchestration state for Message-Id header
@@ -18072,10 +18673,10 @@ function Invoke-CreateSnapshotFromDialog {
             Write-RobocurseLog -Message "Enforcing retention (keep $($DialogResult.KeepCount))" -Level 'Debug' -Component 'GUI'
 
             if ($isLocal) {
-                $retResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $DialogResult.KeepCount
+                $retResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $DialogResult.KeepCount -Config $script:Config -ConfigPath $script:ConfigPath
             }
             else {
-                $retResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $DialogResult.KeepCount
+                $retResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $DialogResult.KeepCount -Config $script:Config -ConfigPath $script:ConfigPath
             }
 
             if (-not $retResult.Success) {
@@ -18097,6 +18698,13 @@ function Invoke-CreateSnapshotFromDialog {
 
         if ($result.Success) {
             Write-RobocurseLog -Message "Snapshot created: $($result.Data.ShadowId)" -Level 'Info' -Component 'GUI'
+            # Register the snapshot in the config
+            if ($script:Config -and $script:ConfigPath) {
+                $registered = Register-PersistentSnapshot -Config $script:Config -Volume $volume -ShadowId $result.Data.ShadowId -ConfigPath $script:ConfigPath
+                if (-not $registered.Success) {
+                    Write-RobocurseLog -Message "Failed to register snapshot: $($registered.ErrorMessage)" -Level 'Warning' -Component 'GUI'
+                }
+            }
         }
 
         return $result
@@ -18152,6 +18760,9 @@ function Invoke-DeleteSelectedSnapshot {
     <#
     .SYNOPSIS
         Deletes the currently selected snapshot
+    .DESCRIPTION
+        Deletes the snapshot and unregisters it from the config's snapshot registry
+        if Config and ConfigPath are available in script scope.
     .OUTPUTS
         OperationResult
     #>
@@ -18180,6 +18791,10 @@ function Invoke-DeleteSelectedSnapshot {
 
         if ($result.Success) {
             Write-RobocurseLog -Message "Snapshot deleted" -Level 'Info' -Component 'GUI'
+            # Unregister from snapshot registry if config is available
+            if ($script:Config -and $script:ConfigPath) {
+                $null = Unregister-PersistentSnapshot -Config $script:Config -ShadowId $snapshot.ShadowId -ConfigPath $script:ConfigPath
+            }
         }
         else {
             Write-RobocurseLog -Message "Failed to delete snapshot: $($result.ErrorMessage)" -Level 'Error' -Component 'GUI'
@@ -18338,6 +18953,9 @@ function Update-SnapshotList {
     <#
     .SYNOPSIS
         Refreshes the snapshot DataGrid with current snapshots
+    .DESCRIPTION
+        Loads snapshots from local or remote server and adds Status property
+        to indicate tracked (Robocurse) vs external snapshots.
     #>
     [CmdletBinding()]
     param()
@@ -18364,12 +18982,16 @@ function Update-SnapshotList {
 
             if ($result.Success) {
                 $snapshots = @($result.Data | ForEach-Object {
+                    $isTracked = if ($script:Config) {
+                        Test-SnapshotRegistered -Config $script:Config -ShadowId $_.ShadowId
+                    } else { $false }
                     [PSCustomObject]@{
                         ShadowId     = $_.ShadowId
                         SourceVolume = $_.SourceVolume
                         CreatedAt    = $_.CreatedAt
                         ServerName   = "Local"
                         ShadowPath   = $_.ShadowPath
+                        Status       = if ($isTracked) { "Tracked" } else { "EXTERNAL" }
                     }
                 })
             }
@@ -18387,7 +19009,19 @@ function Update-SnapshotList {
             }
 
             if ($result.Success) {
-                $snapshots = @($result.Data)
+                $snapshots = @($result.Data | ForEach-Object {
+                    $isTracked = if ($script:Config) {
+                        Test-SnapshotRegistered -Config $script:Config -ShadowId $_.ShadowId
+                    } else { $false }
+                    [PSCustomObject]@{
+                        ShadowId     = $_.ShadowId
+                        SourceVolume = $_.SourceVolume
+                        CreatedAt    = $_.CreatedAt
+                        ServerName   = $_.ServerName
+                        ShadowPath   = $_.ShadowPath
+                        Status       = if ($isTracked) { "Tracked" } else { "EXTERNAL" }
+                    }
+                })
             }
             else {
                 Write-RobocurseLog -Message "Failed to load remote snapshots: $($result.ErrorMessage)" -Level 'Warning' -Component 'GUI'
@@ -18398,7 +19032,10 @@ function Update-SnapshotList {
         $grid.ItemsSource = $snapshots
         $script:Controls['btnDeleteSnapshot'].IsEnabled = $false
 
-        Write-RobocurseLog -Message "Loaded $($snapshots.Count) snapshot(s)" -Level 'Debug' -Component 'GUI'
+        # Log summary of tracked vs untracked
+        $trackedCount = @($snapshots | Where-Object { $_.Status -eq "Tracked" }).Count
+        $externalCount = @($snapshots | Where-Object { $_.Status -eq "EXTERNAL" }).Count
+        Write-RobocurseLog -Message "Loaded $($snapshots.Count) snapshot(s): $trackedCount tracked, $externalCount external" -Level 'Debug' -Component 'GUI'
     }
     catch {
         Write-RobocurseLog -Message "Error updating snapshot list: $($_.Exception.Message)" -Level 'Error' -Component 'GUI'
@@ -20674,6 +21311,8 @@ function Invoke-HeadlessReplication {
         suitable for scripting and automation.
     .PARAMETER Config
         Configuration object
+    .PARAMETER ConfigPath
+        Path to configuration file (for snapshot registry updates)
     .PARAMETER ProfilesToRun
         Array of profile objects to run
     .PARAMETER MaxConcurrentJobs
@@ -20689,6 +21328,9 @@ function Invoke-HeadlessReplication {
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath,
 
         [Parameter(Mandatory)]
         [PSCustomObject[]]$ProfilesToRun,
@@ -20728,7 +21370,7 @@ function Invoke-HeadlessReplication {
     Write-Host ""
 
     # Start replication with bandwidth throttling
-    Start-ReplicationRun -Profiles $ProfilesToRun -Config $Config -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps -DryRun:$DryRun
+    Start-ReplicationRun -Profiles $ProfilesToRun -Config $Config -ConfigPath $ConfigPath -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps -DryRun:$DryRun
 
     # Track last progress output time for throttling
     $lastProgressOutput = [datetime]::MinValue
@@ -20778,6 +21420,9 @@ function Invoke-HeadlessReplication {
         }
     }
 
+    # Build snapshot summary for email (tracked vs external per volume)
+    $snapshotSummary = Get-SnapshotSummaryForEmail -Config $Config
+
     $results = [PSCustomObject]@{
         Duration = $status.Elapsed
         TotalBytesCopied = $totalBytesCopied
@@ -20785,6 +21430,7 @@ function Invoke-HeadlessReplication {
         TotalErrors = $totalFailed
         Profiles = $profileResultsArray
         Errors = $allErrors
+        SnapshotSummary = $snapshotSummary
     }
 
     # Determine overall status
@@ -20900,7 +21546,12 @@ function Start-RobocurseMain {
 
     # Snapshot command dispatch (before GUI/headless logic)
     if ($ListSnapshots) {
-        return Invoke-ListSnapshotsCommand -Volume $Volume -Server $Server
+        # Load config to show tracked/untracked status
+        $listConfig = $null
+        if (Test-Path $ConfigPath) {
+            $listConfig = Get-RobocurseConfig -Path $ConfigPath
+        }
+        return Invoke-ListSnapshotsCommand -Volume $Volume -Server $Server -Config $listConfig
     }
 
     if ($CreateSnapshot) {
@@ -20908,7 +21559,13 @@ function Start-RobocurseMain {
             Write-Host "Error: -Volume is required for -CreateSnapshot" -ForegroundColor Red
             return 1
         }
-        return Invoke-CreateSnapshotCommand -Volume $Volume -Server $Server -KeepCount $KeepCount
+        # Load config for snapshot registry
+        if (-not (Test-Path $ConfigPath)) {
+            Write-Host "Error: Configuration file not found: $ConfigPath" -ForegroundColor Red
+            return 1
+        }
+        $createConfig = Get-RobocurseConfig -Path $ConfigPath
+        return Invoke-CreateSnapshotCommand -Volume $Volume -Server $Server -KeepCount $KeepCount -Config $createConfig -ConfigPath $ConfigPath
     }
 
     if ($DeleteSnapshot) {
@@ -20916,7 +21573,12 @@ function Start-RobocurseMain {
             Write-Host "Error: -ShadowId is required for -DeleteSnapshot" -ForegroundColor Red
             return 1
         }
-        return Invoke-DeleteSnapshotCommand -ShadowId $ShadowId -Server $Server
+        # Load config to unregister snapshot from registry
+        $deleteConfig = $null
+        if (Test-Path $ConfigPath) {
+            $deleteConfig = Get-RobocurseConfig -Path $ConfigPath
+        }
+        return Invoke-DeleteSnapshotCommand -ShadowId $ShadowId -Server $Server -Config $deleteConfig -ConfigPath $ConfigPath
     }
 
     if ($SnapshotSchedule) {
@@ -20926,7 +21588,7 @@ function Start-RobocurseMain {
             return 1
         }
         $config = Get-RobocurseConfig -Path $ConfigPath
-        return Invoke-SnapshotScheduleCommand -List:$List -Sync:$Sync -Add:$Add -Remove:$Remove -ScheduleName $ScheduleName -Config $config
+        return Invoke-SnapshotScheduleCommand -List:$List -Sync:$Sync -Add:$Add -Remove:$Remove -ScheduleName $ScheduleName -Config $config -ConfigPath $ConfigPath
     }
 
     # Remote VSS prerequisites test
@@ -21078,7 +21740,7 @@ function Start-RobocurseMain {
                 0
             }
 
-            return Invoke-HeadlessReplication -Config $config -ProfilesToRun $profilesToRun `
+            return Invoke-HeadlessReplication -Config $config -ConfigPath $ConfigPath -ProfilesToRun $profilesToRun `
                 -MaxConcurrentJobs $maxJobs -BandwidthLimitMbps $bandwidthLimit -DryRun:$DryRun
         }
         catch {

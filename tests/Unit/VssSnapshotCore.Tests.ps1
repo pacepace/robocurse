@@ -80,6 +80,13 @@ Describe "Get-VssSnapshots" {
 }
 
 Describe "Invoke-VssRetentionPolicy" {
+    BeforeAll {
+        # Common mock config for all tests - treat all snapshots as registered
+        $script:testConfig = [PSCustomObject]@{ PersistentSnapshots = @() }
+        Mock Test-SnapshotRegistered { $true }
+        Mock Unregister-PersistentSnapshot { New-OperationResult -Success $true }
+    }
+
     Context "When under retention limit" {
         BeforeAll {
             Mock Get-VssSnapshots {
@@ -90,7 +97,7 @@ Describe "Invoke-VssRetentionPolicy" {
         }
 
         It "Does not delete any snapshots" {
-            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 3
+            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 3 -Config $script:testConfig -ConfigPath "test.json"
             $result.Success | Should -Be $true
             $result.Data.DeletedCount | Should -Be 0
             $result.Data.KeptCount | Should -Be 1
@@ -110,14 +117,14 @@ Describe "Invoke-VssRetentionPolicy" {
         }
 
         It "Deletes oldest snapshots to meet retention" {
-            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 1
+            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 1 -Config $script:testConfig -ConfigPath "test.json"
             $result.Success | Should -Be $true
             $result.Data.DeletedCount | Should -Be 2
             $result.Data.KeptCount | Should -Be 1
         }
 
         It "Keeps newest snapshot" {
-            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 1
+            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 1 -Config $script:testConfig -ConfigPath "test.json"
 
             # Verify Remove-VssSnapshot was called for oldest two
             Should -Invoke Remove-VssSnapshot -Times 2 -ParameterFilter {
@@ -143,7 +150,7 @@ Describe "Invoke-VssRetentionPolicy" {
         }
 
         It "Returns errors but continues" {
-            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 1
+            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 1 -Config $script:testConfig -ConfigPath "test.json"
             $result.Success | Should -Be $false
             $result.Data.Errors.Count | Should -BeGreaterThan 0
         }
@@ -161,7 +168,90 @@ Describe "Invoke-VssRetentionPolicy" {
         }
 
         It "Does not delete when -WhatIf is specified" {
-            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 1 -WhatIf
+            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 1 -Config $script:testConfig -ConfigPath "test.json" -WhatIf
+            Should -Not -Invoke Remove-VssSnapshot
+        }
+    }
+
+    Context "Registry-aware retention (Config provided)" {
+        BeforeAll {
+            # Mix of registered and external snapshots
+            Mock Get-VssSnapshots {
+                New-OperationResult -Success $true -Data @(
+                    [PSCustomObject]@{ ShadowId = "{registered-1}"; CreatedAt = (Get-Date).AddHours(-5) },
+                    [PSCustomObject]@{ ShadowId = "{external-1}"; CreatedAt = (Get-Date).AddHours(-4) },
+                    [PSCustomObject]@{ ShadowId = "{registered-2}"; CreatedAt = (Get-Date).AddHours(-3) },
+                    [PSCustomObject]@{ ShadowId = "{external-2}"; CreatedAt = (Get-Date).AddHours(-2) },
+                    [PSCustomObject]@{ ShadowId = "{registered-3}"; CreatedAt = (Get-Date).AddHours(-1) }
+                )
+            }
+
+            # Only registered-* are in the registry
+            Mock Test-SnapshotRegistered {
+                param($Config, $ShadowId)
+                $ShadowId -like "{registered-*}"
+            }
+
+            Mock Remove-VssSnapshot { New-OperationResult -Success $true -Data $ShadowId }
+            Mock Unregister-PersistentSnapshot { New-OperationResult -Success $true }
+        }
+
+        It "Should NOT delete external snapshots" {
+            $config = [PSCustomObject]@{ SnapshotRegistry = @() }
+
+            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 1 -Config $config -ConfigPath "test.json"
+            $result.Success | Should -Be $true
+
+            # External snapshots should NEVER be deleted
+            Should -Not -Invoke Remove-VssSnapshot -ParameterFilter { $ShadowId -eq "{external-1}" }
+            Should -Not -Invoke Remove-VssSnapshot -ParameterFilter { $ShadowId -eq "{external-2}" }
+        }
+
+        It "Should only count registered snapshots against retention" {
+            $config = [PSCustomObject]@{ SnapshotRegistry = @() }
+
+            # With KeepCount=2, only 1 registered snapshot should be deleted (oldest registered)
+            # Even though there are 5 total snapshots, only 3 are registered
+            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 2 -Config $config -ConfigPath "test.json"
+            $result.Success | Should -Be $true
+            $result.Data.DeletedCount | Should -Be 1
+            $result.Data.KeptCount | Should -Be 2
+
+            # Only the oldest registered snapshot should be deleted
+            Should -Invoke Remove-VssSnapshot -Times 1 -ParameterFilter { $ShadowId -eq "{registered-1}" }
+        }
+
+        It "Should return ExternalCount correctly" {
+            $config = [PSCustomObject]@{ SnapshotRegistry = @() }
+
+            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 3 -Config $config -ConfigPath "test.json"
+            $result.Success | Should -Be $true
+            $result.Data.ExternalCount | Should -Be 2
+        }
+
+        It "Should call Unregister-PersistentSnapshot when deleting" {
+            $config = [PSCustomObject]@{ SnapshotRegistry = @() }
+            $configPath = "C:\test\config.json"
+
+            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 1 -Config $config -ConfigPath $configPath
+            $result.Success | Should -Be $true
+
+            # Should unregister deleted snapshots
+            Should -Invoke Unregister-PersistentSnapshot -Times 2 -ParameterFilter {
+                $ShadowId -eq "{registered-1}" -or $ShadowId -eq "{registered-2}"
+            }
+        }
+
+        It "Should NOT delete any snapshots when registered count is under limit" {
+            $config = [PSCustomObject]@{ SnapshotRegistry = @() }
+
+            # 3 registered snapshots, KeepCount=5, should delete nothing
+            $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 5 -Config $config -ConfigPath "test.json"
+            $result.Success | Should -Be $true
+            $result.Data.DeletedCount | Should -Be 0
+            $result.Data.KeptCount | Should -Be 3
+            $result.Data.ExternalCount | Should -Be 2
+
             Should -Not -Invoke Remove-VssSnapshot
         }
     }

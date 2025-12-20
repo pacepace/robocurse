@@ -140,6 +140,9 @@ function Update-SnapshotList {
     <#
     .SYNOPSIS
         Refreshes the snapshot DataGrid with current snapshots
+    .DESCRIPTION
+        Loads snapshots from local or remote server and adds Status property
+        to indicate tracked (Robocurse) vs external snapshots.
     #>
     [CmdletBinding()]
     param()
@@ -166,12 +169,16 @@ function Update-SnapshotList {
 
             if ($result.Success) {
                 $snapshots = @($result.Data | ForEach-Object {
+                    $isTracked = if ($script:Config) {
+                        Test-SnapshotRegistered -Config $script:Config -ShadowId $_.ShadowId
+                    } else { $false }
                     [PSCustomObject]@{
                         ShadowId     = $_.ShadowId
                         SourceVolume = $_.SourceVolume
                         CreatedAt    = $_.CreatedAt
                         ServerName   = "Local"
                         ShadowPath   = $_.ShadowPath
+                        Status       = if ($isTracked) { "Tracked" } else { "EXTERNAL" }
                     }
                 })
             }
@@ -189,7 +196,19 @@ function Update-SnapshotList {
             }
 
             if ($result.Success) {
-                $snapshots = @($result.Data)
+                $snapshots = @($result.Data | ForEach-Object {
+                    $isTracked = if ($script:Config) {
+                        Test-SnapshotRegistered -Config $script:Config -ShadowId $_.ShadowId
+                    } else { $false }
+                    [PSCustomObject]@{
+                        ShadowId     = $_.ShadowId
+                        SourceVolume = $_.SourceVolume
+                        CreatedAt    = $_.CreatedAt
+                        ServerName   = $_.ServerName
+                        ShadowPath   = $_.ShadowPath
+                        Status       = if ($isTracked) { "Tracked" } else { "EXTERNAL" }
+                    }
+                })
             }
             else {
                 Write-RobocurseLog -Message "Failed to load remote snapshots: $($result.ErrorMessage)" -Level 'Warning' -Component 'GUI'
@@ -200,7 +219,10 @@ function Update-SnapshotList {
         $grid.ItemsSource = $snapshots
         $script:Controls['btnDeleteSnapshot'].IsEnabled = $false
 
-        Write-RobocurseLog -Message "Loaded $($snapshots.Count) snapshot(s)" -Level 'Debug' -Component 'GUI'
+        # Log summary of tracked vs untracked
+        $trackedCount = @($snapshots | Where-Object { $_.Status -eq "Tracked" }).Count
+        $externalCount = @($snapshots | Where-Object { $_.Status -eq "EXTERNAL" }).Count
+        Write-RobocurseLog -Message "Loaded $($snapshots.Count) snapshot(s): $trackedCount tracked, $externalCount external" -Level 'Debug' -Component 'GUI'
     }
     catch {
         Write-RobocurseLog -Message "Error updating snapshot list: $($_.Exception.Message)" -Level 'Error' -Component 'GUI'

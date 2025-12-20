@@ -664,6 +664,22 @@ $additionalErrors
 $profilesHtml
             </div>
 
+$(if ($Results.SnapshotSummary) {
+    $snapshotHtml = ""
+    $hasExternal = $false
+    foreach ($vol in $Results.SnapshotSummary.Keys | Sort-Object) {
+        $info = $Results.SnapshotSummary[$vol]
+        $snapshotHtml += "                <div class=`"profile-item profile-success`">$vol`: $($info.Tracked) tracked, $($info.External) external</div>`n"
+        if ($info.External -gt 0) { $hasExternal = $true }
+    }
+@"
+            <h3>Snapshot Summary</h3>
+            <div class="profile-list">
+$snapshotHtml            </div>
+$(if ($hasExternal) { "            <p style='color: #FF9800;'><em>External snapshots were not created by Robocurse and will not count against retention.</em></p>" })
+"@
+})
+
 $errorsHtml
         </div>
         <div class="footer">
@@ -752,6 +768,21 @@ Errors:       $($Results.TotalErrors)
 
 "@
         }
+    }
+
+    # Add snapshot summary if present
+    if ($Results.SnapshotSummary -and $Results.SnapshotSummary.Count -gt 0) {
+        $text += "SNAPSHOTS`n---------`n"
+        $hasExternal = $false
+        foreach ($vol in $Results.SnapshotSummary.Keys | Sort-Object) {
+            $info = $Results.SnapshotSummary[$vol]
+            $text += "* ${vol}: $($info.Tracked) tracked, $($info.External) external`n"
+            if ($info.External -gt 0) { $hasExternal = $true }
+        }
+        if ($hasExternal) {
+            $text += "  (External snapshots were not created by Robocurse)`n"
+        }
+        $text += "`n"
     }
 
     # Add errors if any

@@ -83,6 +83,8 @@ function Invoke-HeadlessReplication {
         suitable for scripting and automation.
     .PARAMETER Config
         Configuration object
+    .PARAMETER ConfigPath
+        Path to configuration file (for snapshot registry updates)
     .PARAMETER ProfilesToRun
         Array of profile objects to run
     .PARAMETER MaxConcurrentJobs
@@ -98,6 +100,9 @@ function Invoke-HeadlessReplication {
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath,
 
         [Parameter(Mandatory)]
         [PSCustomObject[]]$ProfilesToRun,
@@ -137,7 +142,7 @@ function Invoke-HeadlessReplication {
     Write-Host ""
 
     # Start replication with bandwidth throttling
-    Start-ReplicationRun -Profiles $ProfilesToRun -Config $Config -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps -DryRun:$DryRun
+    Start-ReplicationRun -Profiles $ProfilesToRun -Config $Config -ConfigPath $ConfigPath -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps -DryRun:$DryRun
 
     # Track last progress output time for throttling
     $lastProgressOutput = [datetime]::MinValue
@@ -187,6 +192,9 @@ function Invoke-HeadlessReplication {
         }
     }
 
+    # Build snapshot summary for email (tracked vs external per volume)
+    $snapshotSummary = Get-SnapshotSummaryForEmail -Config $Config
+
     $results = [PSCustomObject]@{
         Duration = $status.Elapsed
         TotalBytesCopied = $totalBytesCopied
@@ -194,6 +202,7 @@ function Invoke-HeadlessReplication {
         TotalErrors = $totalFailed
         Profiles = $profileResultsArray
         Errors = $allErrors
+        SnapshotSummary = $snapshotSummary
     }
 
     # Determine overall status
@@ -309,7 +318,12 @@ function Start-RobocurseMain {
 
     # Snapshot command dispatch (before GUI/headless logic)
     if ($ListSnapshots) {
-        return Invoke-ListSnapshotsCommand -Volume $Volume -Server $Server
+        # Load config to show tracked/untracked status
+        $listConfig = $null
+        if (Test-Path $ConfigPath) {
+            $listConfig = Get-RobocurseConfig -Path $ConfigPath
+        }
+        return Invoke-ListSnapshotsCommand -Volume $Volume -Server $Server -Config $listConfig
     }
 
     if ($CreateSnapshot) {
@@ -317,7 +331,13 @@ function Start-RobocurseMain {
             Write-Host "Error: -Volume is required for -CreateSnapshot" -ForegroundColor Red
             return 1
         }
-        return Invoke-CreateSnapshotCommand -Volume $Volume -Server $Server -KeepCount $KeepCount
+        # Load config for snapshot registry
+        if (-not (Test-Path $ConfigPath)) {
+            Write-Host "Error: Configuration file not found: $ConfigPath" -ForegroundColor Red
+            return 1
+        }
+        $createConfig = Get-RobocurseConfig -Path $ConfigPath
+        return Invoke-CreateSnapshotCommand -Volume $Volume -Server $Server -KeepCount $KeepCount -Config $createConfig -ConfigPath $ConfigPath
     }
 
     if ($DeleteSnapshot) {
@@ -325,7 +345,12 @@ function Start-RobocurseMain {
             Write-Host "Error: -ShadowId is required for -DeleteSnapshot" -ForegroundColor Red
             return 1
         }
-        return Invoke-DeleteSnapshotCommand -ShadowId $ShadowId -Server $Server
+        # Load config to unregister snapshot from registry
+        $deleteConfig = $null
+        if (Test-Path $ConfigPath) {
+            $deleteConfig = Get-RobocurseConfig -Path $ConfigPath
+        }
+        return Invoke-DeleteSnapshotCommand -ShadowId $ShadowId -Server $Server -Config $deleteConfig -ConfigPath $ConfigPath
     }
 
     if ($SnapshotSchedule) {
@@ -335,7 +360,7 @@ function Start-RobocurseMain {
             return 1
         }
         $config = Get-RobocurseConfig -Path $ConfigPath
-        return Invoke-SnapshotScheduleCommand -List:$List -Sync:$Sync -Add:$Add -Remove:$Remove -ScheduleName $ScheduleName -Config $config
+        return Invoke-SnapshotScheduleCommand -List:$List -Sync:$Sync -Add:$Add -Remove:$Remove -ScheduleName $ScheduleName -Config $config -ConfigPath $ConfigPath
     }
 
     # Remote VSS prerequisites test
@@ -487,7 +512,7 @@ function Start-RobocurseMain {
                 0
             }
 
-            return Invoke-HeadlessReplication -Config $config -ProfilesToRun $profilesToRun `
+            return Invoke-HeadlessReplication -Config $config -ConfigPath $ConfigPath -ProfilesToRun $profilesToRun `
                 -MaxConcurrentJobs $maxJobs -BandwidthLimitMbps $bandwidthLimit -DryRun:$DryRun
         }
         catch {

@@ -8,6 +8,16 @@ BeforeAll {
     . "$PSScriptRoot\..\..\src\Robocurse\Public\JobManagement.ps1"
 
     Mock Write-RobocurseLog {}
+
+    # Create a test config path for ConfigPath parameter
+    $script:TestConfigPath = Join-Path $env:TEMP "Robocurse-Test-Config-$([Guid]::NewGuid().ToString('N').Substring(0,8)).json"
+    @{ Version = "1.0"; SyncProfiles = @() } | ConvertTo-Json | Out-File -FilePath $script:TestConfigPath -Encoding utf8
+}
+
+AfterAll {
+    if ($script:TestConfigPath -and (Test-Path $script:TestConfigPath)) {
+        Remove-Item $script:TestConfigPath -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Describe "Get-EffectiveVolumeRetention" {
@@ -187,7 +197,7 @@ Describe "Invoke-ProfileSnapshots" {
                 SyncProfiles = @($profile)
             }
 
-            $result = Invoke-ProfileSnapshots -Profile $profile -Config $config
+            $result = Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
             $result.Success | Should -Be $true
             $result.Data.SourceSnapshot | Should -BeNull
             $result.Data.DestinationSnapshot | Should -BeNull
@@ -219,7 +229,7 @@ Describe "Invoke-ProfileSnapshots" {
                 SyncProfiles = @($profile)
             }
 
-            $result = Invoke-ProfileSnapshots -Profile $profile -Config $config
+            $result = Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
             $result.Success | Should -Be $true
 
             Should -Invoke Invoke-VssRetentionPolicy -Times 1
@@ -252,7 +262,7 @@ Describe "Invoke-ProfileSnapshots" {
                 SyncProfiles = @($profile)
             }
 
-            $result = Invoke-ProfileSnapshots -Profile $profile -Config $config
+            $result = Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
             $result.Success | Should -Be $true
 
             Should -Invoke Invoke-VssRetentionPolicy -Times 1
@@ -288,7 +298,7 @@ Describe "Invoke-ProfileSnapshots" {
                 SyncProfiles = @($profile)
             }
 
-            $result = Invoke-ProfileSnapshots -Profile $profile -Config $config
+            $result = Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
             $result.Success | Should -Be $true
 
             Should -Invoke Invoke-RemoteVssRetentionPolicy -Times 1
@@ -349,6 +359,179 @@ Describe "Configuration Schema" {
             $profile.SourceSnapshot.PersistentEnabled | Should -Be $true
             $profile.SourceSnapshot.RetentionCount | Should -Be 5
             $profile.DestinationSnapshot.PersistentEnabled | Should -Be $false
+        }
+    }
+}
+
+Describe "Retention Policy Accumulation" {
+    BeforeAll {
+        # Track snapshot creation calls
+        $script:CreatedSnapshots = @()
+        $script:ExistingSnapshots = @()
+
+        Mock Get-VolumeFromPath { "D:" }
+        Mock Write-RobocurseLog {}
+    }
+
+    BeforeEach {
+        $script:CreatedSnapshots = @()
+        $script:ExistingSnapshots = @()
+    }
+
+    Context "Multiple backup runs should accumulate snapshots up to KeepCount" {
+        BeforeAll {
+            Mock Get-VssSnapshots {
+                param($Volume)
+                # Return current "existing" snapshots
+                New-OperationResult -Success $true -Data @($script:ExistingSnapshots)
+            }
+
+            Mock New-VssSnapshot {
+                param($SourcePath)
+                # Create a new snapshot
+                $newSnap = [PSCustomObject]@{
+                    ShadowId = "{snap-$([guid]::NewGuid().ToString('N').Substring(0,8))}"
+                    CreatedAt = [datetime]::Now
+                    SourceVolume = "D:"
+                }
+                $script:CreatedSnapshots += $newSnap
+                $script:ExistingSnapshots += $newSnap
+                New-OperationResult -Success $true -Data $newSnap
+            }
+
+            Mock Remove-VssSnapshot {
+                param($ShadowId)
+                $script:ExistingSnapshots = @($script:ExistingSnapshots | Where-Object { $_.ShadowId -ne $ShadowId })
+                New-OperationResult -Success $true
+            }
+        }
+
+        It "Accumulates snapshots correctly over multiple runs with KeepCount=3" {
+            $profile = [PSCustomObject]@{
+                Name = "TestProfile"
+                Source = "D:\Data"
+                Destination = "D:\Backup"
+                SourceSnapshot = [PSCustomObject]@{ PersistentEnabled = $false; RetentionCount = 3 }
+                DestinationSnapshot = [PSCustomObject]@{ PersistentEnabled = $true; RetentionCount = 3 }
+            }
+            $config = [PSCustomObject]@{ SyncProfiles = @($profile) }
+
+            # Run 1: Start with 0 snapshots
+            $result1 = Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
+            $result1.Success | Should -Be $true
+            $script:ExistingSnapshots.Count | Should -Be 1 -Because "First run creates 1 snapshot"
+
+            # Run 2: Now have 1 snapshot
+            $result2 = Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
+            $result2.Success | Should -Be $true
+            $script:ExistingSnapshots.Count | Should -Be 2 -Because "Second run creates another, total 2"
+
+            # Run 3: Now have 2 snapshots
+            $result3 = Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
+            $result3.Success | Should -Be $true
+            $script:ExistingSnapshots.Count | Should -Be 3 -Because "Third run creates another, total 3"
+
+            # Run 4: Now have 3 snapshots, should delete 1 to make room for new one
+            $result4 = Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
+            $result4.Success | Should -Be $true
+            # Retention enforces BEFORE create with KeepCount-1 to make room:
+            # 3 snapshots exist, retention targets KeepCount-1=2, so delete 1, then create 1 = 3 total
+            $script:ExistingSnapshots.Count | Should -Be 3 -Because "Fourth run: retention deletes 1, creates 1, maintains KeepCount=3"
+
+            # Run 5: Still have 3 snapshots, steady state
+            $result5 = Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
+            $result5.Success | Should -Be $true
+            $script:ExistingSnapshots.Count | Should -Be 3 -Because "Fifth run: maintains KeepCount=3 steady state"
+        }
+
+        It "With KeepCount=1, only keeps 1 snapshot in steady state" {
+            $script:ExistingSnapshots = @()
+
+            $profile = [PSCustomObject]@{
+                Name = "TestProfile"
+                Source = "D:\Data"
+                Destination = "D:\Backup"
+                SourceSnapshot = [PSCustomObject]@{ PersistentEnabled = $false; RetentionCount = 1 }
+                DestinationSnapshot = [PSCustomObject]@{ PersistentEnabled = $true; RetentionCount = 1 }
+            }
+            $config = [PSCustomObject]@{ SyncProfiles = @($profile) }
+
+            # Run 1: Start with 0 snapshots, retention targets 0, creates 1
+            Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
+            $script:ExistingSnapshots.Count | Should -Be 1
+
+            # Run 2: 1 snapshot exists, retention targets KeepCount-1=0, deletes 1, creates 1 = 1
+            Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
+            $script:ExistingSnapshots.Count | Should -Be 1 -Because "Retention deletes old before creating new, maintains KeepCount=1"
+
+            # Run 3: Still 1 snapshot (steady state)
+            Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
+            $script:ExistingSnapshots.Count | Should -Be 1 -Because "Maintains KeepCount=1 steady state"
+
+            # Run 4: Still 1 snapshot (steady state)
+            Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
+            $script:ExistingSnapshots.Count | Should -Be 1 -Because "Stays at 1 in steady state"
+        }
+    }
+
+    Context "Retention count comes from config, not hardcoded" {
+        BeforeAll {
+            Mock Invoke-VssRetentionPolicy {
+                param($Volume, $KeepCount)
+                # Just record what was called
+                $script:LastKeepCount = $KeepCount
+                New-OperationResult -Success $true -Data @{ DeletedCount = 0; KeptCount = 0 }
+            }
+            Mock New-VssSnapshot {
+                New-OperationResult -Success $true -Data @{ ShadowId = "{test}" }
+            }
+        }
+
+        It "Passes correct KeepCount from profile config (minus 1 to make room for new snapshot)" {
+            $profile = [PSCustomObject]@{
+                Name = "TestProfile"
+                Source = "D:\Data"
+                Destination = "D:\Backup"
+                SourceSnapshot = [PSCustomObject]@{ PersistentEnabled = $false; RetentionCount = 3 }
+                DestinationSnapshot = [PSCustomObject]@{ PersistentEnabled = $true; RetentionCount = 7 }
+            }
+            $config = [PSCustomObject]@{ SyncProfiles = @($profile) }
+
+            Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
+
+            # Retention is called with KeepCount-1 to make room for the new snapshot about to be created
+            Should -Invoke Invoke-VssRetentionPolicy -Times 1 -ParameterFilter { $KeepCount -eq 6 }
+        }
+    }
+
+    Context "Persistent snapshots skip orphan tracking" {
+        BeforeAll {
+            Mock Invoke-VssRetentionPolicy {
+                New-OperationResult -Success $true -Data @{ DeletedCount = 0; KeptCount = 0 }
+            }
+            # Track whether SkipTracking was passed
+            $script:SkipTrackingCalled = $false
+            Mock New-VssSnapshot {
+                param($SourcePath, [switch]$SkipTracking)
+                $script:SkipTrackingCalled = $SkipTracking.IsPresent
+                New-OperationResult -Success $true -Data @{ ShadowId = "{test}" }
+            }
+        }
+
+        It "Calls New-VssSnapshot with -SkipTracking for persistent destination snapshots" {
+            $profile = [PSCustomObject]@{
+                Name = "TestProfile"
+                Source = "D:\Data"
+                Destination = "D:\Backup"
+                SourceSnapshot = [PSCustomObject]@{ PersistentEnabled = $false; RetentionCount = 3 }
+                DestinationSnapshot = [PSCustomObject]@{ PersistentEnabled = $true; RetentionCount = 3 }
+            }
+            $config = [PSCustomObject]@{ SyncProfiles = @($profile) }
+
+            Invoke-ProfileSnapshots -Profile $profile -Config $config -ConfigPath $script:TestConfigPath
+
+            # Verify SkipTracking was passed
+            $script:SkipTrackingCalled | Should -Be $true -Because "Persistent snapshots must skip tracking to survive restarts"
         }
     }
 }

@@ -298,6 +298,21 @@ InModuleScope 'Robocurse' {
         BeforeAll {
             # Initialize C# type for orchestration state
             Initialize-OrchestrationStateType | Out-Null
+
+            # Create our own temp directory (separate from Main Entry Point tests)
+            $script:HeadlessTempDir = Join-Path $env:TEMP "RobocurseHeadlessTests_$(Get-Random)"
+            New-Item -Path $script:HeadlessTempDir -ItemType Directory -Force | Out-Null
+
+            # Create a test config file for ConfigPath parameter
+            $script:HeadlessTestConfigPath = Join-Path $script:HeadlessTempDir "headless-test-config.json"
+            @{ Version = "1.0"; SyncProfiles = @() } | ConvertTo-Json | Out-File -FilePath $script:HeadlessTestConfigPath -Encoding utf8
+        }
+
+        AfterAll {
+            # Cleanup temp directory
+            if (Test-Path $script:HeadlessTempDir) {
+                Remove-Item -Path $script:HeadlessTempDir -Recurse -Force -ErrorAction SilentlyContinue
+            }
         }
 
         BeforeEach {
@@ -339,8 +354,8 @@ InModuleScope 'Robocurse' {
                     Destination = "C:\Dest"
                 }
 
-                $exitCode = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
-                $exitCode = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4
+                $exitCode = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
+                $exitCode = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4
                 $exitCode | Should -Be 0
             }
 
@@ -370,8 +385,8 @@ InModuleScope 'Robocurse' {
                     Destination = "C:\Dest"
                 }
 
-                $exitCode = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
-                $exitCode = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4
+                $exitCode = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
+                $exitCode = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4
                 $exitCode | Should -Be 1
             }
 
@@ -387,8 +402,8 @@ InModuleScope 'Robocurse' {
                     Destination = "C:\Dest"
                 }
 
-                $exitCode = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
-                $exitCode = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4
+                $exitCode = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
+                $exitCode = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4
                 $exitCode | Should -Be 1
             }
         }
@@ -406,7 +421,7 @@ InModuleScope 'Robocurse' {
                     Destination = "C:\Dest"
                 }
 
-                $output = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 -DryRun 6>&1
+                $output = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 -DryRun 6>&1
                 $outputText = $output -join "`n"
                 $outputText | Should -Match "DRY-RUN"
             }
@@ -424,7 +439,7 @@ InModuleScope 'Robocurse' {
                     Destination = "C:\Dest"
                 }
 
-                Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 -DryRun 6>&1 | Out-Null
+                Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 -DryRun 6>&1 | Out-Null
                 Should -Invoke Start-ReplicationRun -ParameterFilter { $DryRun -eq $true }
             }
         }
@@ -448,7 +463,7 @@ InModuleScope 'Robocurse' {
                     Destination = "C:\Dest"
                 }
 
-                Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
+                Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
                 Should -Invoke Send-CompletionEmail -Times 1
             }
 
@@ -465,7 +480,7 @@ InModuleScope 'Robocurse' {
                     Destination = "C:\Dest"
                 }
 
-                Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
+                Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
                 Should -Invoke Send-CompletionEmail -Times 0
             }
 
@@ -485,8 +500,8 @@ InModuleScope 'Robocurse' {
                     Destination = "C:\Dest"
                 }
 
-                $exitCode = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
-                $exitCode = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4
+                $exitCode = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
+                $exitCode = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4
                 # Email failure alone should not cause exit code 1
                 $exitCode | Should -Be 0
             }
@@ -505,7 +520,7 @@ InModuleScope 'Robocurse' {
                     Destination = "C:\Dest"
                 }
 
-                $output = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 -BandwidthLimitMbps 100 6>&1
+                $output = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 -BandwidthLimitMbps 100 6>&1
                 $outputText = $output -join "`n"
                 $outputText | Should -Match "Bandwidth limit.*100"
             }
@@ -522,7 +537,7 @@ InModuleScope 'Robocurse' {
                     Destination = "C:\Dest"
                 }
 
-                $output = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile) -MaxConcurrentJobs 4 -BandwidthLimitMbps 0 6>&1
+                $output = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 -BandwidthLimitMbps 0 6>&1
                 $outputText = $output -join "`n"
                 $outputText | Should -Not -Match "Bandwidth limit"
             }
@@ -538,7 +553,7 @@ InModuleScope 'Robocurse' {
                 $profile1 = [PSCustomObject]@{ Name = "Profile1"; Source = "C:\S1"; Destination = "C:\D1" }
                 $profile2 = [PSCustomObject]@{ Name = "Profile2"; Source = "C:\S2"; Destination = "C:\D2" }
 
-                $output = Invoke-HeadlessReplication -Config $config -ProfilesToRun @($profile1, $profile2) -MaxConcurrentJobs 4 6>&1
+                $output = Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile1, $profile2) -MaxConcurrentJobs 4 6>&1
                 $outputText = $output -join "`n"
                 $outputText | Should -Match "Profile1.*Profile2"
             }

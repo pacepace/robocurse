@@ -189,6 +189,9 @@ function New-RemoteVssSnapshot {
         that hosts the specified UNC path.
     .PARAMETER UncPath
         The UNC path to the share/folder to snapshot
+    .PARAMETER SkipTracking
+        If set, does not add snapshot to orphan tracking file. Use for persistent
+        snapshots that should survive application restarts.
     .PARAMETER RetryCount
         Number of retry attempts for transient failures (default: 3)
     .PARAMETER RetryDelaySeconds
@@ -211,6 +214,8 @@ function New-RemoteVssSnapshot {
         [Parameter(Mandatory)]
         [ValidatePattern('^\\\\[^\\]+\\[^\\]+')]
         [string]$UncPath,
+
+        [switch]$SkipTracking,
 
         [ValidateRange(0, 10)]
         [int]$RetryCount = 3,
@@ -305,14 +310,19 @@ function New-RemoteVssSnapshot {
 
                 Write-RobocurseLog -Message "Remote VSS snapshot ready on '$serverName'. Shadow path: $($snapshotInfo.ShadowPath)" -Level 'Info' -Component 'VSS'
 
-                # Track for orphan cleanup
-                Add-VssToTracking -SnapshotInfo ([PSCustomObject]@{
-                    ShadowId     = $shadowId
-                    SourceVolume = "$serverName`:$volume"  # Include server name for remote tracking
-                    CreatedAt    = $snapshotInfo.CreatedAt
-                    ServerName   = $serverName
-                    IsRemote     = $true
-                })
+                # Track for orphan cleanup (unless SkipTracking for persistent snapshots)
+                if (-not $SkipTracking) {
+                    Add-VssToTracking -SnapshotInfo ([PSCustomObject]@{
+                        ShadowId     = $shadowId
+                        SourceVolume = "$serverName`:$volume"  # Include server name for remote tracking
+                        CreatedAt    = $snapshotInfo.CreatedAt
+                        ServerName   = $serverName
+                        IsRemote     = $true
+                    })
+                }
+                else {
+                    Write-RobocurseLog -Message "Skipping orphan tracking for persistent remote snapshot: $shadowId" -Level 'Debug' -Component 'VSS'
+                }
 
                 return New-OperationResult -Success $true -Data $snapshotInfo
             }
@@ -866,16 +876,22 @@ function Invoke-RemoteVssRetentionPolicy {
     .DESCRIPTION
         For a specified volume on a remote server, keeps the newest N snapshots
         and removes the rest. Uses CIM sessions for remote operations.
+        Only considers snapshots registered in our snapshot registry
+        (external snapshots are ignored and not counted against retention).
     .PARAMETER ServerName
         The remote server name
     .PARAMETER Volume
         Volume to apply retention to (e.g., "D:")
     .PARAMETER KeepCount
         Number of snapshots to keep (default: 3)
+    .PARAMETER Config
+        Config object containing the snapshot registry.
+    .PARAMETER ConfigPath
+        Path to config file for saving after unregister.
     .OUTPUTS
-        OperationResult with Data containing DeletedCount, KeptCount, Errors
+        OperationResult with Data containing DeletedCount, KeptCount, Errors, ExternalCount
     .EXAMPLE
-        $result = Invoke-RemoteVssRetentionPolicy -ServerName "FileServer01" -Volume "D:" -KeepCount 5
+        $result = Invoke-RemoteVssRetentionPolicy -ServerName "FileServer01" -Volume "D:" -KeepCount 5 -Config $config -ConfigPath $configPath
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -887,7 +903,13 @@ function Invoke-RemoteVssRetentionPolicy {
         [string]$Volume,
 
         [ValidateRange(0, 100)]
-        [int]$KeepCount = 3
+        [int]$KeepCount = 3,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     Write-RobocurseLog -Message "Applying VSS retention on '$ServerName' for $Volume (keep: $KeepCount)" -Level 'Info' -Component 'VSS'
@@ -898,16 +920,33 @@ function Invoke-RemoteVssRetentionPolicy {
         return New-OperationResult -Success $false -ErrorMessage "Failed to list snapshots: $($listResult.ErrorMessage)"
     }
 
-    $snapshots = @($listResult.Data)
+    $allSnapshots = @($listResult.Data)
+    $externalCount = 0
+
+    # Filter to only our registered snapshots (external snapshots are not counted against retention)
+    $snapshots = @()
+    foreach ($snap in $allSnapshots) {
+        if (Test-SnapshotRegistered -Config $Config -ShadowId $snap.ShadowId) {
+            $snapshots += $snap
+        }
+        else {
+            $externalCount++
+        }
+    }
+    if ($externalCount -gt 0) {
+        Write-RobocurseLog -Message "Found $externalCount external/untracked snapshot(s) on $ServerName $Volume (not counting against retention)" -Level 'Info' -Component 'VSS'
+    }
+
     $currentCount = $snapshots.Count
 
     # Nothing to do if under limit
     if ($currentCount -le $KeepCount) {
-        Write-RobocurseLog -Message "Retention OK on '$ServerName': $currentCount snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
+        Write-RobocurseLog -Message "Retention OK on '$ServerName': $currentCount registered snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
         return New-OperationResult -Success $true -Data @{
-            DeletedCount = 0
-            KeptCount    = $currentCount
-            Errors       = @()
+            DeletedCount  = 0
+            KeptCount     = $currentCount
+            Errors        = @()
+            ExternalCount = $externalCount
         }
     }
 
@@ -930,6 +969,8 @@ function Invoke-RemoteVssRetentionPolicy {
             if ($removeResult.Success) {
                 $deletedCount++
                 Write-RobocurseLog -Message "Deleted remote snapshot $shadowId on '$ServerName'" -Level 'Debug' -Component 'VSS'
+                # Unregister from snapshot registry
+                $null = Unregister-PersistentSnapshot -Config $Config -ShadowId $shadowId -ConfigPath $ConfigPath
             }
             else {
                 $errors += "Failed to delete $shadowId on '$ServerName': $($removeResult.ErrorMessage)"
@@ -940,9 +981,10 @@ function Invoke-RemoteVssRetentionPolicy {
 
     $success = $errors.Count -eq 0
     $resultData = @{
-        DeletedCount = $deletedCount
-        KeptCount    = $toKeep.Count
-        Errors       = $errors
+        DeletedCount  = $deletedCount
+        KeptCount     = $toKeep.Count
+        Errors        = $errors
+        ExternalCount = $externalCount
     }
 
     if ($success) {

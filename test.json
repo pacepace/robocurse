@@ -1,0 +1,44 @@
+﻿{
+  "version": "1.0",
+  "profiles": {
+    
+  },
+  "global": {
+    "performance": {
+      "maxConcurrentJobs": null,
+      "throttleNetworkMbps": null
+    },
+    "logging": {
+      "operationalLog": {
+        "path": null,
+        "rotation": {
+          "maxAgeDays": null
+        }
+      },
+      "verboseFileLogging": null,
+      "redactPaths": null,
+      "redactServerNames": [
+        null
+      ]
+    },
+    "email": {
+      "enabled": null,
+      "smtp": {
+        "server": null,
+        "port": null,
+        "useSsl": null,
+        "credentialName": null
+      },
+      "from": null,
+      "to": [
+        null
+      ]
+    }
+  },
+  "snapshotRegistry": {
+    "D:": [
+      "{new-snap}",
+      "{remote}"
+    ]
+  }
+}

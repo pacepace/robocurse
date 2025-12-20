@@ -7,6 +7,17 @@
     "WorkerCount":  4,
     "SelectedProfile":  "Test",
     "ActivePanel":  "Profiles",
-    "LastRun":  null,
-    "SavedAt":  "2025-12-19T23:00:45.3603305-08:00"
+    "LastRun":  {
+                    "ChunksCompleted":  21,
+                    "Timestamp":  "2025-12-20T12:18:27.6386608-08:00",
+                    "ProfilesRun":  [
+                                        "Test"
+                                    ],
+                    "BytesCopied":  5262835484,
+                    "Status":  "Success",
+                    "Duration":  "00:00:03",
+                    "ChunksTotal":  21,
+                    "ChunksFailed":  0
+                },
+    "SavedAt":  "2025-12-20T12:19:02.5338049-08:00"
 }

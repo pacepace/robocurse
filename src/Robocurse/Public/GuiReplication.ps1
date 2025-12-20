@@ -81,6 +81,14 @@ function Start-GuiReplication {
     # without first clicking elsewhere to trigger LostFocus
     Save-ProfileFromForm
 
+    # Persist in-memory config to disk before creating snapshot
+    # This ensures background runspace sees current settings (snapshot/retention, etc.)
+    $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+    if (-not $saveResult.Success) {
+        Write-GuiLog "Warning: Could not save config before replication: $($saveResult.ErrorMessage)"
+        # Continue anyway - the in-memory config might still work for current session
+    }
+
     # Get and validate profiles (force array context to handle PowerShell's single-item unwrapping)
     $profilesToRun = @(Get-ProfilesToRun -AllProfiles:$AllProfiles -SelectedOnly:$SelectedOnly)
     if ($profilesToRun.Count -eq 0) { return }
@@ -250,6 +258,34 @@ function Complete-GuiReplication {
         Write-GuiLog "Warning: Failed to save last run summary: $_"
     }
 
+    # Merge snapshot registry from temp config back to original config
+    # The background runspace wrote registry updates to the snapshot, not the original
+    try {
+        if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath) -and (Test-Path $script:ConfigSnapshotPath)) {
+            $snapshotConfig = Get-Content $script:ConfigSnapshotPath -Raw | ConvertFrom-Json
+            if ($snapshotConfig.snapshotRegistry) {
+                # Merge snapshot registry entries into the live config
+                $snapshotConfig.snapshotRegistry.PSObject.Properties | ForEach-Object {
+                    $volumeKey = $_.Name
+                    $snapshotIds = $_.Value
+                    if ($snapshotIds -and $snapshotIds.Count -gt 0) {
+                        $script:Config.SnapshotRegistry | Add-Member -NotePropertyName $volumeKey -NotePropertyValue $snapshotIds -Force
+                    }
+                }
+                # Save the merged config to the original path
+                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+                if ($saveResult.Success) {
+                    Write-GuiLog "Snapshot registry merged from background runspace"
+                } else {
+                    Write-GuiLog "Warning: Failed to save merged snapshot registry: $($saveResult.ErrorMessage)"
+                }
+            }
+        }
+    }
+    catch {
+        Write-GuiLog "Warning: Failed to merge snapshot registry: $($_.Exception.Message)"
+    }
+
     # Send email notification if configured
     try {
         if ($script:Config.Email -and $script:Config.Email.Enabled) {
@@ -275,6 +311,9 @@ function Complete-GuiReplication {
                 'Failed'
             }
 
+            # Build snapshot summary for email (tracked vs external per volume)
+            $snapshotSummary = Get-SnapshotSummaryForEmail -Config $script:Config
+
             # Build results object matching what Send-CompletionEmail expects
             $emailResults = [PSCustomObject]@{
                 Duration = $emailElapsed
@@ -294,6 +333,7 @@ function Complete-GuiReplication {
                     }
                 })
                 Errors = @()
+                SnapshotSummary = $snapshotSummary
             }
 
             # Get session ID from orchestration state for Message-Id header

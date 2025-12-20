@@ -128,10 +128,10 @@ function Invoke-CreateSnapshotFromDialog {
             Write-RobocurseLog -Message "Enforcing retention (keep $($DialogResult.KeepCount))" -Level 'Debug' -Component 'GUI'
 
             if ($isLocal) {
-                $retResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $DialogResult.KeepCount
+                $retResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $DialogResult.KeepCount -Config $script:Config -ConfigPath $script:ConfigPath
             }
             else {
-                $retResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $DialogResult.KeepCount
+                $retResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $DialogResult.KeepCount -Config $script:Config -ConfigPath $script:ConfigPath
             }
 
             if (-not $retResult.Success) {
@@ -153,6 +153,13 @@ function Invoke-CreateSnapshotFromDialog {
 
         if ($result.Success) {
             Write-RobocurseLog -Message "Snapshot created: $($result.Data.ShadowId)" -Level 'Info' -Component 'GUI'
+            # Register the snapshot in the config
+            if ($script:Config -and $script:ConfigPath) {
+                $registered = Register-PersistentSnapshot -Config $script:Config -Volume $volume -ShadowId $result.Data.ShadowId -ConfigPath $script:ConfigPath
+                if (-not $registered.Success) {
+                    Write-RobocurseLog -Message "Failed to register snapshot: $($registered.ErrorMessage)" -Level 'Warning' -Component 'GUI'
+                }
+            }
         }
 
         return $result
@@ -208,6 +215,9 @@ function Invoke-DeleteSelectedSnapshot {
     <#
     .SYNOPSIS
         Deletes the currently selected snapshot
+    .DESCRIPTION
+        Deletes the snapshot and unregisters it from the config's snapshot registry
+        if Config and ConfigPath are available in script scope.
     .OUTPUTS
         OperationResult
     #>
@@ -236,6 +246,10 @@ function Invoke-DeleteSelectedSnapshot {
 
         if ($result.Success) {
             Write-RobocurseLog -Message "Snapshot deleted" -Level 'Info' -Component 'GUI'
+            # Unregister from snapshot registry if config is available
+            if ($script:Config -and $script:ConfigPath) {
+                $null = Unregister-PersistentSnapshot -Config $script:Config -ShadowId $snapshot.ShadowId -ConfigPath $script:ConfigPath
+            }
         }
         else {
             Write-RobocurseLog -Message "Failed to delete snapshot: $($result.ErrorMessage)" -Level 'Error' -Component 'GUI'

@@ -78,6 +78,13 @@ Describe "Get-RemoteVssSnapshots" {
 }
 
 Describe "Invoke-RemoteVssRetentionPolicy" {
+    BeforeAll {
+        # Common mock config for all tests - treat all snapshots as registered
+        $script:testConfig = [PSCustomObject]@{ PersistentSnapshots = @() }
+        Mock Test-SnapshotRegistered { $true }
+        Mock Unregister-PersistentSnapshot { New-OperationResult -Success $true }
+    }
+
     Context "When over retention limit" {
         BeforeAll {
             Mock Get-RemoteVssSnapshots {
@@ -91,13 +98,13 @@ Describe "Invoke-RemoteVssRetentionPolicy" {
         }
 
         It "Deletes oldest snapshots" {
-            $result = Invoke-RemoteVssRetentionPolicy -ServerName "TestServer" -Volume "D:" -KeepCount 1
+            $result = Invoke-RemoteVssRetentionPolicy -ServerName "TestServer" -Volume "D:" -KeepCount 1 -Config $script:testConfig -ConfigPath "test.json"
             $result.Success | Should -Be $true
             $result.Data.DeletedCount | Should -Be 2
         }
 
         It "Passes ServerName to Remove-RemoteVssSnapshot" {
-            Invoke-RemoteVssRetentionPolicy -ServerName "TestServer" -Volume "D:" -KeepCount 1
+            Invoke-RemoteVssRetentionPolicy -ServerName "TestServer" -Volume "D:" -KeepCount 1 -Config $script:testConfig -ConfigPath "test.json"
             Should -Invoke Remove-RemoteVssSnapshot -ParameterFilter { $ServerName -eq "TestServer" }
         }
     }
@@ -112,9 +119,74 @@ Describe "Invoke-RemoteVssRetentionPolicy" {
         }
 
         It "Does not delete any snapshots" {
-            $result = Invoke-RemoteVssRetentionPolicy -ServerName "TestServer" -Volume "D:" -KeepCount 5
+            $result = Invoke-RemoteVssRetentionPolicy -ServerName "TestServer" -Volume "D:" -KeepCount 5 -Config $script:testConfig -ConfigPath "test.json"
             $result.Success | Should -Be $true
             $result.Data.DeletedCount | Should -Be 0
+        }
+    }
+
+    Context "Registry-aware retention (Config provided)" {
+        BeforeAll {
+            # Mix of registered and external snapshots on remote server
+            Mock Get-RemoteVssSnapshots {
+                New-OperationResult -Success $true -Data @(
+                    [PSCustomObject]@{ ShadowId = "{reg-remote-1}"; CreatedAt = (Get-Date).AddHours(-4); ServerName = "TestServer" },
+                    [PSCustomObject]@{ ShadowId = "{ext-remote-1}"; CreatedAt = (Get-Date).AddHours(-3); ServerName = "TestServer" },
+                    [PSCustomObject]@{ ShadowId = "{reg-remote-2}"; CreatedAt = (Get-Date).AddHours(-2); ServerName = "TestServer" },
+                    [PSCustomObject]@{ ShadowId = "{ext-remote-2}"; CreatedAt = (Get-Date).AddHours(-1); ServerName = "TestServer" }
+                )
+            }
+
+            # Only reg-remote-* are in the registry
+            Mock Test-SnapshotRegistered {
+                param($Config, $ShadowId)
+                $ShadowId -like "{reg-remote-*}"
+            }
+
+            Mock Remove-RemoteVssSnapshot { New-OperationResult -Success $true -Data $ShadowId }
+            Mock Unregister-PersistentSnapshot { New-OperationResult -Success $true }
+        }
+
+        It "Should NOT delete external snapshots on remote server" {
+            $config = [PSCustomObject]@{ SnapshotRegistry = @() }
+
+            $result = Invoke-RemoteVssRetentionPolicy -ServerName "TestServer" -Volume "D:" -KeepCount 1 -Config $config -ConfigPath "test.json"
+            $result.Success | Should -Be $true
+
+            # External snapshots should NEVER be deleted
+            Should -Not -Invoke Remove-RemoteVssSnapshot -ParameterFilter { $ShadowId -eq "{ext-remote-1}" }
+            Should -Not -Invoke Remove-RemoteVssSnapshot -ParameterFilter { $ShadowId -eq "{ext-remote-2}" }
+        }
+
+        It "Should only count registered snapshots against remote retention" {
+            $config = [PSCustomObject]@{ SnapshotRegistry = @() }
+
+            # 2 registered, KeepCount=1, so delete 1
+            $result = Invoke-RemoteVssRetentionPolicy -ServerName "TestServer" -Volume "D:" -KeepCount 1 -Config $config -ConfigPath "test.json"
+            $result.Success | Should -Be $true
+            $result.Data.DeletedCount | Should -Be 1
+            $result.Data.KeptCount | Should -Be 1
+
+            # Only the oldest registered snapshot should be deleted
+            Should -Invoke Remove-RemoteVssSnapshot -Times 1 -ParameterFilter { $ShadowId -eq "{reg-remote-1}" }
+        }
+
+        It "Should return ExternalCount for remote snapshots" {
+            $config = [PSCustomObject]@{ SnapshotRegistry = @() }
+
+            $result = Invoke-RemoteVssRetentionPolicy -ServerName "TestServer" -Volume "D:" -KeepCount 2 -Config $config -ConfigPath "test.json"
+            $result.Success | Should -Be $true
+            $result.Data.ExternalCount | Should -Be 2
+        }
+
+        It "Should unregister deleted remote snapshots" {
+            $config = [PSCustomObject]@{ SnapshotRegistry = @() }
+            $configPath = "C:\test\config.json"
+
+            $result = Invoke-RemoteVssRetentionPolicy -ServerName "TestServer" -Volume "D:" -KeepCount 1 -Config $config -ConfigPath $configPath
+            $result.Success | Should -Be $true
+
+            Should -Invoke Unregister-PersistentSnapshot -ParameterFilter { $ShadowId -eq "{reg-remote-1}" }
         }
     }
 }

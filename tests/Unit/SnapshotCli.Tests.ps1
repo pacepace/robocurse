@@ -40,12 +40,14 @@ Describe "Invoke-ListSnapshotsCommand" {
 
 Describe "Invoke-CreateSnapshotCommand" {
     BeforeAll {
+        $script:testConfig = [PSCustomObject]@{ PersistentSnapshots = @() }
         Mock Invoke-VssRetentionPolicy { New-OperationResult -Success $true -Data @{ DeletedCount = 0; KeptCount = 2 } }
         Mock New-VssSnapshot { New-OperationResult -Success $true -Data @{ ShadowId = "{new-snap}" } }
+        Mock Register-PersistentSnapshot { New-OperationResult -Success $true }
     }
 
     It "Enforces retention before creating" {
-        Invoke-CreateSnapshotCommand -Volume "D:" -KeepCount 5
+        Invoke-CreateSnapshotCommand -Volume "D:" -KeepCount 5 -Config $script:testConfig -ConfigPath "test.json"
 
         Should -Invoke Invoke-VssRetentionPolicy -Times 1 -Scope It -ParameterFilter {
             $Volume -eq "D:" -and $KeepCount -eq 5
@@ -53,13 +55,29 @@ Describe "Invoke-CreateSnapshotCommand" {
     }
 
     It "Creates snapshot after retention" {
-        Invoke-CreateSnapshotCommand -Volume "D:"
+        Invoke-CreateSnapshotCommand -Volume "D:" -Config $script:testConfig -ConfigPath "test.json"
         Should -Invoke New-VssSnapshot -Times 1 -Scope It
     }
 
     It "Returns 0 on success" {
-        $result = Invoke-CreateSnapshotCommand -Volume "D:"
+        $result = Invoke-CreateSnapshotCommand -Volume "D:" -Config $script:testConfig -ConfigPath "test.json"
         $result | Should -Be 0
+    }
+
+    It "Registers snapshot after successful creation" {
+        Invoke-CreateSnapshotCommand -Volume "D:" -Config $script:testConfig -ConfigPath "test.json"
+
+        Should -Invoke Register-PersistentSnapshot -Times 1 -Scope It -ParameterFilter {
+            $Volume -eq "D:" -and $ShadowId -eq "{new-snap}" -and $ConfigPath -eq "test.json"
+        }
+    }
+
+    It "Does NOT register snapshot when creation fails" {
+        Mock New-VssSnapshot { New-OperationResult -Success $false -ErrorMessage "Creation failed" }
+
+        Invoke-CreateSnapshotCommand -Volume "D:" -Config $script:testConfig -ConfigPath "test.json"
+
+        Should -Not -Invoke Register-PersistentSnapshot -Scope It
     }
 
     Context "Remote creation" {
@@ -69,9 +87,17 @@ Describe "Invoke-CreateSnapshotCommand" {
         }
 
         It "Uses remote functions when -Server specified" {
-            Invoke-CreateSnapshotCommand -Volume "D:" -Server "Server01"
+            Invoke-CreateSnapshotCommand -Volume "D:" -Server "Server01" -Config $script:testConfig -ConfigPath "test.json"
             Should -Invoke Invoke-RemoteVssRetentionPolicy -Times 1 -Scope It
             Should -Invoke New-RemoteVssSnapshot -Times 1 -Scope It
+        }
+
+        It "Registers remote snapshot after successful creation" {
+            Invoke-CreateSnapshotCommand -Volume "D:" -Server "Server01" -Config $script:testConfig -ConfigPath "test.json"
+
+            Should -Invoke Register-PersistentSnapshot -Times 1 -Scope It -ParameterFilter {
+                $Volume -eq "D:" -and $ShadowId -eq "{remote}"
+            }
         }
     }
 }
@@ -135,7 +161,7 @@ Describe "Invoke-SnapshotScheduleCommand" {
                 }
             }
 
-            Invoke-SnapshotScheduleCommand -Sync -Config $config
+            Invoke-SnapshotScheduleCommand -Sync -Config $config -ConfigPath "C:\Config\robocurse.json"
             Should -Invoke Sync-SnapshotSchedules -Times 1 -Scope It
         }
     }

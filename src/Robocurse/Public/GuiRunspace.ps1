@@ -171,7 +171,7 @@ function New-ModuleModeBackgroundScript {
             Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
 
             # Start replication with -SkipInitialization since UI thread already initialized
-            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$ConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
             # Run the orchestration loop until complete
             # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
@@ -258,7 +258,7 @@ function New-ScriptModeBackgroundScript {
             Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
 
             # Start replication with -SkipInitialization since UI thread already initialized
-            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$GuiConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
 
             # Run the orchestration loop until complete
             # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)

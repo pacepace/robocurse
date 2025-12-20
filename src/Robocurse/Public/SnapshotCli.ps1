@@ -5,11 +5,21 @@ function Invoke-ListSnapshotsCommand {
     <#
     .SYNOPSIS
         CLI command to list VSS snapshots
+    .DESCRIPTION
+        Lists all VSS snapshots on the specified volume/server. If Config is provided,
+        shows which snapshots are tracked (created by Robocurse) vs untracked (external).
+    .PARAMETER Volume
+        Optional volume filter (e.g., "D:")
+    .PARAMETER Server
+        Optional remote server name
+    .PARAMETER Config
+        Optional config object (for showing tracked/untracked status)
     #>
     [CmdletBinding()]
     param(
         [string]$Volume,
-        [string]$Server
+        [string]$Server,
+        [PSCustomObject]$Config
     )
 
     Write-Host ""
@@ -39,23 +49,57 @@ function Invoke-ListSnapshotsCommand {
             return 0
         }
 
-        Write-Host "Found $($snapshots.Count) snapshot(s):" -ForegroundColor Gray
+        # Count tracked vs untracked
+        $trackedCount = 0
+        $untrackedCount = 0
+        if ($Config) {
+            foreach ($snap in $snapshots) {
+                if (Test-SnapshotRegistered -Config $Config -ShadowId $snap.ShadowId) {
+                    $trackedCount++
+                } else {
+                    $untrackedCount++
+                }
+            }
+            Write-Host "Found $($snapshots.Count) snapshot(s): $trackedCount tracked, $untrackedCount untracked" -ForegroundColor Gray
+        } else {
+            Write-Host "Found $($snapshots.Count) snapshot(s):" -ForegroundColor Gray
+        }
         Write-Host ""
 
-        # Table header
-        $format = "{0,-8} {1,-20} {2,-40}"
-        Write-Host ($format -f "Volume", "Created", "Shadow ID") -ForegroundColor White
-        Write-Host ($format -f "------", "-------", "---------") -ForegroundColor DarkGray
+        # Table header - include Status column if config available
+        if ($Config) {
+            $format = "{0,-8} {1,-20} {2,-10} {3,-40}"
+            Write-Host ($format -f "Volume", "Created", "Status", "Shadow ID") -ForegroundColor White
+            Write-Host ($format -f "------", "-------", "------", "---------") -ForegroundColor DarkGray
+        } else {
+            $format = "{0,-8} {1,-20} {2,-40}"
+            Write-Host ($format -f "Volume", "Created", "Shadow ID") -ForegroundColor White
+            Write-Host ($format -f "------", "-------", "---------") -ForegroundColor DarkGray
+        }
 
         foreach ($snap in $snapshots) {
             $volume = $snap.SourceVolume
             $created = $snap.CreatedAt.ToString("yyyy-MM-dd HH:mm:ss")
             $shadowId = $snap.ShadowId
 
-            Write-Host ($format -f $volume, $created, $shadowId)
+            if ($Config) {
+                $isTracked = Test-SnapshotRegistered -Config $Config -ShadowId $shadowId
+                if ($isTracked) {
+                    Write-Host ($format -f $volume, $created, "Tracked", $shadowId) -ForegroundColor Green
+                } else {
+                    Write-Host ($format -f $volume, $created, "EXTERNAL", $shadowId) -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host ($format -f $volume, $created, $shadowId)
+            }
         }
 
         Write-Host ""
+        if ($untrackedCount -gt 0) {
+            Write-Host "Note: $untrackedCount snapshot(s) marked EXTERNAL were not created by Robocurse." -ForegroundColor Yellow
+            Write-Host "      They will not count against retention limits and will not be auto-deleted." -ForegroundColor Yellow
+            Write-Host ""
+        }
         return 0
     }
     catch {
@@ -77,6 +121,10 @@ function Invoke-CreateSnapshotCommand {
         Optional remote server name for remote snapshots
     .PARAMETER KeepCount
         Number of snapshots to retain after cleanup (default: 3)
+    .PARAMETER Config
+        Config object for snapshot registry
+    .PARAMETER ConfigPath
+        Path to config file for saving registry updates
     #>
     [CmdletBinding()]
     param(
@@ -85,7 +133,13 @@ function Invoke-CreateSnapshotCommand {
 
         [string]$Server,
 
-        [int]$KeepCount = 3
+        [int]$KeepCount = 3,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     Write-Host ""
@@ -102,10 +156,10 @@ function Invoke-CreateSnapshotCommand {
         Write-Host "Enforcing retention policy..." -ForegroundColor Gray
 
         if ($Server) {
-            $retResult = Invoke-RemoteVssRetentionPolicy -ServerName $Server -Volume $Volume -KeepCount $KeepCount
+            $retResult = Invoke-RemoteVssRetentionPolicy -ServerName $Server -Volume $Volume -KeepCount $KeepCount -Config $Config -ConfigPath $ConfigPath
         }
         else {
-            $retResult = Invoke-VssRetentionPolicy -Volume $Volume -KeepCount $KeepCount
+            $retResult = Invoke-VssRetentionPolicy -Volume $Volume -KeepCount $KeepCount -Config $Config -ConfigPath $ConfigPath
         }
 
         if ($retResult.Success) {
@@ -130,6 +184,12 @@ function Invoke-CreateSnapshotCommand {
         }
 
         if ($snapResult.Success) {
+            # Register the snapshot in the config
+            $registered = Register-PersistentSnapshot -Config $Config -Volume $Volume -ShadowId $snapResult.Data.ShadowId -ConfigPath $ConfigPath
+            if (-not $registered.Success) {
+                Write-Host "  Warning: Failed to register snapshot: $($registered.ErrorMessage)" -ForegroundColor Yellow
+            }
+
             Write-Host ""
             Write-Host "Snapshot created successfully!" -ForegroundColor Green
             Write-Host "  Shadow ID: $($snapResult.Data.ShadowId)" -ForegroundColor White
@@ -157,17 +217,26 @@ function Invoke-DeleteSnapshotCommand {
         CLI command to delete a VSS snapshot
     .DESCRIPTION
         Deletes a VSS snapshot by its Shadow ID, with confirmation prompt.
+        If Config and ConfigPath are provided, also unregisters the snapshot from the registry.
     .PARAMETER ShadowId
         The GUID of the shadow copy to delete
     .PARAMETER Server
         Optional remote server name for remote snapshots
+    .PARAMETER Config
+        Optional config object (for unregistering from snapshot registry)
+    .PARAMETER ConfigPath
+        Optional config file path (required if Config is provided)
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string]$ShadowId,
 
-        [string]$Server
+        [string]$Server,
+
+        [PSCustomObject]$Config,
+
+        [string]$ConfigPath
     )
 
     Write-Host ""
@@ -199,6 +268,10 @@ function Invoke-DeleteSnapshotCommand {
         }
 
         if ($result.Success) {
+            # Unregister from snapshot registry if config provided
+            if ($Config -and $ConfigPath) {
+                $null = Unregister-PersistentSnapshot -Config $Config -ShadowId $ShadowId -ConfigPath $ConfigPath
+            }
             Write-Host "Snapshot deleted successfully!" -ForegroundColor Green
             Write-Host ""
             return 0
@@ -236,6 +309,8 @@ function Invoke-SnapshotScheduleCommand {
         Name of the schedule (required for -Remove)
     .PARAMETER Config
         The Robocurse configuration object (required for -Sync)
+    .PARAMETER ConfigPath
+        Path to configuration file (required for -Sync)
     #>
     [CmdletBinding()]
     param(
@@ -244,7 +319,8 @@ function Invoke-SnapshotScheduleCommand {
         [switch]$Add,
         [switch]$Remove,
         [string]$ScheduleName,
-        [PSCustomObject]$Config
+        [PSCustomObject]$Config,
+        [string]$ConfigPath
     )
 
     Write-Host ""
@@ -281,7 +357,7 @@ function Invoke-SnapshotScheduleCommand {
     if ($Sync) {
         Write-Host "Synchronizing schedules with configuration..." -ForegroundColor Gray
 
-        $result = Sync-SnapshotSchedules -Config $Config
+        $result = Sync-SnapshotSchedules -Config $Config -ConfigPath $ConfigPath
 
         if ($result.Success) {
             Write-Host ""

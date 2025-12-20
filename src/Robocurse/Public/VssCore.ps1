@@ -624,3 +624,256 @@ function Get-VssPath {
 
     return $vssPath
 }
+
+# ============================================================================
+# Snapshot Registry Functions
+# Track which snapshot IDs we created (stored in config file)
+# ============================================================================
+
+function Register-PersistentSnapshot {
+    <#
+    .SYNOPSIS
+        Registers a snapshot ID in the config's snapshot registry
+    .DESCRIPTION
+        Adds a snapshot ID to the config's SnapshotRegistry for a given volume.
+        This tracks which snapshots we created for accurate retention counting.
+    .PARAMETER Config
+        The config object (will be modified in place)
+    .PARAMETER Volume
+        The volume (e.g., "D:")
+    .PARAMETER ShadowId
+        The snapshot GUID to register
+    .PARAMETER ConfigPath
+        Path to config file (for saving)
+    .OUTPUTS
+        OperationResult - Success=$true if registered, Success=$false with ErrorMessage on failure
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$Volume,
+
+        [Parameter(Mandatory)]
+        [string]$ShadowId,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    $volumeKey = $Volume.ToUpper()
+
+    # Ensure SnapshotRegistry exists
+    if (-not $Config.SnapshotRegistry) {
+        $Config | Add-Member -NotePropertyName SnapshotRegistry -NotePropertyValue ([PSCustomObject]@{}) -Force
+    }
+
+    # Get or create the array for this volume
+    $existingIds = @()
+    if ($Config.SnapshotRegistry.PSObject.Properties[$volumeKey]) {
+        $existingIds = @($Config.SnapshotRegistry.$volumeKey)
+    }
+
+    # Add if not already present
+    if ($ShadowId -notin $existingIds) {
+        $existingIds += $ShadowId
+        $Config.SnapshotRegistry | Add-Member -NotePropertyName $volumeKey -NotePropertyValue $existingIds -Force
+        Write-RobocurseLog -Message "Registered persistent snapshot $ShadowId for volume $volumeKey" -Level 'Debug' -Component 'VSS'
+
+        # Save config to persist the registry
+        $saveResult = Save-RobocurseConfig -Config $Config -Path $ConfigPath
+        if (-not $saveResult.Success) {
+            Write-RobocurseLog -Message "Failed to save snapshot registry: $($saveResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            return New-OperationResult -Success $false -ErrorMessage "Failed to save snapshot registry: $($saveResult.ErrorMessage)"
+        }
+    }
+
+    return New-OperationResult -Success $true -Data $ShadowId
+}
+
+function Unregister-PersistentSnapshot {
+    <#
+    .SYNOPSIS
+        Removes a snapshot ID from the config's snapshot registry
+    .DESCRIPTION
+        Removes a snapshot ID from the SnapshotRegistry when the snapshot is deleted.
+    .PARAMETER Config
+        The config object (will be modified in place)
+    .PARAMETER ShadowId
+        The snapshot GUID to unregister
+    .PARAMETER ConfigPath
+        Path to config file (for saving)
+    .OUTPUTS
+        $true if successfully unregistered (or wasn't registered)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ShadowId,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    if (-not $Config.SnapshotRegistry) {
+        return $true  # Nothing to unregister from
+    }
+
+    $found = $false
+    foreach ($prop in $Config.SnapshotRegistry.PSObject.Properties) {
+        $volumeKey = $prop.Name
+        $ids = @($prop.Value)
+        if ($ShadowId -in $ids) {
+            $newIds = @($ids | Where-Object { $_ -ne $ShadowId })
+            $Config.SnapshotRegistry | Add-Member -NotePropertyName $volumeKey -NotePropertyValue $newIds -Force
+            $found = $true
+            Write-RobocurseLog -Message "Unregistered snapshot $ShadowId from volume $volumeKey" -Level 'Debug' -Component 'VSS'
+        }
+    }
+
+    if ($found) {
+        # Save config to persist the registry change
+        $saveResult = Save-RobocurseConfig -Config $Config -Path $ConfigPath
+        if (-not $saveResult.Success) {
+            Write-RobocurseLog -Message "Failed to save snapshot registry after unregister: $($saveResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Test-SnapshotRegistered {
+    <#
+    .SYNOPSIS
+        Checks if a snapshot ID is registered in our registry
+    .DESCRIPTION
+        Returns $true if the snapshot was created by Robocurse (tracked in registry),
+        $false if it's an external/untracked snapshot.
+    .PARAMETER Config
+        The config object
+    .PARAMETER ShadowId
+        The snapshot GUID to check
+    .OUTPUTS
+        $true if registered, $false otherwise
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ShadowId
+    )
+
+    if (-not $Config.SnapshotRegistry) {
+        return $false
+    }
+
+    foreach ($prop in $Config.SnapshotRegistry.PSObject.Properties) {
+        $ids = @($prop.Value)
+        if ($ShadowId -in $ids) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Get-RegisteredSnapshots {
+    <#
+    .SYNOPSIS
+        Gets all registered snapshot IDs for a volume
+    .DESCRIPTION
+        Returns an array of snapshot IDs that we created for the specified volume.
+    .PARAMETER Config
+        The config object
+    .PARAMETER Volume
+        The volume (e.g., "D:")
+    .OUTPUTS
+        Array of snapshot GUID strings
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$Volume
+    )
+
+    $volumeKey = $Volume.ToUpper()
+
+    if (-not $Config.SnapshotRegistry) {
+        return @()
+    }
+
+    if ($Config.SnapshotRegistry.PSObject.Properties[$volumeKey]) {
+        return @($Config.SnapshotRegistry.$volumeKey)
+    }
+
+    return @()
+}
+
+function Get-SnapshotSummaryForEmail {
+    <#
+    .SYNOPSIS
+        Builds snapshot summary for email reports
+    .DESCRIPTION
+        Gets all local VSS snapshots and counts tracked vs external per volume.
+        Returns a hashtable suitable for inclusion in email Results object.
+    .PARAMETER Config
+        The config object (for checking snapshot registry)
+    .OUTPUTS
+        Hashtable with volume as key, value = @{ Tracked = N; External = M }
+    .EXAMPLE
+        $summary = Get-SnapshotSummaryForEmail -Config $config
+        # Returns: @{ "C:" = @{Tracked=3; External=1}; "D:" = @{Tracked=2; External=0} }
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config
+    )
+
+    $summary = @{}
+
+    try {
+        # Get all local snapshots
+        $result = Get-VssSnapshots
+        if (-not $result.Success) {
+            Write-RobocurseLog -Message "Could not get snapshots for email summary: $($result.ErrorMessage)" -Level 'Debug' -Component 'Email'
+            return $summary
+        }
+
+        $snapshots = @($result.Data)
+        if ($snapshots.Count -eq 0) {
+            return $summary
+        }
+
+        # Count per volume
+        foreach ($snap in $snapshots) {
+            $vol = $snap.SourceVolume
+            if (-not $summary.ContainsKey($vol)) {
+                $summary[$vol] = @{ Tracked = 0; External = 0 }
+            }
+
+            if (Test-SnapshotRegistered -Config $Config -ShadowId $snap.ShadowId) {
+                $summary[$vol].Tracked++
+            }
+            else {
+                $summary[$vol].External++
+            }
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Error building snapshot summary: $($_.Exception.Message)" -Level 'Debug' -Component 'Email'
+    }
+
+    return $summary
+}

@@ -699,6 +699,254 @@ Describe "VSS Integration Tests" -Skip:(-not $script:CanUseVss) {
             }
         }
     }
+
+    Context "VSS Snapshot Registry (Config-Based)" {
+        # These tests verify that the snapshot registry (stored in config file)
+        # correctly tracks which snapshots were created by Robocurse for retention purposes.
+
+        BeforeAll {
+            # Create a temporary config file for testing
+            $script:TestConfigPath = Join-Path $env:TEMP "RobocurseVssRegistryTest_$([Guid]::NewGuid().ToString('N').Substring(0,8)).json"
+            $script:TestConfig = [PSCustomObject]@{
+                SyncProfiles = @()
+                GlobalSettings = [PSCustomObject]@{
+                    LogPath = $env:TEMP
+                    SnapshotSchedules = @()
+                }
+                PersistentSnapshots = @()
+                SnapshotRegistry = [PSCustomObject]@{}
+            }
+            $script:TestConfig | ConvertTo-Json -Depth 10 | Set-Content -Path $script:TestConfigPath
+        }
+
+        AfterAll {
+            # Cleanup test config
+            if (Test-Path $script:TestConfigPath) {
+                Remove-Item $script:TestConfigPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It "Should register snapshot in config after creation" {
+            $result = New-VssSnapshot -SourcePath "C:\Windows"
+
+            try {
+                $result.Success | Should -Be $true
+
+                # Register the snapshot
+                $registerResult = Register-PersistentSnapshot `
+                    -Config $script:TestConfig `
+                    -Volume "C:" `
+                    -ShadowId $result.Data.ShadowId `
+                    -ConfigPath $script:TestConfigPath
+
+                $registerResult.Success | Should -Be $true -Because "Registration should succeed: $($registerResult.ErrorMessage)"
+
+                # Reload config from file to verify it was saved
+                $reloadedConfig = Get-Content $script:TestConfigPath -Raw | ConvertFrom-Json
+
+                # Check SnapshotRegistry contains the snapshot
+                $reloadedConfig.SnapshotRegistry."C:" | Should -Contain $result.Data.ShadowId
+            }
+            finally {
+                if ($result.Success) {
+                    Remove-VssSnapshot -ShadowId $result.Data.ShadowId | Out-Null
+                }
+            }
+        }
+
+        It "Should detect registered snapshot via Test-SnapshotRegistered" {
+            $result = New-VssSnapshot -SourcePath "C:\Windows"
+
+            try {
+                $result.Success | Should -Be $true
+
+                # Before registration, should NOT be registered
+                $isRegisteredBefore = Test-SnapshotRegistered -Config $script:TestConfig -ShadowId $result.Data.ShadowId
+                $isRegisteredBefore | Should -Be $false
+
+                # Register the snapshot
+                Register-PersistentSnapshot `
+                    -Config $script:TestConfig `
+                    -Volume "C:" `
+                    -ShadowId $result.Data.ShadowId `
+                    -ConfigPath $script:TestConfigPath | Out-Null
+
+                # After registration, SHOULD be registered
+                $isRegisteredAfter = Test-SnapshotRegistered -Config $script:TestConfig -ShadowId $result.Data.ShadowId
+                $isRegisteredAfter | Should -Be $true
+            }
+            finally {
+                if ($result.Success) {
+                    Remove-VssSnapshot -ShadowId $result.Data.ShadowId | Out-Null
+                }
+            }
+        }
+
+        It "Should unregister snapshot when deleted" {
+            $result = New-VssSnapshot -SourcePath "C:\Windows"
+
+            try {
+                $result.Success | Should -Be $true
+
+                # Register the snapshot
+                Register-PersistentSnapshot `
+                    -Config $script:TestConfig `
+                    -Volume "C:" `
+                    -ShadowId $result.Data.ShadowId `
+                    -ConfigPath $script:TestConfigPath | Out-Null
+
+                # Verify registered
+                Test-SnapshotRegistered -Config $script:TestConfig -ShadowId $result.Data.ShadowId | Should -Be $true
+
+                # Unregister
+                $unregisterResult = Unregister-PersistentSnapshot `
+                    -Config $script:TestConfig `
+                    -ShadowId $result.Data.ShadowId `
+                    -ConfigPath $script:TestConfigPath
+
+                $unregisterResult | Should -Be $true
+
+                # Verify no longer registered
+                Test-SnapshotRegistered -Config $script:TestConfig -ShadowId $result.Data.ShadowId | Should -Be $false
+
+                # Reload and verify persisted
+                $reloadedConfig = Get-Content $script:TestConfigPath -Raw | ConvertFrom-Json
+                if ($reloadedConfig.SnapshotRegistry."C:") {
+                    $reloadedConfig.SnapshotRegistry."C:" | Should -Not -Contain $result.Data.ShadowId
+                }
+            }
+            finally {
+                if ($result.Success) {
+                    Remove-VssSnapshot -ShadowId $result.Data.ShadowId | Out-Null
+                }
+            }
+        }
+
+        It "Should correctly filter retention to only registered snapshots" {
+            # Create two snapshots
+            $snap1 = New-VssSnapshot -SourcePath "C:\Windows"
+            $snap2 = New-VssSnapshot -SourcePath "C:\Windows"
+
+            try {
+                $snap1.Success | Should -Be $true
+                $snap2.Success | Should -Be $true
+
+                # Only register snap1
+                Register-PersistentSnapshot `
+                    -Config $script:TestConfig `
+                    -Volume "C:" `
+                    -ShadowId $snap1.Data.ShadowId `
+                    -ConfigPath $script:TestConfigPath | Out-Null
+
+                # Get all snapshots
+                $allSnaps = Get-VssSnapshots -Volume "C:"
+                $allSnaps.Success | Should -Be $true
+
+                # Filter to only registered (what retention policy does)
+                $registeredSnaps = @($allSnaps.Data | Where-Object {
+                    Test-SnapshotRegistered -Config $script:TestConfig -ShadowId $_.ShadowId
+                })
+
+                # Should include snap1 but not snap2
+                $registeredSnaps | ForEach-Object { $_.ShadowId } | Should -Contain $snap1.Data.ShadowId
+                $registeredSnaps | ForEach-Object { $_.ShadowId } | Should -Not -Contain $snap2.Data.ShadowId
+            }
+            finally {
+                if ($snap1.Success) { Remove-VssSnapshot -ShadowId $snap1.Data.ShadowId | Out-Null }
+                if ($snap2.Success) { Remove-VssSnapshot -ShadowId $snap2.Data.ShadowId | Out-Null }
+            }
+        }
+
+        It "Should show registered snapshot as Tracked in email summary" {
+            # This tests the FULL flow from snapshot creation to email summary
+            $result = New-VssSnapshot -SourcePath "C:\Windows"
+
+            try {
+                $result.Success | Should -Be $true
+
+                # Register the snapshot
+                $registerResult = Register-PersistentSnapshot `
+                    -Config $script:TestConfig `
+                    -Volume "C:" `
+                    -ShadowId $result.Data.ShadowId `
+                    -ConfigPath $script:TestConfigPath
+
+                $registerResult.Success | Should -Be $true -Because "Registration should succeed"
+
+                # Reload config from disk to simulate fresh load (like Main.ps1 does for email)
+                $freshConfig = Get-Content $script:TestConfigPath -Raw | ConvertFrom-Json
+
+                # Get email summary using the DISK config
+                $summary = Get-SnapshotSummaryForEmail -Config $freshConfig
+
+                # Our snapshot should be in "C:" and Tracked
+                $summary.ContainsKey("C:") | Should -Be $true -Because "C: volume should be in summary"
+                $summary["C:"].Tracked | Should -BeGreaterOrEqual 1 -Because "At least our registered snapshot should be tracked"
+            }
+            finally {
+                if ($result.Success) {
+                    Remove-VssSnapshot -ShadowId $result.Data.ShadowId | Out-Null
+                }
+            }
+        }
+
+        It "Should show unregistered snapshot as External in email summary" {
+            # Create snapshot but DON'T register it
+            $result = New-VssSnapshot -SourcePath "C:\Windows"
+
+            try {
+                $result.Success | Should -Be $true
+
+                # Get email summary - should show as External since we didn't register
+                $summary = Get-SnapshotSummaryForEmail -Config $script:TestConfig
+
+                $summary.ContainsKey("C:") | Should -Be $true -Because "C: volume should be in summary"
+                $summary["C:"].External | Should -BeGreaterOrEqual 1 -Because "Unregistered snapshot should be external"
+            }
+            finally {
+                if ($result.Success) {
+                    Remove-VssSnapshot -ShadowId $result.Data.ShadowId | Out-Null
+                }
+            }
+        }
+
+        It "Invoke-LocalPersistentSnapshot should register snapshot and persist to disk" {
+            # This tests the ACTUAL function called during replication when
+            # SourceSnapshot.PersistentEnabled = $true
+
+            # Need InModuleScope to access internal function
+            $result = Invoke-LocalPersistentSnapshot `
+                -Path "C:\Windows" `
+                -Side "Source" `
+                -Config $script:TestConfig `
+                -ConfigPath $script:TestConfigPath
+
+            try {
+                $result.Success | Should -Be $true -Because "Invoke-LocalPersistentSnapshot should succeed: $($result.ErrorMessage)"
+                $result.Data.Snapshot | Should -Not -BeNullOrEmpty
+                $shadowId = $result.Data.Snapshot.ShadowId
+
+                # Verify snapshot was registered in memory
+                Test-SnapshotRegistered -Config $script:TestConfig -ShadowId $shadowId | Should -Be $true `
+                    -Because "Snapshot should be registered in memory after creation"
+
+                # Reload config from disk and verify it was persisted
+                $freshConfig = Get-Content $script:TestConfigPath -Raw | ConvertFrom-Json
+                Test-SnapshotRegistered -Config $freshConfig -ShadowId $shadowId | Should -Be $true `
+                    -Because "Snapshot registration should be persisted to disk"
+
+                # Verify email summary shows it as Tracked
+                $summary = Get-SnapshotSummaryForEmail -Config $freshConfig
+                $summary["C:"].Tracked | Should -BeGreaterOrEqual 1 `
+                    -Because "Persistent snapshot should show as Tracked in email summary"
+            }
+            finally {
+                if ($result.Success -and $result.Data.Snapshot) {
+                    Remove-VssSnapshot -ShadowId $result.Data.Snapshot.ShadowId | Out-Null
+                }
+            }
+        }
+    }
 }
 
 Describe "VSS Not Available Tests" -Skip:($script:CanUseVss) {

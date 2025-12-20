@@ -39,6 +39,8 @@ function Start-ReplicationRun {
         Preview mode - runs robocopy with /L flag to show what would be copied
     .PARAMETER Config
         Full configuration object (required for snapshot retention settings)
+    .PARAMETER ConfigPath
+        Path to config file (required for snapshot registry updates)
     #>
     [CmdletBinding()]
     param(
@@ -65,6 +67,9 @@ function Start-ReplicationRun {
 
         [Parameter(Mandatory)]
         [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath,
 
         [ValidateRange(1, 128)]
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs,
@@ -137,6 +142,7 @@ function Start-ReplicationRun {
     $script:OnProfileComplete = $OnProfileComplete
     $script:CurrentMaxConcurrentJobs = $MaxConcurrentJobs
     $script:Config = $Config
+    $script:ConfigPath = $ConfigPath
 
     # Store profiles and start timing
     $script:OrchestrationState.Profiles = $Profiles
@@ -171,12 +177,15 @@ function Invoke-ProfileSnapshots {
         - Computes effective retention using MAX across all profiles sharing that volume
         - Enforces retention policy (deletes old snapshots to make room)
         - Creates a new persistent snapshot
+        - Registers the snapshot in the config's SnapshotRegistry
 
         The snapshots remain after backup completes for point-in-time recovery.
     .PARAMETER Profile
         The sync profile object
     .PARAMETER Config
         The full configuration object (for computing effective retention)
+    .PARAMETER ConfigPath
+        Path to the config file (for saving registry updates)
     .OUTPUTS
         OperationResult with Data containing:
         - SourceSnapshot: snapshot info or $null
@@ -190,7 +199,10 @@ function Invoke-ProfileSnapshots {
         [PSCustomObject]$Profile,
 
         [Parameter(Mandatory)]
-        [PSCustomObject]$Config
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     $results = @{
@@ -209,10 +221,10 @@ function Invoke-ProfileSnapshots {
         $isRemote = $sourcePath -match '^\\\\[^\\]+\\[^\\]+'
 
         if ($isRemote) {
-            $sourceResult = Invoke-RemotePersistentSnapshot -Path $sourcePath -Side "Source" -Config $Config
+            $sourceResult = Invoke-RemotePersistentSnapshot -Path $sourcePath -Side "Source" -Config $Config -ConfigPath $ConfigPath
         }
         else {
-            $sourceResult = Invoke-LocalPersistentSnapshot -Path $sourcePath -Side "Source" -Config $Config
+            $sourceResult = Invoke-LocalPersistentSnapshot -Path $sourcePath -Side "Source" -Config $Config -ConfigPath $ConfigPath
         }
 
         if ($sourceResult.Success) {
@@ -235,10 +247,10 @@ function Invoke-ProfileSnapshots {
         $isRemote = $destPath -match '^\\\\[^\\]+\\[^\\]+'
 
         if ($isRemote) {
-            $destResult = Invoke-RemotePersistentSnapshot -Path $destPath -Side "Destination" -Config $Config
+            $destResult = Invoke-RemotePersistentSnapshot -Path $destPath -Side "Destination" -Config $Config -ConfigPath $ConfigPath
         }
         else {
-            $destResult = Invoke-LocalPersistentSnapshot -Path $destPath -Side "Destination" -Config $Config
+            $destResult = Invoke-LocalPersistentSnapshot -Path $destPath -Side "Destination" -Config $Config -ConfigPath $ConfigPath
         }
 
         if ($destResult.Success) {
@@ -268,12 +280,15 @@ function Invoke-LocalPersistentSnapshot {
         Uses Get-EffectiveVolumeRetention to compute MAX retention across all profiles
         sharing this volume.
         The snapshot persists after backup completes for point-in-time recovery.
+        Registers the snapshot ID in the config's SnapshotRegistry for tracking.
     .PARAMETER Path
         The local path to snapshot (used to determine volume)
     .PARAMETER Side
         "Source" or "Destination" - which side this snapshot is for
     .PARAMETER Config
         The full configuration object (for computing effective retention)
+    .PARAMETER ConfigPath
+        Path to the config file (for saving registry updates)
     .OUTPUTS
         OperationResult with Data containing Snapshot and Retention info
     #>
@@ -287,7 +302,10 @@ function Invoke-LocalPersistentSnapshot {
         [string]$Side,
 
         [Parameter(Mandatory)]
-        [PSCustomObject]$Config
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     # Get volume from path
@@ -301,8 +319,10 @@ function Invoke-LocalPersistentSnapshot {
 
     Write-RobocurseLog -Message "Enforcing $Side retention for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
 
-    # Step 1: Enforce retention BEFORE creating new snapshot
-    $retentionResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $keepCount
+    # Step 1: Enforce retention BEFORE creating new snapshot (only our registered snapshots)
+    # Use KeepCount-1 to make room for the new snapshot we're about to create
+    $retentionTarget = [Math]::Max(0, $keepCount - 1)
+    $retentionResult = Invoke-VssRetentionPolicy -Volume $volume -KeepCount $retentionTarget -Config $Config -ConfigPath $ConfigPath
     $retentionInfo = $null
     if (-not $retentionResult.Success) {
         Write-RobocurseLog -Message "Retention enforcement failed: $($retentionResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
@@ -319,13 +339,17 @@ function Invoke-LocalPersistentSnapshot {
         }
     }
 
-    # Step 2: Create new persistent snapshot
-    $snapshotResult = New-VssSnapshot -SourcePath $Path
+    # Step 2: Create new persistent snapshot (skip tracking so it survives restarts)
+    $snapshotResult = New-VssSnapshot -SourcePath $Path -SkipTracking
     if (-not $snapshotResult.Success) {
         return New-OperationResult -Success $false -ErrorMessage "Failed to create persistent snapshot: $($snapshotResult.ErrorMessage)"
     }
 
-    # Note: We do NOT track this snapshot for orphan cleanup - it's meant to persist
+    # Step 3: Register the snapshot in our registry
+    $registered = Register-PersistentSnapshot -Config $Config -Volume $volume -ShadowId $snapshotResult.Data.ShadowId -ConfigPath $ConfigPath
+    if (-not $registered.Success) {
+        Write-RobocurseLog -Message "Warning: Failed to register snapshot in registry: $($registered.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
+    }
 
     Write-RobocurseLog -Message "Created persistent $Side snapshot: $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
 
@@ -344,12 +368,15 @@ function Invoke-RemotePersistentSnapshot {
         enforcing retention policy first. Uses Get-EffectiveVolumeRetention
         to compute MAX retention across all profiles sharing that volume.
         The snapshot persists after backup completes for point-in-time recovery.
+        Registers the snapshot ID in the config's SnapshotRegistry for tracking.
     .PARAMETER Path
         The UNC path to snapshot (e.g., \\server\share)
     .PARAMETER Side
         "Source" or "Destination" - which side this snapshot is for
     .PARAMETER Config
         The full configuration object (for computing effective retention)
+    .PARAMETER ConfigPath
+        Path to the config file (for saving registry updates)
     .OUTPUTS
         OperationResult with Data containing Snapshot and Retention info
     #>
@@ -363,7 +390,10 @@ function Invoke-RemotePersistentSnapshot {
         [string]$Side,
 
         [Parameter(Mandatory)]
-        [PSCustomObject]$Config
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     # Parse UNC path
@@ -394,13 +424,16 @@ function Invoke-RemotePersistentSnapshot {
 
     Write-RobocurseLog -Message "Enforcing remote $Side retention on '$serverName' for $volume (keep: $keepCount)" -Level 'Info' -Component 'Orchestration'
 
-    # Step 1: Enforce retention
-    $retentionResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $keepCount
+    # Step 1: Enforce retention (only our registered snapshots)
+    # Use KeepCount-1 to make room for the new snapshot we're about to create
+    $retentionTarget = [Math]::Max(0, $keepCount - 1)
+    $retentionResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $retentionTarget -Config $Config -ConfigPath $ConfigPath
     $retentionInfo = $null
     if (-not $retentionResult.Success) {
         Write-RobocurseLog -Message "Remote retention failed: $($retentionResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
     }
     else {
+        Write-RobocurseLog -Message "Remote retention: deleted $($retentionResult.Data.DeletedCount), kept $($retentionResult.Data.KeptCount)" -Level 'Debug' -Component 'Orchestration'
         $retentionInfo = [PSCustomObject]@{
             Volume = $volume
             Location = "Remote:$serverName"
@@ -410,10 +443,16 @@ function Invoke-RemotePersistentSnapshot {
         }
     }
 
-    # Step 2: Create new persistent snapshot
-    $snapshotResult = New-RemoteVssSnapshot -UncPath $Path
+    # Step 2: Create new persistent snapshot (skip tracking so it survives restarts)
+    $snapshotResult = New-RemoteVssSnapshot -UncPath $Path -SkipTracking
     if (-not $snapshotResult.Success) {
         return New-OperationResult -Success $false -ErrorMessage "Failed to create remote persistent snapshot: $($snapshotResult.ErrorMessage)"
+    }
+
+    # Step 3: Register the snapshot in our registry
+    $registered = Register-PersistentSnapshot -Config $Config -Volume $volume -ShadowId $snapshotResult.Data.ShadowId -ConfigPath $ConfigPath
+    if (-not $registered.Success) {
+        Write-RobocurseLog -Message "Warning: Failed to register remote snapshot in registry: $($registered.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
     }
 
     Write-RobocurseLog -Message "Created remote persistent $Side snapshot on '$serverName': $($snapshotResult.Data.ShadowId)" -Level 'Info' -Component 'Orchestration'
@@ -576,7 +615,7 @@ function Start-ProfileReplication {
     }
 
     # Create persistent snapshots if enabled (separate from temp VSS for file copying)
-    $snapshotResult = Invoke-ProfileSnapshots -Profile $Profile -Config $script:Config
+    $snapshotResult = Invoke-ProfileSnapshots -Profile $Profile -Config $script:Config -ConfigPath $script:ConfigPath
     if (-not $snapshotResult.Success) {
         Write-RobocurseLog -Message "Persistent snapshot creation failed: $($snapshotResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
         # Don't fail the profile - persistent snapshots are optional enhancement

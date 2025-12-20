@@ -395,7 +395,7 @@ InModuleScope 'Robocurse' {
                 }
 
                 # Start replication (synchronous for testing)
-                Start-ReplicationRun -Profiles @($profile) -Config $script:TestConfig -MaxConcurrentJobs 2
+                Start-ReplicationRun -Profiles @($profile) -Config $script:TestConfig -ConfigPath $script:ConfigPath -MaxConcurrentJobs 2
 
                 # Run ticks until complete
                 $maxTicks = 100
@@ -427,7 +427,7 @@ InModuleScope 'Robocurse' {
                     ChunkMaxDepth = 5
                 }
 
-                Start-ReplicationRun -Profiles @($profile) -Config $script:TestConfig -MaxConcurrentJobs 2
+                Start-ReplicationRun -Profiles @($profile) -Config $script:TestConfig -ConfigPath $script:ConfigPath -MaxConcurrentJobs 2
 
                 # Capture display items at various points
                 $capturedItems = @()

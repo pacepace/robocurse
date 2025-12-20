@@ -108,6 +108,9 @@ function New-VssSnapshot {
         Configurable via -RetryCount and -RetryDelaySeconds parameters.
     .PARAMETER SourcePath
         Path on the volume to snapshot (used to determine volume)
+    .PARAMETER SkipTracking
+        If set, does not add snapshot to orphan tracking file. Use for persistent
+        snapshots that should survive application restarts.
     .PARAMETER RetryCount
         Number of retry attempts for transient failures (default: 3)
     .PARAMETER RetryDelaySeconds
@@ -138,6 +141,8 @@ function New-VssSnapshot {
             $true
         })]
         [string]$SourcePath,
+
+        [switch]$SkipTracking,
 
         [ValidateRange(0, 10)]
         [int]$RetryCount = 3,
@@ -177,7 +182,7 @@ function New-VssSnapshot {
             Start-Sleep -Seconds $RetryDelaySeconds
         }
 
-        $result = New-VssSnapshotInternal -SourcePath $SourcePath
+        $result = New-VssSnapshotInternal -SourcePath $SourcePath -SkipTracking:$SkipTracking
         if ($result.Success) {
             if ($isRetry) {
                 Write-RobocurseLog -Message "VSS snapshot succeeded on retry $($attempt - 1)" -Level 'Info' -Component 'VSS'
@@ -209,11 +214,15 @@ function New-VssSnapshotInternal {
         Called by New-VssSnapshot. Separated for retry logic.
     .PARAMETER SourcePath
         Path to create snapshot for (volume will be determined from this path)
+    .PARAMETER SkipTracking
+        If set, does not add snapshot to orphan tracking file
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$SourcePath
+        [string]$SourcePath,
+
+        [switch]$SkipTracking
     )
 
     try {
@@ -259,8 +268,13 @@ function New-VssSnapshotInternal {
 
         Write-RobocurseLog -Message "VSS snapshot ready. Shadow path: $($snapshotInfo.ShadowPath)" -Level 'Info' -Component 'VSS'
 
-        # Track snapshot for orphan cleanup in case of crash
-        Add-VssToTracking -SnapshotInfo $snapshotInfo
+        # Track snapshot for orphan cleanup in case of crash (unless SkipTracking for persistent snapshots)
+        if (-not $SkipTracking) {
+            Add-VssToTracking -SnapshotInfo $snapshotInfo
+        }
+        else {
+            Write-RobocurseLog -Message "Skipping orphan tracking for persistent snapshot: $shadowId" -Level 'Debug' -Component 'VSS'
+        }
 
         return New-OperationResult -Success $true -Data $snapshotInfo
     }
@@ -498,10 +512,16 @@ function Invoke-VssRetentionPolicy {
     .DESCRIPTION
         For each volume, keeps the newest N snapshots and removes the rest.
         This is typically called before creating a new snapshot.
+        Only considers snapshots registered in our snapshot registry
+        (external snapshots are ignored and not counted against retention).
     .PARAMETER Volume
         Volume to apply retention to (e.g., "D:"). Required.
     .PARAMETER KeepCount
         Number of snapshots to keep per volume (default: 3)
+    .PARAMETER Config
+        Config object containing the snapshot registry.
+    .PARAMETER ConfigPath
+        Path to config file for saving after unregister.
     .PARAMETER WhatIf
         If specified, shows what would be deleted without actually deleting
     .OUTPUTS
@@ -509,8 +529,9 @@ function Invoke-VssRetentionPolicy {
         - DeletedCount: Number of snapshots removed
         - KeptCount: Number of snapshots retained
         - Errors: Array of any deletion errors
+        - ExternalCount: Number of unregistered snapshots on volume
     .EXAMPLE
-        $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 5
+        $result = Invoke-VssRetentionPolicy -Volume "D:" -KeepCount 5 -Config $config -ConfigPath $configPath
         if ($result.Success) { "Deleted $($result.Data.DeletedCount) old snapshots" }
     #>
     [CmdletBinding(SupportsShouldProcess)]
@@ -520,7 +541,13 @@ function Invoke-VssRetentionPolicy {
         [string]$Volume,
 
         [ValidateRange(0, 100)]
-        [int]$KeepCount = 3
+        [int]$KeepCount = 3,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     Write-RobocurseLog -Message "Applying VSS retention policy for $Volume (keep: $KeepCount)" -Level 'Info' -Component 'VSS'
@@ -531,16 +558,33 @@ function Invoke-VssRetentionPolicy {
         return New-OperationResult -Success $false -ErrorMessage "Failed to list snapshots: $($listResult.ErrorMessage)"
     }
 
-    $snapshots = @($listResult.Data)
+    $allSnapshots = @($listResult.Data)
+    $externalCount = 0
+
+    # Filter to only our registered snapshots (external snapshots are not counted against retention)
+    $snapshots = @()
+    foreach ($snap in $allSnapshots) {
+        if (Test-SnapshotRegistered -Config $Config -ShadowId $snap.ShadowId) {
+            $snapshots += $snap
+        }
+        else {
+            $externalCount++
+        }
+    }
+    if ($externalCount -gt 0) {
+        Write-RobocurseLog -Message "Found $externalCount external/untracked snapshot(s) on $Volume (not counting against retention)" -Level 'Info' -Component 'VSS'
+    }
+
     $currentCount = $snapshots.Count
 
     # Nothing to do if we're under the limit
     if ($currentCount -le $KeepCount) {
-        Write-RobocurseLog -Message "Retention OK: $currentCount snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
+        Write-RobocurseLog -Message "Retention OK: $currentCount registered snapshot(s) <= $KeepCount limit" -Level 'Debug' -Component 'VSS'
         return New-OperationResult -Success $true -Data @{
-            DeletedCount = 0
-            KeptCount    = $currentCount
-            Errors       = @()
+            DeletedCount  = 0
+            KeptCount     = $currentCount
+            Errors        = @()
+            ExternalCount = $externalCount
         }
     }
 
@@ -563,6 +607,8 @@ function Invoke-VssRetentionPolicy {
             if ($removeResult.Success) {
                 $deletedCount++
                 Write-RobocurseLog -Message "Deleted snapshot $shadowId (created $createdAt)" -Level 'Debug' -Component 'VSS'
+                # Unregister from snapshot registry
+                $null = Unregister-PersistentSnapshot -Config $Config -ShadowId $shadowId -ConfigPath $ConfigPath
             }
             else {
                 $errors += "Failed to delete $shadowId`: $($removeResult.ErrorMessage)"
@@ -573,9 +619,10 @@ function Invoke-VssRetentionPolicy {
 
     $success = $errors.Count -eq 0
     $resultData = @{
-        DeletedCount = $deletedCount
-        KeptCount    = $toKeep.Count
-        Errors       = $errors
+        DeletedCount  = $deletedCount
+        KeptCount     = $toKeep.Count
+        Errors        = $errors
+        ExternalCount = $externalCount
     }
 
     if ($success) {

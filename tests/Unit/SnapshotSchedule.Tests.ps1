@@ -68,10 +68,28 @@ Describe "New-SnapshotTaskCommand" {
             ServerName = $null
         }
 
-        $cmd = New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test"
+        $cmd = New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test" -ConfigPath "C:\Config\robocurse.json"
         $cmd | Should -Match "Invoke-VssRetentionPolicy"
         $cmd | Should -Match "-Volume 'D:'"
         $cmd | Should -Match "-KeepCount 5"
+        $cmd | Should -Match "Get-RobocurseConfig"
+        $cmd | Should -Match "-Config"
+        $cmd | Should -Match "-ConfigPath"
+    }
+
+    It "Registers snapshot after creation for local command" {
+        $schedule = [PSCustomObject]@{
+            Name = "TestLocal"
+            Volume = "D:"
+            KeepCount = 5
+            ServerName = $null
+        }
+
+        $cmd = New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test" -ConfigPath "C:\Config\robocurse.json"
+        $cmd | Should -Match "Register-PersistentSnapshot"
+        $cmd | Should -Match "-Volume 'D:'"
+        $cmd | Should -Match "-ShadowId"
+        $cmd | Should -Match "-ConfigPath"
     }
 
     It "Builds remote snapshot command" {
@@ -82,10 +100,26 @@ Describe "New-SnapshotTaskCommand" {
             ServerName = "Server1"
         }
 
-        $cmd = New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test"
+        $cmd = New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test" -ConfigPath "C:\Config\robocurse.json"
         $cmd | Should -Match "Invoke-RemoteVssRetentionPolicy"
         $cmd | Should -Match "-ServerName 'Server1'"
         $cmd | Should -Match "New-RemoteVssSnapshot"
+        $cmd | Should -Match "Get-RobocurseConfig"
+    }
+
+    It "Registers snapshot after creation for remote command" {
+        $schedule = [PSCustomObject]@{
+            Name = "TestRemote"
+            Volume = "E:"
+            KeepCount = 10
+            ServerName = "Server1"
+        }
+
+        $cmd = New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test" -ConfigPath "C:\Config\robocurse.json"
+        $cmd | Should -Match "Register-PersistentSnapshot"
+        $cmd | Should -Match "-Volume 'E:'"
+        $cmd | Should -Match "-ShadowId"
+        $cmd | Should -Match "-ConfigPath"
     }
 
     It "Throws on malicious ServerName" {
@@ -96,7 +130,7 @@ Describe "New-SnapshotTaskCommand" {
             ServerName = "Server'; Remove-Item C:\* -Force; '"
         }
 
-        { New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test" } | Should -Throw "*unsafe characters*"
+        { New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test" -ConfigPath "C:\Config\robocurse.json" } | Should -Throw "*unsafe characters*"
     }
 
     It "Throws on malicious ModulePath" {
@@ -107,7 +141,18 @@ Describe "New-SnapshotTaskCommand" {
             ServerName = $null
         }
 
-        { New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test'; Remove-Item" } | Should -Throw "*unsafe characters*"
+        { New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test'; Remove-Item" -ConfigPath "C:\Config\robocurse.json" } | Should -Throw "*unsafe characters*"
+    }
+
+    It "Throws on malicious ConfigPath" {
+        $schedule = [PSCustomObject]@{
+            Name = "TestLocal"
+            Volume = "D:"
+            KeepCount = 5
+            ServerName = $null
+        }
+
+        { New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test" -ConfigPath "C:\Test'; Remove-Item" } | Should -Throw "*unsafe characters*"
     }
 
     It "Accepts valid FQDN server name" {
@@ -118,7 +163,7 @@ Describe "New-SnapshotTaskCommand" {
             ServerName = "fileserver.corp.contoso.com"
         }
 
-        $cmd = New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test"
+        $cmd = New-SnapshotTaskCommand -Schedule $schedule -ModulePath "C:\Test" -ConfigPath "C:\Config\robocurse.json"
         $cmd | Should -Match "fileserver.corp.contoso.com"
     }
 }
@@ -146,7 +191,7 @@ Describe "New-SnapshotScheduledTask" {
             DaysOfWeek = @()
         }
 
-        $result = New-SnapshotScheduledTask -Schedule $schedule
+        $result = New-SnapshotScheduledTask -Schedule $schedule -ConfigPath "C:\Config\robocurse.json"
         $result.Success | Should -Be $true
 
         Should -Invoke New-ScheduledTaskTrigger -ParameterFilter { $Daily -eq $true }
@@ -173,7 +218,7 @@ Describe "New-SnapshotScheduledTask" {
             DaysOfWeek = @()
         }
 
-        New-SnapshotScheduledTask -Schedule $schedule
+        New-SnapshotScheduledTask -Schedule $schedule -ConfigPath "C:\Config\robocurse.json"
 
         Should -Invoke Unregister-ScheduledTask -Times 1
     }
@@ -256,7 +301,7 @@ Describe "Sync-SnapshotSchedules" {
             }
         }
 
-        $result = Sync-SnapshotSchedules -Config $config
+        $result = Sync-SnapshotSchedules -Config $config -ConfigPath "C:\Config\robocurse.json"
         $result.Success | Should -Be $true
         $result.Data.Created | Should -Be 1
     }
@@ -272,7 +317,7 @@ Describe "Sync-SnapshotSchedules" {
             }
         }
 
-        $result = Sync-SnapshotSchedules -Config $config
+        $result = Sync-SnapshotSchedules -Config $config -ConfigPath "C:\Config\robocurse.json"
         Should -Invoke Remove-SnapshotScheduledTask -Times 1 -ParameterFilter { $ScheduleName -eq "Orphan" }
     }
 }

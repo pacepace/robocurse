@@ -63,18 +63,23 @@ function New-SnapshotScheduledTask {
         A schedule definition object from config
     .PARAMETER RobocurseModulePath
         Path to the Robocurse module (for task script)
+    .PARAMETER ConfigPath
+        Path to the Robocurse config file (required for snapshot registry)
     .OUTPUTS
         OperationResult with Data = task name
     .EXAMPLE
         $schedule = [PSCustomObject]@{ Name = "HourlyD"; Volume = "D:"; Schedule = "Hourly"; Time = "00:00"; KeepCount = 24 }
-        New-SnapshotScheduledTask -Schedule $schedule
+        New-SnapshotScheduledTask -Schedule $schedule -ConfigPath "C:\Robocurse\config.json"
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$Schedule,
 
-        [string]$RobocurseModulePath = $PSScriptRoot
+        [string]$RobocurseModulePath = $PSScriptRoot,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     $taskName = "$script:SnapshotTaskPrefix$($Schedule.Name)"
@@ -84,7 +89,7 @@ function New-SnapshotScheduledTask {
     try {
         # Build the PowerShell command to run
         $isRemote = [bool]$Schedule.ServerName
-        $command = New-SnapshotTaskCommand -Schedule $Schedule -ModulePath $RobocurseModulePath
+        $command = New-SnapshotTaskCommand -Schedule $Schedule -ModulePath $RobocurseModulePath -ConfigPath $ConfigPath
 
         # Create action
         $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command `"$command`""
@@ -161,6 +166,8 @@ function New-SnapshotTaskCommand {
         A schedule definition object containing Volume, KeepCount, and optional ServerName
     .PARAMETER ModulePath
         Path to the Robocurse module for Import-Module in the task
+    .PARAMETER ConfigPath
+        Path to the Robocurse config file (required for snapshot registry)
     .OUTPUTS
         String containing the PowerShell command, or $null if validation fails
     #>
@@ -169,7 +176,10 @@ function New-SnapshotTaskCommand {
         [Parameter(Mandatory)]
         [PSCustomObject]$Schedule,
 
-        [string]$ModulePath
+        [string]$ModulePath,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     $volume = $Schedule.Volume
@@ -191,14 +201,20 @@ function New-SnapshotTaskCommand {
         throw $pathCheck.ErrorMessage
     }
 
+    $configPathCheck = Test-SafeScheduleParameter -Value $ConfigPath -ParameterName "ConfigPath" -Pattern $script:SafePathPattern
+    if (-not $configPathCheck.Success) {
+        throw $configPathCheck.ErrorMessage
+    }
+
     # Volume is already validated by ValidatePattern in the calling functions
 
     if ($isRemote) {
         # Remote snapshot command
         $cmd = @"
 Import-Module '$ModulePath\Robocurse.psd1' -Force;
-`$r = Invoke-RemoteVssRetentionPolicy -ServerName '$serverName' -Volume '$volume' -KeepCount $keepCount;
-if (`$r.Success) { `$s = New-RemoteVssSnapshot -UncPath '\\$serverName\$volume`$' };
+`$cfg = Get-RobocurseConfig -Path '$ConfigPath';
+`$r = Invoke-RemoteVssRetentionPolicy -ServerName '$serverName' -Volume '$volume' -KeepCount $keepCount -Config `$cfg -ConfigPath '$ConfigPath';
+if (`$r.Success) { `$s = New-RemoteVssSnapshot -UncPath '\\$serverName\$volume`$'; if (`$s.Success) { Register-PersistentSnapshot -Config `$cfg -Volume '$volume' -ShadowId `$s.Data.ShadowId -ConfigPath '$ConfigPath' } };
 exit ([int](-not `$r.Success))
 "@
     }
@@ -206,8 +222,9 @@ exit ([int](-not `$r.Success))
         # Local snapshot command
         $cmd = @"
 Import-Module '$ModulePath\Robocurse.psd1' -Force;
-`$r = Invoke-VssRetentionPolicy -Volume '$volume' -KeepCount $keepCount;
-if (`$r.Success) { `$s = New-VssSnapshot -SourcePath '$volume\' };
+`$cfg = Get-RobocurseConfig -Path '$ConfigPath';
+`$r = Invoke-VssRetentionPolicy -Volume '$volume' -KeepCount $keepCount -Config `$cfg -ConfigPath '$ConfigPath';
+if (`$r.Success) { `$s = New-VssSnapshot -SourcePath '$volume\'; if (`$s.Success) { Register-PersistentSnapshot -Config `$cfg -Volume '$volume' -ShadowId `$s.Data.ShadowId -ConfigPath '$ConfigPath' } };
 exit ([int](-not `$r.Success))
 "@
     }
@@ -299,13 +316,18 @@ function Sync-SnapshotSchedules {
         Removes tasks not in config, creates tasks that are missing, updates changed tasks.
     .PARAMETER Config
         The Robocurse configuration object
+    .PARAMETER ConfigPath
+        Path to the configuration file (required for snapshot registry in scheduled tasks)
     .OUTPUTS
         OperationResult with Data = summary of changes
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [PSCustomObject]$Config
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
     )
 
     $schedules = @($Config.GlobalSettings.SnapshotSchedules | Where-Object { $_.Enabled })
@@ -333,7 +355,7 @@ function Sync-SnapshotSchedules {
     # Create/update tasks from config
     foreach ($schedule in $schedules) {
         # Always recreate to ensure settings are current
-        $result = New-SnapshotScheduledTask -Schedule $schedule
+        $result = New-SnapshotScheduledTask -Schedule $schedule -ConfigPath $ConfigPath
         if ($result.Success) {
             if ($schedule.Name -notin $existingNames) {
                 $created++

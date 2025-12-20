@@ -310,6 +310,7 @@ function Update-ProfileSnapshotLists {
     .DESCRIPTION
         Loads existing VSS snapshots for the source and destination volumes of the
         currently selected profile and populates the respective DataGrids.
+        Adds a Status property to indicate tracked (Robocurse) vs external snapshots.
     #>
     [CmdletBinding()]
     param()
@@ -326,6 +327,26 @@ function Update-ProfileSnapshotLists {
         return
     }
 
+    # Helper function to add Status property to snapshots
+    $addStatusToSnapshots = {
+        param($snapshots)
+        $result = @()
+        foreach ($snap in $snapshots) {
+            $isTracked = if ($script:Config) {
+                Test-SnapshotRegistered -Config $script:Config -ShadowId $snap.ShadowId
+            } else { $false }
+            $snapWithStatus = [PSCustomObject]@{
+                ShadowId = $snap.ShadowId
+                SourceVolume = $snap.SourceVolume
+                CreatedAt = $snap.CreatedAt
+                DeviceObject = $snap.DeviceObject
+                Status = if ($isTracked) { "Tracked" } else { "EXTERNAL" }
+            }
+            $result += $snapWithStatus
+        }
+        return $result
+    }
+
     # Get source volume and load snapshots
     if ($script:Controls['dgSourceSnapshots'] -and $profile.Source) {
         try {
@@ -333,7 +354,8 @@ function Update-ProfileSnapshotLists {
             if ($sourceVolume) {
                 $result = Get-VssSnapshots -Volume $sourceVolume
                 if ($result.Success) {
-                    $script:Controls.dgSourceSnapshots.ItemsSource = @($result.Data)
+                    $snapsWithStatus = & $addStatusToSnapshots @($result.Data)
+                    $script:Controls.dgSourceSnapshots.ItemsSource = @($snapsWithStatus)
                 } else {
                     $script:Controls.dgSourceSnapshots.ItemsSource = @()
                 }
@@ -353,7 +375,8 @@ function Update-ProfileSnapshotLists {
             if ($destVolume) {
                 $result = Get-VssSnapshots -Volume $destVolume
                 if ($result.Success) {
-                    $script:Controls.dgDestSnapshots.ItemsSource = @($result.Data)
+                    $snapsWithStatus = & $addStatusToSnapshots @($result.Data)
+                    $script:Controls.dgDestSnapshots.ItemsSource = @($snapsWithStatus)
                 } else {
                     $script:Controls.dgDestSnapshots.ItemsSource = @()
                 }
@@ -371,6 +394,9 @@ function Invoke-DeleteProfileSnapshot {
     <#
     .SYNOPSIS
         Deletes the selected snapshot from a profile's snapshot grid
+    .DESCRIPTION
+        Deletes the snapshot and unregisters it from the config's snapshot registry
+        if Config and ConfigPath are available in script scope.
     .PARAMETER SnapshotGrid
         The DataGrid control containing the selected snapshot
     #>
@@ -395,6 +421,10 @@ function Invoke-DeleteProfileSnapshot {
         $result = Remove-VssSnapshot -ShadowId $selected.ShadowId
         if ($result.Success) {
             Write-GuiLog "Snapshot deleted: $($selected.ShadowId)"
+            # Unregister from snapshot registry if config is available
+            if ($script:Config -and $script:ConfigPath) {
+                $null = Unregister-PersistentSnapshot -Config $script:Config -ShadowId $selected.ShadowId -ConfigPath $script:ConfigPath
+            }
             Update-ProfileSnapshotLists
         } else {
             [System.Windows.MessageBox]::Show(

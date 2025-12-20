@@ -104,6 +104,11 @@ function New-DefaultConfig {
             TaskName = ""  # Custom task name; empty = auto-generate unique name
         }
         SyncProfiles = @()
+        SnapshotRegistry = [PSCustomObject]@{
+            # Tracks persistent snapshot IDs created by Robocurse per volume
+            # Format: { "D:": ["{guid1}", "{guid2}"], "E:": ["{guid3}"] }
+            # Used for accurate retention counting and to avoid touching external snapshots
+        }
     }
 
     # Ensure arrays are not null by explicitly setting them if needed
@@ -443,6 +448,14 @@ function ConvertFrom-FriendlyConfig {
 
     $config.SyncProfiles = $syncProfiles
 
+    # Load snapshot registry (tracks which snapshot IDs we created per volume)
+    if ($RawConfig.snapshotRegistry) {
+        $config.SnapshotRegistry = $RawConfig.snapshotRegistry
+    }
+    else {
+        $config.SnapshotRegistry = [PSCustomObject]@{}
+    }
+
     Write-Verbose "Converted config: $($syncProfiles.Count) profiles loaded"
     return $config
 }
@@ -557,6 +570,14 @@ function ConvertTo-FriendlyConfig {
         }
 
         $friendly.profiles[$profile.Name] = [PSCustomObject]$friendlyProfile
+    }
+
+    # Add snapshot registry (tracks which snapshot IDs we created per volume)
+    if ($Config.SnapshotRegistry) {
+        $friendly.snapshotRegistry = $Config.SnapshotRegistry
+    }
+    else {
+        $friendly.snapshotRegistry = [ordered]@{}
     }
 
     return [PSCustomObject]$friendly
