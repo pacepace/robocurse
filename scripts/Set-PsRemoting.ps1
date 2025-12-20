@@ -102,6 +102,31 @@
     Unlike SMB, disabling WinRM has minimal impact on traditional Windows
     administration tools. Most MMC snap-ins use RPC (port 135), not WinRM.
 
+    CONNECTING BY IP ADDRESS (for Robocurse remote VSS):
+    =====================================================
+    When connecting to servers by IP address (e.g., over a dedicated backup network),
+    Kerberos authentication cannot be used. You must configure TrustedHosts on the
+    CLIENT machine (where Robocurse runs) to allow NTLM authentication.
+
+    On the Robocurse machine, run:
+        Set-Item WSMan:\localhost\Client\TrustedHosts -Value "192.168.123.1" -Force
+
+    For multiple servers:
+        Set-Item WSMan:\localhost\Client\TrustedHosts -Value "192.168.123.1,192.168.123.2" -Force
+
+    To allow any IP (less secure):
+        Set-Item WSMan:\localhost\Client\TrustedHosts -Value "*" -Force
+
+    To view current setting:
+        Get-Item WSMan:\localhost\Client\TrustedHosts
+
+    The WinRM service must be running on the client machine to use PS Remoting:
+        Start-Service WinRM
+
+    Note: TrustedHosts is a CLIENT-side setting. This script configures the SERVER
+    to accept connections. TrustedHosts must be set on the machine connecting TO
+    the server, not on the server itself.
+
 .LINK
     Set-SmbFirewall.ps1
     Set-FileSharing.ps1
