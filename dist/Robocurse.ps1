@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-19 22:20:51
+    Built: 2025-12-19 23:01:54
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -19053,8 +19053,6 @@ function Initialize-RobocurseGui {
                                                      ToolTip="Number of snapshots to keep on destination volume"/>
                                             <Label Content="snapshots" Foreground="#808080" VerticalAlignment="Center" Padding="0"/>
                                         </StackPanel>
-                                        <TextBlock Text="Destination snapshots enable rollback if backup corrupts files."
-                                                   Foreground="#606060" FontSize="10" Margin="0,8,0,0" TextWrapping="Wrap"/>
                                     </StackPanel>
                                 </Border>
                             </TabItem>
