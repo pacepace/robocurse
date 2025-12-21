@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-20 22:02:16
+    Built: 2025-12-20 22:10:32
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -20199,7 +20199,7 @@ function Initialize-RobocurseGui {
         $xamlContent = Get-XamlResource -ResourceName 'MainWindow.xaml' -FallbackContent @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Robocurse - Multi-Share Replication"
+        Title="Robocurse - Replication Cursed Robo"
         Height="630" Width="900"
         MinHeight="630" MinWidth="900"
         WindowStartupLocation="CenterScreen"
