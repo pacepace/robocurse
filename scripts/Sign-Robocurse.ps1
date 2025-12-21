@@ -1,26 +1,76 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Signs the Robocurse monolith with a code signing certificate.
+    Signs a PowerShell script with a code signing certificate for trusted execution.
 
 .DESCRIPTION
-    Creates a self-signed code signing certificate (if needed), installs it
-    to the Trusted Publishers store, and signs Robocurse.ps1.
+    This script enables running PowerShell scripts under the "AllSigned" execution policy
+    by creating and managing a self-signed code signing certificate.
+
+    On first run, it:
+    1. Creates a self-signed code signing certificate (valid for 5 years)
+    2. Installs it to Trusted Root CAs (so Windows trusts it as a root)
+    3. Installs it to Trusted Publishers (so Windows trusts code it signs)
+    4. Signs the target script with a SHA256 signature and timestamp
+
+    On subsequent runs, it reuses the existing certificate unless -Force is specified.
+
+    The timestamp from DigiCert ensures signatures remain valid even after the
+    certificate expires, as long as the signature was made while the cert was valid.
 
 .PARAMETER ScriptPath
-    Path to the script to sign. Defaults to dist\Robocurse.ps1.
+    Path to the script to sign. If not specified, defaults to Robocurse.ps1 in the
+    current directory. Accepts a positional argument.
 
 .PARAMETER CertSubject
     Subject name for the certificate. Defaults to "Robocurse Signing".
+    Change this if you want separate certificates for different scripts.
 
 .PARAMETER Force
-    Create a new certificate even if one already exists.
+    Create a new certificate even if a valid one already exists.
+    Use this if the existing certificate is compromised or you want to rotate keys.
 
 .EXAMPLE
     .\Sign-Robocurse.ps1
 
+    Signs .\Robocurse.ps1 in the current directory using the default certificate.
+
 .EXAMPLE
-    .\Sign-Robocurse.ps1 -ScriptPath C:\Deploy\Robocurse.ps1
+    .\Sign-Robocurse.ps1 C:\Deploy\Robocurse.ps1
+
+    Signs a script at a specific path (positional argument).
+
+.EXAMPLE
+    .\Sign-Robocurse.ps1 -ScriptPath C:\Scripts\MyScript.ps1 -CertSubject "My Company Signing"
+
+    Signs a different script with a custom certificate name.
+
+.EXAMPLE
+    .\Sign-Robocurse.ps1 -Force
+
+    Creates a new certificate even if one already exists, then signs the script.
+
+.NOTES
+    Requires: Administrator privileges (to install certificates to LocalMachine stores)
+
+    After signing, set the execution policy to use signed scripts:
+        Set-ExecutionPolicy AllSigned -Scope LocalMachine
+
+    To verify a signature:
+        Get-AuthenticodeSignature .\Robocurse.ps1
+
+    To view installed certificates:
+        Get-ChildItem Cert:\LocalMachine\TrustedPublisher
+        Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert
+
+    Self-signed certificates are only trusted on machines where you run this script.
+    For multi-machine deployment, either:
+    - Run this script on each machine
+    - Export the cert and import it via GPO
+    - Use a certificate from your organization's CA or a commercial CA
+
+.LINK
+    https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.security/set-authenticodesignature
 #>
 [CmdletBinding()]
 param(
