@@ -216,6 +216,9 @@ function New-Chunk {
         IsFilesOnly = $IsFilesOnly
         Status = "Pending"
         RetryCount = 0  # Track retry attempts for failed chunks
+        RetryAfter = $null  # Timestamp for delayed retry (exponential backoff)
+        LastExitCode = $null  # Last robocopy exit code for this chunk
+        LastErrorMessage = $null  # Last error message for display in UI
         RobocopyArgs = @()
     }
 
