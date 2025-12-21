@@ -45,6 +45,19 @@ SNAPSHOT SCHEDULES:
     -SnapshotSchedule -Sync             Sync schedules with config file
     -SnapshotSchedule -Remove -ScheduleName DailyD    Remove a schedule
 
+PROFILE SCHEDULES:
+    -ListProfileSchedules               List all profile scheduled tasks
+    -SetProfileSchedule -ProfileName <name> -Frequency <type> [-Time HH:MM] [options]
+                                        Configure schedule for a profile
+        Frequency options: Hourly, Daily, Weekly, Monthly
+        -Time HH:MM                     Time to run (24-hour format, default: 02:00)
+        -Interval N                     Hours between runs (Hourly only)
+        -DayOfWeek <day>                Day of week (Weekly only)
+        -DayOfMonth N                   Day of month 1-28 (Monthly only)
+    -EnableProfileSchedule -ProfileName <name>    Enable a profile schedule
+    -DisableProfileSchedule -ProfileName <name>   Disable a profile schedule
+    -SyncProfileSchedules               Sync all profile schedules with config
+
 DIAGNOSTICS:
     -TestRemote -Server <name>          Test remote VSS prerequisites
                                         Checks: network, WinRM, CIM, VSS service
@@ -67,6 +80,18 @@ EXAMPLES:
 
     # Test remote VSS prerequisites before deployment
     .\Robocurse.ps1 -TestRemote -Server FileServer01
+
+    # List profile schedules
+    .\Robocurse.ps1 -ListProfileSchedules
+
+    # Set a daily profile schedule
+    .\Robocurse.ps1 -SetProfileSchedule -ProfileName "DailyBackup" -Frequency Daily -Time "03:00"
+
+    # Set an hourly schedule (every 4 hours)
+    .\Robocurse.ps1 -SetProfileSchedule -ProfileName "FrequentSync" -Frequency Hourly -Interval 4
+
+    # Set a weekly schedule
+    .\Robocurse.ps1 -SetProfileSchedule -ProfileName "WeeklyArchive" -Frequency Weekly -DayOfWeek Saturday -Time "02:00"
 
 "@
 }
@@ -308,7 +333,21 @@ function Start-RobocurseMain {
         [string]$ScheduleName,
 
         # Diagnostic parameters
-        [switch]$TestRemote
+        [switch]$TestRemote,
+
+        # Profile Schedule parameters
+        [switch]$ListProfileSchedules,
+        [switch]$SetProfileSchedule,
+        [switch]$EnableProfileSchedule,
+        [switch]$DisableProfileSchedule,
+        [switch]$SyncProfileSchedules,
+        [ValidateSet("Hourly", "Daily", "Weekly", "Monthly")]
+        [string]$Frequency = "Daily",
+        [string]$Time = "02:00",
+        [int]$Interval = 1,
+        [ValidateSet("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")]
+        [string]$DayOfWeek = "Sunday",
+        [int]$DayOfMonth = 1
     )
 
     if ($ShowHelp) {
@@ -372,6 +411,115 @@ function Start-RobocurseMain {
         }
         $result = Test-RemoteVssPrerequisites -ServerName $Server -Detailed
         return $(if ($result.Success) { 0 } else { 1 })
+    }
+
+    # Profile Schedule CLI commands
+    if ($ListProfileSchedules) {
+        $tasks = Get-AllProfileScheduledTasks
+        if ($tasks.Count -eq 0) {
+            Write-Host "No profile schedules configured."
+        } else {
+            Write-Host "Profile Scheduled Tasks:" -ForegroundColor Cyan
+            Write-Host ""
+            foreach ($task in $tasks) {
+                $status = if ($task.Enabled) { "[Enabled]" } else { "[Disabled]" }
+                $statusColor = if ($task.Enabled) { "Green" } else { "Yellow" }
+                Write-Host "  $status " -ForegroundColor $statusColor -NoNewline
+                Write-Host "$($task.ProfileName)" -ForegroundColor White
+                Write-Host "    Schedule: $($task.Frequency)" -ForegroundColor Gray
+                if ($task.NextRun) {
+                    Write-Host "    Next Run: $($task.NextRun)" -ForegroundColor Gray
+                }
+            }
+        }
+        return 0
+    }
+
+    if ($SetProfileSchedule) {
+        if (-not $ProfileName) {
+            Write-Host "Error: -ProfileName is required for -SetProfileSchedule" -ForegroundColor Red
+            return 1
+        }
+        if (-not (Test-Path $ConfigPath)) {
+            Write-Host "Error: Configuration file not found: $ConfigPath" -ForegroundColor Red
+            return 1
+        }
+        $config = Get-RobocurseConfig -Path $ConfigPath
+        $profile = $config.SyncProfiles | Where-Object { $_.Name -eq $ProfileName }
+        if (-not $profile) {
+            Write-Host "Error: Profile '$ProfileName' not found in configuration" -ForegroundColor Red
+            return 1
+        }
+
+        $scheduleParams = @{
+            ProfileName = $ProfileName
+            ConfigPath = $ConfigPath
+            Frequency = $Frequency
+            Time = $Time
+        }
+        if ($Frequency -eq "Hourly") { $scheduleParams.Interval = $Interval }
+        if ($Frequency -eq "Weekly") { $scheduleParams.DayOfWeek = $DayOfWeek }
+        if ($Frequency -eq "Monthly") { $scheduleParams.DayOfMonth = $DayOfMonth }
+
+        $result = New-ProfileScheduledTask @scheduleParams
+        if ($result.Success) {
+            Write-Host "Profile schedule created for '$ProfileName'" -ForegroundColor Green
+            Write-Host "  Frequency: $Frequency"
+            Write-Host "  Time: $Time"
+            return 0
+        } else {
+            Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+    }
+
+    if ($EnableProfileSchedule) {
+        if (-not $ProfileName) {
+            Write-Host "Error: -ProfileName is required for -EnableProfileSchedule" -ForegroundColor Red
+            return 1
+        }
+        $result = Enable-ProfileScheduledTask -ProfileName $ProfileName
+        if ($result.Success) {
+            Write-Host "Profile schedule enabled for '$ProfileName'" -ForegroundColor Green
+            return 0
+        } else {
+            Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+    }
+
+    if ($DisableProfileSchedule) {
+        if (-not $ProfileName) {
+            Write-Host "Error: -ProfileName is required for -DisableProfileSchedule" -ForegroundColor Red
+            return 1
+        }
+        $result = Disable-ProfileScheduledTask -ProfileName $ProfileName
+        if ($result.Success) {
+            Write-Host "Profile schedule disabled for '$ProfileName'" -ForegroundColor Green
+            return 0
+        } else {
+            Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+    }
+
+    if ($SyncProfileSchedules) {
+        if (-not (Test-Path $ConfigPath)) {
+            Write-Host "Error: Configuration file not found: $ConfigPath" -ForegroundColor Red
+            return 1
+        }
+        $config = Get-RobocurseConfig -Path $ConfigPath
+        $result = Sync-ProfileSchedules -Config $config -ConfigPath $ConfigPath
+        if ($result.Success) {
+            Write-Host "Profile schedules synced successfully" -ForegroundColor Green
+            if ($result.Created -gt 0) { Write-Host "  Created: $($result.Created)" }
+            if ($result.Updated -gt 0) { Write-Host "  Updated: $($result.Updated)" }
+            if ($result.Removed -gt 0) { Write-Host "  Removed: $($result.Removed)" }
+            return 0
+        } else {
+            Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
     }
 
     # Track state for cleanup

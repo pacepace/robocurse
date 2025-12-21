@@ -1,6 +1,6 @@
 ﻿{
     "WindowLeft":  278,
-    "WindowTop":  61,
+    "WindowTop":  72,
     "WindowWidth":  900,
     "WindowHeight":  630,
     "WindowState":  "Normal",
@@ -19,5 +19,5 @@
                     "ChunksTotal":  21,
                     "ChunksFailed":  0
                 },
-    "SavedAt":  "2025-12-20T17:20:47.4862316-08:00"
+    "SavedAt":  "2025-12-20T21:14:49.4562387-08:00"
 }

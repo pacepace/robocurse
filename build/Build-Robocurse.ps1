@@ -168,6 +168,9 @@ param(
     [switch]$LoadOnly
 )
 
+# Capture script path at initialization for use by functions
+$script:RobocurseScriptPath = $PSCommandPath
+
 '@)
 
 # Replace build date placeholder

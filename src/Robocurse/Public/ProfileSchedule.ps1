@@ -43,7 +43,13 @@ function New-ProfileScheduledTask {
     try {
         # Auto-detect script path if not provided
         if (-not $ScriptPath) {
-            $ScriptPath = Join-Path (Split-Path $PSScriptRoot -Parent) "Robocurse.ps1"
+            # Use script-level variable set at initialization (works for monolith)
+            if ($script:RobocurseScriptPath) {
+                $ScriptPath = $script:RobocurseScriptPath
+            } else {
+                # Fallback: look in same directory as config
+                $ScriptPath = Join-Path (Split-Path $ConfigPath -Parent) "Robocurse.ps1"
+            }
         }
 
         # Validate script exists
@@ -51,11 +57,14 @@ function New-ProfileScheduledTask {
             return New-OperationResult -Success $false -ErrorMessage "Script not found: $ScriptPath"
         }
 
-        # Build PowerShell command
-        $argument = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`" -ConfigPath `"$ConfigPath`" -ProfileName `"$($Profile.Name)`""
+        # Build PowerShell command (must include -Headless for Task Scheduler)
+        $argument = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`" -Headless -ConfigPath `"$ConfigPath`" -Profile `"$($Profile.Name)`""
 
-        # Create action
-        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument
+        # Set working directory to config file's directory (for relative paths in config)
+        $workingDir = Split-Path -Parent (Resolve-Path $ConfigPath)
+
+        # Create action with working directory
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument -WorkingDirectory $workingDir
 
         # Create trigger based on frequency
         $trigger = switch ($schedule.Frequency) {

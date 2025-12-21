@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-20 19:51:34
+    Built: 2025-12-20 21:09:59
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -71,6 +71,9 @@ param(
     # Internal: Load functions only without executing main entry point (for background runspace)
     [switch]$LoadOnly
 )
+
+# Capture script path at initialization for use by functions
+$script:RobocurseScriptPath = $PSCommandPath
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -13646,7 +13649,13 @@ function New-ProfileScheduledTask {
     try {
         # Auto-detect script path if not provided
         if (-not $ScriptPath) {
-            $ScriptPath = Join-Path (Split-Path $PSScriptRoot -Parent) "Robocurse.ps1"
+            # Use script-level variable set at initialization (works for monolith)
+            if ($script:RobocurseScriptPath) {
+                $ScriptPath = $script:RobocurseScriptPath
+            } else {
+                # Fallback: look in same directory as config
+                $ScriptPath = Join-Path (Split-Path $ConfigPath -Parent) "Robocurse.ps1"
+            }
         }
 
         # Validate script exists
@@ -13654,11 +13663,14 @@ function New-ProfileScheduledTask {
             return New-OperationResult -Success $false -ErrorMessage "Script not found: $ScriptPath"
         }
 
-        # Build PowerShell command
-        $argument = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`" -ConfigPath `"$ConfigPath`" -ProfileName `"$($Profile.Name)`""
+        # Build PowerShell command (must include -Headless for Task Scheduler)
+        $argument = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`" -Headless -ConfigPath `"$ConfigPath`" -Profile `"$($Profile.Name)`""
 
-        # Create action
-        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument
+        # Set working directory to config file's directory (for relative paths in config)
+        $workingDir = Split-Path -Parent (Resolve-Path $ConfigPath)
+
+        # Create action with working directory
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument -WorkingDirectory $workingDir
 
         # Create trigger based on frequency
         $trigger = switch ($schedule.Frequency) {
@@ -15228,13 +15240,12 @@ function Update-ProfileScheduleButtonState {
 
     $script:Controls.btnProfileSchedule.IsEnabled = $true
 
-    # Find profile and check schedule
-    $profile = $script:Config.SyncProfiles | Where-Object { $_.Name -eq $selectedProfile } | Select-Object -First 1
-    if ($profile -and $profile.Schedule -and $profile.Schedule.Enabled) {
+    # Check schedule on selected profile (SelectedItem is already the profile object)
+    if ($selectedProfile.Schedule -and $selectedProfile.Schedule.Enabled) {
         # Show schedule is active
         $script:Controls.btnProfileSchedule.Content = "Scheduled"
-        $freq = $profile.Schedule.Frequency
-        $time = $profile.Schedule.Time
+        $freq = $selectedProfile.Schedule.Frequency
+        $time = $selectedProfile.Schedule.Time
         $script:Controls.btnProfileSchedule.ToolTip = "Schedule enabled - $freq at $time"
     } else {
         $script:Controls.btnProfileSchedule.Content = "Schedule"
@@ -17171,6 +17182,49 @@ function Show-ProfileScheduleDialog {
         ResizeMode="NoResize">
 
     <Window.Resources>
+        <!-- Dark ScrollBar Thumb -->
+        <Style x:Key="DarkScrollBarThumb" TargetType="Thumb">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="IsTabStop" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Border Background="#505050" CornerRadius="4" Margin="2"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="Thumb">
+                                <Border Background="#686868" CornerRadius="4" Margin="2"/>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Dark ScrollBar -->
+        <Style TargetType="ScrollBar">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Width" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Border Background="#2D2D2D" CornerRadius="6">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource DarkScrollBarThumb}"/>
+                                </Track.Thumb>
+                            </Track>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Standard dark theme button -->
         <Style x:Key="StandardButton" TargetType="Button">
             <Setter Property="Foreground" Value="#E0E0E0"/>
@@ -17245,7 +17299,7 @@ function Show-ProfileScheduleDialog {
 
             <!-- Form Content -->
             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-                <StackPanel>
+                <StackPanel Margin="0,0,8,0">
                     <!-- Enable checkbox -->
                     <CheckBox x:Name="chkEnabled" Content="Enable scheduled runs" Foreground="#E0E0E0"
                               FontSize="13" Margin="0,0,0,16"/>
@@ -20194,6 +20248,105 @@ function Initialize-RobocurseGui {
             <Setter Property="Foreground" Value="#E0E0E0"/>
         </Style>
 
+        <!-- Dark ScrollBar Thumb -->
+        <Style x:Key="DarkScrollBarThumb" TargetType="Thumb">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="IsTabStop" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Border Background="#505050" CornerRadius="4" Margin="2"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="Thumb">
+                                <Border Background="#686868" CornerRadius="4" Margin="2"/>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Dark Vertical ScrollBar -->
+        <Style x:Key="DarkScrollBar" TargetType="ScrollBar">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Width" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Border Background="#2D2D2D" CornerRadius="6">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource DarkScrollBarThumb}"/>
+                                </Track.Thumb>
+                            </Track>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="Orientation" Value="Horizontal">
+                    <Setter Property="Width" Value="Auto"/>
+                    <Setter Property="Height" Value="12"/>
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="ScrollBar">
+                                <Border Background="#2D2D2D" CornerRadius="6">
+                                    <Track x:Name="PART_Track" IsDirectionReversed="False">
+                                        <Track.Thumb>
+                                            <Thumb Style="{StaticResource DarkScrollBarThumb}"/>
+                                        </Track.Thumb>
+                                    </Track>
+                                </Border>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Apply dark scrollbars globally -->
+        <Style TargetType="ScrollBar" BasedOn="{StaticResource DarkScrollBar}"/>
+
+        <!-- Dark ScrollViewer with proper padding -->
+        <Style x:Key="DarkScrollViewer" TargetType="ScrollViewer">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollViewer">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <ScrollContentPresenter Grid.Column="0" Grid.Row="0" Margin="0,0,4,0"/>
+                            <ScrollBar x:Name="PART_VerticalScrollBar" Grid.Column="1" Grid.Row="0"
+                                       Value="{TemplateBinding VerticalOffset}"
+                                       Maximum="{TemplateBinding ScrollableHeight}"
+                                       ViewportSize="{TemplateBinding ViewportHeight}"
+                                       Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"
+                                       Style="{StaticResource DarkScrollBar}"/>
+                            <ScrollBar x:Name="PART_HorizontalScrollBar" Grid.Column="0" Grid.Row="1"
+                                       Orientation="Horizontal"
+                                       Value="{TemplateBinding HorizontalOffset}"
+                                       Maximum="{TemplateBinding ScrollableWidth}"
+                                       ViewportSize="{TemplateBinding ViewportWidth}"
+                                       Visibility="{TemplateBinding ComputedHorizontalScrollBarVisibility}"
+                                       Style="{StaticResource DarkScrollBar}"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="DarkListBox" TargetType="ListBox">
             <Setter Property="Background" Value="#2D2D2D"/>
             <Setter Property="Foreground" Value="#E0E0E0"/>
@@ -20600,7 +20753,7 @@ function Initialize-RobocurseGui {
                                     <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
                                     <ComboBoxItem Content="Quick" Style="{StaticResource DarkComboBoxItem}"/>
                                 </ComboBox>
-                                <StackPanel Grid.Row="4" Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,8">
+                                <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,8">
                                     <Button x:Name="btnProfileSchedule" Content="Schedule" Style="{StaticResource ScheduleButton}"
                                             VerticalAlignment="Center" Margin="0,0,8,0"
                                             ToolTip="Configure scheduled runs for this profile"/>
@@ -21179,9 +21332,6 @@ function Initialize-RobocurseGui {
                     <Button x:Name="btnStop" Content="&#x23F9; Stop"
                             Style="{StaticResource StopButton}" Width="90" Margin="0,0,5,0" IsEnabled="False"
                             ToolTip="Stop replication (Escape)"/>
-                    <Button x:Name="btnSchedule" Content="&#x1F4C5; Schedule"
-                            Style="{StaticResource ScheduleButton}" Width="90"
-                            ToolTip="Configure scheduled runs"/>
                 </StackPanel>
 
                 <!-- Status text - clickable when errors exist -->
@@ -21225,7 +21375,7 @@ function Initialize-RobocurseGui {
         'tabProfileSnapshots', 'dgSourceSnapshots', 'dgDestSnapshots',
         'btnRefreshSourceSnapshots', 'btnDeleteSourceSnapshot', 'btnRefreshDestSnapshots', 'btnDeleteDestSnapshot',
         'btnProfileSchedule', 'btnValidateProfile',
-        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
+        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
         'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus',
         'pnlProfileErrors', 'pnlProfileErrorItems',
@@ -21518,25 +21668,20 @@ function Initialize-EventHandlers {
     })
 
     # Profile Schedule button
-    if ($script:Controls['btnProfileSchedule']) {
-        $script:Controls.btnProfileSchedule.Add_Click({
-            Invoke-SafeEventHandler -HandlerName "ProfileSchedule" -ScriptBlock {
-                $selectedProfile = $script:Controls.lstProfiles.SelectedItem
-                if ($selectedProfile) {
-                    # Find the profile object in config
-                    $profile = $script:Config.SyncProfiles | Where-Object { $_.Name -eq $selectedProfile } | Select-Object -First 1
-                    if ($profile) {
-                        $result = Show-ProfileScheduleDialog -Profile $profile
-                        if ($result) {
-                            Write-GuiLog "Profile schedule updated for $($profile.Name)"
-                            # Update button visual if schedule is enabled
-                            Update-ProfileScheduleButtonState
-                        }
-                    }
-                }
+    $script:Controls.btnProfileSchedule.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "ProfileSchedule" -ScriptBlock {
+            $selectedProfile = $script:Controls.lstProfiles.SelectedItem
+            if (-not $selectedProfile) {
+                Show-AlertDialog -Title "No Profile Selected" -Message "Please select a profile to configure scheduling" -Icon 'Warning'
+                return
             }
-        })
-    }
+            $result = Show-ProfileScheduleDialog -Profile $selectedProfile
+            if ($result) {
+                Write-GuiLog "Profile schedule updated for $($selectedProfile.Name)"
+                Update-ProfileScheduleButtonState
+            }
+        }
+    })
 
     # Workers slider
     $script:Controls.sldWorkers.Add_ValueChanged({
@@ -21554,11 +21699,6 @@ function Initialize-EventHandlers {
     })
     $script:Controls.btnStop.Add_Click({
         Invoke-SafeEventHandler -HandlerName "Stop" -ScriptBlock { Request-Stop }
-    })
-
-    # Schedule button
-    $script:Controls.btnSchedule.Add_Click({
-        Invoke-SafeEventHandler -HandlerName "Schedule" -ScriptBlock { Show-ScheduleDialog }
     })
 
     # Status text - click to show error popup when errors exist
@@ -22238,6 +22378,19 @@ SNAPSHOT SCHEDULES:
     -SnapshotSchedule -Sync             Sync schedules with config file
     -SnapshotSchedule -Remove -ScheduleName DailyD    Remove a schedule
 
+PROFILE SCHEDULES:
+    -ListProfileSchedules               List all profile scheduled tasks
+    -SetProfileSchedule -ProfileName <name> -Frequency <type> [-Time HH:MM] [options]
+                                        Configure schedule for a profile
+        Frequency options: Hourly, Daily, Weekly, Monthly
+        -Time HH:MM                     Time to run (24-hour format, default: 02:00)
+        -Interval N                     Hours between runs (Hourly only)
+        -DayOfWeek <day>                Day of week (Weekly only)
+        -DayOfMonth N                   Day of month 1-28 (Monthly only)
+    -EnableProfileSchedule -ProfileName <name>    Enable a profile schedule
+    -DisableProfileSchedule -ProfileName <name>   Disable a profile schedule
+    -SyncProfileSchedules               Sync all profile schedules with config
+
 DIAGNOSTICS:
     -TestRemote -Server <name>          Test remote VSS prerequisites
                                         Checks: network, WinRM, CIM, VSS service
@@ -22260,6 +22413,18 @@ EXAMPLES:
 
     # Test remote VSS prerequisites before deployment
     .\Robocurse.ps1 -TestRemote -Server FileServer01
+
+    # List profile schedules
+    .\Robocurse.ps1 -ListProfileSchedules
+
+    # Set a daily profile schedule
+    .\Robocurse.ps1 -SetProfileSchedule -ProfileName "DailyBackup" -Frequency Daily -Time "03:00"
+
+    # Set an hourly schedule (every 4 hours)
+    .\Robocurse.ps1 -SetProfileSchedule -ProfileName "FrequentSync" -Frequency Hourly -Interval 4
+
+    # Set a weekly schedule
+    .\Robocurse.ps1 -SetProfileSchedule -ProfileName "WeeklyArchive" -Frequency Weekly -DayOfWeek Saturday -Time "02:00"
 
 "@
 }
@@ -22501,7 +22666,21 @@ function Start-RobocurseMain {
         [string]$ScheduleName,
 
         # Diagnostic parameters
-        [switch]$TestRemote
+        [switch]$TestRemote,
+
+        # Profile Schedule parameters
+        [switch]$ListProfileSchedules,
+        [switch]$SetProfileSchedule,
+        [switch]$EnableProfileSchedule,
+        [switch]$DisableProfileSchedule,
+        [switch]$SyncProfileSchedules,
+        [ValidateSet("Hourly", "Daily", "Weekly", "Monthly")]
+        [string]$Frequency = "Daily",
+        [string]$Time = "02:00",
+        [int]$Interval = 1,
+        [ValidateSet("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")]
+        [string]$DayOfWeek = "Sunday",
+        [int]$DayOfMonth = 1
     )
 
     if ($ShowHelp) {
@@ -22565,6 +22744,115 @@ function Start-RobocurseMain {
         }
         $result = Test-RemoteVssPrerequisites -ServerName $Server -Detailed
         return $(if ($result.Success) { 0 } else { 1 })
+    }
+
+    # Profile Schedule CLI commands
+    if ($ListProfileSchedules) {
+        $tasks = Get-AllProfileScheduledTasks
+        if ($tasks.Count -eq 0) {
+            Write-Host "No profile schedules configured."
+        } else {
+            Write-Host "Profile Scheduled Tasks:" -ForegroundColor Cyan
+            Write-Host ""
+            foreach ($task in $tasks) {
+                $status = if ($task.Enabled) { "[Enabled]" } else { "[Disabled]" }
+                $statusColor = if ($task.Enabled) { "Green" } else { "Yellow" }
+                Write-Host "  $status " -ForegroundColor $statusColor -NoNewline
+                Write-Host "$($task.ProfileName)" -ForegroundColor White
+                Write-Host "    Schedule: $($task.Frequency)" -ForegroundColor Gray
+                if ($task.NextRun) {
+                    Write-Host "    Next Run: $($task.NextRun)" -ForegroundColor Gray
+                }
+            }
+        }
+        return 0
+    }
+
+    if ($SetProfileSchedule) {
+        if (-not $ProfileName) {
+            Write-Host "Error: -ProfileName is required for -SetProfileSchedule" -ForegroundColor Red
+            return 1
+        }
+        if (-not (Test-Path $ConfigPath)) {
+            Write-Host "Error: Configuration file not found: $ConfigPath" -ForegroundColor Red
+            return 1
+        }
+        $config = Get-RobocurseConfig -Path $ConfigPath
+        $profile = $config.SyncProfiles | Where-Object { $_.Name -eq $ProfileName }
+        if (-not $profile) {
+            Write-Host "Error: Profile '$ProfileName' not found in configuration" -ForegroundColor Red
+            return 1
+        }
+
+        $scheduleParams = @{
+            ProfileName = $ProfileName
+            ConfigPath = $ConfigPath
+            Frequency = $Frequency
+            Time = $Time
+        }
+        if ($Frequency -eq "Hourly") { $scheduleParams.Interval = $Interval }
+        if ($Frequency -eq "Weekly") { $scheduleParams.DayOfWeek = $DayOfWeek }
+        if ($Frequency -eq "Monthly") { $scheduleParams.DayOfMonth = $DayOfMonth }
+
+        $result = New-ProfileScheduledTask @scheduleParams
+        if ($result.Success) {
+            Write-Host "Profile schedule created for '$ProfileName'" -ForegroundColor Green
+            Write-Host "  Frequency: $Frequency"
+            Write-Host "  Time: $Time"
+            return 0
+        } else {
+            Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+    }
+
+    if ($EnableProfileSchedule) {
+        if (-not $ProfileName) {
+            Write-Host "Error: -ProfileName is required for -EnableProfileSchedule" -ForegroundColor Red
+            return 1
+        }
+        $result = Enable-ProfileScheduledTask -ProfileName $ProfileName
+        if ($result.Success) {
+            Write-Host "Profile schedule enabled for '$ProfileName'" -ForegroundColor Green
+            return 0
+        } else {
+            Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+    }
+
+    if ($DisableProfileSchedule) {
+        if (-not $ProfileName) {
+            Write-Host "Error: -ProfileName is required for -DisableProfileSchedule" -ForegroundColor Red
+            return 1
+        }
+        $result = Disable-ProfileScheduledTask -ProfileName $ProfileName
+        if ($result.Success) {
+            Write-Host "Profile schedule disabled for '$ProfileName'" -ForegroundColor Green
+            return 0
+        } else {
+            Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+    }
+
+    if ($SyncProfileSchedules) {
+        if (-not (Test-Path $ConfigPath)) {
+            Write-Host "Error: Configuration file not found: $ConfigPath" -ForegroundColor Red
+            return 1
+        }
+        $config = Get-RobocurseConfig -Path $ConfigPath
+        $result = Sync-ProfileSchedules -Config $config -ConfigPath $ConfigPath
+        if ($result.Success) {
+            Write-Host "Profile schedules synced successfully" -ForegroundColor Green
+            if ($result.Created -gt 0) { Write-Host "  Created: $($result.Created)" }
+            if ($result.Updated -gt 0) { Write-Host "  Updated: $($result.Updated)" }
+            if ($result.Removed -gt 0) { Write-Host "  Removed: $($result.Removed)" }
+            return 0
+        } else {
+            Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
     }
 
     # Track state for cleanup

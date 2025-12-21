@@ -127,6 +127,105 @@
             <Setter Property="Foreground" Value="#E0E0E0"/>
         </Style>
 
+        <!-- Dark ScrollBar Thumb -->
+        <Style x:Key="DarkScrollBarThumb" TargetType="Thumb">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="IsTabStop" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Border Background="#505050" CornerRadius="4" Margin="2"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="Thumb">
+                                <Border Background="#686868" CornerRadius="4" Margin="2"/>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Dark Vertical ScrollBar -->
+        <Style x:Key="DarkScrollBar" TargetType="ScrollBar">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Width" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Border Background="#2D2D2D" CornerRadius="6">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource DarkScrollBarThumb}"/>
+                                </Track.Thumb>
+                            </Track>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="Orientation" Value="Horizontal">
+                    <Setter Property="Width" Value="Auto"/>
+                    <Setter Property="Height" Value="12"/>
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="ScrollBar">
+                                <Border Background="#2D2D2D" CornerRadius="6">
+                                    <Track x:Name="PART_Track" IsDirectionReversed="False">
+                                        <Track.Thumb>
+                                            <Thumb Style="{StaticResource DarkScrollBarThumb}"/>
+                                        </Track.Thumb>
+                                    </Track>
+                                </Border>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Apply dark scrollbars globally -->
+        <Style TargetType="ScrollBar" BasedOn="{StaticResource DarkScrollBar}"/>
+
+        <!-- Dark ScrollViewer with proper padding -->
+        <Style x:Key="DarkScrollViewer" TargetType="ScrollViewer">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollViewer">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="*"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <ScrollContentPresenter Grid.Column="0" Grid.Row="0" Margin="0,0,4,0"/>
+                            <ScrollBar x:Name="PART_VerticalScrollBar" Grid.Column="1" Grid.Row="0"
+                                       Value="{TemplateBinding VerticalOffset}"
+                                       Maximum="{TemplateBinding ScrollableHeight}"
+                                       ViewportSize="{TemplateBinding ViewportHeight}"
+                                       Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"
+                                       Style="{StaticResource DarkScrollBar}"/>
+                            <ScrollBar x:Name="PART_HorizontalScrollBar" Grid.Column="0" Grid.Row="1"
+                                       Orientation="Horizontal"
+                                       Value="{TemplateBinding HorizontalOffset}"
+                                       Maximum="{TemplateBinding ScrollableWidth}"
+                                       ViewportSize="{TemplateBinding ViewportWidth}"
+                                       Visibility="{TemplateBinding ComputedHorizontalScrollBarVisibility}"
+                                       Style="{StaticResource DarkScrollBar}"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="DarkListBox" TargetType="ListBox">
             <Setter Property="Background" Value="#2D2D2D"/>
             <Setter Property="Foreground" Value="#E0E0E0"/>
@@ -533,7 +632,7 @@
                                     <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
                                     <ComboBoxItem Content="Quick" Style="{StaticResource DarkComboBoxItem}"/>
                                 </ComboBox>
-                                <StackPanel Grid.Row="4" Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,8">
+                                <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,8">
                                     <Button x:Name="btnProfileSchedule" Content="Schedule" Style="{StaticResource ScheduleButton}"
                                             VerticalAlignment="Center" Margin="0,0,8,0"
                                             ToolTip="Configure scheduled runs for this profile"/>
@@ -1112,9 +1211,6 @@
                     <Button x:Name="btnStop" Content="&#x23F9; Stop"
                             Style="{StaticResource StopButton}" Width="90" Margin="0,0,5,0" IsEnabled="False"
                             ToolTip="Stop replication (Escape)"/>
-                    <Button x:Name="btnSchedule" Content="&#x1F4C5; Schedule"
-                            Style="{StaticResource ScheduleButton}" Width="90"
-                            ToolTip="Configure scheduled runs"/>
                 </StackPanel>
 
                 <!-- Status text - clickable when errors exist -->

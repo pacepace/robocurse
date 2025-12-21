@@ -44,13 +44,12 @@ function Update-ProfileScheduleButtonState {
 
     $script:Controls.btnProfileSchedule.IsEnabled = $true
 
-    # Find profile and check schedule
-    $profile = $script:Config.SyncProfiles | Where-Object { $_.Name -eq $selectedProfile } | Select-Object -First 1
-    if ($profile -and $profile.Schedule -and $profile.Schedule.Enabled) {
+    # Check schedule on selected profile (SelectedItem is already the profile object)
+    if ($selectedProfile.Schedule -and $selectedProfile.Schedule.Enabled) {
         # Show schedule is active
         $script:Controls.btnProfileSchedule.Content = "Scheduled"
-        $freq = $profile.Schedule.Frequency
-        $time = $profile.Schedule.Time
+        $freq = $selectedProfile.Schedule.Frequency
+        $time = $selectedProfile.Schedule.Time
         $script:Controls.btnProfileSchedule.ToolTip = "Schedule enabled - $freq at $time"
     } else {
         $script:Controls.btnProfileSchedule.Content = "Schedule"

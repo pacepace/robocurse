@@ -9,6 +9,49 @@
         ResizeMode="NoResize">
 
     <Window.Resources>
+        <!-- Dark ScrollBar Thumb -->
+        <Style x:Key="DarkScrollBarThumb" TargetType="Thumb">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="IsTabStop" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Border Background="#505050" CornerRadius="4" Margin="2"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="Thumb">
+                                <Border Background="#686868" CornerRadius="4" Margin="2"/>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Dark ScrollBar -->
+        <Style TargetType="ScrollBar">
+            <Setter Property="Background" Value="#2D2D2D"/>
+            <Setter Property="Width" Value="12"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ScrollBar">
+                        <Border Background="#2D2D2D" CornerRadius="6">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource DarkScrollBarThumb}"/>
+                                </Track.Thumb>
+                            </Track>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Standard dark theme button -->
         <Style x:Key="StandardButton" TargetType="Button">
             <Setter Property="Foreground" Value="#E0E0E0"/>
@@ -83,7 +126,7 @@
 
             <!-- Form Content -->
             <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
-                <StackPanel>
+                <StackPanel Margin="0,0,8,0">
                     <!-- Enable checkbox -->
                     <CheckBox x:Name="chkEnabled" Content="Enable scheduled runs" Foreground="#E0E0E0"
                               FontSize="13" Margin="0,0,0,16"/>

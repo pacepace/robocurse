@@ -79,7 +79,7 @@ function Initialize-RobocurseGui {
         'tabProfileSnapshots', 'dgSourceSnapshots', 'dgDestSnapshots',
         'btnRefreshSourceSnapshots', 'btnDeleteSourceSnapshot', 'btnRefreshDestSnapshots', 'btnDeleteDestSnapshot',
         'btnProfileSchedule', 'btnValidateProfile',
-        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
+        'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
         'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus',
         'pnlProfileErrors', 'pnlProfileErrorItems',
@@ -372,25 +372,20 @@ function Initialize-EventHandlers {
     })
 
     # Profile Schedule button
-    if ($script:Controls['btnProfileSchedule']) {
-        $script:Controls.btnProfileSchedule.Add_Click({
-            Invoke-SafeEventHandler -HandlerName "ProfileSchedule" -ScriptBlock {
-                $selectedProfile = $script:Controls.lstProfiles.SelectedItem
-                if ($selectedProfile) {
-                    # Find the profile object in config
-                    $profile = $script:Config.SyncProfiles | Where-Object { $_.Name -eq $selectedProfile } | Select-Object -First 1
-                    if ($profile) {
-                        $result = Show-ProfileScheduleDialog -Profile $profile
-                        if ($result) {
-                            Write-GuiLog "Profile schedule updated for $($profile.Name)"
-                            # Update button visual if schedule is enabled
-                            Update-ProfileScheduleButtonState
-                        }
-                    }
-                }
+    $script:Controls.btnProfileSchedule.Add_Click({
+        Invoke-SafeEventHandler -HandlerName "ProfileSchedule" -ScriptBlock {
+            $selectedProfile = $script:Controls.lstProfiles.SelectedItem
+            if (-not $selectedProfile) {
+                Show-AlertDialog -Title "No Profile Selected" -Message "Please select a profile to configure scheduling" -Icon 'Warning'
+                return
             }
-        })
-    }
+            $result = Show-ProfileScheduleDialog -Profile $selectedProfile
+            if ($result) {
+                Write-GuiLog "Profile schedule updated for $($selectedProfile.Name)"
+                Update-ProfileScheduleButtonState
+            }
+        }
+    })
 
     # Workers slider
     $script:Controls.sldWorkers.Add_ValueChanged({
@@ -408,11 +403,6 @@ function Initialize-EventHandlers {
     })
     $script:Controls.btnStop.Add_Click({
         Invoke-SafeEventHandler -HandlerName "Stop" -ScriptBlock { Request-Stop }
-    })
-
-    # Schedule button
-    $script:Controls.btnSchedule.Add_Click({
-        Invoke-SafeEventHandler -HandlerName "Schedule" -ScriptBlock { Show-ScheduleDialog }
     })
 
     # Status text - click to show error popup when errors exist
