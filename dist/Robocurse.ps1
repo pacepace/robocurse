@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-20 21:47:10
+    Built: 2025-12-20 22:02:16
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -9222,7 +9222,48 @@ function Test-VssSupported {
             return $false
         }
 
-        # Check if CIM is available and we can access Win32_ShadowCopy class
+        $volumeLetter = $volume.TrimEnd('\')
+        $driveLetter = $volumeLetter.TrimEnd(':')
+
+        # Check Win32_LogicalDisk for basic drive type
+        $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$volumeLetter'" -ErrorAction SilentlyContinue
+        if ($disk) {
+            # DriveType: 2=Removable, 3=Fixed, 4=Network, 5=CD-ROM, 6=RAM disk
+            if ($disk.DriveType -eq 5) {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (CD-ROM/ISO drive)" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+            if ($disk.DriveType -eq 4) {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (network drive)" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+            if ($disk.DriveType -eq 6) {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (RAM disk)" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+        }
+
+        # Use Get-Volume for detailed filesystem and capability info
+        $volumeInfo = Get-Volume -DriveLetter $driveLetter -ErrorAction SilentlyContinue
+        if ($volumeInfo) {
+            # Check drive type
+            if ($volumeInfo.DriveType -eq 'CD-ROM') {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (CD-ROM drive)" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+            # VSS requires NTFS or ReFS filesystem
+            if ($volumeInfo.FileSystemType -and $volumeInfo.FileSystemType -notin @('NTFS', 'ReFS')) {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (filesystem: $($volumeInfo.FileSystemType), requires NTFS or ReFS)" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+            # Check for read-only filesystem (UDF for ISOs, CDFS for CDs)
+            if ($volumeInfo.FileSystemType -in @('UDF', 'CDFS', 'FAT', 'FAT32', 'exFAT')) {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (filesystem: $($volumeInfo.FileSystemType))" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+        }
+
+        # Final check: verify CIM VSS class is available
         $shadowClass = Get-CimClass -ClassName Win32_ShadowCopy -ErrorAction Stop
         if ($shadowClass) {
             Write-RobocurseLog -Message "VSS is supported for path: $Path" -Level 'Debug' -Component 'VSS'
@@ -9942,16 +9983,53 @@ function Test-RemoteVssSupported {
         try {
             # Check if Win32_ShadowCopy is available
             $shadowClass = Get-CimClass -CimSession $cimSession -ClassName Win32_ShadowCopy -ErrorAction Stop
+            if (-not $shadowClass) {
+                return New-OperationResult -Success $false -ErrorMessage "Win32_ShadowCopy class not available on '$serverName'. Ensure VSS service is not disabled on the remote server."
+            }
 
-            if ($shadowClass) {
-                Write-RobocurseLog -Message "Remote VSS supported on server '$serverName'" -Level 'Debug' -Component 'VSS'
+            # Get the share info to find the local path on the remote server
+            $shareName = $components.ShareName
+            $share = Get-CimInstance -CimSession $cimSession -ClassName Win32_Share -Filter "Name='$shareName'" -ErrorAction SilentlyContinue
+            if (-not $share) {
+                Write-RobocurseLog -Message "Could not query share '$shareName' on '$serverName' - assuming VSS supported" -Level 'Debug' -Component 'VSS'
                 return New-OperationResult -Success $true -Data @{
                     ServerName = $serverName
-                    ShareName  = $components.ShareName
+                    ShareName  = $shareName
+                    Warning    = "Could not verify share filesystem type"
                 }
             }
 
-            return New-OperationResult -Success $false -ErrorMessage "Win32_ShadowCopy class not available on '$serverName'. Ensure VSS service is not disabled on the remote server."
+            # Get the volume letter from the share path
+            $sharePath = $share.Path
+            if ($sharePath -match '^([A-Za-z]):') {
+                $volumeLetter = $Matches[1]
+
+                # Check the volume's filesystem and drive type
+                $volume = Get-CimInstance -CimSession $cimSession -ClassName Win32_LogicalDisk -Filter "DeviceID='${volumeLetter}:'" -ErrorAction SilentlyContinue
+                if ($volume) {
+                    # DriveType: 2=Removable, 3=Fixed, 4=Network, 5=CD-ROM, 6=RAM disk
+                    if ($volume.DriveType -eq 5) {
+                        return New-OperationResult -Success $false -ErrorMessage "VSS not supported for share '$shareName' on '$serverName' (CD-ROM/ISO drive)"
+                    }
+                    if ($volume.DriveType -eq 4) {
+                        return New-OperationResult -Success $false -ErrorMessage "VSS not supported for share '$shareName' on '$serverName' (network drive)"
+                    }
+                    if ($volume.DriveType -eq 6) {
+                        return New-OperationResult -Success $false -ErrorMessage "VSS not supported for share '$shareName' on '$serverName' (RAM disk)"
+                    }
+                    # Check filesystem - VSS requires NTFS or ReFS
+                    if ($volume.FileSystem -and $volume.FileSystem -notin @('NTFS', 'ReFS')) {
+                        return New-OperationResult -Success $false -ErrorMessage "VSS not supported for share '$shareName' on '$serverName' (filesystem: $($volume.FileSystem), requires NTFS or ReFS)"
+                    }
+                }
+            }
+
+            Write-RobocurseLog -Message "Remote VSS supported on server '$serverName' for share '$shareName'" -Level 'Debug' -Component 'VSS'
+            return New-OperationResult -Success $true -Data @{
+                ServerName = $serverName
+                ShareName  = $shareName
+                SharePath  = $sharePath
+            }
         }
         finally {
             Remove-CimSession -CimSession $cimSession -ErrorAction SilentlyContinue

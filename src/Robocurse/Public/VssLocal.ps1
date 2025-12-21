@@ -375,7 +375,48 @@ function Test-VssSupported {
             return $false
         }
 
-        # Check if CIM is available and we can access Win32_ShadowCopy class
+        $volumeLetter = $volume.TrimEnd('\')
+        $driveLetter = $volumeLetter.TrimEnd(':')
+
+        # Check Win32_LogicalDisk for basic drive type
+        $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$volumeLetter'" -ErrorAction SilentlyContinue
+        if ($disk) {
+            # DriveType: 2=Removable, 3=Fixed, 4=Network, 5=CD-ROM, 6=RAM disk
+            if ($disk.DriveType -eq 5) {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (CD-ROM/ISO drive)" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+            if ($disk.DriveType -eq 4) {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (network drive)" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+            if ($disk.DriveType -eq 6) {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (RAM disk)" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+        }
+
+        # Use Get-Volume for detailed filesystem and capability info
+        $volumeInfo = Get-Volume -DriveLetter $driveLetter -ErrorAction SilentlyContinue
+        if ($volumeInfo) {
+            # Check drive type
+            if ($volumeInfo.DriveType -eq 'CD-ROM') {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (CD-ROM drive)" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+            # VSS requires NTFS or ReFS filesystem
+            if ($volumeInfo.FileSystemType -and $volumeInfo.FileSystemType -notin @('NTFS', 'ReFS')) {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (filesystem: $($volumeInfo.FileSystemType), requires NTFS or ReFS)" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+            # Check for read-only filesystem (UDF for ISOs, CDFS for CDs)
+            if ($volumeInfo.FileSystemType -in @('UDF', 'CDFS', 'FAT', 'FAT32', 'exFAT')) {
+                Write-RobocurseLog -Message "VSS not supported for path: $Path (filesystem: $($volumeInfo.FileSystemType))" -Level 'Debug' -Component 'VSS'
+                return $false
+            }
+        }
+
+        # Final check: verify CIM VSS class is available
         $shadowClass = Get-CimClass -ClassName Win32_ShadowCopy -ErrorAction Stop
         if ($shadowClass) {
             Write-RobocurseLog -Message "VSS is supported for path: $Path" -Level 'Debug' -Component 'VSS'
