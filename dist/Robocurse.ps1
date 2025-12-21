@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-20 16:33:56
+    Built: 2025-12-20 17:19:22
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -20050,19 +20050,6 @@ function Initialize-RobocurseGui {
                                     </Grid>
                                 </Border>
 
-                                <!-- Snapshot Settings Info -->
-                                <Border BorderBrush="#3D3D3D" BorderThickness="0,1,0,0" Margin="0,15,0,0" Padding="0,15,0,0">
-                                    <StackPanel>
-                                        <Label Content="Snapshot Settings" Style="{StaticResource DarkLabel}" FontWeight="Bold" FontSize="14"/>
-                                        <TextBlock Foreground="#888888" FontSize="11" TextWrapping="Wrap" Margin="5,10,0,0">
-                                            <Run Text="Snapshot retention is now configured per-profile in the Profiles tab. Each profile can have independent source and destination snapshot settings with individual retention counts."/>
-                                        </TextBlock>
-                                        <TextBlock Foreground="#888888" FontSize="11" TextWrapping="Wrap" Margin="5,10,0,0">
-                                            <Run Text="Snapshot schedules can be configured via command line: "/>
-                                            <Run Text="Robocurse.ps1 -SnapshotSchedule" Foreground="#0078D4"/>
-                                        </TextBlock>
-                                    </StackPanel>
-                                </Border>
                             </StackPanel>
                         </ScrollViewer>
                     </DockPanel>
