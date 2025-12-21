@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-20 14:50:27
+    Built: 2025-12-20 16:33:56
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -8732,14 +8732,15 @@ function Get-SnapshotSummaryForEmail {
         Builds snapshot summary for email reports
     .DESCRIPTION
         Gets all local VSS snapshots and counts tracked vs external per volume.
+        Also includes the max retention count for each volume.
         Returns a hashtable suitable for inclusion in email Results object.
     .PARAMETER Config
         The config object (for checking snapshot registry)
     .OUTPUTS
-        Hashtable with volume as key, value = @{ Tracked = N; External = M }
+        Hashtable with volume as key, value = @{ Tracked = N; External = M; MaxRetention = R }
     .EXAMPLE
         $summary = Get-SnapshotSummaryForEmail -Config $config
-        # Returns: @{ "C:" = @{Tracked=3; External=1}; "D:" = @{Tracked=2; External=0} }
+        # Returns: @{ "C:" = @{Tracked=3; External=1; MaxRetention=5}; "D:" = @{Tracked=2; External=0; MaxRetention=3} }
     #>
     [CmdletBinding()]
     param(
@@ -8766,7 +8767,7 @@ function Get-SnapshotSummaryForEmail {
         foreach ($snap in $snapshots) {
             $vol = $snap.SourceVolume
             if (-not $summary.ContainsKey($vol)) {
-                $summary[$vol] = @{ Tracked = 0; External = 0 }
+                $summary[$vol] = @{ Tracked = 0; External = 0; MaxRetention = 0 }
             }
 
             if (Test-SnapshotRegistered -Config $Config -ShadowId $snap.ShadowId) {
@@ -8775,6 +8776,13 @@ function Get-SnapshotSummaryForEmail {
             else {
                 $summary[$vol].External++
             }
+        }
+
+        # Calculate max retention for each volume (check both source and destination sides)
+        foreach ($vol in $summary.Keys) {
+            $sourceRetention = Get-EffectiveVolumeRetention -Volume $vol -Side "Source" -Config $Config
+            $destRetention = Get-EffectiveVolumeRetention -Volume $vol -Side "Destination" -Config $Config
+            $summary[$vol].MaxRetention = [Math]::Max($sourceRetention, $destRetention)
         }
     }
     catch {
@@ -12044,7 +12052,8 @@ $(if ($Results.SnapshotSummary) {
     $hasExternal = $false
     foreach ($vol in $Results.SnapshotSummary.Keys | Sort-Object) {
         $info = $Results.SnapshotSummary[$vol]
-        $snapshotHtml += "                <div class=`"profile-item profile-success`">$vol`: $($info.Tracked) tracked, $($info.External) external</div>`n"
+        $trackedDisplay = if ($info.MaxRetention -gt 0) { "$($info.Tracked)/$($info.MaxRetention)" } else { "$($info.Tracked)" }
+        $snapshotHtml += "                <div class=`"profile-item profile-success`">$vol`: $trackedDisplay tracked, $($info.External) external</div>`n"
         if ($info.External -gt 0) { $hasExternal = $true }
     }
 @"

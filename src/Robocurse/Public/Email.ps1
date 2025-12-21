@@ -669,7 +669,8 @@ $(if ($Results.SnapshotSummary) {
     $hasExternal = $false
     foreach ($vol in $Results.SnapshotSummary.Keys | Sort-Object) {
         $info = $Results.SnapshotSummary[$vol]
-        $snapshotHtml += "                <div class=`"profile-item profile-success`">$vol`: $($info.Tracked) tracked, $($info.External) external</div>`n"
+        $trackedDisplay = if ($info.MaxRetention -gt 0) { "$($info.Tracked)/$($info.MaxRetention)" } else { "$($info.Tracked)" }
+        $snapshotHtml += "                <div class=`"profile-item profile-success`">$vol`: $trackedDisplay tracked, $($info.External) external</div>`n"
         if ($info.External -gt 0) { $hasExternal = $true }
     }
 @"
