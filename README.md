@@ -28,6 +28,7 @@ Robocurse solves these problems with a single deployable PowerShell script.
 | **GUI + Headless** | Interactive WPF interface or CLI for scheduled tasks |
 | **Email Notifications** | Completion reports with statistics |
 | **Bandwidth Throttling** | Aggregate limit across all concurrent jobs |
+| **Per-Profile Scheduling** | Independent schedules for each profile (Hourly, Daily, Weekly, Monthly) |
 
 ## Quick Start
 
@@ -472,6 +473,58 @@ Manage schedules via CLI:
 ```
 
 Schedule options: `Hourly`, `Daily`, `Weekly`, `Monthly`.
+
+---
+
+## Profile Scheduling
+
+Each sync profile can have its own independent schedule. Schedules are managed via Windows Task Scheduler.
+
+### GUI Configuration
+
+1. Select a profile from the list
+2. Click the **Schedule** button (next to Validate)
+3. Enable scheduling and configure:
+   - **Frequency**: Hourly, Daily, Weekly, or Monthly
+   - **Time**: When to run (24-hour format, e.g., 02:00)
+   - **Interval**: For Hourly - run every N hours
+   - **Day of Week**: For Weekly - which day
+   - **Day of Month**: For Monthly - which date (1-28)
+4. Click **Save** to create the scheduled task
+
+The Schedule button shows **Scheduled** when a schedule is active for the selected profile.
+
+### CLI Commands
+
+```powershell
+# List all profile schedules
+.\Robocurse.ps1 -ListProfileSchedules
+
+# Set a daily schedule
+.\Robocurse.ps1 -SetProfileSchedule -ProfileName "MyBackup" -Frequency Daily -Time "03:00"
+
+# Set an hourly schedule (every 4 hours)
+.\Robocurse.ps1 -SetProfileSchedule -ProfileName "FrequentSync" -Frequency Hourly -Interval 4
+
+# Set a weekly schedule
+.\Robocurse.ps1 -SetProfileSchedule -ProfileName "WeeklyArchive" -Frequency Weekly -DayOfWeek Saturday -Time "02:00"
+
+# Set a monthly schedule
+.\Robocurse.ps1 -SetProfileSchedule -ProfileName "MonthlyReport" -Frequency Monthly -DayOfMonth 1 -Time "01:00"
+
+# Enable/disable a schedule
+.\Robocurse.ps1 -EnableProfileSchedule -ProfileName "MyBackup"
+.\Robocurse.ps1 -DisableProfileSchedule -ProfileName "MyBackup"
+
+# Sync tasks with config (create missing, remove orphaned)
+.\Robocurse.ps1 -SyncProfileSchedules
+```
+
+### Task Naming
+
+Scheduled tasks are created with the naming convention: `Robocurse-Profile-{ProfileName}`
+
+You can view these tasks in Windows Task Scheduler under the root folder.
 
 ---
 

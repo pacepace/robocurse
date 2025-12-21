@@ -1039,4 +1039,109 @@ Describe "Configuration Management" {
             $result.SyncProfiles | Should -HaveCount 0
         }
     }
+
+    Context "Profile Schedule Schema" {
+        It "Should have default Schedule property on new profile" {
+            $rawConfig = [PSCustomObject]@{
+                version = "1.0"
+                profiles = [PSCustomObject]@{
+                    TestProfile = [PSCustomObject]@{
+                        source = "C:\Test"
+                        destination = "D:\Backup"
+                    }
+                }
+                global = [PSCustomObject]@{}
+            }
+            $config = ConvertFrom-FriendlyConfig -RawConfig $rawConfig
+            $profile = $config.SyncProfiles[0]
+
+            # Schedule should have defaults
+            $profile.Schedule | Should -Not -BeNullOrEmpty
+            $profile.Schedule.Enabled | Should -Be $false
+            $profile.Schedule.Frequency | Should -Be "Daily"
+            $profile.Schedule.Time | Should -Be "02:00"
+        }
+
+        It "Should parse schedule from JSON config" {
+            $json = @'
+{
+    "profiles": {
+        "TestProfile": {
+            "source": "C:\\Test",
+            "destination": "D:\\Backup",
+            "schedule": {
+                "enabled": true,
+                "frequency": "Weekly",
+                "time": "03:00",
+                "dayOfWeek": "Saturday"
+            }
+        }
+    }
+}
+'@
+            $tempPath = Join-Path $TestDrive "schedule-test.json"
+            $json | Set-Content $tempPath
+
+            $config = Get-RobocurseConfig -Path $tempPath
+            $profile = $config.SyncProfiles[0]
+
+            $profile.Schedule.Enabled | Should -Be $true
+            $profile.Schedule.Frequency | Should -Be "Weekly"
+            $profile.Schedule.Time | Should -Be "03:00"
+            $profile.Schedule.DayOfWeek | Should -Be "Saturday"
+        }
+
+        It "Should serialize schedule to JSON" {
+            $config = New-DefaultConfig
+            $config.SyncProfiles = @([PSCustomObject]@{
+                Name = "TestProfile"
+                Source = "C:\Test"
+                Destination = "D:\Backup"
+                Schedule = [PSCustomObject]@{
+                    Enabled = $true
+                    Frequency = "Hourly"
+                    Time = "00:00"
+                    Interval = 4
+                    DayOfWeek = "Sunday"
+                    DayOfMonth = 1
+                }
+                Enabled = $true
+                UseVss = $false
+                ScanMode = "Smart"
+                ChunkMaxSizeGB = 10
+                ChunkMaxFiles = 50000
+                ChunkMaxDepth = 5
+                RobocopyOptions = @{}
+            })
+
+            $friendly = ConvertTo-FriendlyConfig -Config $config
+
+            $friendly.profiles.TestProfile.schedule | Should -Not -BeNullOrEmpty
+            $friendly.profiles.TestProfile.schedule.enabled | Should -Be $true
+            $friendly.profiles.TestProfile.schedule.frequency | Should -Be "Hourly"
+            $friendly.profiles.TestProfile.schedule.interval | Should -Be 4
+        }
+
+        It "Should handle profiles without schedule property" {
+            $json = @'
+{
+    "profiles": {
+        "LegacyProfile": {
+            "source": "C:\\Legacy",
+            "destination": "D:\\Backup"
+        }
+    }
+}
+'@
+            $tempPath = Join-Path $TestDrive "legacy-test.json"
+            $json | Set-Content $tempPath
+
+            $config = Get-RobocurseConfig -Path $tempPath
+            $profile = $config.SyncProfiles[0]
+
+            # Should have default schedule
+            $profile.Schedule.Enabled | Should -Be $false
+            $profile.Schedule.Frequency | Should -Be "Daily"
+        }
+    }
 }

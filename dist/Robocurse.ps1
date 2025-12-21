@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-20 17:19:22
+    Built: 2025-12-20 18:38:48
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -69,7 +69,40 @@ param(
     [switch]$DryRun,
     [switch]$Help,
     # Internal: Load functions only without executing main entry point (for background runspace)
-    [switch]$LoadOnly
+    [switch]$LoadOnly,
+
+    # Snapshot parameters
+    [switch]$ListSnapshots,
+    [switch]$CreateSnapshot,
+    [switch]$DeleteSnapshot,
+    [string]$Volume,
+    [string]$ShadowId,
+    [string]$Server,
+    [int]$KeepCount = 3,
+    [switch]$SnapshotSchedule,
+    [switch]$List,
+    [switch]$Sync,
+    [switch]$Add,
+    [switch]$Remove,
+    [string]$ScheduleName,
+
+    # Diagnostic parameters
+    [switch]$TestRemote,
+
+    # Profile Schedule parameters
+    [switch]$ListProfileSchedules,
+    [switch]$SetProfileSchedule,
+    [string]$ProfileName,
+    [ValidateSet("Hourly", "Daily", "Weekly", "Monthly")]
+    [string]$Frequency = "Daily",
+    [string]$Time = "02:00",
+    [int]$Interval = 1,
+    [ValidateSet("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")]
+    [string]$DayOfWeek = "Sunday",
+    [int]$DayOfMonth = 1,
+    [switch]$EnableProfileSchedule,
+    [switch]$DisableProfileSchedule,
+    [switch]$SyncProfileSchedules
 )
 
 #region ==================== CONSTANTS ====================
@@ -1479,6 +1512,14 @@ function ConvertFrom-FriendlyConfig {
                     PersistentEnabled = $false    # Create persistent snapshot on destination before backup
                     RetentionCount = 3            # How many snapshots to keep on destination volume
                 }
+                Schedule = [PSCustomObject]@{
+                    Enabled = $false
+                    Frequency = "Daily"
+                    Time = "02:00"
+                    Interval = 1
+                    DayOfWeek = "Sunday"
+                    DayOfMonth = 1
+                }
             }
 
             # Handle source - "source" property (string or object with path/useVss)
@@ -1524,6 +1565,18 @@ function ConvertFrom-FriendlyConfig {
                     if ($RawConfig.global -and $RawConfig.global.snapshotRetention -and $RawConfig.global.snapshotRetention.defaultKeepCount) {
                         $syncProfile.SourceSnapshot.RetentionCount = [int]$RawConfig.global.snapshotRetention.defaultKeepCount
                     }
+                }
+            }
+
+            # Handle schedule settings
+            if ($rawProfile.schedule) {
+                $syncProfile.Schedule = [PSCustomObject]@{
+                    Enabled = [bool]$rawProfile.schedule.enabled
+                    Frequency = if ($rawProfile.schedule.frequency) { $rawProfile.schedule.frequency } else { "Daily" }
+                    Time = if ($rawProfile.schedule.time) { $rawProfile.schedule.time } else { "02:00" }
+                    Interval = if ($rawProfile.schedule.interval) { [int]$rawProfile.schedule.interval } else { 1 }
+                    DayOfWeek = if ($rawProfile.schedule.dayOfWeek) { $rawProfile.schedule.dayOfWeek } else { "Sunday" }
+                    DayOfMonth = if ($rawProfile.schedule.dayOfMonth) { [int]$rawProfile.schedule.dayOfMonth } else { 1 }
                 }
             }
 
@@ -1651,6 +1704,27 @@ function ConvertTo-FriendlyConfig {
             $friendlyProfile.destinationSnapshot = [ordered]@{
                 persistentEnabled = $profile.DestinationSnapshot.PersistentEnabled
                 retentionCount = if ($profile.DestinationSnapshot.RetentionCount) { $profile.DestinationSnapshot.RetentionCount } else { 3 }
+            }
+        }
+
+        # Add schedule settings if configured
+        if ($profile.Schedule -and $profile.Schedule.Enabled) {
+            $friendlyProfile.schedule = [ordered]@{
+                enabled = $profile.Schedule.Enabled
+                frequency = $profile.Schedule.Frequency
+                time = $profile.Schedule.Time
+            }
+            # Add frequency-specific fields
+            switch ($profile.Schedule.Frequency) {
+                "Hourly" {
+                    $friendlyProfile.schedule.interval = $profile.Schedule.Interval
+                }
+                "Weekly" {
+                    $friendlyProfile.schedule.dayOfWeek = $profile.Schedule.DayOfWeek
+                }
+                "Monthly" {
+                    $friendlyProfile.schedule.dayOfMonth = $profile.Schedule.DayOfMonth
+                }
             }
         }
 
@@ -13553,6 +13627,389 @@ function Sync-SnapshotSchedules {
 
 #endregion
 
+#region ==================== PROFILESCHEDULE ====================
+
+# Manages Windows Task Scheduler tasks for automated profile execution
+
+$script:ProfileTaskPrefix = "Robocurse-Profile-"
+
+function New-ProfileScheduledTask {
+    <#
+    .SYNOPSIS
+        Creates a Windows scheduled task for profile execution
+    .DESCRIPTION
+        Registers a scheduled task that runs the specified profile at the configured schedule.
+    .PARAMETER Profile
+        The profile object with Schedule property
+    .PARAMETER ConfigPath
+        Path to the Robocurse config file
+    .PARAMETER ScriptPath
+        Path to Robocurse.ps1 (optional, auto-detected)
+    .OUTPUTS
+        OperationResult with Data = task name
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath,
+
+        [string]$ScriptPath
+    )
+
+    # Platform check
+    if (-not (Test-IsWindowsPlatform)) {
+        Write-RobocurseLog -Message "Profile scheduling is only supported on Windows" -Level 'Warning' -Component 'ProfileSchedule'
+        return New-OperationResult -Success $false -ErrorMessage "Profile scheduling is only supported on Windows"
+    }
+
+    $taskName = "$script:ProfileTaskPrefix$($Profile.Name)"
+    $schedule = $Profile.Schedule
+
+    Write-RobocurseLog -Message "Creating profile schedule '$taskName' (Frequency: $($schedule.Frequency))" -Level 'Info' -Component 'ProfileSchedule'
+
+    try {
+        # Auto-detect script path if not provided
+        if (-not $ScriptPath) {
+            $ScriptPath = Join-Path (Split-Path $PSScriptRoot -Parent) "Robocurse.ps1"
+        }
+
+        # Validate script exists
+        if (-not (Test-Path $ScriptPath)) {
+            return New-OperationResult -Success $false -ErrorMessage "Script not found: $ScriptPath"
+        }
+
+        # Build PowerShell command
+        $argument = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$ScriptPath`" -ConfigPath `"$ConfigPath`" -ProfileName `"$($Profile.Name)`""
+
+        # Create action
+        $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument $argument
+
+        # Create trigger based on frequency
+        $trigger = switch ($schedule.Frequency) {
+            "Hourly" {
+                $interval = if ($schedule.Interval -and $schedule.Interval -ge 1 -and $schedule.Interval -le 24) {
+                    $schedule.Interval
+                } else { 1 }
+                New-ScheduledTaskTrigger -Once -At $schedule.Time -RepetitionInterval (New-TimeSpan -Hours $interval) -RepetitionDuration (New-TimeSpan -Days 9999)
+            }
+            "Daily" {
+                New-ScheduledTaskTrigger -Daily -At $schedule.Time
+            }
+            "Weekly" {
+                $day = if ($schedule.DayOfWeek) { $schedule.DayOfWeek } else { "Sunday" }
+                New-ScheduledTaskTrigger -Weekly -DaysOfWeek $day -At $schedule.Time
+            }
+            "Monthly" {
+                # Monthly requires special handling with CIM
+                $day = if ($schedule.DayOfMonth -and $schedule.DayOfMonth -ge 1 -and $schedule.DayOfMonth -le 28) {
+                    $schedule.DayOfMonth
+                } else { 1 }
+                # Create monthly trigger using CIM
+                $trigger = New-CimInstance -CimClass (Get-CimClass -ClassName MSFT_TaskMonthlyTrigger -Namespace Root/Microsoft/Windows/TaskScheduler) -ClientOnly
+                $trigger.DaysOfMonth = @($day)
+                $trigger.MonthsOfYear = @(1,2,3,4,5,6,7,8,9,10,11,12)  # All months
+                $trigger.StartBoundary = (Get-Date -Format "yyyy-MM-ddT$($schedule.Time):00")
+                $trigger.Enabled = $true
+                $trigger
+            }
+            default {
+                throw "Unknown frequency: $($schedule.Frequency)"
+            }
+        }
+
+        # Run as current user with highest privileges
+        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType S4U -RunLevel Highest
+
+        # Settings
+        $settings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries `
+            -StartWhenAvailable `
+            -MultipleInstances IgnoreNew
+
+        # Remove existing task if present
+        if ($PSCmdlet.ShouldProcess($taskName, "Create Scheduled Task")) {
+            $existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            if ($existing) {
+                Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+                Write-RobocurseLog -Message "Removed existing task '$taskName'" -Level 'Debug' -Component 'ProfileSchedule'
+            }
+
+            # Register the task
+            Register-ScheduledTask `
+                -TaskName $taskName `
+                -Action $action `
+                -Trigger $trigger `
+                -Principal $principal `
+                -Settings $settings `
+                -Description "Robocurse profile: $($Profile.Name)" | Out-Null
+
+            Write-RobocurseLog -Message "Created profile schedule '$taskName'" -Level 'Info' -Component 'ProfileSchedule'
+        }
+
+        return New-OperationResult -Success $true -Data $taskName
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to create profile schedule: $($_.Exception.Message)" -Level 'Error' -Component 'ProfileSchedule'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to create schedule '$taskName': $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+function Remove-ProfileScheduledTask {
+    <#
+    .SYNOPSIS
+        Removes a profile scheduled task
+    .PARAMETER ProfileName
+        The profile name (task prefix added automatically)
+    .OUTPUTS
+        OperationResult
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    $taskName = "$script:ProfileTaskPrefix$ProfileName"
+
+    try {
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+
+        if (-not $task) {
+            Write-RobocurseLog -Message "Profile schedule '$taskName' not found" -Level 'Debug' -Component 'ProfileSchedule'
+            return New-OperationResult -Success $true -Data "Task not found (already removed)"
+        }
+
+        if ($PSCmdlet.ShouldProcess($taskName, "Remove Scheduled Task")) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+            Write-RobocurseLog -Message "Removed profile schedule '$taskName'" -Level 'Info' -Component 'ProfileSchedule'
+            return New-OperationResult -Success $true -Data $taskName
+        }
+
+        return New-OperationResult -Success $true -Data "WhatIf: Would remove $taskName"
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to remove schedule '$taskName': $($_.Exception.Message)" -Level 'Error' -Component 'ProfileSchedule'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to remove schedule: $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+function Get-ProfileScheduledTask {
+    <#
+    .SYNOPSIS
+        Gets information about a profile scheduled task
+    .PARAMETER ProfileName
+        The profile name
+    .OUTPUTS
+        Task info object or $null
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    $taskName = "$script:ProfileTaskPrefix$ProfileName"
+
+    try {
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if (-not $task) {
+            return $null
+        }
+
+        $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+
+        return [PSCustomObject]@{
+            Name = $ProfileName
+            TaskName = $taskName
+            State = $task.State
+            Enabled = ($task.State -eq 'Ready')
+            NextRunTime = $taskInfo.NextRunTime
+            LastRunTime = $taskInfo.LastRunTime
+            LastResult = $taskInfo.LastTaskResult
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to get profile schedule '$taskName': $($_.Exception.Message)" -Level 'Warning' -Component 'ProfileSchedule'
+        return $null
+    }
+}
+
+function Get-AllProfileScheduledTasks {
+    <#
+    .SYNOPSIS
+        Lists all Robocurse profile scheduled tasks
+    .OUTPUTS
+        Array of task info objects
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $tasks = Get-ScheduledTask -TaskName "$script:ProfileTaskPrefix*" -ErrorAction SilentlyContinue
+
+        if (-not $tasks) {
+            return @()
+        }
+
+        return @($tasks | ForEach-Object {
+            $taskInfo = Get-ScheduledTaskInfo -TaskName $_.TaskName -ErrorAction SilentlyContinue
+            [PSCustomObject]@{
+                Name = $_.TaskName -replace "^$([regex]::Escape($script:ProfileTaskPrefix))", ""
+                TaskName = $_.TaskName
+                State = $_.State
+                Enabled = ($_.State -eq 'Ready')
+                NextRunTime = $taskInfo.NextRunTime
+                LastRunTime = $taskInfo.LastRunTime
+                LastResult = $taskInfo.LastTaskResult
+                Description = $_.Description
+            }
+        })
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to list profile schedules: $($_.Exception.Message)" -Level 'Warning' -Component 'ProfileSchedule'
+        return @()
+    }
+}
+
+function Enable-ProfileScheduledTask {
+    <#
+    .SYNOPSIS
+        Enables a profile scheduled task
+    .PARAMETER ProfileName
+        The profile name
+    .OUTPUTS
+        OperationResult
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    $taskName = "$script:ProfileTaskPrefix$ProfileName"
+
+    try {
+        if ($PSCmdlet.ShouldProcess($taskName, "Enable Scheduled Task")) {
+            Enable-ScheduledTask -TaskName $taskName | Out-Null
+            Write-RobocurseLog -Message "Enabled profile schedule '$taskName'" -Level 'Info' -Component 'ProfileSchedule'
+        }
+        return New-OperationResult -Success $true -Data $taskName
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to enable schedule '$taskName': $($_.Exception.Message)" -Level 'Error' -Component 'ProfileSchedule'
+        return New-OperationResult -Success $false -ErrorMessage $_.Exception.Message -ErrorRecord $_
+    }
+}
+
+function Disable-ProfileScheduledTask {
+    <#
+    .SYNOPSIS
+        Disables a profile scheduled task
+    .PARAMETER ProfileName
+        The profile name
+    .OUTPUTS
+        OperationResult
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    $taskName = "$script:ProfileTaskPrefix$ProfileName"
+
+    try {
+        if ($PSCmdlet.ShouldProcess($taskName, "Disable Scheduled Task")) {
+            Disable-ScheduledTask -TaskName $taskName | Out-Null
+            Write-RobocurseLog -Message "Disabled profile schedule '$taskName'" -Level 'Info' -Component 'ProfileSchedule'
+        }
+        return New-OperationResult -Success $true -Data $taskName
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to disable schedule '$taskName': $($_.Exception.Message)" -Level 'Error' -Component 'ProfileSchedule'
+        return New-OperationResult -Success $false -ErrorMessage $_.Exception.Message -ErrorRecord $_
+    }
+}
+
+function Sync-ProfileSchedules {
+    <#
+    .SYNOPSIS
+        Synchronizes scheduled tasks with profile configuration
+    .DESCRIPTION
+        Creates/updates/removes scheduled tasks to match profile schedules.
+        Removes tasks for profiles that no longer exist or have disabled schedules.
+    .PARAMETER Config
+        The Robocurse configuration object
+    .PARAMETER ConfigPath
+        Path to the configuration file
+    .OUTPUTS
+        OperationResult with Data = summary of changes
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Config,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    # Get profiles with enabled schedules
+    $scheduledProfiles = @($Config.SyncProfiles | Where-Object { $_.Schedule -and $_.Schedule.Enabled })
+    $existingTasks = Get-AllProfileScheduledTasks
+    $existingNames = @($existingTasks | ForEach-Object { $_.Name })
+    $configNames = @($scheduledProfiles | ForEach-Object { $_.Name })
+
+    $created = 0
+    $removed = 0
+    $errors = @()
+
+    # Remove tasks not in config
+    foreach ($existing in $existingTasks) {
+        if ($existing.Name -notin $configNames) {
+            $result = Remove-ProfileScheduledTask -ProfileName $existing.Name
+            if ($result.Success) {
+                $removed++
+            }
+            else {
+                $errors += $result.ErrorMessage
+            }
+        }
+    }
+
+    # Create/update tasks from config
+    foreach ($profile in $scheduledProfiles) {
+        $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $ConfigPath
+        if ($result.Success) {
+            if ($profile.Name -notin $existingNames) {
+                $created++
+            }
+        }
+        else {
+            $errors += $result.ErrorMessage
+        }
+    }
+
+    $summary = @{
+        Created = $created
+        Removed = $removed
+        Total = $scheduledProfiles.Count
+        Errors = $errors
+    }
+
+    $success = $errors.Count -eq 0
+
+    Write-RobocurseLog -Message "Profile schedules synced: $created created, $removed removed, $($scheduledProfiles.Count) total" -Level 'Info' -Component 'ProfileSchedule'
+
+    return New-OperationResult -Success $success -Data $summary -ErrorMessage $(if (-not $success) { $errors -join "; " })
+}
+
+#endregion
+
 #region ==================== GUIRESOURCES ====================
 
 # XAML resources are stored in the Resources folder for maintainability.
@@ -21362,6 +21819,21 @@ SNAPSHOT SCHEDULES:
     -SnapshotSchedule -Sync             Sync schedules with config file
     -SnapshotSchedule -Remove -ScheduleName DailyD    Remove a schedule
 
+PROFILE SCHEDULES:
+    -ListProfileSchedules               List all profile scheduled tasks
+    -SetProfileSchedule                 Configure schedule for a profile
+      -ProfileName <name>               Required: Name of the profile
+      -Frequency <type>                 Hourly, Daily, Weekly, or Monthly (default: Daily)
+      -Time <HH:MM>                     Run time in 24-hour format (default: 02:00)
+      -Interval <N>                     For Hourly: run every N hours (default: 1)
+      -DayOfWeek <day>                  For Weekly: day name (default: Sunday)
+      -DayOfMonth <N>                   For Monthly: day 1-28 (default: 1)
+    -EnableProfileSchedule              Enable schedule for a profile
+      -ProfileName <name>               Required: Name of the profile
+    -DisableProfileSchedule             Disable schedule for a profile
+      -ProfileName <name>               Required: Name of the profile
+    -SyncProfileSchedules               Sync tasks with config (create missing, remove orphaned)
+
 DIAGNOSTICS:
     -TestRemote -Server <name>          Test remote VSS prerequisites
                                         Checks: network, WinRM, CIM, VSS service
@@ -21384,6 +21856,18 @@ EXAMPLES:
 
     # Test remote VSS prerequisites before deployment
     .\Robocurse.ps1 -TestRemote -Server FileServer01
+
+    # List profile schedules
+    .\Robocurse.ps1 -ListProfileSchedules
+
+    # Set daily schedule for a profile
+    .\Robocurse.ps1 -SetProfileSchedule -ProfileName "DailyBackup" -Frequency Daily -Time "03:00"
+
+    # Set weekly schedule
+    .\Robocurse.ps1 -SetProfileSchedule -ProfileName "WeeklyArchive" -Frequency Weekly -DayOfWeek Saturday -Time "02:00"
+
+    # Sync profile schedules with config
+    .\Robocurse.ps1 -SyncProfileSchedules
 
 "@
 }
@@ -21625,7 +22109,21 @@ function Start-RobocurseMain {
         [string]$ScheduleName,
 
         # Diagnostic parameters
-        [switch]$TestRemote
+        [switch]$TestRemote,
+
+        # Profile Schedule parameters
+        [switch]$ListProfileSchedules,
+        [switch]$SetProfileSchedule,
+        [ValidateSet("Hourly", "Daily", "Weekly", "Monthly")]
+        [string]$Frequency = "Daily",
+        [string]$Time = "02:00",
+        [int]$Interval = 1,
+        [ValidateSet("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")]
+        [string]$DayOfWeek = "Sunday",
+        [int]$DayOfMonth = 1,
+        [switch]$EnableProfileSchedule,
+        [switch]$DisableProfileSchedule,
+        [switch]$SyncProfileSchedules
     )
 
     if ($ShowHelp) {
@@ -21689,6 +22187,162 @@ function Start-RobocurseMain {
         }
         $result = Test-RemoteVssPrerequisites -ServerName $Server -Detailed
         return $(if ($result.Success) { 0 } else { 1 })
+    }
+
+    # Profile Schedule CLI Commands
+    if ($ListProfileSchedules) {
+        Write-Host "`nProfile Schedules:" -ForegroundColor Cyan
+        Write-Host "==================" -ForegroundColor Cyan
+
+        $schedules = Get-AllProfileScheduledTasks
+        if ($schedules.Count -eq 0) {
+            Write-Host "No profile schedules configured." -ForegroundColor Yellow
+        } else {
+            $schedules | Format-Table -Property @(
+                @{Label="Profile"; Expression={$_.Name}},
+                @{Label="State"; Expression={$_.State}},
+                @{Label="Next Run"; Expression={if($_.NextRunTime){$_.NextRunTime.ToString("g")}else{"N/A"}}},
+                @{Label="Last Run"; Expression={if($_.LastRunTime){$_.LastRunTime.ToString("g")}else{"Never"}}},
+                @{Label="Last Result"; Expression={$_.LastResult}}
+            ) -AutoSize
+        }
+
+        # Also show profiles with schedules in config but no task
+        if (Test-Path $ConfigPath) {
+            $config = Get-RobocurseConfig -Path $ConfigPath
+            $configuredProfiles = $config.SyncProfiles | Where-Object { $_.Schedule -and $_.Schedule.Enabled }
+            $taskNames = $schedules | ForEach-Object { $_.Name }
+
+            $missingTasks = $configuredProfiles | Where-Object { $_.Name -notin $taskNames }
+            if ($missingTasks.Count -gt 0) {
+                Write-Host "`nProfiles with schedule in config but no task:" -ForegroundColor Yellow
+                $missingTasks | ForEach-Object {
+                    Write-Host "  - $($_.Name): $($_.Schedule.Frequency) at $($_.Schedule.Time)" -ForegroundColor Yellow
+                }
+                Write-Host "Run -SyncProfileSchedules to create missing tasks." -ForegroundColor Gray
+            }
+        }
+
+        return 0
+    }
+
+    if ($SetProfileSchedule) {
+        if (-not $ProfileName) {
+            Write-Host "Error: -ProfileName is required with -SetProfileSchedule" -ForegroundColor Red
+            return 1
+        }
+
+        # Load config
+        if (-not (Test-Path $ConfigPath)) {
+            Write-Host "Error: Configuration file not found: $ConfigPath" -ForegroundColor Red
+            return 1
+        }
+        $config = Get-RobocurseConfig -Path $ConfigPath
+        $profile = $config.SyncProfiles | Where-Object { $_.Name -eq $ProfileName } | Select-Object -First 1
+
+        if (-not $profile) {
+            Write-Host "Error: Profile '$ProfileName' not found" -ForegroundColor Red
+            return 1
+        }
+
+        # Validate time format
+        if ($Time -notmatch '^([01]?\d|2[0-3]):([0-5]\d)$') {
+            Write-Host "Error: Invalid time format. Use HH:MM (24-hour)" -ForegroundColor Red
+            return 1
+        }
+
+        # Build schedule object
+        $schedule = [PSCustomObject]@{
+            Enabled = $true
+            Frequency = $Frequency
+            Time = $Time
+            Interval = $Interval
+            DayOfWeek = $DayOfWeek
+            DayOfMonth = $DayOfMonth
+        }
+
+        # Update profile
+        $profile.Schedule = $schedule
+
+        # Save config
+        $saveResult = Save-RobocurseConfig -Config $config -Path $ConfigPath
+        if (-not $saveResult.Success) {
+            Write-Host "Error: Failed to save config: $($saveResult.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+
+        # Create task
+        $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $ConfigPath
+        if ($result.Success) {
+            Write-Host "Profile schedule set for '$ProfileName':" -ForegroundColor Green
+            Write-Host "  Frequency: $Frequency"
+            Write-Host "  Time: $Time"
+            switch ($Frequency) {
+                "Hourly" { Write-Host "  Interval: Every $Interval hour(s)" }
+                "Weekly" { Write-Host "  Day: $DayOfWeek" }
+                "Monthly" { Write-Host "  Day: $DayOfMonth" }
+            }
+            Write-Host "  Task: $($result.Data)"
+            return 0
+        } else {
+            Write-Host "Error: Failed to create task: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+    }
+
+    if ($EnableProfileSchedule) {
+        if (-not $ProfileName) {
+            Write-Host "Error: -ProfileName is required with -EnableProfileSchedule" -ForegroundColor Red
+            return 1
+        }
+
+        $result = Enable-ProfileScheduledTask -ProfileName $ProfileName
+        if ($result.Success) {
+            Write-Host "Profile schedule enabled for '$ProfileName'" -ForegroundColor Green
+            return 0
+        } else {
+            Write-Host "Error: Failed to enable schedule: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+    }
+
+    if ($DisableProfileSchedule) {
+        if (-not $ProfileName) {
+            Write-Host "Error: -ProfileName is required with -DisableProfileSchedule" -ForegroundColor Red
+            return 1
+        }
+
+        $result = Disable-ProfileScheduledTask -ProfileName $ProfileName
+        if ($result.Success) {
+            Write-Host "Profile schedule disabled for '$ProfileName'" -ForegroundColor Green
+            return 0
+        } else {
+            Write-Host "Error: Failed to disable schedule: $($result.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+    }
+
+    if ($SyncProfileSchedules) {
+        if (-not (Test-Path $ConfigPath)) {
+            Write-Host "Error: Configuration file not found: $ConfigPath" -ForegroundColor Red
+            return 1
+        }
+        $config = Get-RobocurseConfig -Path $ConfigPath
+        $result = Sync-ProfileSchedules -Config $config -ConfigPath $ConfigPath
+
+        if ($result.Success) {
+            Write-Host "Profile schedules synced:" -ForegroundColor Green
+            Write-Host "  Created: $($result.Data.Created)"
+            Write-Host "  Removed: $($result.Data.Removed)"
+            Write-Host "  Total active: $($result.Data.Total)"
+            return 0
+        } else {
+            Write-Host "Error syncing schedules: $($result.ErrorMessage)" -ForegroundColor Red
+            if ($result.Data -and $result.Data.Errors) {
+                $result.Data.Errors | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+            }
+            return 1
+        }
     }
 
     # Track state for cleanup
@@ -21897,7 +22551,15 @@ if ($Help) {
 # Use the Test-IsBeingDotSourced function to detect dot-sourcing
 # This avoids duplicating the call stack detection logic
 if (-not (Test-IsBeingDotSourced)) {
-    $exitCode = Start-RobocurseMain -Headless:$Headless -ConfigPath $ConfigPath -ProfileName $SyncProfile -AllProfiles:$AllProfiles -DryRun:$DryRun -ShowHelp:$Help
+    $exitCode = Start-RobocurseMain `
+        -Headless:$Headless -ConfigPath $ConfigPath -ProfileName $SyncProfile -AllProfiles:$AllProfiles -DryRun:$DryRun -ShowHelp:$Help `
+        -ListSnapshots:$ListSnapshots -CreateSnapshot:$CreateSnapshot -DeleteSnapshot:$DeleteSnapshot `
+        -Volume $Volume -ShadowId $ShadowId -Server $Server -KeepCount $KeepCount `
+        -SnapshotSchedule:$SnapshotSchedule -List:$List -Sync:$Sync -Add:$Add -Remove:$Remove -ScheduleName $ScheduleName `
+        -TestRemote:$TestRemote `
+        -ListProfileSchedules:$ListProfileSchedules -SetProfileSchedule:$SetProfileSchedule `
+        -Frequency $Frequency -Time $Time -Interval $Interval -DayOfWeek $DayOfWeek -DayOfMonth $DayOfMonth `
+        -EnableProfileSchedule:$EnableProfileSchedule -DisableProfileSchedule:$DisableProfileSchedule -SyncProfileSchedules:$SyncProfileSchedules
     exit $exitCode
 }
 

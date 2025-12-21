@@ -158,6 +158,15 @@
         'Get-SnapshotScheduledTasks'
         'Sync-SnapshotSchedules'
 
+        # Profile Scheduling
+        'New-ProfileScheduledTask'
+        'Remove-ProfileScheduledTask'
+        'Get-ProfileScheduledTask'
+        'Get-AllProfileScheduledTasks'
+        'Enable-ProfileScheduledTask'
+        'Disable-ProfileScheduledTask'
+        'Sync-ProfileSchedules'
+
         # Snapshot CLI
         'Invoke-ListSnapshotsCommand'
         'Invoke-CreateSnapshotCommand'
@@ -171,6 +180,7 @@
         'Write-GuiLog'
         'Show-ConfirmDialog'
         'Show-AlertDialog'
+        'Show-ProfileScheduleDialog'
 
         # GUI Log Window
         'Show-LogWindow'

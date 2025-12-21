@@ -768,3 +768,230 @@ function Show-CredentialInputDialog {
         return $false
     }
 }
+
+function Show-ProfileScheduleDialog {
+    <#
+    .SYNOPSIS
+        Shows profile schedule configuration dialog
+    .DESCRIPTION
+        Displays a dialog for configuring scheduled runs for a specific profile.
+        When saved, updates the profile's Schedule property and creates/removes
+        the corresponding Windows Task Scheduler task.
+    .PARAMETER Profile
+        The profile object to configure scheduling for
+    .OUTPUTS
+        $true if schedule was saved, $false if cancelled
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile
+    )
+
+    try {
+        # Load XAML
+        $xaml = Get-XamlResource -ResourceName 'ProfileScheduleDialog.xaml'
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+        $reader.Close()
+
+        # Get controls
+        $txtProfileName = $dialog.FindName("txtProfileName")
+        $chkEnabled = $dialog.FindName("chkEnabled")
+        $cmbFrequency = $dialog.FindName("cmbFrequency")
+        $txtTime = $dialog.FindName("txtTime")
+        $pnlHourlyOptions = $dialog.FindName("pnlHourlyOptions")
+        $pnlWeeklyOptions = $dialog.FindName("pnlWeeklyOptions")
+        $pnlMonthlyOptions = $dialog.FindName("pnlMonthlyOptions")
+        $cmbInterval = $dialog.FindName("cmbInterval")
+        $cmbDayOfWeek = $dialog.FindName("cmbDayOfWeek")
+        $cmbDayOfMonth = $dialog.FindName("cmbDayOfMonth")
+        $txtStatus = $dialog.FindName("txtStatus")
+        $btnSave = $dialog.FindName("btnSave")
+        $btnCancel = $dialog.FindName("btnCancel")
+
+        # Set profile name
+        $txtProfileName.Text = "Configure schedule for: $($Profile.Name)"
+
+        # Populate day of month dropdown (1-28)
+        1..28 | ForEach-Object {
+            $item = New-Object System.Windows.Controls.ComboBoxItem
+            $item.Content = $_.ToString()
+            $cmbDayOfMonth.Items.Add($item) | Out-Null
+        }
+        $cmbDayOfMonth.SelectedIndex = 0
+
+        # Load current settings
+        if ($Profile.Schedule) {
+            $chkEnabled.IsChecked = $Profile.Schedule.Enabled
+            $txtTime.Text = if ($Profile.Schedule.Time) { $Profile.Schedule.Time } else { "02:00" }
+
+            # Set frequency
+            $freqIndex = switch ($Profile.Schedule.Frequency) {
+                "Hourly" { 0 }
+                "Daily" { 1 }
+                "Weekly" { 2 }
+                "Monthly" { 3 }
+                default { 1 }
+            }
+            $cmbFrequency.SelectedIndex = $freqIndex
+
+            # Set frequency-specific values
+            if ($Profile.Schedule.Interval) {
+                $intervalIndex = @(1,2,3,4,6,8,12).IndexOf([int]$Profile.Schedule.Interval)
+                if ($intervalIndex -ge 0) { $cmbInterval.SelectedIndex = $intervalIndex }
+            }
+            if ($Profile.Schedule.DayOfWeek) {
+                $dayIndex = @("Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday").IndexOf($Profile.Schedule.DayOfWeek)
+                if ($dayIndex -ge 0) { $cmbDayOfWeek.SelectedIndex = $dayIndex }
+            }
+            if ($Profile.Schedule.DayOfMonth) {
+                $cmbDayOfMonth.SelectedIndex = [Math]::Max(0, [int]$Profile.Schedule.DayOfMonth - 1)
+            }
+        }
+
+        # Function to update visible options
+        $updateOptions = {
+            $frequency = $cmbFrequency.SelectedItem.Content
+            $pnlHourlyOptions.Visibility = if ($frequency -eq "Hourly") { 'Visible' } else { 'Collapsed' }
+            $pnlWeeklyOptions.Visibility = if ($frequency -eq "Weekly") { 'Visible' } else { 'Collapsed' }
+            $pnlMonthlyOptions.Visibility = if ($frequency -eq "Monthly") { 'Visible' } else { 'Collapsed' }
+        }
+
+        # Frequency change handler
+        $cmbFrequency.Add_SelectionChanged({
+            & $updateOptions
+        })
+
+        # Initialize visibility
+        & $updateOptions
+
+        # Time validation
+        $txtTime.Add_TextChanged({
+            param($sender, $e)
+            $isValid = $sender.Text -match '^([01]?\d|2[0-3]):([0-5]\d)$'
+            if ($isValid) {
+                $sender.BorderBrush = [System.Windows.Media.Brushes]::Gray
+                $sender.ToolTip = "Time in 24-hour format (HH:MM)"
+            } else {
+                $sender.BorderBrush = [System.Windows.Media.Brushes]::Red
+                $sender.ToolTip = "Invalid format. Use HH:MM (24-hour, e.g., 02:00, 14:30)"
+            }
+        })
+
+        # Check current task status
+        $taskInfo = Get-ProfileScheduledTask -ProfileName $Profile.Name
+        if ($taskInfo) {
+            $nextRun = if ($taskInfo.NextRunTime) { $taskInfo.NextRunTime.ToString("g") } else { "N/A" }
+            $txtStatus.Text = "Current task status: $($taskInfo.State)`nNext run: $nextRun"
+        } else {
+            $txtStatus.Text = "No scheduled task currently configured."
+        }
+
+        # Track result
+        $script:ProfileScheduleDialogResult = $false
+
+        # Save button
+        $btnSave.Add_Click({
+            # Validate time
+            if ($txtTime.Text -notmatch '^([01]?\d|2[0-3]):([0-5]\d)$') {
+                [System.Windows.MessageBox]::Show("Invalid time format. Use HH:MM (24-hour)", "Validation Error", "OK", "Warning")
+                return
+            }
+
+            try {
+                # Build schedule object
+                $frequency = $cmbFrequency.SelectedItem.Content
+                $newSchedule = [PSCustomObject]@{
+                    Enabled = $chkEnabled.IsChecked
+                    Frequency = $frequency
+                    Time = $txtTime.Text
+                    Interval = [int]$cmbInterval.SelectedItem.Content
+                    DayOfWeek = $cmbDayOfWeek.SelectedItem.Content
+                    DayOfMonth = [int]$cmbDayOfMonth.SelectedItem.Content
+                }
+
+                # Update profile
+                $Profile.Schedule = $newSchedule
+
+                # Create or remove task
+                if ($chkEnabled.IsChecked) {
+                    Write-GuiLog "Creating profile schedule for $($Profile.Name)"
+                    $result = New-ProfileScheduledTask -Profile $Profile -ConfigPath $script:ConfigPath
+                    if ($result.Success) {
+                        Write-GuiLog "Profile schedule created: $($result.Data)"
+                    } else {
+                        Write-GuiLog "Failed to create profile schedule: $($result.ErrorMessage)"
+                        [System.Windows.MessageBox]::Show(
+                            "Failed to create scheduled task:`n$($result.ErrorMessage)",
+                            "Error", "OK", "Error"
+                        )
+                        return
+                    }
+                } else {
+                    # Remove task if it exists
+                    $existingTask = Get-ProfileScheduledTask -ProfileName $Profile.Name
+                    if ($existingTask) {
+                        Write-GuiLog "Removing profile schedule for $($Profile.Name)"
+                        Remove-ProfileScheduledTask -ProfileName $Profile.Name | Out-Null
+                    }
+                }
+
+                # Save config
+                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
+                if (-not $saveResult.Success) {
+                    Write-GuiLog "Warning: Failed to save config: $($saveResult.ErrorMessage)"
+                }
+
+                $script:ProfileScheduleDialogResult = $true
+                $dialog.Close()
+            }
+            catch {
+                Write-GuiLog "Error saving profile schedule: $($_.Exception.Message)"
+                [System.Windows.MessageBox]::Show(
+                    "Error saving schedule: $($_.Exception.Message)",
+                    "Error", "OK", "Error"
+                )
+            }
+        })
+
+        # Cancel button
+        $btnCancel.Add_Click({
+            $script:ProfileScheduleDialogResult = $false
+            $dialog.Close()
+        })
+
+        # Dragging
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.ChangedButton -eq [System.Windows.Input.MouseButton]::Left) {
+                $dialog.DragMove()
+            }
+        })
+
+        # Escape to close
+        $dialog.Add_KeyDown({
+            param($sender, $e)
+            if ($e.Key -eq [System.Windows.Input.Key]::Escape) {
+                $script:ProfileScheduleDialogResult = $false
+                $dialog.Close()
+            }
+        })
+
+        # Set owner
+        if ($script:Window) {
+            $dialog.Owner = $script:Window
+        }
+        $dialog.ShowDialog() | Out-Null
+
+        return $script:ProfileScheduleDialogResult
+    }
+    catch {
+        Write-GuiLog "Error showing profile schedule dialog: $($_.Exception.Message)"
+        [System.Windows.MessageBox]::Show(
+            "Failed to show schedule dialog:`n$($_.Exception.Message)",
+            "Error", "OK", "Error"
+        )
+        return $false
+    }
+}

@@ -78,7 +78,7 @@ function Initialize-RobocurseGui {
         'chkDestPersistentSnapshot', 'txtDestRetentionCount',
         'tabProfileSnapshots', 'dgSourceSnapshots', 'dgDestSnapshots',
         'btnRefreshSourceSnapshots', 'btnDeleteSourceSnapshot', 'btnRefreshDestSnapshots', 'btnDeleteDestSnapshot',
-        'btnValidateProfile',
+        'btnProfileSchedule', 'btnValidateProfile',
         'sldWorkers', 'txtWorkerCount', 'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
         'dgChunks', 'pbProfile', 'pbOverall', 'txtProfileProgress', 'txtOverallProgress',
         'txtEta', 'txtSpeed', 'txtChunks', 'txtStatus',
@@ -370,6 +370,27 @@ function Initialize-EventHandlers {
             Show-ValidationDialog -Profile $selectedProfile
         }
     })
+
+    # Profile Schedule button
+    if ($script:Controls['btnProfileSchedule']) {
+        $script:Controls.btnProfileSchedule.Add_Click({
+            Invoke-SafeEventHandler -HandlerName "ProfileSchedule" -ScriptBlock {
+                $selectedProfile = $script:Controls.lstProfiles.SelectedItem
+                if ($selectedProfile) {
+                    # Find the profile object in config
+                    $profile = $script:Config.SyncProfiles | Where-Object { $_.Name -eq $selectedProfile } | Select-Object -First 1
+                    if ($profile) {
+                        $result = Show-ProfileScheduleDialog -Profile $profile
+                        if ($result) {
+                            Write-GuiLog "Profile schedule updated for $($profile.Name)"
+                            # Update button visual if schedule is enabled
+                            Update-ProfileScheduleButtonState
+                        }
+                    }
+                }
+            }
+        })
+    }
 
     # Workers slider
     $script:Controls.sldWorkers.Add_ValueChanged({

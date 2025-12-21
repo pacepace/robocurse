@@ -377,6 +377,14 @@ function ConvertFrom-FriendlyConfig {
                     PersistentEnabled = $false    # Create persistent snapshot on destination before backup
                     RetentionCount = 3            # How many snapshots to keep on destination volume
                 }
+                Schedule = [PSCustomObject]@{
+                    Enabled = $false
+                    Frequency = "Daily"
+                    Time = "02:00"
+                    Interval = 1
+                    DayOfWeek = "Sunday"
+                    DayOfMonth = 1
+                }
             }
 
             # Handle source - "source" property (string or object with path/useVss)
@@ -422,6 +430,18 @@ function ConvertFrom-FriendlyConfig {
                     if ($RawConfig.global -and $RawConfig.global.snapshotRetention -and $RawConfig.global.snapshotRetention.defaultKeepCount) {
                         $syncProfile.SourceSnapshot.RetentionCount = [int]$RawConfig.global.snapshotRetention.defaultKeepCount
                     }
+                }
+            }
+
+            # Handle schedule settings
+            if ($rawProfile.schedule) {
+                $syncProfile.Schedule = [PSCustomObject]@{
+                    Enabled = [bool]$rawProfile.schedule.enabled
+                    Frequency = if ($rawProfile.schedule.frequency) { $rawProfile.schedule.frequency } else { "Daily" }
+                    Time = if ($rawProfile.schedule.time) { $rawProfile.schedule.time } else { "02:00" }
+                    Interval = if ($rawProfile.schedule.interval) { [int]$rawProfile.schedule.interval } else { 1 }
+                    DayOfWeek = if ($rawProfile.schedule.dayOfWeek) { $rawProfile.schedule.dayOfWeek } else { "Sunday" }
+                    DayOfMonth = if ($rawProfile.schedule.dayOfMonth) { [int]$rawProfile.schedule.dayOfMonth } else { 1 }
                 }
             }
 
@@ -549,6 +569,27 @@ function ConvertTo-FriendlyConfig {
             $friendlyProfile.destinationSnapshot = [ordered]@{
                 persistentEnabled = $profile.DestinationSnapshot.PersistentEnabled
                 retentionCount = if ($profile.DestinationSnapshot.RetentionCount) { $profile.DestinationSnapshot.RetentionCount } else { 3 }
+            }
+        }
+
+        # Add schedule settings if configured
+        if ($profile.Schedule -and $profile.Schedule.Enabled) {
+            $friendlyProfile.schedule = [ordered]@{
+                enabled = $profile.Schedule.Enabled
+                frequency = $profile.Schedule.Frequency
+                time = $profile.Schedule.Time
+            }
+            # Add frequency-specific fields
+            switch ($profile.Schedule.Frequency) {
+                "Hourly" {
+                    $friendlyProfile.schedule.interval = $profile.Schedule.Interval
+                }
+                "Weekly" {
+                    $friendlyProfile.schedule.dayOfWeek = $profile.Schedule.DayOfWeek
+                }
+                "Monthly" {
+                    $friendlyProfile.schedule.dayOfMonth = $profile.Schedule.DayOfMonth
+                }
             }
         }
 

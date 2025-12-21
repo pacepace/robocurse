@@ -533,10 +533,14 @@
                                     <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
                                     <ComboBoxItem Content="Quick" Style="{StaticResource DarkComboBoxItem}"/>
                                 </ComboBox>
-                                <Button Grid.Row="4" Grid.Column="2" x:Name="btnValidateProfile"
-                                        Content="Validate" Style="{StaticResource ValidateButton}"
-                                        VerticalAlignment="Center" Margin="0,0,0,8"
-                                        ToolTip="Run pre-flight validation checks"/>
+                                <StackPanel Grid.Row="4" Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,8">
+                                    <Button x:Name="btnProfileSchedule" Content="Schedule" Style="{StaticResource ScheduleButton}"
+                                            VerticalAlignment="Center" Margin="0,0,8,0"
+                                            ToolTip="Configure scheduled runs for this profile"/>
+                                    <Button x:Name="btnValidateProfile" Content="Validate" Style="{StaticResource ValidateButton}"
+                                            VerticalAlignment="Center"
+                                            ToolTip="Run pre-flight validation checks"/>
+                                </StackPanel>
 
                                 <!-- Snapshot Configuration TabControl -->
                                 <TabControl Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" x:Name="tabSnapshotConfig"

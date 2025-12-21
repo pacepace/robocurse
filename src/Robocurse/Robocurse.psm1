@@ -191,6 +191,7 @@ $publicFunctionOrder = @(
     'Email.ps1'
     'Scheduling.ps1'
     'SnapshotSchedule.ps1'
+    'ProfileSchedule.ps1'
     'SnapshotCli.ps1'
     # GUI modules (split for maintainability)
     'GuiResources.ps1'

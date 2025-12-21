@@ -20,6 +20,42 @@ function Update-ProfileSettingsVisibility {
             $script:Controls.pnlNoProfileMessage.Visibility = [System.Windows.Visibility]::Visible
         }
     }
+
+    # Update schedule button state
+    Update-ProfileScheduleButtonState
+}
+
+function Update-ProfileScheduleButtonState {
+    <#
+    .SYNOPSIS
+        Updates the Schedule button appearance based on current profile's schedule status
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not $script:Controls['btnProfileSchedule']) { return }
+
+    $selectedProfile = $script:Controls.lstProfiles.SelectedItem
+    if (-not $selectedProfile) {
+        $script:Controls.btnProfileSchedule.IsEnabled = $false
+        $script:Controls.btnProfileSchedule.Content = "Schedule"
+        return
+    }
+
+    $script:Controls.btnProfileSchedule.IsEnabled = $true
+
+    # Find profile and check schedule
+    $profile = $script:Config.SyncProfiles | Where-Object { $_.Name -eq $selectedProfile } | Select-Object -First 1
+    if ($profile -and $profile.Schedule -and $profile.Schedule.Enabled) {
+        # Show schedule is active
+        $script:Controls.btnProfileSchedule.Content = "Scheduled"
+        $freq = $profile.Schedule.Frequency
+        $time = $profile.Schedule.Time
+        $script:Controls.btnProfileSchedule.ToolTip = "Schedule enabled - $freq at $time"
+    } else {
+        $script:Controls.btnProfileSchedule.Content = "Schedule"
+        $script:Controls.btnProfileSchedule.ToolTip = "Configure scheduled runs for this profile"
+    }
 }
 
 function Update-ProfileList {

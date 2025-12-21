@@ -70,6 +70,7 @@ $moduleOrder = @(
     'Public\Email.ps1'
     'Public\Scheduling.ps1'
     'Public\SnapshotSchedule.ps1'   # Scheduled snapshot operations
+    'Public\ProfileSchedule.ps1'    # Scheduled profile operations
     # GUI modules (split from GUI.ps1 for maintainability)
     'Public\GuiResources.ps1'
     'Public\GuiValidation.ps1'      # GUI validation helpers
