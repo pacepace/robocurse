@@ -450,6 +450,12 @@ function Start-RobocurseMain {
             return 1
         }
 
+        # Validate time format
+        if ($Time -notmatch '^([01]?\d|2[0-3]):([0-5]\d)$') {
+            Write-Host "Error: Invalid time format '$Time'. Use HH:MM (24-hour format, e.g., 02:00, 14:30)" -ForegroundColor Red
+            return 1
+        }
+
         # Update the profile's Schedule property
         $profile.Schedule = [PSCustomObject]@{
             Enabled = $true

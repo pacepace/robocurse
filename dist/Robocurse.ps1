@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-20 21:32:27
+    Built: 2025-12-20 21:47:10
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -22780,6 +22780,12 @@ function Start-RobocurseMain {
         $profile = $config.SyncProfiles | Where-Object { $_.Name -eq $ProfileName }
         if (-not $profile) {
             Write-Host "Error: Profile '$ProfileName' not found in configuration" -ForegroundColor Red
+            return 1
+        }
+
+        # Validate time format
+        if ($Time -notmatch '^([01]?\d|2[0-3]):([0-5]\d)$') {
+            Write-Host "Error: Invalid time format '$Time'. Use HH:MM (24-hour format, e.g., 02:00, 14:30)" -ForegroundColor Red
             return 1
         }
 
