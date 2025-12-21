@@ -8,13 +8,12 @@ Robocurse manages what robocopy alone cannot: large-scale file replication acros
 
 ## The Problem
 
-Robocopy is the backbone of Windows file replication. But at scale, it breaks down:
+Robocopy is the go-to tool for Windows file copying and migration. But at scale, it breaks down:
 
 - **Single-threaded orchestration**: One massive directory tree overwhelms a single robocopy process
 - **No parallel job management**: Running multiple robocopy instances manually is tedious and error-prone
 - **Locked file failures**: Production servers have open files that robocopy can't copy
 - **No recovery**: Crash mid-job and you're starting over
-- **DFS Replication**: If you've tried DFS-R for this, you know why you're here
 
 Robocurse solves these problems with a single deployable PowerShell script.
 
@@ -108,23 +107,34 @@ No external dependencies. No modules to install. One file.
 
 PowerShell's default execution policy blocks scripts. Choose one of these approaches:
 
-**Option A: User-level policy (recommended)**
+**Option A: Code signing (recommended for production)**
 
-Sets policy for your user account only, doesn't affect system-wide settings:
+Sign the script with a certificate so Windows trusts it. Run as Administrator:
+
+```powershell
+.\scripts\Sign-Robocurse.ps1 .\Robocurse.ps1
+Set-ExecutionPolicy AllSigned -Scope LocalMachine
+```
+
+This creates a self-signed certificate, installs it to the trusted stores, and signs the script.
+Re-run the signing script after each update to Robocurse.ps1.
+
+**Option B: RemoteSigned policy**
+
+Allows local scripts to run without signing:
 
 ```powershell
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+Unblock-File .\Robocurse.ps1
 ```
 
-**Option B: Per-session bypass**
+**Option C: Per-session bypass**
 
-Run Robocurse without changing any policies:
+Run without changing any policies (useful for scheduled tasks):
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\Robocurse.ps1
 ```
-
-For scheduled tasks, use Option B in the task action to avoid policy dependencies.
 
 ### Step 2: Deploy Files
 
