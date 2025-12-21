@@ -108,6 +108,7 @@ InModuleScope 'Robocurse' {
             It "Should have required controls defined" {
                 # Note: txtLog and svLog removed - now in separate LogWindow.xaml
                 # btnLogs replaced by navigation rail buttons (btnNavProfiles, btnNavSettings, btnNavProgress, btnNavLogs)
+                # btnSchedule replaced by btnProfileSchedule (per-profile scheduling)
                 $requiredControls = @(
                     'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
                     'txtProfileName', 'txtSource', 'txtDest',
@@ -115,7 +116,7 @@ InModuleScope 'Robocurse' {
                     'chkUseVss', 'cmbScanMode',
                     'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
                     'sldWorkers', 'txtWorkerCount',
-                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
+                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnProfileSchedule',
                     'dgChunks', 'pbProfile', 'pbOverall',
                     'txtProfileProgress', 'txtOverallProgress',
                     'txtEta', 'txtSpeed', 'txtChunks',
@@ -750,7 +751,7 @@ InModuleScope 'Robocurse' {
                     'chkUseVss', 'cmbScanMode',
                     'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
                     'sldWorkers', 'txtWorkerCount',
-                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnSchedule',
+                    'btnRunAll', 'btnRunSelected', 'btnStop', 'btnProfileSchedule',
                     'dgChunks', 'pbProfile', 'pbOverall',
                     'txtProfileProgress', 'txtOverallProgress',
                     'txtEta', 'txtSpeed', 'txtChunks',

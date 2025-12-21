@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-20 21:09:59
+    Built: 2025-12-20 21:32:27
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -4630,12 +4630,12 @@ function Get-RobocopyExitMeaning {
         $result.ShouldRetry = $result.CopyErrors  # Retry only if there were also copy errors
     }
     elseif ($result.CopyErrors) {
-        # Exit code 8: Some files couldn't be copied after robocopy's own retries (/R:n)
-        # Since robocopy already retried each file, these are likely permanent failures
-        # (permissions, file in use by system process, etc.) - don't retry the whole chunk
-        $result.Severity = "Warning"
-        $result.Message = "Some files could not be copied (see log for details)"
-        $result.ShouldRetry = $false  # Robocopy already retried per-file; chunk retry won't help
+        # Exit code 8: Some files couldn't be copied - this is an error condition
+        # Robocopy already retried per-file with /R:n so chunk-level retry may help
+        # for transient issues (file locks released, network recovered, etc.)
+        $result.Severity = "Error"
+        $result.Message = "Some files could not be copied"
+        $result.ShouldRetry = $true
     }
     elseif ($result.MismatchesFound) {
         # Configurable severity for mismatches
@@ -22758,10 +22758,9 @@ function Start-RobocurseMain {
                 $status = if ($task.Enabled) { "[Enabled]" } else { "[Disabled]" }
                 $statusColor = if ($task.Enabled) { "Green" } else { "Yellow" }
                 Write-Host "  $status " -ForegroundColor $statusColor -NoNewline
-                Write-Host "$($task.ProfileName)" -ForegroundColor White
-                Write-Host "    Schedule: $($task.Frequency)" -ForegroundColor Gray
-                if ($task.NextRun) {
-                    Write-Host "    Next Run: $($task.NextRun)" -ForegroundColor Gray
+                Write-Host "$($task.Name)" -ForegroundColor White
+                if ($task.NextRunTime) {
+                    Write-Host "    Next Run: $($task.NextRunTime)" -ForegroundColor Gray
                 }
             }
         }
@@ -22784,17 +22783,25 @@ function Start-RobocurseMain {
             return 1
         }
 
-        $scheduleParams = @{
-            ProfileName = $ProfileName
-            ConfigPath = $ConfigPath
+        # Update the profile's Schedule property
+        $profile.Schedule = [PSCustomObject]@{
+            Enabled = $true
             Frequency = $Frequency
             Time = $Time
+            Interval = $Interval
+            DayOfWeek = $DayOfWeek
+            DayOfMonth = $DayOfMonth
         }
-        if ($Frequency -eq "Hourly") { $scheduleParams.Interval = $Interval }
-        if ($Frequency -eq "Weekly") { $scheduleParams.DayOfWeek = $DayOfWeek }
-        if ($Frequency -eq "Monthly") { $scheduleParams.DayOfMonth = $DayOfMonth }
 
-        $result = New-ProfileScheduledTask @scheduleParams
+        # Save the updated config
+        $saveResult = Save-RobocurseConfig -Config $config -Path $ConfigPath
+        if (-not $saveResult.Success) {
+            Write-Host "Error: Failed to save config: $($saveResult.ErrorMessage)" -ForegroundColor Red
+            return 1
+        }
+
+        # Create the scheduled task
+        $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $ConfigPath
         if ($result.Success) {
             Write-Host "Profile schedule created for '$ProfileName'" -ForegroundColor Green
             Write-Host "  Frequency: $Frequency"
@@ -22845,9 +22852,9 @@ function Start-RobocurseMain {
         $result = Sync-ProfileSchedules -Config $config -ConfigPath $ConfigPath
         if ($result.Success) {
             Write-Host "Profile schedules synced successfully" -ForegroundColor Green
-            if ($result.Created -gt 0) { Write-Host "  Created: $($result.Created)" }
-            if ($result.Updated -gt 0) { Write-Host "  Updated: $($result.Updated)" }
-            if ($result.Removed -gt 0) { Write-Host "  Removed: $($result.Removed)" }
+            if ($result.Data.Created -gt 0) { Write-Host "  Created: $($result.Data.Created)" }
+            if ($result.Data.Removed -gt 0) { Write-Host "  Removed: $($result.Data.Removed)" }
+            Write-Host "  Total: $($result.Data.Total)"
             return 0
         } else {
             Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red

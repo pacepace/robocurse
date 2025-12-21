@@ -458,12 +458,12 @@ function Get-RobocopyExitMeaning {
         $result.ShouldRetry = $result.CopyErrors  # Retry only if there were also copy errors
     }
     elseif ($result.CopyErrors) {
-        # Exit code 8: Some files couldn't be copied after robocopy's own retries (/R:n)
-        # Since robocopy already retried each file, these are likely permanent failures
-        # (permissions, file in use by system process, etc.) - don't retry the whole chunk
-        $result.Severity = "Warning"
-        $result.Message = "Some files could not be copied (see log for details)"
-        $result.ShouldRetry = $false  # Robocopy already retried per-file; chunk retry won't help
+        # Exit code 8: Some files couldn't be copied - this is an error condition
+        # Robocopy already retried per-file with /R:n so chunk-level retry may help
+        # for transient issues (file locks released, network recovered, etc.)
+        $result.Severity = "Error"
+        $result.Message = "Some files could not be copied"
+        $result.ShouldRetry = $true
     }
     elseif ($result.MismatchesFound) {
         # Configurable severity for mismatches

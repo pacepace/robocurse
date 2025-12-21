@@ -117,17 +117,16 @@ Describe "GUI Profile Schedule" {
             }
 
             It "Should show 'Scheduled' when schedule enabled" {
-                $script:Controls.lstProfiles.SelectedItem = "ScheduledProfile"
-                $script:Config.SyncProfiles = @(
-                    [PSCustomObject]@{
-                        Name = "ScheduledProfile"
-                        Schedule = [PSCustomObject]@{
-                            Enabled = $true
-                            Frequency = "Daily"
-                            Time = "03:00"
-                        }
+                $scheduledProfile = [PSCustomObject]@{
+                    Name = "ScheduledProfile"
+                    Schedule = [PSCustomObject]@{
+                        Enabled = $true
+                        Frequency = "Daily"
+                        Time = "03:00"
                     }
-                )
+                }
+                $script:Controls.lstProfiles.SelectedItem = $scheduledProfile
+                $script:Config.SyncProfiles = @($scheduledProfile)
 
                 Update-ProfileScheduleButtonState
 
@@ -137,17 +136,16 @@ Describe "GUI Profile Schedule" {
             }
 
             It "Should show 'Schedule' when schedule disabled" {
-                $script:Controls.lstProfiles.SelectedItem = "DisabledProfile"
-                $script:Config.SyncProfiles = @(
-                    [PSCustomObject]@{
-                        Name = "DisabledProfile"
-                        Schedule = [PSCustomObject]@{
-                            Enabled = $false
-                            Frequency = "Daily"
-                            Time = "03:00"
-                        }
+                $disabledProfile = [PSCustomObject]@{
+                    Name = "DisabledProfile"
+                    Schedule = [PSCustomObject]@{
+                        Enabled = $false
+                        Frequency = "Daily"
+                        Time = "03:00"
                     }
-                )
+                }
+                $script:Controls.lstProfiles.SelectedItem = $disabledProfile
+                $script:Config.SyncProfiles = @($disabledProfile)
 
                 Update-ProfileScheduleButtonState
 
