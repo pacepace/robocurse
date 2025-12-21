@@ -168,6 +168,36 @@ To remove credentials:
 cmdkey /delete:Robocurse-SMTP
 ```
 
+### Server Setup Utilities
+
+The `scripts/` folder includes utilities for configuring servers. All require Administrator privileges.
+
+| Script | Purpose |
+|--------|---------|
+| `Sign-Robocurse.ps1` | Sign the script with a self-signed certificate for AllSigned execution policy |
+| `Set-PsRemoting.ps1` | Enable/disable PowerShell Remoting with optional IP restrictions |
+| `Set-FileSharing.ps1` | Enable/disable the LanmanServer service (SMB file sharing) |
+| `Set-SmbFirewall.ps1` | Block/allow SMB ports 139 and 445 at the firewall level |
+
+**Code signing** (for production servers):
+```powershell
+.\scripts\Sign-Robocurse.ps1 .\Robocurse.ps1
+Set-ExecutionPolicy AllSigned -Scope LocalMachine
+```
+
+**Remote VSS setup** (on file servers you're backing up):
+```powershell
+.\scripts\Set-PsRemoting.ps1 -Enable -AllowedIPs "192.168.1.100"
+```
+
+**Connecting by IP address** (on the Robocurse machine):
+```powershell
+Start-Service WinRM
+Set-Item WSMan:\localhost\Client\TrustedHosts -Value "192.168.123.1" -Force
+```
+
+Run `Get-Help .\scripts\<script>.ps1 -Full` for detailed documentation.
+
 ---
 
 ## Configuration Reference
