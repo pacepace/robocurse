@@ -1,0 +1,23 @@
+﻿{
+    "WindowLeft":  100,
+    "WindowTop":  100,
+    "WindowWidth":  650,
+    "WindowHeight":  550,
+    "WindowState":  "Normal",
+    "WorkerCount":  4,
+    "SelectedProfile":  null,
+    "ActivePanel":  "Profiles",
+    "LastRun":  {
+                    "ChunksCompleted":  145,
+                    "Timestamp":  "2025-12-22T13:05:51.4069955-08:00",
+                    "ProfilesRun":  [
+                                        "IntegrationProfile"
+                                    ],
+                    "BytesCopied":  5368709120,
+                    "Status":  "PartialFailure",
+                    "Duration":  "02:15:30",
+                    "ChunksTotal":  150,
+                    "ChunksFailed":  5
+                },
+    "SavedAt":  "2025-12-22T13:05:51.4179859-08:00"
+}

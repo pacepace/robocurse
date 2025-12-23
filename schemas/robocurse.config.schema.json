@@ -1,0 +1,372 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/pacepace/robocurse/schemas/robocurse.config.schema.json",
+  "title": "Robocurse Configuration",
+  "description": "Configuration schema for Robocurse multi-share parallel robocopy orchestrator",
+  "type": "object",
+  "required": ["version", "profiles"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference (optional)"
+    },
+    "version": {
+      "type": "string",
+      "description": "Configuration schema version",
+      "pattern": "^[0-9]+\\.[0-9]+$",
+      "examples": ["1.0"]
+    },
+    "profiles": {
+      "type": "object",
+      "description": "Named replication profiles",
+      "additionalProperties": {
+        "$ref": "#/definitions/profile"
+      },
+      "minProperties": 0
+    },
+    "global": {
+      "$ref": "#/definitions/globalSettings",
+      "description": "Global settings that apply to all profiles"
+    }
+  },
+  "definitions": {
+    "profile": {
+      "type": "object",
+      "description": "A replication profile configuration",
+      "required": ["source", "destination"],
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of this profile",
+          "maxLength": 500
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether this profile should run (default: true)",
+          "default": true
+        },
+        "source": {
+          "$ref": "#/definitions/sourceConfig"
+        },
+        "destination": {
+          "$ref": "#/definitions/destinationConfig"
+        },
+        "chunking": {
+          "$ref": "#/definitions/chunkingConfig"
+        },
+        "robocopy": {
+          "$ref": "#/definitions/robocopyConfig"
+        }
+      }
+    },
+    "sourceConfig": {
+      "type": "object",
+      "description": "Source path configuration",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Source path (local or UNC)",
+          "minLength": 1,
+          "examples": ["C:\\Data", "\\\\SERVER\\Share"]
+        },
+        "useVss": {
+          "type": "boolean",
+          "description": "Use Volume Shadow Copy for locked files",
+          "default": false
+        }
+      }
+    },
+    "destinationConfig": {
+      "type": "object",
+      "description": "Destination path configuration",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Destination path (local or UNC)",
+          "minLength": 1,
+          "examples": ["D:\\Backup", "\\\\BACKUP\\Share"]
+        }
+      }
+    },
+    "chunkingConfig": {
+      "type": "object",
+      "description": "Directory chunking settings for parallel processing",
+      "additionalProperties": false,
+      "properties": {
+        "maxChunkSizeGB": {
+          "type": "number",
+          "description": "Maximum chunk size in gigabytes",
+          "minimum": 0.1,
+          "maximum": 10000,
+          "default": 10,
+          "examples": [10, 100, 200]
+        },
+        "maxFiles": {
+          "type": "integer",
+          "description": "Maximum files per chunk before splitting",
+          "minimum": 100,
+          "maximum": 1000000,
+          "default": 50000
+        },
+        "maxDepthToScan": {
+          "type": "integer",
+          "description": "Maximum directory depth for chunking analysis",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 5
+        },
+        "strategy": {
+          "type": "string",
+          "description": "Chunking strategy",
+          "enum": ["auto", "none", "size", "count"],
+          "default": "auto"
+        }
+      }
+    },
+    "robocopyConfig": {
+      "type": "object",
+      "description": "Robocopy-specific settings",
+      "additionalProperties": false,
+      "properties": {
+        "switches": {
+          "type": "array",
+          "description": "Robocopy command-line switches",
+          "items": {
+            "type": "string",
+            "pattern": "^/[A-Za-z0-9:]+$"
+          },
+          "examples": [["/MIR", "/COPYALL", "/R:3", "/W:10", "/MT:8"]]
+        },
+        "excludeFiles": {
+          "type": "array",
+          "description": "File patterns to exclude",
+          "items": {
+            "type": "string"
+          },
+          "examples": [["*.tmp", "*.temp", "~*"]]
+        },
+        "excludeDirs": {
+          "type": "array",
+          "description": "Directory names to exclude",
+          "items": {
+            "type": "string"
+          },
+          "examples": [["System Volume Information", "$RECYCLE.BIN"]]
+        },
+        "retryPolicy": {
+          "type": "object",
+          "description": "Retry settings for failed copies",
+          "additionalProperties": false,
+          "properties": {
+            "count": {
+              "type": "integer",
+              "description": "Number of retry attempts",
+              "minimum": 0,
+              "maximum": 100,
+              "default": 3
+            },
+            "wait": {
+              "type": "integer",
+              "description": "Seconds to wait between retries",
+              "minimum": 0,
+              "maximum": 300,
+              "default": 10
+            }
+          }
+        },
+        "mismatchSeverity": {
+          "type": "string",
+          "description": "How to treat file mismatches (robocopy exit code 4)",
+          "enum": ["Warning", "Error", "Success"],
+          "default": "Warning"
+        }
+      }
+    },
+    "globalSettings": {
+      "type": "object",
+      "description": "Global settings affecting all operations",
+      "additionalProperties": false,
+      "properties": {
+        "performance": {
+          "type": "object",
+          "description": "Performance and throttling settings",
+          "additionalProperties": false,
+          "properties": {
+            "maxConcurrentJobs": {
+              "type": "integer",
+              "description": "Maximum parallel robocopy jobs",
+              "minimum": 1,
+              "maximum": 128,
+              "default": 4
+            },
+            "throttleNetworkMbps": {
+              "type": "number",
+              "description": "Aggregate bandwidth limit in Mbps (0 = unlimited)",
+              "minimum": 0,
+              "maximum": 100000,
+              "default": 0
+            }
+          }
+        },
+        "logging": {
+          "type": "object",
+          "description": "Logging configuration",
+          "additionalProperties": false,
+          "properties": {
+            "operationalLog": {
+              "type": "object",
+              "description": "Operational log settings",
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "description": "Directory for log files",
+                  "minLength": 1,
+                  "default": ".\\Logs"
+                },
+                "rotation": {
+                  "type": "object",
+                  "description": "Log rotation settings",
+                  "additionalProperties": false,
+                  "properties": {
+                    "maxAgeDays": {
+                      "type": "integer",
+                      "description": "Delete logs older than this many days",
+                      "minimum": 1,
+                      "maximum": 3650,
+                      "default": 30
+                    },
+                    "compressAfterDays": {
+                      "type": "integer",
+                      "description": "Compress logs older than this many days",
+                      "minimum": 1,
+                      "maximum": 3650,
+                      "default": 7
+                    }
+                  }
+                }
+              }
+            },
+            "verboseFileLogging": {
+              "type": "boolean",
+              "description": "Log every file copied (verbose) or just summaries",
+              "default": false
+            },
+            "redactPaths": {
+              "type": "boolean",
+              "description": "Redact file paths in logs for security/privacy",
+              "default": false
+            },
+            "redactServerNames": {
+              "type": "array",
+              "description": "Server names to specifically redact from logs",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "email": {
+          "type": "object",
+          "description": "Email notification settings",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Enable email notifications",
+              "default": false
+            },
+            "smtp": {
+              "type": "object",
+              "description": "SMTP server configuration",
+              "additionalProperties": false,
+              "properties": {
+                "server": {
+                  "type": "string",
+                  "description": "SMTP server hostname",
+                  "format": "hostname"
+                },
+                "port": {
+                  "type": "integer",
+                  "description": "SMTP port",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "default": 587
+                },
+                "useSsl": {
+                  "type": "boolean",
+                  "description": "Use TLS/SSL encryption",
+                  "default": true
+                },
+                "credentialName": {
+                  "type": "string",
+                  "description": "Windows Credential Manager target name for SMTP auth"
+                }
+              }
+            },
+            "from": {
+              "type": "string",
+              "description": "Sender email address",
+              "format": "email"
+            },
+            "to": {
+              "type": "array",
+              "description": "Recipient email addresses",
+              "items": {
+                "type": "string",
+                "format": "email"
+              },
+              "minItems": 1
+            }
+          },
+          "if": {
+            "properties": {
+              "enabled": { "const": true }
+            }
+          },
+          "then": {
+            "required": ["smtp", "from", "to"]
+          }
+        },
+        "schedule": {
+          "type": "object",
+          "description": "Windows Task Scheduler settings",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Enable scheduled execution",
+              "default": false
+            },
+            "time": {
+              "type": "string",
+              "description": "Time to run (24-hour format HH:MM)",
+              "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+              "default": "02:00"
+            },
+            "days": {
+              "type": "array",
+              "description": "Days to run",
+              "items": {
+                "type": "string",
+                "enum": ["Daily", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+              },
+              "minItems": 1,
+              "default": ["Daily"]
+            },
+            "taskName": {
+              "type": "string",
+              "description": "Custom scheduled task name (empty = auto-generate)"
+            }
+          }
+        }
+      }
+    }
+  }
+}

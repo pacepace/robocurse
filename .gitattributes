@@ -1,0 +1,15 @@
+# Force consistent line endings
+* text=auto
+
+# PowerShell scripts - use CRLF on Windows
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+
+# Config/data files
+*.json text eol=lf
+*.xml text eol=lf
+*.xaml text eol=lf
+
+# Markdown
+*.md text eol=lf

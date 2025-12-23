@@ -1,0 +1,26 @@
+﻿{
+    "WindowLeft":  267,
+    "WindowTop":  71,
+    "WindowWidth":  900,
+    "WindowHeight":  630,
+    "WindowState":  "Normal",
+    "WorkerCount":  4,
+    "SelectedProfile":  "Test",
+    "ActivePanel":  "Progress",
+    "LastRun":  {
+                    "BytesCopied":  5262835484,
+                    "ChunksCompleted":  21,
+                    "ChunksWarning":  0,
+                    "FilesFailed":  0,
+                    "Status":  "Success",
+                    "FilesCopied":  0,
+                    "Timestamp":  "2025-12-21T21:02:49.5724471-08:00",
+                    "ChunksFailed":  0,
+                    "ProfilesRun":  [
+                                        "Test"
+                                    ],
+                    "ChunksTotal":  21,
+                    "Duration":  "00:00:03"
+                },
+    "SavedAt":  "2025-12-21T21:02:54.6572072-08:00"
+}

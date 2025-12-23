@@ -1,0 +1,938 @@
+﻿# Robocurse Logging Functions
+# Script-scoped variables for current session state
+$script:CurrentSessionId = $null
+# Note: LogMutexTimeoutMs and MinLogLevel are defined in Robocurse.psm1 CONSTANTS region
+
+# Path redaction settings - can be set via Enable-PathRedaction
+$script:PathRedactionEnabled = $false
+$script:PathRedactionPatterns = @()  # Array of regex patterns to redact
+
+# Log level priority mapping for filtering
+$script:LogLevelPriority = @{
+    'Debug'   = 0
+    'Info'    = 1
+    'Warning' = 2
+    'Error'   = 3
+}
+
+function Test-ShouldLog {
+    <#
+    .SYNOPSIS
+        Determines if a message should be logged based on minimum log level
+    .PARAMETER Level
+        The log level of the message (Debug, Info, Warning, Error)
+    .OUTPUTS
+        Boolean indicating if the message should be logged
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Debug', 'Info', 'Warning', 'Error')]
+        [string]$Level
+    )
+
+    # Get minimum level from module constant (defaults to Debug if not set)
+    $minLevel = if ($script:MinLogLevel) { $script:MinLogLevel } else { 'Debug' }
+
+    # Get priorities (default to 0 for unknown levels)
+    $messagePriority = $script:LogLevelPriority[$Level]
+    $minPriority = $script:LogLevelPriority[$minLevel]
+
+    if ($null -eq $messagePriority) { $messagePriority = 0 }
+    if ($null -eq $minPriority) { $minPriority = 0 }
+
+    return $messagePriority -ge $minPriority
+}
+
+function Set-RobocurseLogLevel {
+    <#
+    .SYNOPSIS
+        Sets the minimum log level for filtering
+    .DESCRIPTION
+        Sets the minimum log level. Messages below this level will not be written to logs.
+        This is useful for reducing log verbosity in production environments.
+    .PARAMETER Level
+        Minimum log level: Debug, Info, Warning, Error
+    .EXAMPLE
+        Set-RobocurseLogLevel -Level 'Info'
+        # Now Debug messages will be filtered out
+    .EXAMPLE
+        Set-RobocurseLogLevel -Level 'Warning'
+        # Only Warning and Error messages will be logged
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Debug', 'Info', 'Warning', 'Error')]
+        [string]$Level
+    )
+
+    $script:MinLogLevel = $Level
+    Write-Verbose "Log level set to: $Level"
+}
+
+function Enable-PathRedaction {
+    <#
+    .SYNOPSIS
+        Enables path redaction in log messages for security/privacy
+    .DESCRIPTION
+        When enabled, file paths in log messages are redacted to hide sensitive
+        directory structures, server names, or project paths. This is useful for:
+        - Sharing logs with third parties without exposing internal paths
+        - Compliance with data privacy requirements
+        - Reducing sensitive information in SIEM logs
+    .PARAMETER RedactionPatterns
+        Optional array of custom regex patterns to redact. If not provided,
+        uses default patterns that redact:
+        - Full Windows paths (C:\path\to\file -> [PATH]\file)
+        - UNC paths (\\server\share\path -> [UNC]\path)
+        - Drive letters with paths
+    .PARAMETER ServerNames
+        Optional array of server names to specifically redact.
+        These are replaced with [SERVER] in the output.
+    .PARAMETER PreserveFilenames
+        If true, preserves the final filename while redacting the directory path.
+        Default: $true
+    .EXAMPLE
+        Enable-PathRedaction
+        # Enables default path redaction
+
+    .EXAMPLE
+        Enable-PathRedaction -ServerNames @('PRODSERVER01', 'FILESERVER')
+        # Redacts specific server names in addition to paths
+
+    .EXAMPLE
+        Enable-PathRedaction -PreserveFilenames $false
+        # Redacts entire paths including filenames
+    #>
+    [CmdletBinding()]
+    param(
+        [string[]]$RedactionPatterns,
+        [string[]]$ServerNames,
+        [bool]$PreserveFilenames = $true
+    )
+
+    $script:PathRedactionEnabled = $true
+    $script:PathRedactionPreserveFilenames = $PreserveFilenames
+
+    # Build redaction patterns
+    $patterns = @()
+
+    # Add custom patterns if provided
+    if ($RedactionPatterns) {
+        $patterns += $RedactionPatterns
+    }
+
+    # Add server name patterns if provided
+    if ($ServerNames) {
+        foreach ($server in $ServerNames) {
+            # Escape special regex characters in server name
+            $escapedServer = [regex]::Escape($server)
+            $patterns += "\\\\$escapedServer(?=\\|$)"  # UNC server reference
+            $patterns += "\b$escapedServer\b"          # Server name in text
+        }
+        $script:PathRedactionServerNames = $ServerNames
+    }
+
+    $script:PathRedactionPatterns = $patterns
+    Write-Verbose "Path redaction enabled with $($patterns.Count) custom patterns"
+}
+
+function Disable-PathRedaction {
+    <#
+    .SYNOPSIS
+        Disables path redaction in log messages
+    .DESCRIPTION
+        Turns off path redaction. Log messages will contain full paths.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $script:PathRedactionEnabled = $false
+    $script:PathRedactionPatterns = @()
+    $script:PathRedactionServerNames = @()
+    Write-Verbose "Path redaction disabled"
+}
+
+function Get-PathRedactionStatus {
+    <#
+    .SYNOPSIS
+        Returns current path redaction configuration
+    .OUTPUTS
+        Hashtable with Enabled, PatternCount, PreserveFilenames
+    #>
+    [CmdletBinding()]
+    param()
+
+    return @{
+        Enabled = $script:PathRedactionEnabled
+        PatternCount = $script:PathRedactionPatterns.Count
+        PreserveFilenames = $script:PathRedactionPreserveFilenames
+        ServerNames = $script:PathRedactionServerNames
+    }
+}
+
+function Invoke-PathRedaction {
+    <#
+    .SYNOPSIS
+        Redacts file paths from a string
+    .DESCRIPTION
+        Replaces file paths in the input string with redacted versions.
+        Used internally by Write-RobocurseLog and Write-SiemEvent when
+        path redaction is enabled.
+    .PARAMETER Text
+        The text to redact paths from
+    .OUTPUTS
+        String with paths redacted
+    .EXAMPLE
+        Invoke-PathRedaction -Text "Error copying C:\Users\john\Documents\secret.txt"
+        # Returns: "Error copying [PATH]\secret.txt"
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    if (-not $script:PathRedactionEnabled -or [string]::IsNullOrEmpty($Text)) {
+        return $Text
+    }
+
+    $result = $Text
+
+    # Apply custom patterns first
+    foreach ($pattern in $script:PathRedactionPatterns) {
+        try {
+            $result = $result -replace $pattern, '[REDACTED]'
+        }
+        catch {
+            # Invalid regex - skip this pattern
+            Write-Verbose "Invalid redaction pattern: $pattern"
+        }
+    }
+
+    # ====================================================================================
+    # UNC PATH REDACTION PATTERNS
+    # ====================================================================================
+    # UNC paths have format: \\server\share[\path\to\file]
+    # We want to redact the server/share/path but optionally preserve the filename
+    #
+    # Pattern breakdown for: '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*\\([^\\]+)(?=\s|$|"|''|])'
+    #   \\\\           - Literal \\ (UNC prefix, escaped as \\\\ in regex)
+    #   [^\\]+         - Server name: one or more chars that aren't backslashes
+    #   \\             - Literal \ separator
+    #   [^\\]+         - Share name: one or more chars that aren't backslashes
+    #   (?:\\[^\\]+)*  - Zero or more path segments (non-capturing group)
+    #                    Each segment is: \ followed by non-backslash chars
+    #   \\             - Literal \ before the final filename
+    #   ([^\\]+)       - CAPTURE GROUP 1: The filename (chars without backslash)
+    #   (?=\s|$|"|'|]) - LOOKAHEAD: Must be followed by whitespace, end-of-string,
+    #                    quote, or bracket (prevents partial matches mid-word)
+    #
+    # Examples:
+    #   "\\server\share\path\file.txt" -> "[UNC]\file.txt"
+    #   "\\server\share\file.txt"      -> "[UNC]\file.txt"
+    #   "\\server\share"               -> "[UNC]" (no filename to preserve)
+    # ====================================================================================
+    if ($script:PathRedactionPreserveFilenames) {
+        # Preserve filename: \\server\share\path\file.txt -> [UNC]\file.txt
+        $result = $result -replace '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*\\([^\\]+)(?=\s|$|"|''|])', '[UNC]\$1'
+        # Handle UNC paths without trailing filename (directories)
+        $result = $result -replace '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*(?=\s|$|"|''|])', '[UNC]'
+    }
+    else {
+        $result = $result -replace '\\\\[^\\]+\\[^\\]+(?:\\[^\\]+)*', '[UNC]'
+    }
+
+    # ====================================================================================
+    # WINDOWS PATH REDACTION PATTERNS
+    # ====================================================================================
+    # Windows paths have format: C:\path\to\file.ext
+    # We want to redact the path but optionally preserve the filename
+    #
+    # Pattern breakdown for: '([A-Za-z]:(?:\\[^\\:*?"<>|]+)+)\\([^\\:*?"<>|\s]+)(?=\s|$|"|''|])'
+    #   [A-Za-z]:            - Drive letter followed by colon (C:, D:, etc.)
+    #   (?:\\[^\\:*?"<>|]+)+ - One or more directory segments (non-capturing group):
+    #                          Each segment is: \ followed by valid path chars
+    #                          [^\\:*?"<>|] excludes invalid Windows filename chars
+    #   \\                   - Literal \ before the final filename
+    #   ([^\\:*?"<>|\s]+)    - CAPTURE GROUP: The filename (valid chars, no whitespace)
+    #   (?=\s|$|"|'|])       - LOOKAHEAD: Must be followed by boundary character
+    #
+    # Pattern breakdown for: '[A-Za-z]:(?:\\[^\\:*?"<>|]+)+(?=\s|$|"|''|]|\\)'
+    #   This pattern matches paths WITHOUT a final filename (directories)
+    #   The lookahead includes \\ to handle paths ending in backslash
+    #
+    # Pattern breakdown for: '[A-Za-z]:\\(?=\s|$|"|'')'
+    #   Matches drive root only (e.g., "C:\") - rare but handled for completeness
+    #
+    # Invalid Windows filename characters excluded: \ : * ? " < > |
+    # These are reserved by Windows and cannot appear in filenames
+    #
+    # Examples:
+    #   "C:\Users\john\file.txt"    -> "[PATH]\file.txt"
+    #   "C:\Projects\secret\data"   -> "[PATH]"
+    #   "Error in D:\Backup\file"   -> "Error in [PATH]\file"
+    # ====================================================================================
+    if ($script:PathRedactionPreserveFilenames) {
+        # Preserve filename: C:\Users\john\file.txt -> [PATH]\file.txt
+        $result = $result -replace '([A-Za-z]:(?:\\[^\\:*?"<>|]+)+)\\([^\\:*?"<>|\s]+)(?=\s|$|"|''|])', '[PATH]\$2'
+        # Handle paths without trailing filename (directories or paths ending in \)
+        $result = $result -replace '[A-Za-z]:(?:\\[^\\:*?"<>|]+)+(?=\s|$|"|''|]|\\)', '[PATH]'
+        # Handle drive root paths: C:\ -> [PATH]
+        $result = $result -replace '[A-Za-z]:\\(?=\s|$|"|'')', '[PATH]'
+    }
+    else {
+        $result = $result -replace '[A-Za-z]:(?:\\[^\\:*?"<>|]+)+', '[PATH]'
+        $result = $result -replace '[A-Za-z]:\\', '[PATH]'
+    }
+
+    return $result
+}
+
+function Invoke-WithLogMutex {
+    <#
+    .SYNOPSIS
+        Executes a scriptblock while holding the log file mutex
+    .DESCRIPTION
+        Acquires a named mutex to synchronize log file writes across multiple
+        threads and processes. Releases the mutex in a finally block to ensure
+        cleanup even on errors.
+    .PARAMETER ScriptBlock
+        Code to execute while holding the mutex
+    .PARAMETER MutexSuffix
+        Suffix for the mutex name (e.g., 'Operational', 'SIEM')
+    .OUTPUTS
+        Result of the scriptblock, or $null if mutex acquisition times out
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock,
+
+        [Parameter(Mandatory)]
+        [string]$MutexSuffix
+    )
+
+    $mutex = $null
+    $mutexAcquired = $false
+    try {
+        $fullMutexName = "Global\RobocurseLog_$MutexSuffix"
+        $mutex = [System.Threading.Mutex]::new($false, $fullMutexName)
+
+        $mutexAcquired = $mutex.WaitOne($script:LogMutexTimeoutMs)
+        if (-not $mutexAcquired) {
+            # Timeout - still execute the scriptblock (better than lost log)
+            # This is a fallback; ideally should never happen
+            return & $ScriptBlock
+        }
+
+        return & $ScriptBlock
+    }
+    finally {
+        if ($mutex) {
+            if ($mutexAcquired) {
+                try { $mutex.ReleaseMutex() } catch {
+                    # Cannot log here (infinite loop) - release failure is rare
+                }
+                # Dispose after release to avoid disposing while acquired
+                $mutex.Dispose()
+            }
+            # Note: Only dispose if we acquired it - otherwise caller still owns it
+        }
+    }
+}
+$script:CurrentOperationalLogPath = $null
+$script:CurrentSiemLogPath = $null
+$script:CurrentJobsPath = $null
+
+function Set-LogSessionPath {
+    <#
+    .SYNOPSIS
+        Sets all log paths for the current session (for sharing across runspaces)
+    .DESCRIPTION
+        Given an operational log path, derives and sets all required logging variables:
+        - CurrentOperationalLogPath (the provided path)
+        - CurrentJobsPath (Jobs subdirectory in same date folder)
+        - CurrentSessionId (extracted from filename)
+        - CurrentSiemLogPath (Audit log in same date folder)
+        This allows background runspaces to share the GUI's log session.
+    .PARAMETER LogPath
+        Full path to the operational log file (e.g., C:\Logs\2025-12-21\Session_123456_789.log)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$LogPath
+    )
+
+    $script:CurrentOperationalLogPath = $LogPath
+
+    # Derive other paths from the operational log path
+    # Log path format: LogRoot/YYYY-MM-DD/Session_HHMMSS_mmm.log
+    $logDirectory = Split-Path -Parent $LogPath
+    $script:CurrentJobsPath = Join-Path $logDirectory "Jobs"
+
+    # Extract session ID from filename (Session_HHMMSS_mmm.log -> HHMMSS_mmm)
+    $filename = Split-Path -Leaf $LogPath
+    if ($filename -match '^Session_(.+)\.log$') {
+        $script:CurrentSessionId = $Matches[1]
+        # Derive SIEM log path
+        $script:CurrentSiemLogPath = Join-Path $logDirectory "Audit_$($script:CurrentSessionId).jsonl"
+    }
+
+    # Ensure Jobs directory exists (may not have been created if GUI initialized first)
+    if (-not (Test-Path $script:CurrentJobsPath)) {
+        New-Item -ItemType Directory -Path $script:CurrentJobsPath -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+}
+
+function Initialize-LogSession {
+    <#
+    .SYNOPSIS
+        Creates log directory for today, generates session ID, initializes log files
+    .DESCRIPTION
+        Initializes logging for a new session. Also performs log rotation/cleanup
+        to compress old logs and delete ancient ones based on retention settings.
+    .PARAMETER LogRoot
+        Root directory for logs (default: .\Logs)
+    .PARAMETER CompressAfterDays
+        Compress logs older than this many days (default from script constant or config)
+    .PARAMETER DeleteAfterDays
+        Delete compressed logs older than this many days (default from script constant or config)
+    .OUTPUTS
+        Hashtable with SessionId, OperationalLogPath, SiemLogPath
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$LogRoot = ".\Logs",
+        [ValidateRange(1, 365)]
+        [int]$CompressAfterDays = $script:LogCompressAfterDays,
+        [ValidateRange(1, 3650)]
+        [int]$DeleteAfterDays = $script:LogDeleteAfterDays
+    )
+
+    # Validate that CompressAfterDays is less than DeleteAfterDays - auto-adjust if misconfigured
+    if ($CompressAfterDays -ge $DeleteAfterDays) {
+        $adjustedValue = [Math]::Max(1, $DeleteAfterDays - 7)
+        Write-Verbose "Auto-adjusted CompressAfterDays from $CompressAfterDays to $adjustedValue (must be < DeleteAfterDays: $DeleteAfterDays)"
+        $CompressAfterDays = $adjustedValue
+    }
+
+    # Generate unique session ID based on timestamp
+    $timestamp = Get-Date -Format "HHmmss"
+    $milliseconds = (Get-Date).Millisecond
+    $sessionId = "${timestamp}_${milliseconds}"
+
+    # Create date-based directory structure
+    $dateFolder = Get-Date -Format "yyyy-MM-dd"
+    $logDirectory = Join-Path $LogRoot $dateFolder
+
+    # Create the directory and Jobs subdirectory
+    # Using New-Item -Force directly avoids TOCTOU race condition between Test-Path and New-Item
+    # -Force succeeds silently if directory already exists
+    New-Item -ItemType Directory -Path $logDirectory -Force -ErrorAction SilentlyContinue | Out-Null
+
+    $jobsDirectory = Join-Path $logDirectory "Jobs"
+    New-Item -ItemType Directory -Path $jobsDirectory -Force -ErrorAction SilentlyContinue | Out-Null
+
+    # Define log file paths
+    $operationalLogPath = Join-Path $logDirectory "Session_${sessionId}.log"
+    $siemLogPath = Join-Path $logDirectory "Audit_${sessionId}.jsonl"
+
+    # Create empty log files
+    New-Item -ItemType File -Path $operationalLogPath -Force | Out-Null
+    New-Item -ItemType File -Path $siemLogPath -Force | Out-Null
+
+    # Update script-scoped variables
+    $script:CurrentSessionId = $sessionId
+    $script:CurrentOperationalLogPath = $operationalLogPath
+    $script:CurrentSiemLogPath = $siemLogPath
+    $script:CurrentJobsPath = $jobsDirectory
+
+    # Perform log rotation/cleanup (compress old, delete ancient)
+    # This runs at session start to maintain log hygiene
+    try {
+        Invoke-LogRotation -LogRoot $LogRoot -CompressAfterDays $CompressAfterDays -DeleteAfterDays $DeleteAfterDays
+    }
+    catch {
+        Write-Warning "Log rotation failed: $($_.Exception.Message)"
+        # Non-fatal - continue with session initialization
+    }
+
+    # Return session information
+    return @{
+        SessionId = $sessionId
+        OperationalLogPath = $operationalLogPath
+        SiemLogPath = $siemLogPath
+        JobsPath = $jobsDirectory
+    }
+}
+
+function Write-RobocurseLog {
+    <#
+    .SYNOPSIS
+        Writes to operational log and optionally SIEM log
+    .DESCRIPTION
+        Logs messages to the operational log file with automatic caller information
+        (function name and line number) for easier debugging.
+    .PARAMETER Message
+        Log message
+    .PARAMETER Level
+        Log level: Debug, Info, Warning, Error
+    .PARAMETER Component
+        Which component is logging (Orchestrator, Chunker, etc.)
+    .PARAMETER SessionId
+        Correlation ID for the current session
+    .PARAMETER WriteSiem
+        Also write a SIEM event (default: true for Warning/Error)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message,
+
+        [ValidateSet('Debug', 'Info', 'Warning', 'Error')]
+        [string]$Level = 'Info',
+
+        [string]$Component = 'General',
+
+        [string]$SessionId = $script:CurrentSessionId,
+
+        [bool]$WriteSiem = ($Level -in @('Warning', 'Error'))
+    )
+
+    # Check if message should be logged based on minimum log level
+    # This filters out Debug messages when MinLogLevel is set to Info or higher
+    if (-not (Test-ShouldLog -Level $Level)) {
+        return
+    }
+
+    # Get caller information from call stack
+    # Index 1 is the immediate caller (index 0 is this function)
+    $callStack = Get-PSCallStack
+    $callerInfo = ""
+    if ($callStack.Count -gt 1) {
+        $caller = $callStack[1]
+        $functionName = if ($caller.FunctionName -and $caller.FunctionName -ne '<ScriptBlock>') {
+            $caller.FunctionName
+        } else {
+            'Main'
+        }
+        $lineNumber = $caller.ScriptLineNumber
+        $callerInfo = "${functionName}:${lineNumber}"
+    }
+
+    # Apply path redaction if enabled (for security/privacy)
+    $redactedMessage = Invoke-PathRedaction -Text $Message
+
+    # Format the log entry with caller info
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $levelUpper = $Level.ToUpper()
+    $logEntry = "${timestamp} [${levelUpper}] [${Component}] [${callerInfo}] ${redactedMessage}"
+
+    # Enqueue to OrchestrationState for GUI consumption (thread-safe)
+    if ($script:OrchestrationState -and $script:OrchestrationState.LogMessages) {
+        $script:OrchestrationState.EnqueueLog($logEntry)
+    }
+
+    # Check if log session is initialized
+    $logPath = $script:CurrentOperationalLogPath
+    if (-not $logPath) {
+        # For important messages, fall back to console
+        if ($Level -in @('Error', 'Warning')) {
+            switch ($Level) {
+                'Error'   { Write-Error $logEntry }
+                'Warning' { Write-Warning $logEntry }
+            }
+        }
+        # For Info/Debug, silently skip
+        return
+    }
+
+    # Write to operational log with mutex protection for thread safety
+    try {
+        # Ensure directory exists
+        $logDir = Split-Path -Path $logPath -Parent
+        if ($logDir -and -not (Test-Path $logDir)) {
+            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        }
+
+        # Append to log file with mutex protection to prevent concurrent write corruption
+        Invoke-WithLogMutex -MutexSuffix 'Operational' -ScriptBlock {
+            Add-Content -Path $logPath -Value $logEntry -Encoding UTF8
+        }.GetNewClosure()
+    }
+    catch {
+        Write-Warning "Failed to write to operational log: $_"
+    }
+
+    # Write to SIEM if requested
+    if ($WriteSiem) {
+        # Map log level and component to appropriate SIEM event type
+        # Use component context and level to determine the most accurate event type
+        # Separate event types allow SIEM to distinguish between different failure modes
+        $eventType = switch ($Level) {
+            'Error' {
+                switch -Wildcard ($Component) {
+                    'Chunk*'      { 'ChunkError' }
+                    'Robocopy'    { 'RobocopyError' }      # Separate from ChunkError for SIEM filtering
+                    'Config*'     { 'ConfigError' }        # Errors during config, not ConfigChange
+                    'Email'       { 'EmailError' }         # Failed to send, not EmailSent
+                    'VSS'         { 'VssError' }           # VSS operation failed
+                    'Session'     { 'SessionEnd' }
+                    'Profile'     { 'ProfileError' }       # Profile failed, not ProfileComplete
+                    'Checkpoint'  { 'CheckpointError' }    # Checkpoint operation failed
+                    default       { 'GeneralError' }       # Catch-all for other errors
+                }
+            }
+            'Warning' {
+                switch -Wildcard ($Component) {
+                    'Chunk*'      { 'ChunkWarning' }
+                    'Robocopy'    { 'RobocopyWarning' }
+                    'Config*'     { 'ConfigWarning' }
+                    'VSS'         { 'VssWarning' }
+                    'Email'       { 'EmailWarning' }
+                    'Checkpoint'  { 'CheckpointWarning' }
+                    default       { 'GeneralWarning' }
+                }
+            }
+            default { 'GeneralError' }  # Fallback for unexpected levels routed to SIEM
+        }
+        Write-SiemEvent -EventType $eventType -Data @{
+            Level = $Level
+            Component = $Component
+            Caller = $callerInfo
+            Message = $redactedMessage  # Use redacted message for SIEM
+        } -SessionId $SessionId
+    }
+}
+
+function Write-SiemEvent {
+    <#
+    .SYNOPSIS
+        Writes a SIEM-compatible JSON event
+    .DESCRIPTION
+        Emits structured JSON Lines events for SIEM integration. Each event includes timestamp,
+        machine name, session ID, event type, and custom data fields. Events are written to
+        the SIEM log path with atomic appends. Used for security monitoring, auditing, and
+        correlation of replication events across distributed systems.
+    .PARAMETER EventType
+        Event type for SIEM categorization. Types are organized by severity and component:
+        - Session: SessionStart, SessionEnd
+        - Profile: ProfileStart, ProfileComplete, ProfileError
+        - Chunk: ChunkStart, ChunkComplete, ChunkError, ChunkWarning
+        - Robocopy: RobocopyError, RobocopyWarning
+        - Config: ConfigChange, ConfigError, ConfigWarning
+        - Email: EmailSent, EmailError, EmailWarning
+        - VSS: VssSnapshotCreated, VssSnapshotRemoved, VssError, VssWarning
+        - Checkpoint: CheckpointError, CheckpointWarning
+        - General: GeneralError, GeneralWarning
+    .PARAMETER Data
+        Hashtable of event-specific data
+    .PARAMETER SessionId
+        Correlation ID
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet(
+            # Session events
+            'SessionStart', 'SessionEnd',
+            # Profile events
+            'ProfileStart', 'ProfileComplete', 'ProfileError',
+            # Chunk events
+            'ChunkStart', 'ChunkComplete', 'ChunkError', 'ChunkWarning',
+            # Robocopy events (separated for SIEM filtering)
+            'RobocopyError', 'RobocopyWarning',
+            # Config events
+            'ConfigChange', 'ConfigError', 'ConfigWarning',
+            # Email events
+            'EmailSent', 'EmailError', 'EmailWarning',
+            # VSS events
+            'VssSnapshotCreated', 'VssSnapshotRemoved', 'VssError', 'VssWarning',
+            # Checkpoint events
+            'CheckpointError', 'CheckpointWarning',
+            # Security events (injection attempts, validation failures)
+            'SecurityWarning', 'SecurityError',
+            # General catch-all events
+            'GeneralError', 'GeneralWarning'
+        )]
+        [string]$EventType,
+
+        [hashtable]$Data = @{},
+
+        [string]$SessionId = $script:CurrentSessionId
+    )
+
+    # Check if log session is initialized
+    $siemPath = $script:CurrentSiemLogPath
+    if (-not $siemPath) {
+        # Silently skip if no log session
+        return
+    }
+
+    # Get timestamp in ISO 8601 format with exactly 3 decimal places for milliseconds
+    $now = Get-Date
+    $utcTime = $now.ToUniversalTime()
+    $milliseconds = $utcTime.Millisecond.ToString("000")
+    $timestamp = $utcTime.ToString("yyyy-MM-ddTHH:mm:ss") + ".${milliseconds}Z"
+
+    # Get machine name - handle both Windows and Unix
+    $machineName = if ($env:COMPUTERNAME) {
+        $env:COMPUTERNAME
+    }
+    elseif ($env:HOSTNAME) {
+        $env:HOSTNAME
+    }
+    else {
+        hostname
+    }
+
+    # Get user with domain - handle both Windows and Unix
+    $userName = if ($env:USERDOMAIN) {
+        "$env:USERDOMAIN\$env:USERNAME"
+    }
+    else {
+        $env:USER
+    }
+
+    # Apply path redaction to data values if enabled
+    $redactedData = @{}
+    foreach ($key in $Data.Keys) {
+        $value = $Data[$key]
+        if ($value -is [string]) {
+            $redactedData[$key] = Invoke-PathRedaction -Text $value
+        }
+        elseif ($value -is [array]) {
+            # Redact string items in arrays
+            $redactedData[$key] = @($value | ForEach-Object {
+                if ($_ -is [string]) { Invoke-PathRedaction -Text $_ } else { $_ }
+            })
+        }
+        else {
+            $redactedData[$key] = $value
+        }
+    }
+
+    # Create SIEM event object with required fields
+    $siemEvent = @{
+        timestamp = $timestamp
+        event = $EventType
+        sessionId = $SessionId
+        user = $userName
+        machine = $machineName
+        data = $redactedData
+    }
+
+    # Convert to JSON (single line) and write with mutex protection
+    try {
+        $jsonLine = $siemEvent | ConvertTo-Json -Compress -Depth 10
+
+        # Ensure directory exists
+        $siemDir = Split-Path -Path $siemPath -Parent
+        if ($siemDir -and -not (Test-Path $siemDir)) {
+            New-Item -ItemType Directory -Path $siemDir -Force | Out-Null
+        }
+
+        # Append to SIEM log (JSON Lines format) with mutex protection
+        # Critical: JSONL corruption breaks SIEM ingestion, so mutex is essential
+        Invoke-WithLogMutex -MutexSuffix 'SIEM' -ScriptBlock {
+            Add-Content -Path $siemPath -Value $jsonLine -Encoding UTF8
+        }.GetNewClosure()
+    }
+    catch {
+        Write-Warning "Failed to write to SIEM log: $_"
+    }
+}
+
+function Invoke-LogRotation {
+    <#
+    .SYNOPSIS
+        Compresses old logs and deletes ancient ones
+    .DESCRIPTION
+        Performs log rotation by compressing date-based log directories older than the compression
+        threshold and deleting compressed archives older than the deletion threshold. Uses timeout
+        protection to prevent hanging on locked files or network shares. Skips today's and
+        yesterday's logs to avoid interference with active sessions. Automatically validates
+        thresholds to ensure compress-before-delete ordering.
+    .PARAMETER LogRoot
+        Root directory for logs
+    .PARAMETER CompressAfterDays
+        Compress logs older than this (default: 7)
+    .PARAMETER DeleteAfterDays
+        Delete logs older than this (default: 30)
+    .PARAMETER TimeoutSeconds
+        Max time to spend on each compression operation (default: 60)
+        Prevents hanging on locked files or unresponsive network shares
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$LogRoot = ".\Logs",
+        [ValidateRange(1, 365)]
+        [int]$CompressAfterDays = $script:LogCompressAfterDays,
+        [ValidateRange(1, 3650)]
+        [int]$DeleteAfterDays = $script:LogDeleteAfterDays,
+        [ValidateRange(5, 300)]
+        [int]$TimeoutSeconds = 60
+    )
+
+    if (-not (Test-Path $LogRoot)) {
+        Write-Verbose "Log root directory does not exist: $LogRoot"
+        return
+    }
+
+    # Validate that CompressAfterDays is less than DeleteAfterDays - auto-adjust if misconfigured
+    if ($CompressAfterDays -ge $DeleteAfterDays) {
+        $adjustedValue = [Math]::Max(1, $DeleteAfterDays - 7)
+        Write-Verbose "Auto-adjusted CompressAfterDays from $CompressAfterDays to $adjustedValue (must be < DeleteAfterDays: $DeleteAfterDays)"
+        $CompressAfterDays = $adjustedValue
+    }
+
+    $now = Get-Date
+    $compressThreshold = $now.AddDays(-$CompressAfterDays)
+    $deleteThreshold = $now.AddDays(-$DeleteAfterDays)
+
+    try {
+        # Get all date-based directories (yyyy-MM-dd format)
+        $logDirectories = Get-ChildItem -Path $LogRoot -Directory | Where-Object {
+            $_.Name -match '^\d{4}-\d{2}-\d{2}$'
+        }
+
+        foreach ($dir in $logDirectories) {
+            try {
+                # Parse directory date
+                $dirDate = [DateTime]::ParseExact($dir.Name, "yyyy-MM-dd", $null)
+
+                # Skip if this is today's directory or yesterday's (may still be in use)
+                # Compare date parts only - AddDays(-1) is clearer than AddHours(-2) for "yesterday"
+                if ($dirDate.Date -ge $now.Date.AddDays(-1)) {
+                    continue
+                }
+
+                # Compress old directories
+                if ($dirDate -lt $compressThreshold) {
+                    $zipPath = Join-Path $LogRoot "$($dir.Name).zip"
+
+                    # Skip if already compressed
+                    if (Test-Path $zipPath) {
+                        # Remove the directory after successful compression
+                        if (Test-Path $dir.FullName) {
+                            Remove-Item -Path $dir.FullName -Recurse -Force -ErrorAction Stop
+                        }
+                        continue
+                    }
+
+                    # Compress the directory with timeout to prevent hanging on locked files
+                    $compressionJob = Start-Job -ScriptBlock {
+                        param($SourcePath, $DestPath)
+                        Compress-Archive -Path $SourcePath -DestinationPath $DestPath -Force -ErrorAction Stop
+                    } -ArgumentList $dir.FullName, $zipPath
+
+                    $completed = $compressionJob | Wait-Job -Timeout $TimeoutSeconds
+                    if (-not $completed) {
+                        Write-Warning "Compression timeout for $($dir.Name) after $TimeoutSeconds seconds - skipping (file may be locked)"
+                        $compressionJob | Stop-Job -PassThru | Remove-Job -Force
+                        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+                        continue
+                    }
+
+                    # Check for job errors
+                    if ($compressionJob.State -eq 'Failed') {
+                        $jobError = $compressionJob | Receive-Job -ErrorAction SilentlyContinue 2>&1
+                        Write-Warning "Compression failed for $($dir.Name): $jobError"
+                        $compressionJob | Remove-Job -Force
+                        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+                        continue
+                    }
+                    $compressionJob | Remove-Job -Force
+
+                    # Verify the archive was created successfully and has content
+                    if (-not (Test-Path $zipPath)) {
+                        Write-Warning "Failed to verify compressed archive: $zipPath"
+                        continue
+                    }
+                    $archiveInfo = Get-Item -Path $zipPath -ErrorAction SilentlyContinue
+                    if ($null -eq $archiveInfo -or $archiveInfo.Length -eq 0) {
+                        Write-Warning "Compressed archive is empty or invalid, keeping original: $zipPath"
+                        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+                        continue
+                    }
+
+                    # Remove the original directory only after verifying compression succeeded
+                    Remove-Item -Path $dir.FullName -Recurse -Force -ErrorAction Stop
+
+                    Write-Verbose "Compressed log directory: $($dir.Name)"
+                }
+            }
+            catch {
+                Write-Warning "Failed to compress log directory $($dir.Name): $_"
+            }
+        }
+
+        # Delete ancient archives
+        $archives = Get-ChildItem -Path $LogRoot -Filter "*.zip" | Where-Object {
+            $_.Name -match '^\d{4}-\d{2}-\d{2}\.zip$'
+        }
+
+        foreach ($archive in $archives) {
+            try {
+                # Parse archive date from filename
+                $archiveDateStr = $archive.BaseName
+                $archiveDate = [DateTime]::ParseExact($archiveDateStr, "yyyy-MM-dd", $null)
+
+                # Delete if older than threshold
+                if ($archiveDate -lt $deleteThreshold) {
+                    Remove-Item -Path $archive.FullName -Force -ErrorAction Stop
+                    Write-Verbose "Deleted old archive: $($archive.Name)"
+                }
+            }
+            catch {
+                Write-Warning "Failed to delete archive $($archive.Name): $_"
+            }
+        }
+    }
+    catch {
+        Write-Warning "Log rotation failed: $_"
+    }
+}
+
+function Get-LogPath {
+    <#
+    .SYNOPSIS
+        Gets path for a specific log type
+    .PARAMETER Type
+        Log type: Operational, Siem, ChunkJob
+    .PARAMETER ChunkId
+        Required for ChunkJob type
+    #>
+    [CmdletBinding()]
+    param(
+        [ValidateSet('Operational', 'Siem', 'ChunkJob')]
+        [string]$Type,
+
+        [int]$ChunkId
+    )
+
+    switch ($Type) {
+        'Operational' {
+            return $script:CurrentOperationalLogPath
+        }
+        'Siem' {
+            return $script:CurrentSiemLogPath
+        }
+        'ChunkJob' {
+            if ($null -eq $ChunkId) {
+                throw "ChunkId parameter is required for ChunkJob type"
+            }
+            if (-not $script:CurrentJobsPath) {
+                throw "No log session initialized. Call Initialize-LogSession first."
+            }
+            $chunkIdFormatted = $ChunkId.ToString("000")
+            return Join-Path $script:CurrentJobsPath "Chunk_${chunkIdFormatted}.log"
+        }
+    }
+}
