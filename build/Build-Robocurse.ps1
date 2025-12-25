@@ -61,6 +61,8 @@ $moduleOrder = @(
     # Orchestration modules (split for maintainability)
     'Public\OrchestrationCore.ps1'  # C# types, state management, circuit breaker
     'Public\HealthCheck.ps1'        # Health monitoring (before JobManagement which uses it)
+    'Public\CredentialStorage.ps1'  # DPAPI credential storage for network shares (before NetworkMapping)
+    'Public\NetworkMapping.ps1'     # UNC path to drive letter mapping (before JobManagement)
     'Public\JobManagement.ps1'      # Job execution, profile management
     'Public\Progress.ps1'
     'Public\VssCore.ps1'

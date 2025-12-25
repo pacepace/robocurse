@@ -58,6 +58,17 @@ InModuleScope 'Robocurse' {
 
             # Mock Test-Path to allow source paths
             Mock Test-Path { $true }
+
+            # Mock network path handling (added for Session 0 scheduled task support)
+            Mock Get-NetworkCredential { $null }
+            Mock Mount-NetworkPaths {
+                @{
+                    Mappings = @()
+                    SourcePath = $SourcePath
+                    DestinationPath = $DestinationPath
+                }
+            }
+            Mock Dismount-NetworkPaths { }
         }
 
         Context "UNC Path Detection" {

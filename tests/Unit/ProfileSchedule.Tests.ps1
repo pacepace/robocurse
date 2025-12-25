@@ -19,7 +19,8 @@ function global:New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDir
 function global:New-ScheduledTaskTrigger { param([switch]$Daily, [switch]$Weekly, [switch]$Once, $At, $DaysOfWeek, $RepetitionInterval, $RepetitionDuration) }
 function global:New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) }
 function global:New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [switch]$StartWhenAvailable, [switch]$RunOnlyIfNetworkAvailable, $MultipleInstances, $ExecutionTimeLimit, $Priority) }
-function global:Register-ScheduledTask { param($TaskName, $Action, $Trigger, $Principal, $Settings, $Description, [switch]$Force, $User, $Password) }
+function global:New-ScheduledTask { param($Action, $Trigger, $Settings, $Principal, $Description) }
+function global:Register-ScheduledTask { param([Parameter(ValueFromPipeline)]$InputObject, $TaskName, $Action, $Trigger, $Principal, $Settings, $Description, [switch]$Force, $User, $Password, $RunLevel) }
 function global:Unregister-ScheduledTask { param($TaskName, [switch]$Confirm) }
 function global:Get-ScheduledTask { param($TaskName) }
 function global:Get-ScheduledTaskInfo { param($TaskName) }
@@ -46,15 +47,25 @@ InModuleScope 'Robocurse' {
         }
 
         Context "New-ProfileScheduledTask" -Skip:(-not (Test-IsWindowsPlatform)) {
+            BeforeAll {
+                # Remove ScheduledTasks module if loaded by other tests to prevent stub conflicts
+                if (Get-Module ScheduledTasks -ErrorAction SilentlyContinue) {
+                    Remove-Module ScheduledTasks -Force -ErrorAction SilentlyContinue
+                }
+            }
+
             BeforeEach {
                 Mock New-ScheduledTaskAction { [PSCustomObject]@{ Execute = "powershell.exe" } }
                 Mock New-ScheduledTaskTrigger { [PSCustomObject]@{ Type = "Daily" } }
                 Mock New-ScheduledTaskPrincipal { [PSCustomObject]@{ UserId = $env:USERNAME } }
                 Mock New-ScheduledTaskSettingsSet { [PSCustomObject]@{ } }
-                Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Robocurse-Profile-TestProfile" } }
+                Mock New-ScheduledTask { [PSCustomObject]@{ Actions = @(); Triggers = @(); Settings = @{} } }
+                Mock Register-ScheduledTask { [PSCustomObject]@{ TaskName = "Robocurse-Profile-TestProfile"; Principal = [PSCustomObject]@{ UserId = $env:USERNAME; LogonType = 'Password' } } }
                 Mock Get-ScheduledTask { $null }
                 Mock Unregister-ScheduledTask { }
                 Mock Write-RobocurseLog { }
+                # Mock Save-NetworkCredential for tests that use credentials
+                Mock Save-NetworkCredential { New-OperationResult -Success $true }
             }
 
             It "Should create task with daily trigger" {
@@ -182,6 +193,53 @@ InModuleScope 'Robocurse' {
                 $result.Success | Should -Be $true
                 Should -Invoke New-ScheduledTaskPrincipal -Times 1 -ParameterFilter {
                     $UserId -match '\\'  # Must contain backslash (domain\user or computer\user)
+                }
+            }
+
+            It "Should use S4U logon when no credential provided" {
+                $profile = [PSCustomObject]@{
+                    Name = "TestProfile"
+                    Schedule = [PSCustomObject]@{
+                        Enabled = $true
+                        Frequency = "Daily"
+                        Time = "03:00"
+                    }
+                }
+
+                $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath
+
+                $result.Success | Should -Be $true
+                Should -Invoke New-ScheduledTaskPrincipal -Times 1 -ParameterFilter {
+                    $LogonType -eq 'S4U'
+                }
+                Should -Invoke Register-ScheduledTask -Times 1 -ParameterFilter {
+                    $Principal -ne $null -and $User -eq $null
+                }
+            }
+
+            It "Should use Password logon when credential provided" {
+                $securePassword = ConvertTo-SecureString "TestPassword123" -AsPlainText -Force
+                $credential = [System.Management.Automation.PSCredential]::new("DOMAIN\TestUser", $securePassword)
+
+                $profile = [PSCustomObject]@{
+                    Name = "TestProfile"
+                    Schedule = [PSCustomObject]@{
+                        Enabled = $true
+                        Frequency = "Daily"
+                        Time = "03:00"
+                    }
+                }
+
+                $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $script:tempConfigPath -ScriptPath $script:tempScriptPath -Credential $credential
+
+                $result.Success | Should -Be $true
+                # With credentials, we do NOT call New-ScheduledTaskPrincipal
+                # Instead we use -User, -Password, -RunLevel directly on Register-ScheduledTask
+                # (because -Principal and -User/-Password are mutually exclusive parameter sets)
+                Should -Invoke New-ScheduledTaskPrincipal -Times 0
+                # Register-ScheduledTask called with -User, -Password, -RunLevel
+                Should -Invoke Register-ScheduledTask -Times 1 -ParameterFilter {
+                    $User -eq "DOMAIN\TestUser" -and $Password -eq "TestPassword123" -and $RunLevel -eq "Highest"
                 }
             }
         }

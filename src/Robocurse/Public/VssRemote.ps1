@@ -56,6 +56,10 @@ function Get-RemoteShareLocalPath {
         The share name to look up
     .PARAMETER CimSession
         Optional existing CIM session to use
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
+        Only used when CimSession is not provided.
     .OUTPUTS
         The local path on the server, or $null if not found
     .EXAMPLE
@@ -70,13 +74,23 @@ function Get-RemoteShareLocalPath {
         [Parameter(Mandatory)]
         [string]$ShareName,
 
-        [Microsoft.Management.Infrastructure.CimSession]$CimSession
+        [Microsoft.Management.Infrastructure.CimSession]$CimSession,
+
+        [PSCredential]$Credential
     )
 
     try {
         $ownSession = $false
         if (-not $CimSession) {
-            $CimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+            # Use credential if provided (required for Session 0 scheduled tasks)
+            $cimParams = @{
+                ComputerName = $ServerName
+                ErrorAction  = 'Stop'
+            }
+            if ($Credential) {
+                $cimParams['Credential'] = $Credential
+            }
+            $CimSession = New-CimSession @cimParams
             $ownSession = $true
         }
 
@@ -114,6 +128,9 @@ function Test-RemoteVssSupported {
         if the Win32_ShadowCopy class is available.
     .PARAMETER UncPath
         The UNC path to test
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult - Success=$true if remote VSS is supported
     .EXAMPLE
@@ -123,7 +140,9 @@ function Test-RemoteVssSupported {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$UncPath
+        [string]$UncPath,
+
+        [PSCredential]$Credential
     )
 
     $components = Get-UncPathComponents -UncPath $UncPath
@@ -134,8 +153,16 @@ function Test-RemoteVssSupported {
     $serverName = $components.ServerName
 
     try {
-        # Test CIM connectivity
-        $cimSession = New-CimSession -ComputerName $serverName -ErrorAction Stop
+        # Test CIM connectivity - use credential if provided (required for Session 0 scheduled tasks)
+        $cimParams = @{
+            ComputerName = $serverName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $cimParams['Credential'] = $Credential
+            Write-RobocurseLog -Message "Creating CIM session to '$serverName' with explicit credentials (user: $($Credential.UserName))" -Level 'Debug' -Component 'VSS'
+        }
+        $cimSession = New-CimSession @cimParams
 
         try {
             # Check if Win32_ShadowCopy is available
@@ -226,6 +253,9 @@ function New-RemoteVssSnapshot {
         that hosts the specified UNC path.
     .PARAMETER UncPath
         The UNC path to the share/folder to snapshot
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .PARAMETER SkipTracking
         If set, does not add snapshot to orphan tracking file. Use for persistent
         snapshots that should survive application restarts.
@@ -252,6 +282,8 @@ function New-RemoteVssSnapshot {
         [ValidatePattern('^\\\\[^\\]+\\[^\\]+')]
         [string]$UncPath,
 
+        [PSCredential]$Credential,
+
         [switch]$SkipTracking,
 
         [ValidateRange(0, 10)]
@@ -273,8 +305,16 @@ function New-RemoteVssSnapshot {
 
     $cimSession = $null
     try {
-        # Establish CIM session
-        $cimSession = New-CimSession -ComputerName $serverName -ErrorAction Stop
+        # Establish CIM session - use credential if provided (required for Session 0 scheduled tasks)
+        $cimParams = @{
+            ComputerName = $serverName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $cimParams['Credential'] = $Credential
+            Write-RobocurseLog -Message "Creating CIM session to '$serverName' with explicit credentials (user: $($Credential.UserName))" -Level 'Debug' -Component 'VSS'
+        }
+        $cimSession = New-CimSession @cimParams
         Write-RobocurseLog -Message "CIM session established to '$serverName'" -Level 'Debug' -Component 'VSS'
 
         # Get the local path for the share
@@ -393,6 +433,9 @@ function Remove-RemoteVssSnapshot {
         The shadow copy ID to remove
     .PARAMETER ServerName
         The remote server where the snapshot exists
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult
     .EXAMPLE
@@ -404,14 +447,25 @@ function Remove-RemoteVssSnapshot {
         [string]$ShadowId,
 
         [Parameter(Mandatory)]
-        [string]$ServerName
+        [string]$ServerName,
+
+        [PSCredential]$Credential
     )
 
     $cimSession = $null
     try {
         Write-RobocurseLog -Message "Removing remote VSS snapshot '$ShadowId' from '$ServerName'" -Level 'Debug' -Component 'VSS'
 
-        $cimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+        # Use credential if provided (required for Session 0 scheduled tasks)
+        $cimParams = @{
+            ComputerName = $ServerName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $cimParams['Credential'] = $Credential
+            Write-RobocurseLog -Message "Creating CIM session to '$ServerName' with explicit credentials for snapshot removal" -Level 'Debug' -Component 'VSS'
+        }
+        $cimSession = New-CimSession @cimParams
 
         $shadow = Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy |
             Where-Object { $_.ID -eq $ShadowId }
@@ -455,6 +509,9 @@ function New-RemoteVssJunction {
         via UNC path from the client.
     .PARAMETER VssSnapshot
         The remote VSS snapshot object from New-RemoteVssSnapshot
+    .PARAMETER Credential
+        Optional credential for remote session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .PARAMETER JunctionName
         Optional name for the junction. Defaults to a GUID-based name.
     .OUTPUTS
@@ -472,6 +529,8 @@ function New-RemoteVssJunction {
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$VssSnapshot,
+
+        [PSCredential]$Credential,
 
         [string]$JunctionName
     )
@@ -514,28 +573,40 @@ function New-RemoteVssJunction {
         # Use Invoke-Command with timeout to create the junction on the remote server
         # Timeout prevents indefinite hangs on slow or unreachable servers
         $sessionOption = New-PSSessionOption -OperationTimeout $script:RemoteOperationTimeoutMs -OpenTimeout $script:RemoteOperationTimeoutMs
-        $result = Invoke-Command -ComputerName $serverName -SessionOption $sessionOption -ScriptBlock {
-            param($JunctionPath, $TargetPath)
+        $invokeParams = @{
+            ComputerName  = $serverName
+            SessionOption = $sessionOption
+            ArgumentList  = @($junctionLocalPath, $vssTargetPath)
+            ErrorAction   = 'Stop'
+            ScriptBlock   = {
+                param($JunctionPath, $TargetPath)
 
-            # Check if junction already exists
-            if (Test-Path $JunctionPath) {
-                return @{ Success = $false; ErrorMessage = "Junction path already exists: $JunctionPath" }
+                # Check if junction already exists
+                if (Test-Path $JunctionPath) {
+                    return @{ Success = $false; ErrorMessage = "Junction path already exists: $JunctionPath" }
+                }
+
+                # Create junction using cmd mklink /J
+                $output = cmd /c "mklink /J `"$JunctionPath`" `"$TargetPath`"" 2>&1
+
+                if ($LASTEXITCODE -ne 0) {
+                    return @{ Success = $false; ErrorMessage = "mklink failed: $output" }
+                }
+
+                # Verify
+                if (-not (Test-Path $JunctionPath)) {
+                    return @{ Success = $false; ErrorMessage = "Junction created but not accessible" }
+                }
+
+                return @{ Success = $true; JunctionPath = $JunctionPath }
             }
-
-            # Create junction using cmd mklink /J
-            $output = cmd /c "mklink /J `"$JunctionPath`" `"$TargetPath`"" 2>&1
-
-            if ($LASTEXITCODE -ne 0) {
-                return @{ Success = $false; ErrorMessage = "mklink failed: $output" }
-            }
-
-            # Verify
-            if (-not (Test-Path $JunctionPath)) {
-                return @{ Success = $false; ErrorMessage = "Junction created but not accessible" }
-            }
-
-            return @{ Success = $true; JunctionPath = $JunctionPath }
-        } -ArgumentList $junctionLocalPath, $vssTargetPath -ErrorAction Stop
+        }
+        # Add credential if provided (required for Session 0 scheduled tasks)
+        if ($Credential) {
+            $invokeParams['Credential'] = $Credential
+            Write-RobocurseLog -Message "Using explicit credentials for remote junction creation (user: $($Credential.UserName))" -Level 'Debug' -Component 'VSS'
+        }
+        $result = Invoke-Command @invokeParams
 
         if (-not $result.Success) {
             return New-OperationResult -Success $false -ErrorMessage "Failed to create remote junction: $($result.ErrorMessage)"
@@ -572,6 +643,9 @@ function Remove-RemoteVssJunction {
         The local path to the junction on the remote server
     .PARAMETER ServerName
         The remote server name
+    .PARAMETER Credential
+        Optional credential for remote session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult
     .EXAMPLE
@@ -583,7 +657,9 @@ function Remove-RemoteVssJunction {
         [string]$JunctionLocalPath,
 
         [Parameter(Mandatory)]
-        [string]$ServerName
+        [string]$ServerName,
+
+        [PSCredential]$Credential
     )
 
     Write-RobocurseLog -Message "Removing remote junction '$JunctionLocalPath' from '$ServerName'" -Level 'Debug' -Component 'VSS'
@@ -591,7 +667,12 @@ function Remove-RemoteVssJunction {
     try {
         # Use timeout to prevent indefinite hangs on slow or unreachable servers
         $sessionOption = New-PSSessionOption -OperationTimeout $script:RemoteOperationTimeoutMs -OpenTimeout $script:RemoteOperationTimeoutMs
-        $result = Invoke-Command -ComputerName $ServerName -SessionOption $sessionOption -ScriptBlock {
+        $invokeParams = @{
+            ComputerName  = $ServerName
+            SessionOption = $sessionOption
+            ErrorAction   = 'Stop'
+            ArgumentList  = $JunctionLocalPath
+            ScriptBlock   = {
             param($JunctionPath)
 
             if (-not (Test-Path $JunctionPath)) {
@@ -616,7 +697,14 @@ function Remove-RemoteVssJunction {
             }
 
             return @{ Success = $true }
-        } -ArgumentList $JunctionLocalPath -ErrorAction Stop
+            }
+        }
+        # Add credential if provided (required for Session 0 scheduled tasks)
+        if ($Credential) {
+            $invokeParams['Credential'] = $Credential
+            Write-RobocurseLog -Message "Using explicit credentials for remote junction removal (user: $($Credential.UserName))" -Level 'Debug' -Component 'VSS'
+        }
+        $result = Invoke-Command @invokeParams
 
         if (-not $result.Success) {
             return New-OperationResult -Success $false -ErrorMessage "Failed to remove remote junction: $($result.ErrorMessage)"
@@ -702,6 +790,9 @@ function Invoke-WithRemoteVssJunction {
     .PARAMETER ScriptBlock
         Code to execute. Receives $SourcePath parameter with the UNC path to the
         VSS junction that provides access to the snapshot.
+    .PARAMETER Credential
+        Optional credential for remote authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult with Data containing the scriptblock result
     .NOTES
@@ -724,7 +815,9 @@ function Invoke-WithRemoteVssJunction {
         [string]$UncPath,
 
         [Parameter(Mandatory)]
-        [scriptblock]$ScriptBlock
+        [scriptblock]$ScriptBlock,
+
+        [PSCredential]$Credential
     )
 
     $snapshot = $null
@@ -733,7 +826,7 @@ function Invoke-WithRemoteVssJunction {
     try {
         # Step 1: Create remote VSS snapshot
         Write-RobocurseLog -Message "Creating remote VSS snapshot for '$UncPath'" -Level 'Info' -Component 'VSS'
-        $snapshotResult = New-RemoteVssSnapshot -UncPath $UncPath
+        $snapshotResult = New-RemoteVssSnapshot -UncPath $UncPath -Credential $Credential
 
         if (-not $snapshotResult.Success) {
             return New-OperationResult -Success $false `
@@ -743,7 +836,7 @@ function Invoke-WithRemoteVssJunction {
         $snapshot = $snapshotResult.Data
 
         # Step 2: Create junction on remote server
-        $junctionResult = New-RemoteVssJunction -VssSnapshot $snapshot
+        $junctionResult = New-RemoteVssJunction -VssSnapshot $snapshot -Credential $Credential
         if (-not $junctionResult.Success) {
             return New-OperationResult -Success $false `
                 -ErrorMessage "Failed to create remote VSS junction: $($junctionResult.ErrorMessage)" `
@@ -774,7 +867,8 @@ function Invoke-WithRemoteVssJunction {
             Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
             $removeJunctionResult = Remove-RemoteVssJunction `
                 -JunctionLocalPath $junctionInfo.JunctionLocalPath `
-                -ServerName $junctionInfo.ServerName
+                -ServerName $junctionInfo.ServerName `
+                -Credential $Credential
             if (-not $removeJunctionResult.Success) {
                 Write-RobocurseLog -Message "Failed to cleanup remote junction: $($removeJunctionResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
             }
@@ -785,7 +879,8 @@ function Invoke-WithRemoteVssJunction {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot" -Level 'Info' -Component 'VSS'
             $removeSnapshotResult = Remove-RemoteVssSnapshot `
                 -ShadowId $snapshot.ShadowId `
-                -ServerName $snapshot.ServerName
+                -ServerName $snapshot.ServerName `
+                -Credential $Credential
             if (-not $removeSnapshotResult.Success) {
                 Write-RobocurseLog -Message "Failed to cleanup remote snapshot: $($removeSnapshotResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
             }
@@ -805,6 +900,9 @@ function Get-RemoteVssSnapshots {
         The remote server name to query
     .PARAMETER Volume
         Optional volume to filter (e.g., "D:"). If not specified, returns all.
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult with Data = array of snapshot objects
     .EXAMPLE
@@ -817,14 +915,24 @@ function Get-RemoteVssSnapshots {
         [string]$ServerName,
 
         [ValidatePattern('^[A-Za-z]:$')]
-        [string]$Volume
+        [string]$Volume,
+
+        [PSCredential]$Credential
     )
 
     Write-RobocurseLog -Message "Listing VSS snapshots on '$ServerName'$(if ($Volume) { " for volume $Volume" })" -Level 'Debug' -Component 'VSS'
 
     $cimSession = $null
     try {
-        $cimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+        # Use credential if provided (required for Session 0 scheduled tasks)
+        $cimParams = @{
+            ComputerName = $ServerName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $cimParams['Credential'] = $Credential
+        }
+        $cimSession = New-CimSession @cimParams
 
         $snapshots = Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy -ErrorAction Stop
 
@@ -925,6 +1033,9 @@ function Invoke-RemoteVssRetentionPolicy {
         Config object containing the snapshot registry.
     .PARAMETER ConfigPath
         Path to config file for saving after unregister.
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult with Data containing DeletedCount, KeptCount, Errors, ExternalCount
     .EXAMPLE
@@ -946,13 +1057,15 @@ function Invoke-RemoteVssRetentionPolicy {
         [PSCustomObject]$Config,
 
         [Parameter(Mandatory)]
-        [string]$ConfigPath
+        [string]$ConfigPath,
+
+        [PSCredential]$Credential
     )
 
     Write-RobocurseLog -Message "Applying VSS retention on '$ServerName' for $Volume (keep: $KeepCount)" -Level 'Info' -Component 'VSS'
 
     # Get current snapshots
-    $listResult = Get-RemoteVssSnapshots -ServerName $ServerName -Volume $Volume
+    $listResult = Get-RemoteVssSnapshots -ServerName $ServerName -Volume $Volume -Credential $Credential
     if (-not $listResult.Success) {
         return New-OperationResult -Success $false -ErrorMessage "Failed to list snapshots: $($listResult.ErrorMessage)"
     }
@@ -1002,7 +1115,7 @@ function Invoke-RemoteVssRetentionPolicy {
         $createdAt = $snapshot.CreatedAt
 
         if ($PSCmdlet.ShouldProcess("$shadowId on $ServerName (created $createdAt)", "Remove Remote VSS Snapshot")) {
-            $removeResult = Remove-RemoteVssSnapshot -ShadowId $shadowId -ServerName $ServerName
+            $removeResult = Remove-RemoteVssSnapshot -ShadowId $shadowId -ServerName $ServerName -Credential $Credential
             if ($removeResult.Success) {
                 $deletedCount++
                 Write-RobocurseLog -Message "Deleted remote snapshot $shadowId on '$ServerName'" -Level 'Debug' -Component 'VSS'
@@ -1050,6 +1163,9 @@ function Test-RemoteVssPrerequisites {
         Use this before deploying to a customer site to identify configuration issues.
     .PARAMETER ServerName
         The remote server to test
+    .PARAMETER Credential
+        Optional credential for remote authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .PARAMETER Detailed
         Show detailed output for each check
     .OUTPUTS
@@ -1065,6 +1181,8 @@ function Test-RemoteVssPrerequisites {
     param(
         [Parameter(Mandatory)]
         [string]$ServerName,
+
+        [PSCredential]$Credential,
 
         [switch]$Detailed
     )
@@ -1099,7 +1217,14 @@ function Test-RemoteVssPrerequisites {
     # Check 2: WinRM connectivity
     Write-Host "[2/5] Testing WinRM connectivity (port 5985/5986)..." -NoNewline
     try {
-        $wsmanTest = Test-WSMan -ComputerName $ServerName -ErrorAction Stop
+        $wsmanParams = @{
+            ComputerName = $ServerName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $wsmanParams['Credential'] = $Credential
+        }
+        $wsmanTest = Test-WSMan @wsmanParams
         Write-Host " PASS" -ForegroundColor Green
         $checks += [PSCustomObject]@{ Check = "WinRM Connectivity"; Status = "Pass"; Message = "WinRM is accessible" }
     }
@@ -1119,7 +1244,14 @@ function Test-RemoteVssPrerequisites {
     # Check 3: CIM session
     Write-Host "[3/5] Testing CIM session establishment..." -NoNewline
     try {
-        $cimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+        $cimParams = @{
+            ComputerName = $ServerName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $cimParams['Credential'] = $Credential
+        }
+        $cimSession = New-CimSession @cimParams
         Write-Host " PASS" -ForegroundColor Green
         $checks += [PSCustomObject]@{ Check = "CIM Session"; Status = "Pass"; Message = "CIM session established successfully" }
     }
@@ -1247,6 +1379,9 @@ function Clear-OrphanRemoteVssSnapshots {
 
         Only successfully deleted snapshots are removed from the tracking file.
         Failed deletions are retained for retry on the next cleanup attempt.
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         Number of remote snapshots cleaned up
     .EXAMPLE
@@ -1257,7 +1392,9 @@ function Clear-OrphanRemoteVssSnapshots {
         # Shows what snapshots would be cleaned without actually removing them
     #>
     [CmdletBinding(SupportsShouldProcess)]
-    param()
+    param(
+        [PSCredential]$Credential
+    )
 
     # Skip if not Windows
     if (-not (Test-IsWindowsPlatform)) {
@@ -1280,7 +1417,7 @@ function Clear-OrphanRemoteVssSnapshots {
             # Only process remote snapshots (IsRemote = $true)
             if ($snapshot.IsRemote -eq $true -and $snapshot.ShadowId -and $snapshot.ServerName) {
                 if ($PSCmdlet.ShouldProcess("$($snapshot.ShadowId) on $($snapshot.ServerName)", "Remove orphan remote VSS snapshot")) {
-                    $removeResult = Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName
+                    $removeResult = Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName -Credential $Credential
                     if ($removeResult.Success) {
                         Write-RobocurseLog -Message "Cleaned up orphan remote VSS snapshot: $($snapshot.ShadowId) on $($snapshot.ServerName)" -Level 'Info' -Component 'VSS'
                         $cleaned++

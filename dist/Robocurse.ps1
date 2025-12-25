@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-22 13:08:12
+    Built: 2025-12-24 20:20:16
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -4695,7 +4695,10 @@ function Start-RobocopyJob {
     $psi.Arguments = $argList -join ' '
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
-    $psi.RedirectStandardOutput = $false  # Using /LOG and /TEE instead
+    # Capture stdout for reliable stat parsing - avoids file system flush race conditions
+    # that occur in Session 0 (scheduled tasks) where log file may not be fully written
+    # when process exits. Stdout is immediately available in memory when process completes.
+    $psi.RedirectStandardOutput = $true
     # Note: Not redirecting stderr - robocopy rarely writes to stderr,
     # and redirecting without reading can cause deadlock on large error output.
     # Robocopy errors are captured in the log file via /LOG and exit codes.
@@ -4707,12 +4710,17 @@ function Start-RobocopyJob {
     # Start the process
     $process = [System.Diagnostics.Process]::Start($psi)
 
+    # Start async stdout read immediately to prevent buffer overflow
+    # Both Wait-RobocopyJob and Complete-RobocopyJob will use this
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+
     return [PSCustomObject]@{
         Process = $process
         Chunk = $Chunk
         StartTime = [datetime]::Now
         LogPath = $LogPath
         DryRun = $DryRun.IsPresent
+        StdoutTask = $stdoutTask
     }
 }
 
@@ -4802,20 +4810,32 @@ function Get-RobocopyExitMeaning {
 function ConvertFrom-RobocopyLog {
     <#
     .SYNOPSIS
-        Parses a robocopy log file for progress and statistics
+        Parses robocopy output for progress and statistics
+    .DESCRIPTION
+        Extracts file counts, byte counts, speed metrics, and error messages from robocopy
+        output using locale-independent patterns. Supports both direct content parsing (from
+        captured stdout) and file-based reading. Prefer passing Content parameter over LogPath
+        for reliability - captured stdout avoids file system flush race conditions that occur
+        in Session 0 scheduled tasks where log files may not be fully written when the
+        robocopy process exits.
     .PARAMETER LogPath
-        Path to log file
+        Path to log file. Used if Content not provided.
+    .PARAMETER Content
+        Raw robocopy output content. When provided, LogPath is ignored for reading.
+        This avoids file system flush race conditions in Session 0 scheduled tasks.
     .PARAMETER TailLines
         Number of lines to read from end (for in-progress parsing)
     .OUTPUTS
         PSCustomObject with file counts, byte counts, speed, and current file
     .NOTES
-        Handles file locking by using FileShare.ReadWrite when robocopy has the file open
+        Prefer passing Content (captured stdout) over LogPath for reliability.
+        File-based reading can fail in Session 0 due to buffering delays.
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
         [string]$LogPath,
+
+        [string]$Content,
 
         [int]$TailLines = 100
     )
@@ -4838,30 +4858,44 @@ function ConvertFrom-RobocopyLog {
         ErrorMessage = $null  # Extracted error message(s) from robocopy output
     }
 
-    # Check if log file exists
-    if (-not (Test-Path $LogPath)) {
-        $result.ParseWarning = "Log file does not exist: $LogPath"
-        return $result
+    # Get content from parameter or read from file
+    if ([string]::IsNullOrEmpty($Content)) {
+        # No content provided, read from file
+        if ([string]::IsNullOrEmpty($LogPath)) {
+            $result.ParseWarning = "Neither Content nor LogPath provided"
+            return $result
+        }
+
+        if (-not (Test-Path $LogPath)) {
+            $result.ParseWarning = "Log file does not exist: $LogPath"
+            return $result
+        }
+
+        # Use FileShare.ReadWrite to allow robocopy to continue writing while we read
+        # This prevents ERROR 32 (sharing violation) when progress polling reads active log files
+        $fs = $null
+        $sr = $null
+        try {
+            $fs = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $sr = New-Object System.IO.StreamReader($fs)
+            $Content = $sr.ReadToEnd()
+        }
+        catch {
+            # Log at Debug level - file lock during progress polling is expected behavior
+            # The ParseWarning in the result object surfaces actual issues to callers
+            $result.ParseWarning = "Failed to read log file: $($_.Exception.Message)"
+            Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level 'Debug' -Component 'Robocopy'
+            return $result
+        }
+        finally {
+            if ($sr) { $sr.Dispose() }
+            if ($fs) { $fs.Dispose() }
+        }
     }
 
-    # Read log file with ReadWrite sharing to handle file locking
-    # Use try-finally to ensure proper disposal even if ReadToEnd() throws
-    $fs = $null
-    $sr = $null
-    try {
-        $fs = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        $sr = New-Object System.IO.StreamReader($fs)
-        $content = $sr.ReadToEnd()
-    }
-    catch {
-        # If we can't read the file, log the warning and return zeros
-        $result.ParseWarning = "Failed to read log file: $($_.Exception.Message)"
-        Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level 'Warning' -Component 'Robocopy'
+    if ([string]::IsNullOrEmpty($Content)) {
+        $result.ParseWarning = "Content was empty"
         return $result
-    }
-    finally {
-        if ($sr) { $sr.Dispose() }
-        if ($fs) { $fs.Dispose() }
     }
 
     # Parse summary statistics using locale-independent patterns
@@ -4879,7 +4913,7 @@ function ConvertFrom-RobocopyLog {
     #   - We normalize by replacing commas with periods and removing spaces in numbers
 
     try {
-        $lines = $content -split "`n"
+        $lines = $Content -split "`n"
 
         # Find all lines that match the stats pattern: "label : numbers"
         # The last 3 such lines should be Dirs, Files, Bytes
@@ -4923,6 +4957,7 @@ function ConvertFrom-RobocopyLog {
         if ($statsLines.Count -ge 3) {
             # Mark as successful parse (we found stats lines)
             $result.ParseSuccess = $true
+            Write-RobocurseLog -Message "Found $($statsLines.Count) stats lines in robocopy log" -Level 'Debug' -Component 'Robocopy'
 
             # Last 3 lines: Dirs, Files, Bytes (in order)
             $dirsLine = $statsLines[$statsLines.Count - 3]
@@ -4941,6 +4976,10 @@ function ConvertFrom-RobocopyLog {
                 $result.FilesCopied = [int](& $parseLocaleNumber $matches[2])
                 $result.FilesSkipped = [int](& $parseLocaleNumber $matches[3])
                 $result.FilesFailed = [int](& $parseLocaleNumber $matches[5])
+                Write-RobocurseLog -Message "Parsed stats - FilesCopied: $($result.FilesCopied), FilesSkipped: $($result.FilesSkipped), FilesFailed: $($result.FilesFailed)" -Level 'Debug' -Component 'Robocopy'
+            }
+            else {
+                Write-RobocurseLog -Message "Files line did not match stats pattern. Line: '$filesLine'" -Level 'Warning' -Component 'Robocopy'
             }
 
             # Parse Bytes line - need to handle unit suffixes (k, m, g, t)
@@ -4959,11 +4998,14 @@ function ConvertFrom-RobocopyLog {
                 }
             }
         }
+        else {
+            Write-RobocurseLog -Message "No stats lines found in robocopy log (found $($statsLines.Count), need 3). Log path: $LogPath" -Level 'Warning' -Component 'Robocopy'
+        }
 
         # Parse Speed line - look for numeric pattern followed by common speed units
         # Robocopy outputs speed in format like "50.123 MegaBytes/min" or "2621440 Bytes/sec"
         # The unit names may be localized but the numeric pattern is consistent
-        if ($content -match '([\d.]+)\s+(Mega)?Bytes[/\s]*(min|sec)') {
+        if ($Content -match '([\d.]+)\s+(Mega)?Bytes[/\s]*(min|sec)') {
             $speedValue = $matches[1]
             $isMega = $matches[2] -eq 'Mega'
             $timeUnit = $matches[3]
@@ -4974,7 +5016,7 @@ function ConvertFrom-RobocopyLog {
         # Robocopy progress lines have: indicator (may contain spaces), size, path
         # Format: "  New File  1024  path\file.txt" or "  *EXTRA File  100  path\file.txt"
         # Key insight: look for a number followed by a backslash path
-        $progressMatches = [regex]::Matches($content, '([\d.]+)\s*[kmgt]?\s+(\S*[\\\/].+)$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+        $progressMatches = [regex]::Matches($Content, '([\d.]+)\s*[kmgt]?\s+(\S*[\\\/].+)$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
         if ($progressMatches.Count -gt 0) {
             $lastMatch = $progressMatches[$progressMatches.Count - 1]
             $potentialPath = $lastMatch.Groups[2].Value.Trim()
@@ -4993,11 +5035,11 @@ function ConvertFrom-RobocopyLog {
     # If we didn't find stats lines, this might be an in-progress job or unexpected format
     if (-not $result.ParseSuccess) {
         # Only warn if file had content (empty file is normal for just-started jobs)
-        if ($content -and $content.Length -gt 100) {
+        if ($Content -and $Content.Length -gt 100) {
             if (-not $result.ParseWarning) {
                 $result.ParseWarning = "No statistics found in log file (job may be in progress or log format unexpected)"
             }
-            Write-RobocurseLog "Could not extract statistics from robocopy log '$LogPath' ($($content.Length) bytes) - job may still be in progress" `
+            Write-RobocurseLog "Could not extract statistics from robocopy log '$LogPath' ($($Content.Length) bytes) - job may still be in progress" `
                 -Level 'Debug' -Component 'Robocopy'
         }
     }
@@ -5009,9 +5051,9 @@ function ConvertFrom-RobocopyLog {
     #   - "ERROR 2 (0x00000002) The system cannot find the file specified."
     #   - "ERROR 3 (0x00000003) The system cannot find the path specified."
     #   - "ERROR : xxx" (generic error lines)
-    if ($content) {
+    if ($Content) {
         $errorLines = @()
-        $lines = $content -split "`r?`n"
+        $lines = $Content -split "`r?`n"
         foreach ($line in $lines) {
             # Match ERROR followed by error code or message
             if ($line -match '\bERROR\s+(\d+|:)\s*(.*)') {
@@ -5070,7 +5112,11 @@ function Wait-RobocopyJob {
     )
 
     # Wait for process to complete with proper resource cleanup
+    $capturedOutput = $null
     try {
+        # Use stdout task from Start-RobocopyJob (already reading async)
+        $stdoutTask = $Job.StdoutTask
+
         if ($TimeoutSeconds -gt 0) {
             $completed = $Job.Process.WaitForExit($TimeoutSeconds * 1000)
             if (-not $completed) {
@@ -5082,6 +5128,11 @@ function Wait-RobocopyJob {
             $Job.Process.WaitForExit()
         }
 
+        # Get captured stdout - synchronous after process exit
+        $capturedOutput = if ($stdoutTask) {
+            $stdoutTask.GetAwaiter().GetResult()
+        } else { $null }
+
         # Calculate duration
         $duration = [datetime]::Now - $Job.StartTime
 
@@ -5089,8 +5140,15 @@ function Wait-RobocopyJob {
         $exitCode = $Job.Process.ExitCode
         $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
 
-        # Parse final statistics from log
-        $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
+        # Parse final statistics from captured stdout (avoids file flush race condition)
+        # Fall back to log file if stdout capture failed
+        $finalStats = if ($capturedOutput) {
+            ConvertFrom-RobocopyLog -Content $capturedOutput -LogPath $Job.LogPath
+        }
+        else {
+            Write-RobocurseLog -Message "No stdout captured, falling back to log file: $($Job.LogPath)" -Level 'Warning' -Component 'Robocopy'
+            ConvertFrom-RobocopyLog -LogPath $Job.LogPath
+        }
 
         return [PSCustomObject]@{
             ExitCode = $exitCode
@@ -6184,6 +6242,46 @@ namespace Robocurse
             set { lock (_lock) { _lastSnapshotResult = value; } }
         }
 
+        // =====================================================================================
+        // NETWORK PATH MAPPINGS (Session 0 Scheduled Task Fix)
+        // =====================================================================================
+        // WHY: Scheduled tasks run in Session 0 where NTLM doesn't delegate credentials.
+        // IP-based UNC paths can't use Kerberos. Result: "Access Denied" on network shares.
+        // FIX: Mount UNC paths to drive letters to force explicit SMB authentication.
+        // See: src/Robocurse/Public/NetworkMapping.ps1 for full explanation.
+        // Stores array of mapping PSCustomObjects with DriveLetter, Root, OriginalPath, MappedPath
+        private object _currentNetworkMappings;
+        public object CurrentNetworkMappings
+        {
+            get { lock (_lock) { return _currentNetworkMappings; } }
+            set { lock (_lock) { _currentNetworkMappings = value; } }
+        }
+
+        // Translated source path (using mapped drive letter if UNC was mounted)
+        private string _networkMappedSource;
+        public string NetworkMappedSource
+        {
+            get { lock (_lock) { return _networkMappedSource; } }
+            set { lock (_lock) { _networkMappedSource = value; } }
+        }
+
+        // Translated destination path (using mapped drive letter if UNC was mounted)
+        private string _networkMappedDest;
+        public string NetworkMappedDest
+        {
+            get { lock (_lock) { return _networkMappedDest; } }
+            set { lock (_lock) { _networkMappedDest = value; } }
+        }
+
+        // Credential for network operations (PSCredential from PowerShell)
+        // Used for remote VSS operations in Session 0 scheduled tasks
+        private object _networkCredential;
+        public object NetworkCredential
+        {
+            get { lock (_lock) { return _networkCredential; } }
+            set { lock (_lock) { _networkCredential = value; } }
+        }
+
         // Thread-safe collections (no additional locking needed)
         public ConcurrentQueue<object> ChunkQueue { get; private set; }
         public ConcurrentDictionary<int, object> ActiveJobs { get; private set; }
@@ -6789,6 +6887,451 @@ function Remove-HealthCheckStatus {
 
 #endregion
 
+#region ==================== CREDENTIALSTORAGE ====================
+
+# Secure storage for network share credentials using DPAPI (Export-Clixml)
+#
+# =====================================================================================
+# SECURITY MODEL - IMPORTANT
+# =====================================================================================
+# This uses Export-Clixml which encrypts credentials via Windows DPAPI.
+# DPAPI encryption is bound to:
+#   1. The USER ACCOUNT that created the credential file
+#   2. The MACHINE where it was created
+#
+# ONLY the same user on the same machine can decrypt these credentials.
+#
+# IMPLICATIONS:
+#   - The credential file MUST be created by the same user that runs scheduled tasks
+#   - If the scheduled task runs as "DOMAIN\ServiceAccount", credentials must be
+#     saved while logged in as "DOMAIN\ServiceAccount"
+#   - GUI can save credentials if running as the same account
+#   - If the service account changes, credentials must be re-saved
+#
+# This is the MOST SECURE option for storing credentials - far better than:
+#   - Machine-bound keys (any process on machine can decrypt)
+#   - Plaintext in config files
+#   - Environment variables
+#
+# Reference: https://docs.microsoft.com/en-us/powershell/module/microsoft.powershell.utility/export-clixml
+# =====================================================================================
+
+function Get-CredentialStoragePath {
+    <#
+    .SYNOPSIS
+        Gets the path to credential storage directory
+    .PARAMETER ConfigPath
+        Path to the Robocurse config file (credentials stored alongside in .credentials subfolder)
+    .OUTPUTS
+        Full path to credentials directory
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    $configDir = Split-Path $ConfigPath -Parent
+    if ([string]::IsNullOrEmpty($configDir)) {
+        $configDir = $PWD.Path
+    }
+    return Join-Path $configDir ".credentials"
+}
+
+function Save-NetworkCredential {
+    <#
+    .SYNOPSIS
+        Saves credentials for a profile using DPAPI encryption (Export-Clixml)
+    .DESCRIPTION
+        Stores PSCredential encrypted with DPAPI. The credential can ONLY be
+        decrypted by the same user on the same machine that created it.
+    .PARAMETER ProfileName
+        Name of the profile (used as filename)
+    .PARAMETER Credential
+        PSCredential object to save
+    .PARAMETER ConfigPath
+        Path to the Robocurse config file (credentials stored alongside)
+    .OUTPUTS
+        OperationResult
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory)]
+        [PSCredential]$Credential,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    try {
+        $credDir = Get-CredentialStoragePath -ConfigPath $ConfigPath
+
+        # Create credentials directory if it doesn't exist
+        if (-not (Test-Path $credDir)) {
+            New-Item -ItemType Directory -Path $credDir -Force | Out-Null
+            Write-RobocurseLog -Message "Created credential storage directory: $credDir" -Level 'Debug' -Component 'CredentialStorage'
+        }
+
+        # Sanitize profile name for filename
+        $safeProfileName = $ProfileName -replace '[\\/:*?"<>|]', '_'
+        $credPath = Join-Path $credDir "$safeProfileName.credential"
+
+        # Export using DPAPI (user+machine bound)
+        $Credential | Export-Clixml -Path $credPath -Force
+
+        Write-RobocurseLog -Message "Saved network credentials for profile '$ProfileName' (user: $($Credential.UserName))" -Level 'Info' -Component 'CredentialStorage'
+
+        return New-OperationResult -Success $true -Data $credPath
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to save credentials for '$ProfileName': $($_.Exception.Message)" -Level 'Error' -Component 'CredentialStorage'
+        return New-OperationResult -Success $false -ErrorMessage "Failed to save credentials: $($_.Exception.Message)" -ErrorRecord $_
+    }
+}
+
+function Get-NetworkCredential {
+    <#
+    .SYNOPSIS
+        Loads stored credentials for a profile
+    .DESCRIPTION
+        Retrieves PSCredential encrypted with DPAPI. Will ONLY succeed if called
+        by the same user on the same machine that created the credential.
+    .PARAMETER ProfileName
+        Name of the profile
+    .PARAMETER ConfigPath
+        Path to the Robocurse config file
+    .OUTPUTS
+        PSCredential or $null if not found or decryption fails
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    $credDir = Get-CredentialStoragePath -ConfigPath $ConfigPath
+    $safeProfileName = $ProfileName -replace '[\\/:*?"<>|]', '_'
+    $credPath = Join-Path $credDir "$safeProfileName.credential"
+
+    if (-not (Test-Path $credPath)) {
+        Write-RobocurseLog -Message "No stored credentials found for profile '$ProfileName'" -Level 'Debug' -Component 'CredentialStorage'
+        return $null
+    }
+
+    try {
+        $credential = Import-Clixml -Path $credPath
+        Write-RobocurseLog -Message "Loaded network credentials for profile '$ProfileName' (user: $($credential.UserName))" -Level 'Debug' -Component 'CredentialStorage'
+        return $credential
+    }
+    catch {
+        # DPAPI decryption fails if wrong user or different machine
+        Write-RobocurseLog -Message "Failed to load credentials for '$ProfileName': $($_.Exception.Message). This usually means the credential was created by a different user or on a different machine." -Level 'Warning' -Component 'CredentialStorage'
+        return $null
+    }
+}
+
+function Remove-NetworkCredential {
+    <#
+    .SYNOPSIS
+        Removes stored credentials for a profile
+    .PARAMETER ProfileName
+        Name of the profile
+    .PARAMETER ConfigPath
+        Path to the Robocurse config file
+    .OUTPUTS
+        OperationResult
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    $credDir = Get-CredentialStoragePath -ConfigPath $ConfigPath
+    $safeProfileName = $ProfileName -replace '[\\/:*?"<>|]', '_'
+    $credPath = Join-Path $credDir "$safeProfileName.credential"
+
+    if (Test-Path $credPath) {
+        try {
+            Remove-Item $credPath -Force
+            Write-RobocurseLog -Message "Removed network credentials for profile '$ProfileName'" -Level 'Info' -Component 'CredentialStorage'
+            return New-OperationResult -Success $true
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to remove credentials for '$ProfileName': $($_.Exception.Message)" -Level 'Error' -Component 'CredentialStorage'
+            return New-OperationResult -Success $false -ErrorMessage "Failed to remove credentials: $($_.Exception.Message)" -ErrorRecord $_
+        }
+    }
+    else {
+        # Not an error - credential didn't exist
+        return New-OperationResult -Success $true
+    }
+}
+
+function Test-NetworkCredentialExists {
+    <#
+    .SYNOPSIS
+        Checks if credentials exist for a profile (doesn't try to decrypt)
+    .PARAMETER ProfileName
+        Name of the profile
+    .PARAMETER ConfigPath
+        Path to the Robocurse config file
+    .OUTPUTS
+        Boolean
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName,
+
+        [Parameter(Mandatory)]
+        [string]$ConfigPath
+    )
+
+    $credDir = Get-CredentialStoragePath -ConfigPath $ConfigPath
+    $safeProfileName = $ProfileName -replace '[\\/:*?"<>|]', '_'
+    $credPath = Join-Path $credDir "$safeProfileName.credential"
+
+    return Test-Path $credPath
+}
+
+#endregion
+
+#region ==================== NETWORKMAPPING ====================
+
+# Maps UNC paths to drive letters for reliable network access in Session 0 scheduled tasks
+#
+# =====================================================================================
+# WHY THIS EXISTS - DO NOT REMOVE
+# =====================================================================================
+# Windows Task Scheduler runs tasks in Session 0 (non-interactive, isolated session).
+# When accessing SMB/UNC shares via IP address (e.g., \\192.168.1.1\share):
+#   1. Kerberos authentication CANNOT work (requires hostname for SPN lookup)
+#   2. Windows falls back to NTLM authentication
+#   3. NTLM does NOT properly delegate credentials in Session 0
+#   4. Result: SMB server sees ANONYMOUS LOGON -> Access Denied
+#
+# SOLUTION: Explicitly mount UNC paths to drive letters using New-PSDrive.
+# This forces Windows to establish a proper authenticated SMB session.
+#
+# Without this mounting:
+#   - GUI mode (user session): Works fine - user's credentials are available
+#   - Scheduled task (Session 0): FAILS with "Access Denied" on network shares
+#
+# With this mounting:
+#   - Both modes work because we force explicit SMB connection establishment
+#
+# Reference: https://duffney.io (scheduled task network access patterns)
+# =====================================================================================
+
+function Get-UncRoot {
+    <#
+    .SYNOPSIS
+        Extracts the \\server\share root from a UNC path
+    .PARAMETER UncPath
+        Full UNC path (e.g., \\192.168.1.1\share\subfolder\file.txt)
+    .OUTPUTS
+        The root portion (e.g., \\192.168.1.1\share)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$UncPath
+    )
+
+    if ($UncPath -match '^(\\\\[^\\]+\\[^\\]+)') {
+        return $Matches[1]
+    }
+    return $UncPath
+}
+
+function Mount-SingleNetworkPath {
+    <#
+    .SYNOPSIS
+        Mounts a single UNC path to an available drive letter
+    .PARAMETER UncPath
+        UNC path to mount
+    .PARAMETER Credential
+        Optional PSCredential for authentication (required for Session 0 scheduled tasks)
+    .OUTPUTS
+        PSCustomObject with DriveLetter, Root, OriginalPath, MappedPath
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$UncPath,
+
+        [PSCredential]$Credential
+    )
+
+    # Extract \\server\share root
+    $root = Get-UncRoot $UncPath
+    $remainder = $UncPath.Substring($root.Length)
+
+    # Clean up stale mapping to same root (from crashed previous runs)
+    $existingDrive = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayRoot -eq $root }
+    if ($existingDrive) {
+        Write-RobocurseLog -Message "Removing stale mapping $($existingDrive.Name): to '$root'" -Level 'Debug' -Component 'NetworkMapping'
+        Remove-PSDrive -Name $existingDrive.Name -Force -ErrorAction SilentlyContinue
+    }
+
+    # Find available letter (Z down to D)
+    $used = @((Get-PSDrive -PSProvider FileSystem).Name)
+    $letter = [char[]](90..68) | Where-Object { [string]$_ -notin $used } | Select-Object -First 1
+    if (-not $letter) {
+        throw "No available drive letters for network mapping"
+    }
+
+    # Mount with or without explicit credentials
+    # With credential: Required for Session 0 scheduled tasks (NTLM doesn't delegate in Session 0)
+    # Without credential: Works in interactive sessions where user credentials are available
+    #
+    # CRITICAL: -Persist is REQUIRED for robocopy.exe to see the drive!
+    # Without -Persist, New-PSDrive creates a PowerShell-only drive invisible to external processes.
+    if ($Credential) {
+        Write-RobocurseLog -Message "Mounting '$root' as $letter`: with explicit credentials (user: $($Credential.UserName))" -Level 'Debug' -Component 'NetworkMapping'
+        New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Credential $Credential -Scope Global -Persist -ErrorAction Stop | Out-Null
+    }
+    else {
+        Write-RobocurseLog -Message "Mounting '$root' as $letter`: (using session credentials)" -Level 'Debug' -Component 'NetworkMapping'
+        New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Scope Global -Persist -ErrorAction Stop | Out-Null
+    }
+
+    # =====================================================================================
+    # VERIFY THE MOUNT ACTUALLY WORKS
+    # =====================================================================================
+    # New-PSDrive can succeed without actually verifying SMB connectivity (it's lazy).
+    # We MUST verify the drive is accessible before returning, otherwise robocopy will
+    # fail with "ERROR 3 (path not found)" even though the mount appeared to succeed.
+    # =====================================================================================
+    $drivePath = "${letter}:\"
+    Write-RobocurseLog -Message "Verifying mount accessibility: $drivePath" -Level 'Debug' -Component 'NetworkMapping'
+
+    try {
+        # Force enumeration to verify SMB connection actually works
+        $null = Get-ChildItem -Path $drivePath -ErrorAction Stop | Select-Object -First 1
+        Write-RobocurseLog -Message "Mount verified accessible: $drivePath" -Level 'Debug' -Component 'NetworkMapping'
+    }
+    catch {
+        # Mount appeared to work but drive isn't accessible - clean up and throw
+        Write-RobocurseLog -Message "Mount verification FAILED for $drivePath`: $($_.Exception.Message)" -Level 'Error' -Component 'NetworkMapping'
+        Remove-PSDrive -Name $letter -Force -ErrorAction SilentlyContinue
+        throw "Network mount to '$root' created but drive $drivePath is not accessible: $($_.Exception.Message)"
+    }
+
+    return [PSCustomObject]@{
+        DriveLetter = [string]$letter
+        Root        = $root
+        OriginalPath = $UncPath
+        MappedPath  = "${letter}:$remainder"
+    }
+}
+
+function Mount-NetworkPaths {
+    <#
+    .SYNOPSIS
+        Mounts UNC paths to drive letters for reliable network access
+    .DESCRIPTION
+        Maps source and/or destination UNC paths to drive letters.
+        If source and destination share the same \\server\share root, reuses the mapping.
+
+        CREDENTIAL HANDLING:
+        - With -Credential: Uses explicit credentials (required for Session 0 scheduled tasks)
+        - Without -Credential: Uses current session credentials (works in interactive sessions)
+    .PARAMETER SourcePath
+        Source path (may be UNC or local)
+    .PARAMETER DestinationPath
+        Destination path (may be UNC or local)
+    .PARAMETER Credential
+        Optional PSCredential for authentication. Required for scheduled tasks running
+        in Session 0 where NTLM doesn't delegate credentials properly.
+    .OUTPUTS
+        Hashtable with Mappings array, translated SourcePath and DestinationPath
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SourcePath,
+
+        [Parameter(Mandatory)]
+        [string]$DestinationPath,
+
+        [PSCredential]$Credential
+    )
+
+    $mappings = @()
+    $translatedSource = $SourcePath
+    $translatedDest = $DestinationPath
+
+    # Mount source if UNC
+    if ($SourcePath -match '^\\\\') {
+        $mapping = Mount-SingleNetworkPath -UncPath $SourcePath -Credential $Credential
+        $mappings += $mapping
+        $translatedSource = $mapping.MappedPath
+        Write-RobocurseLog -Message "Mapped source '$SourcePath' to '$translatedSource'" -Level 'Info' -Component 'NetworkMapping'
+    }
+
+    # Mount destination if UNC (may share same root as source)
+    if ($DestinationPath -match '^\\\\') {
+        $destRoot = Get-UncRoot $DestinationPath
+        $existing = $mappings | Where-Object { $_.Root -eq $destRoot }
+
+        if ($existing) {
+            # Reuse existing mapping for same root
+            $remainder = $DestinationPath.Substring($destRoot.Length)
+            $translatedDest = "$($existing.DriveLetter):$remainder"
+            Write-RobocurseLog -Message "Reusing source mapping for destination: '$translatedDest'" -Level 'Debug' -Component 'NetworkMapping'
+        }
+        else {
+            $mapping = Mount-SingleNetworkPath -UncPath $DestinationPath -Credential $Credential
+            $mappings += $mapping
+            $translatedDest = $mapping.MappedPath
+            Write-RobocurseLog -Message "Mapped destination '$DestinationPath' to '$translatedDest'" -Level 'Info' -Component 'NetworkMapping'
+        }
+    }
+
+    return @{
+        Mappings        = $mappings
+        SourcePath      = $translatedSource
+        DestinationPath = $translatedDest
+    }
+}
+
+function Dismount-NetworkPaths {
+    <#
+    .SYNOPSIS
+        Removes drive mappings created by Mount-NetworkPaths
+    .PARAMETER Mappings
+        Array of mapping objects from Mount-NetworkPaths
+    #>
+    [CmdletBinding()]
+    param(
+        [array]$Mappings
+    )
+
+    foreach ($mapping in $Mappings) {
+        try {
+            Remove-PSDrive -Name $mapping.DriveLetter -Force -ErrorAction Stop
+            Write-RobocurseLog -Message "Unmapped $($mapping.DriveLetter): from '$($mapping.Root)'" -Level 'Debug' -Component 'NetworkMapping'
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to unmount $($mapping.DriveLetter): $($_.Exception.Message)" -Level 'Warning' -Component 'NetworkMapping'
+        }
+    }
+}
+
+#endregion
+
 #region ==================== JOBMANAGEMENT ====================
 
 # Chunk job execution, retry logic, and profile management
@@ -6978,6 +7521,8 @@ function Invoke-ProfileSnapshots {
         The full configuration object (for computing effective retention)
     .PARAMETER ConfigPath
         Path to the config file (for saving registry updates)
+    .PARAMETER State
+        Optional OrchestrationState object for updating GUI status
     .OUTPUTS
         OperationResult with Data containing:
         - SourceSnapshot: snapshot info or $null
@@ -6994,7 +7539,10 @@ function Invoke-ProfileSnapshots {
         [PSCustomObject]$Config,
 
         [Parameter(Mandatory)]
-        [string]$ConfigPath
+        [string]$ConfigPath,
+
+        [Parameter()]
+        [object]$State
     )
 
     $results = @{
@@ -7008,6 +7556,7 @@ function Invoke-ProfileSnapshots {
     # Source snapshot
     if ($Profile.SourceSnapshot -and $Profile.SourceSnapshot.PersistentEnabled) {
         $sourcePath = $Profile.Source
+        if ($State) { $State.CurrentActivity = "Creating source snapshot..." }
         Write-RobocurseLog -Message "Creating source persistent snapshot for profile '$($Profile.Name)': $sourcePath" -Level 'Info' -Component 'Orchestration'
 
         $isRemote = $sourcePath -match '^\\\\[^\\]+\\[^\\]+'
@@ -7034,6 +7583,7 @@ function Invoke-ProfileSnapshots {
     # Destination snapshot
     if ($Profile.DestinationSnapshot -and $Profile.DestinationSnapshot.PersistentEnabled) {
         $destPath = $Profile.Destination
+        if ($State) { $State.CurrentActivity = "Creating destination snapshot..." }
         Write-RobocurseLog -Message "Creating destination persistent snapshot for profile '$($Profile.Name)': $destPath" -Level 'Info' -Component 'Orchestration'
 
         $isRemote = $destPath -match '^\\\\[^\\]+\\[^\\]+'
@@ -7169,6 +7719,9 @@ function Invoke-RemotePersistentSnapshot {
         The full configuration object (for computing effective retention)
     .PARAMETER ConfigPath
         Path to the config file (for saving registry updates)
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult with Data containing Snapshot and Retention info
     #>
@@ -7185,7 +7738,9 @@ function Invoke-RemotePersistentSnapshot {
         [PSCustomObject]$Config,
 
         [Parameter(Mandatory)]
-        [string]$ConfigPath
+        [string]$ConfigPath,
+
+        [PSCredential]$Credential
     )
 
     # Parse UNC path
@@ -7198,7 +7753,7 @@ function Invoke-RemotePersistentSnapshot {
     $shareName = $components.ShareName
 
     # Get share's local path to determine volume
-    $shareLocalPath = Get-RemoteShareLocalPath -ServerName $serverName -ShareName $shareName
+    $shareLocalPath = Get-RemoteShareLocalPath -ServerName $serverName -ShareName $shareName -Credential $Credential
     if (-not $shareLocalPath) {
         return New-OperationResult -Success $false -ErrorMessage "Cannot determine local path for share '$shareName' on '$serverName'"
     }
@@ -7219,7 +7774,7 @@ function Invoke-RemotePersistentSnapshot {
     # Step 1: Enforce retention (only our registered snapshots)
     # Use KeepCount-1 to make room for the new snapshot we're about to create
     $retentionTarget = [Math]::Max(0, $keepCount - 1)
-    $retentionResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $retentionTarget -Config $Config -ConfigPath $ConfigPath
+    $retentionResult = Invoke-RemoteVssRetentionPolicy -ServerName $serverName -Volume $volume -KeepCount $retentionTarget -Config $Config -ConfigPath $ConfigPath -Credential $Credential
     $retentionInfo = $null
     if (-not $retentionResult.Success) {
         Write-RobocurseLog -Message "Remote retention failed: $($retentionResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
@@ -7236,7 +7791,7 @@ function Invoke-RemotePersistentSnapshot {
     }
 
     # Step 2: Create new persistent snapshot (skip tracking so it survives restarts)
-    $snapshotResult = New-RemoteVssSnapshot -UncPath $Path -SkipTracking
+    $snapshotResult = New-RemoteVssSnapshot -UncPath $Path -SkipTracking -Credential $Credential
     if (-not $snapshotResult.Success) {
         return New-OperationResult -Success $false -ErrorMessage "Failed to create remote persistent snapshot: $($snapshotResult.ErrorMessage)"
     }
@@ -7344,20 +7899,78 @@ function Start-ProfileReplication {
     $state.ProfileStartTime = [datetime]::Now
     $state.ProfileStartFiles = $state.CompletedChunkFiles  # Snapshot for per-profile file counting
 
+    # =====================================================================================
+    # NETWORK PATH MOUNTING (Session 0 Scheduled Task Fix)
+    # =====================================================================================
+    # WHY: Scheduled tasks run in Session 0 where NTLM doesn't delegate credentials.
+    # IP-based UNC paths (\\192.168.1.1\share) can't use Kerberos (no SPN).
+    # Result: SMB server sees ANONYMOUS LOGON -> "Access Denied"
+    #
+    # FIX: Mount UNC paths to drive letters BEFORE any path access.
+    # This forces explicit SMB connection establishment with proper authentication.
+    # See: src/Robocurse/Public/NetworkMapping.ps1 for full explanation.
+    # =====================================================================================
+    $state.CurrentNetworkMappings = $null
+    $state.NetworkMappedSource = $null
+    $state.NetworkCredential = $null
+    $state.NetworkMappedDest = $null
+    $effectiveSource = $Profile.Source
+    $effectiveDest = $Profile.Destination
+    $networkCredential = $null  # Will be loaded if UNC paths are used
+
+    if ($Profile.Source -match '^\\\\' -or $Profile.Destination -match '^\\\\') {
+        try {
+            # Load stored credentials for this profile (required for Session 0 scheduled tasks)
+            # Credentials are saved via GUI when scheduling profiles with UNC paths
+            # Uses DPAPI encryption - only the same user on the same machine can decrypt
+            $networkCredential = Get-NetworkCredential -ProfileName $Profile.Name -ConfigPath $script:ConfigPath
+
+            if ($networkCredential) {
+                Write-RobocurseLog -Message "Using stored credentials for profile '$($Profile.Name)' (user: $($networkCredential.UserName))" -Level 'Info' -Component 'NetworkMapping'
+                $state.NetworkCredential = $networkCredential  # Store for cleanup operations
+            }
+            else {
+                Write-RobocurseLog -Message "No stored credentials for profile '$($Profile.Name)' - using session credentials (may fail in scheduled tasks)" -Level 'Debug' -Component 'NetworkMapping'
+            }
+
+            $mountResult = Mount-NetworkPaths -SourcePath $Profile.Source -DestinationPath $Profile.Destination -Credential $networkCredential
+            $state.CurrentNetworkMappings = $mountResult.Mappings
+            $state.NetworkMappedSource = $mountResult.SourcePath
+            $state.NetworkMappedDest = $mountResult.DestinationPath
+            $effectiveSource = $mountResult.SourcePath
+            $effectiveDest = $mountResult.DestinationPath
+            Write-RobocurseLog -Message "Network paths mounted: Source='$effectiveSource', Dest='$effectiveDest'" -Level 'Info' -Component 'NetworkMapping'
+        }
+        catch {
+            $errorMsg = "Profile '$($Profile.Name)' failed to mount network paths: $($_.Exception.Message)"
+            Write-RobocurseLog -Message $errorMsg -Level 'Error' -Component 'NetworkMapping'
+            $state.EnqueueError($errorMsg)
+            $script:CurrentPreflightError = $errorMsg
+            Complete-CurrentProfile
+            return
+        }
+    }
+
     # Pre-flight validation: Source path accessibility
-    $sourceCheck = Test-SourcePathAccessible -Path $Profile.Source
+    $sourceCheck = Test-SourcePathAccessible -Path $effectiveSource
     if (-not $sourceCheck.Success) {
         $errorMsg = "Profile '$($Profile.Name)' failed pre-flight check: $($sourceCheck.ErrorMessage)"
         Write-RobocurseLog -Message $errorMsg -Level 'Error' -Component 'Orchestrator'
         $state.EnqueueError($errorMsg)
+
+        # Track pre-flight error for inclusion in profile result
+        $script:CurrentPreflightError = $errorMsg
 
         # Skip to next profile instead of failing the whole run
         Complete-CurrentProfile
         return
     }
 
+    # Clear any previous pre-flight error (successful pre-flight)
+    $script:CurrentPreflightError = $null
+
     # Pre-flight validation: Destination disk space (warning only)
-    $diskCheck = Test-DestinationDiskSpace -Path $Profile.Destination
+    $diskCheck = Test-DestinationDiskSpace -Path $effectiveDest
     if (-not $diskCheck.Success) {
         Write-RobocurseLog -Message "Profile '$($Profile.Name)' disk space warning: $($diskCheck.ErrorMessage)" `
             -Level 'Warning' -Component 'Orchestrator'
@@ -7409,7 +8022,7 @@ function Start-ProfileReplication {
     }
 
     # Create persistent snapshots if enabled (separate from temp VSS for file copying)
-    $snapshotResult = Invoke-ProfileSnapshots -Profile $Profile -Config $script:Config -ConfigPath $script:ConfigPath
+    $snapshotResult = Invoke-ProfileSnapshots -Profile $Profile -Config $script:Config -ConfigPath $script:ConfigPath -State $state
     if (-not $snapshotResult.Success) {
         Write-RobocurseLog -Message "Persistent snapshot creation failed: $($snapshotResult.ErrorMessage)" -Level 'Warning' -Component 'Orchestration'
         # Don't fail the profile - persistent snapshots are optional enhancement
@@ -7425,10 +8038,17 @@ function Start-ProfileReplication {
     # Store snapshot results in state for later email reporting
     $state.LastSnapshotResult = $snapshotResult.Data
 
+    # Check for stop request after persistent snapshots
+    if ($state.StopRequested) {
+        Write-RobocurseLog -Message "Stop requested after persistent snapshots, aborting profile setup" -Level 'Info' -Component 'Orchestrator'
+        return
+    }
+
     # VSS snapshot handling - allows copying of locked files
     $state.CurrentVssSnapshot = $null
     $state.CurrentVssJunction = $null
-    $effectiveSource = $Profile.Source
+    # Use network-mapped source if available, otherwise original path
+    $effectiveSource = if ($state.NetworkMappedSource) { $state.NetworkMappedSource } else { $Profile.Source }
 
     if ($Profile.UseVSS) {
         # Detect UNC path (network share)
@@ -7436,20 +8056,35 @@ function Start-ProfileReplication {
 
         if ($isUncPath) {
             # Remote VSS path - create snapshot on the file server
+            # Use stored credentials for CIM session (required for Session 0 scheduled tasks)
             $state.CurrentActivity = "Checking remote VSS support..."
-            $remoteCheck = Test-RemoteVssSupported -UncPath $Profile.Source
+            $remoteCheck = Test-RemoteVssSupported -UncPath $Profile.Source -Credential $networkCredential
+
+            # Check for stop request after remote VSS check
+            if ($state.StopRequested) {
+                Write-RobocurseLog -Message "Stop requested after remote VSS check, aborting profile setup" -Level 'Info' -Component 'Orchestrator'
+                return
+            }
 
             if ($remoteCheck.Success) {
                 $state.CurrentActivity = "Creating remote VSS snapshot..."
                 Write-RobocurseLog -Message "Creating remote VSS snapshot for: $($Profile.Source)" -Level 'Info' -Component 'VSS'
 
-                $snapshotResult = New-RemoteVssSnapshot -UncPath $Profile.Source
+                $snapshotResult = New-RemoteVssSnapshot -UncPath $Profile.Source -Credential $networkCredential
                 if ($snapshotResult.Success) {
                     $snapshot = $snapshotResult.Data
                     $state.CurrentVssSnapshot = $snapshot
 
+                    # Check for stop request after remote VSS snapshot creation
+                    if ($state.StopRequested) {
+                        Write-RobocurseLog -Message "Stop requested after remote VSS snapshot, cleaning up" -Level 'Info' -Component 'Orchestrator'
+                        Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName -Credential $networkCredential
+                        $state.CurrentVssSnapshot = $null
+                        return
+                    }
+
                     # Create junction to access VSS via UNC
-                    $junctionResult = New-RemoteVssJunction -VssSnapshot $snapshot
+                    $junctionResult = New-RemoteVssJunction -VssSnapshot $snapshot -Credential $networkCredential
                     if ($junctionResult.Success) {
                         $state.CurrentVssJunction = $junctionResult.Data
                         $effectiveSource = Get-RemoteVssPath -OriginalUncPath $Profile.Source -VssSnapshot $snapshot -JunctionInfo $state.CurrentVssJunction
@@ -7462,11 +8097,21 @@ function Start-ProfileReplication {
                             serverName = $snapshot.ServerName
                             isRemote = $true
                         }
+
+                        # Check for stop request after remote VSS junction creation
+                        if ($state.StopRequested) {
+                            Write-RobocurseLog -Message "Stop requested after remote VSS junction, cleaning up" -Level 'Info' -Component 'Orchestrator'
+                            Remove-RemoteVssJunction -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath -ServerName $snapshot.ServerName -Credential $networkCredential
+                            Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName -Credential $networkCredential
+                            $state.CurrentVssJunction = $null
+                            $state.CurrentVssSnapshot = $null
+                            return
+                        }
                     }
                     else {
                         # Junction failed - clean up snapshot and continue without VSS
                         Write-RobocurseLog -Message "Failed to create remote VSS junction: $($junctionResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
-                        Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName
+                        Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName -Credential $networkCredential
                         $state.CurrentVssSnapshot = $null
                     }
                 }
@@ -7498,11 +8143,20 @@ function Start-ProfileReplication {
                         shadowId = $snapshot.ShadowId
                         shadowPath = $snapshot.ShadowPath
                     }
+
+                    # Check for stop request after local VSS snapshot creation
+                    if ($state.StopRequested) {
+                        Write-RobocurseLog -Message "Stop requested after local VSS snapshot, cleaning up" -Level 'Info' -Component 'Orchestrator'
+                        Remove-VssSnapshot -ShadowId $snapshot.ShadowId
+                        $state.CurrentVssSnapshot = $null
+                        return
+                    }
                 }
                 else {
                     Write-RobocurseLog -Message "Failed to create VSS snapshot, continuing without VSS: $($snapshotResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
                     $state.CurrentVssSnapshot = $null
-                    $effectiveSource = $Profile.Source
+                    # Fall back to network-mapped source if available, otherwise original path
+                    $effectiveSource = if ($state.NetworkMappedSource) { $state.NetworkMappedSource } else { $Profile.Source }
                 }
             }
             else {
@@ -7511,11 +8165,24 @@ function Start-ProfileReplication {
         }
     }
 
+    # Check for stop request before scanning (scanning can be slow for large directories)
+    if ($state.StopRequested) {
+        Write-RobocurseLog -Message "Stop requested before directory scan, aborting profile setup" -Level 'Info' -Component 'Orchestrator'
+        # VSS cleanup will be handled by Stop-AllJobs when tick loop processes the stop
+        return
+    }
+
     # Scan source directory (using VSS path if available)
     $state.Phase = "Scanning"
     $state.ScanProgress = 0
     $state.CurrentActivity = "Scanning source directory..."
     $scanResult = Get-DirectoryProfile -Path $effectiveSource -State $state
+
+    # Check for stop request after directory scan
+    if ($state.StopRequested) {
+        Write-RobocurseLog -Message "Stop requested after directory scan, aborting profile setup" -Level 'Info' -Component 'Orchestrator'
+        return
+    }
 
     # Generate chunks based on scan mode
     $state.ScanProgress = 0
@@ -7528,11 +8195,14 @@ function Start-ProfileReplication {
     Write-RobocurseLog -Message "Chunk settings: MaxSize=$([math]::Round($maxChunkBytes/1GB, 2))GB, MaxFiles=$maxFiles, MaxDepth=$maxDepth, Mode=$($Profile.ScanMode)" `
         -Level 'Debug' -Component 'Orchestrator'
 
+    # Use network-mapped destination if available
+    $effectiveDestination = if ($state.NetworkMappedDest) { $state.NetworkMappedDest } else { $Profile.Destination }
+
     $chunks = switch ($Profile.ScanMode) {
         'Flat' {
             New-FlatChunks `
                 -Path $effectiveSource `
-                -DestinationRoot $Profile.Destination `
+                -DestinationRoot $effectiveDestination `
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles `
                 -State $state
@@ -7540,7 +8210,7 @@ function Start-ProfileReplication {
         'Smart' {
             New-SmartChunks `
                 -Path $effectiveSource `
-                -DestinationRoot $Profile.Destination `
+                -DestinationRoot $effectiveDestination `
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles `
                 -MaxDepth $maxDepth `
@@ -7549,7 +8219,7 @@ function Start-ProfileReplication {
         default {
             New-SmartChunks `
                 -Path $effectiveSource `
-                -DestinationRoot $Profile.Destination `
+                -DestinationRoot $effectiveDestination `
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles `
                 -MaxDepth $maxDepth `
@@ -7734,6 +8404,13 @@ function Invoke-ReplicationTick {
                     if ($removedJob.Chunk.EstimatedSize) {
                         $state.AddCompletedChunkBytes($removedJob.Chunk.EstimatedSize)
                     }
+                    # Log stats for debugging
+                    if ($result.Stats) {
+                        Write-RobocurseLog -Message "Chunk $($removedJob.Chunk.ChunkId) stats: ParseSuccess=$($result.Stats.ParseSuccess), FilesCopied=$($result.Stats.FilesCopied), FilesSkipped=$($result.Stats.FilesSkipped), FilesFailed=$($result.Stats.FilesFailed)" -Level 'Debug' -Component 'Orchestrator'
+                    }
+                    else {
+                        Write-RobocurseLog -Message "Chunk $($removedJob.Chunk.ChunkId) has no Stats object" -Level 'Warning' -Component 'Orchestrator'
+                    }
                     # Track files copied from the parsed robocopy log
                     if ($result.Stats -and $result.Stats.FilesCopied -gt 0) {
                         $state.AddCompletedChunkFiles($result.Stats.FilesCopied)
@@ -7888,7 +8565,27 @@ function Complete-RobocopyJob {
     }
 
     $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode -MismatchSeverity $mismatchSeverity
-    $stats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
+
+    # Get captured stdout (was started async in Start-RobocopyJob)
+    # This avoids file flush race conditions in Session 0 scheduled tasks
+    $capturedOutput = $null
+    if ($Job.StdoutTask) {
+        try {
+            $capturedOutput = $Job.StdoutTask.GetAwaiter().GetResult()
+        }
+        catch {
+            Write-RobocurseLog "Failed to get captured stdout for chunk $($Job.Chunk.ChunkId): $_" -Level 'Warning' -Component 'Orchestrator'
+        }
+    }
+
+    # Parse stats from captured stdout (avoids file flush race), fallback to log file
+    $stats = if ($capturedOutput) {
+        ConvertFrom-RobocopyLog -Content $capturedOutput -LogPath $Job.LogPath
+    }
+    else {
+        ConvertFrom-RobocopyLog -LogPath $Job.LogPath
+    }
+
     $duration = [datetime]::Now - $Job.StartTime
 
     # Update chunk status
@@ -8080,12 +8777,29 @@ function Complete-CurrentProfile {
     # Total completed = queue count (this run) + skipped (checkpoint resume)
     $totalCompleted = $completedChunksArray.Count + $skippedChunkCount
 
+    # Determine profile status - Failed if pre-flight error, Warning if chunk failures, else Success
+    $profileStatus = if ($script:CurrentPreflightError) {
+        'Failed'
+    } elseif ($failedChunksArray.Count -gt 0) {
+        'Warning'
+    } else {
+        'Success'
+    }
+
+    # Build errors array - include pre-flight error if present, plus chunk errors
+    $profileErrors = @()
+    if ($script:CurrentPreflightError) {
+        $profileErrors += $script:CurrentPreflightError
+    }
+    $profileErrors += @($failedChunksArray | ForEach-Object { "Chunk $($_.ChunkId): $($_.SourcePath)" })
+
     # Store profile result for email/reporting (prevents memory leak by summarizing)
     $profileResult = [PSCustomObject]@{
         Name = $state.CurrentProfile.Name
         Source = $state.CurrentProfile.Source
         Destination = $state.CurrentProfile.Destination
-        Status = if ($failedChunksArray.Count -gt 0) { 'Warning' } else { 'Success' }
+        Status = $profileStatus
+        PreflightError = $script:CurrentPreflightError
         ChunksComplete = $totalCompleted
         ChunksSkipped = $skippedChunkCount
         ChunksTotal = $state.TotalChunks
@@ -8093,8 +8807,11 @@ function Complete-CurrentProfile {
         BytesCopied = $profileBytesCopied
         FilesCopied = $profileFilesCopied
         Duration = $profileDuration
-        Errors = @($failedChunksArray | ForEach-Object { "Chunk $($_.ChunkId): $($_.SourcePath)" })
+        Errors = $profileErrors
     }
+
+    # Clear the pre-flight error after including in result
+    $script:CurrentPreflightError = $null
 
     # Add to ProfileResults (thread-safe ConcurrentQueue)
     $state.ProfileResults.Enqueue($profileResult)
@@ -8117,7 +8834,8 @@ function Complete-CurrentProfile {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
         $removeJunctionResult = Remove-RemoteVssJunction `
             -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
-            -ServerName $state.CurrentVssJunction.ServerName
+            -ServerName $state.CurrentVssJunction.ServerName `
+            -Credential $state.NetworkCredential
         if (-not $removeJunctionResult.Success) {
             Write-RobocurseLog -Message "Failed to cleanup remote junction: $($removeJunctionResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
         }
@@ -8128,7 +8846,7 @@ function Complete-CurrentProfile {
     if ($state.CurrentVssSnapshot) {
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
-            $removeResult = Remove-RemoteVssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId -ServerName $state.CurrentVssSnapshot.ServerName
+            $removeResult = Remove-RemoteVssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId -ServerName $state.CurrentVssSnapshot.ServerName -Credential $state.NetworkCredential
         }
         else {
             Write-RobocurseLog -Message "Cleaning up VSS snapshot: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
@@ -8149,6 +8867,16 @@ function Complete-CurrentProfile {
         $state.CurrentVssSnapshot = $null
     }
 
+    # Clean up network mappings
+    if ($state.CurrentNetworkMappings -and $state.CurrentNetworkMappings.Count -gt 0) {
+        Write-RobocurseLog -Message "Cleaning up network mappings" -Level 'Debug' -Component 'NetworkMapping'
+        Dismount-NetworkPaths -Mappings $state.CurrentNetworkMappings
+        $state.CurrentNetworkMappings = $null
+        $state.NetworkMappedSource = $null
+        $state.NetworkMappedDest = $null
+    }
+    $state.NetworkCredential = $null
+
     # Invoke callback
     if ($script:OnProfileComplete) {
         & $script:OnProfileComplete $state.CurrentProfile
@@ -8167,7 +8895,12 @@ function Complete-CurrentProfile {
     else {
         # All profiles complete
         $state.Phase = "Complete"
-        $totalDuration = [datetime]::Now - $state.StartTime
+        # Guard against null StartTime (e.g., when Start-ProfileReplication called directly in tests)
+        $totalDuration = if ($null -ne $state.StartTime) {
+            [datetime]::Now - $state.StartTime
+        } else {
+            [TimeSpan]::Zero
+        }
 
         # Remove checkpoint file on successful completion
         Remove-ReplicationCheckpoint | Out-Null
@@ -8229,7 +8962,8 @@ function Stop-AllJobs {
         try {
             $removeJunctionResult = Remove-RemoteVssJunction `
                 -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
-                -ServerName $state.CurrentVssJunction.ServerName
+                -ServerName $state.CurrentVssJunction.ServerName `
+                -Credential $state.NetworkCredential
             if (-not $removeJunctionResult.Success) {
                 Write-RobocurseLog -Message "Failed to cleanup remote junction: $($removeJunctionResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
             }
@@ -8247,7 +8981,7 @@ function Stop-AllJobs {
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot after stop: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
             try {
-                $removeResult = Remove-RemoteVssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId -ServerName $state.CurrentVssSnapshot.ServerName
+                $removeResult = Remove-RemoteVssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId -ServerName $state.CurrentVssSnapshot.ServerName -Credential $state.NetworkCredential
                 if (-not $removeResult.Success) {
                     Write-RobocurseLog -Message "Failed to clean up remote VSS snapshot: $($removeResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
                 }
@@ -10504,6 +11238,10 @@ function Get-RemoteShareLocalPath {
         The share name to look up
     .PARAMETER CimSession
         Optional existing CIM session to use
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
+        Only used when CimSession is not provided.
     .OUTPUTS
         The local path on the server, or $null if not found
     .EXAMPLE
@@ -10518,13 +11256,23 @@ function Get-RemoteShareLocalPath {
         [Parameter(Mandatory)]
         [string]$ShareName,
 
-        [Microsoft.Management.Infrastructure.CimSession]$CimSession
+        [Microsoft.Management.Infrastructure.CimSession]$CimSession,
+
+        [PSCredential]$Credential
     )
 
     try {
         $ownSession = $false
         if (-not $CimSession) {
-            $CimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+            # Use credential if provided (required for Session 0 scheduled tasks)
+            $cimParams = @{
+                ComputerName = $ServerName
+                ErrorAction  = 'Stop'
+            }
+            if ($Credential) {
+                $cimParams['Credential'] = $Credential
+            }
+            $CimSession = New-CimSession @cimParams
             $ownSession = $true
         }
 
@@ -10562,6 +11310,9 @@ function Test-RemoteVssSupported {
         if the Win32_ShadowCopy class is available.
     .PARAMETER UncPath
         The UNC path to test
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult - Success=$true if remote VSS is supported
     .EXAMPLE
@@ -10571,7 +11322,9 @@ function Test-RemoteVssSupported {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$UncPath
+        [string]$UncPath,
+
+        [PSCredential]$Credential
     )
 
     $components = Get-UncPathComponents -UncPath $UncPath
@@ -10582,8 +11335,16 @@ function Test-RemoteVssSupported {
     $serverName = $components.ServerName
 
     try {
-        # Test CIM connectivity
-        $cimSession = New-CimSession -ComputerName $serverName -ErrorAction Stop
+        # Test CIM connectivity - use credential if provided (required for Session 0 scheduled tasks)
+        $cimParams = @{
+            ComputerName = $serverName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $cimParams['Credential'] = $Credential
+            Write-RobocurseLog -Message "Creating CIM session to '$serverName' with explicit credentials (user: $($Credential.UserName))" -Level 'Debug' -Component 'VSS'
+        }
+        $cimSession = New-CimSession @cimParams
 
         try {
             # Check if Win32_ShadowCopy is available
@@ -10674,6 +11435,9 @@ function New-RemoteVssSnapshot {
         that hosts the specified UNC path.
     .PARAMETER UncPath
         The UNC path to the share/folder to snapshot
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .PARAMETER SkipTracking
         If set, does not add snapshot to orphan tracking file. Use for persistent
         snapshots that should survive application restarts.
@@ -10700,6 +11464,8 @@ function New-RemoteVssSnapshot {
         [ValidatePattern('^\\\\[^\\]+\\[^\\]+')]
         [string]$UncPath,
 
+        [PSCredential]$Credential,
+
         [switch]$SkipTracking,
 
         [ValidateRange(0, 10)]
@@ -10721,8 +11487,16 @@ function New-RemoteVssSnapshot {
 
     $cimSession = $null
     try {
-        # Establish CIM session
-        $cimSession = New-CimSession -ComputerName $serverName -ErrorAction Stop
+        # Establish CIM session - use credential if provided (required for Session 0 scheduled tasks)
+        $cimParams = @{
+            ComputerName = $serverName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $cimParams['Credential'] = $Credential
+            Write-RobocurseLog -Message "Creating CIM session to '$serverName' with explicit credentials (user: $($Credential.UserName))" -Level 'Debug' -Component 'VSS'
+        }
+        $cimSession = New-CimSession @cimParams
         Write-RobocurseLog -Message "CIM session established to '$serverName'" -Level 'Debug' -Component 'VSS'
 
         # Get the local path for the share
@@ -10841,6 +11615,9 @@ function Remove-RemoteVssSnapshot {
         The shadow copy ID to remove
     .PARAMETER ServerName
         The remote server where the snapshot exists
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult
     .EXAMPLE
@@ -10852,14 +11629,25 @@ function Remove-RemoteVssSnapshot {
         [string]$ShadowId,
 
         [Parameter(Mandatory)]
-        [string]$ServerName
+        [string]$ServerName,
+
+        [PSCredential]$Credential
     )
 
     $cimSession = $null
     try {
         Write-RobocurseLog -Message "Removing remote VSS snapshot '$ShadowId' from '$ServerName'" -Level 'Debug' -Component 'VSS'
 
-        $cimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+        # Use credential if provided (required for Session 0 scheduled tasks)
+        $cimParams = @{
+            ComputerName = $ServerName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $cimParams['Credential'] = $Credential
+            Write-RobocurseLog -Message "Creating CIM session to '$ServerName' with explicit credentials for snapshot removal" -Level 'Debug' -Component 'VSS'
+        }
+        $cimSession = New-CimSession @cimParams
 
         $shadow = Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy |
             Where-Object { $_.ID -eq $ShadowId }
@@ -10903,6 +11691,9 @@ function New-RemoteVssJunction {
         via UNC path from the client.
     .PARAMETER VssSnapshot
         The remote VSS snapshot object from New-RemoteVssSnapshot
+    .PARAMETER Credential
+        Optional credential for remote session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .PARAMETER JunctionName
         Optional name for the junction. Defaults to a GUID-based name.
     .OUTPUTS
@@ -10920,6 +11711,8 @@ function New-RemoteVssJunction {
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$VssSnapshot,
+
+        [PSCredential]$Credential,
 
         [string]$JunctionName
     )
@@ -10962,28 +11755,40 @@ function New-RemoteVssJunction {
         # Use Invoke-Command with timeout to create the junction on the remote server
         # Timeout prevents indefinite hangs on slow or unreachable servers
         $sessionOption = New-PSSessionOption -OperationTimeout $script:RemoteOperationTimeoutMs -OpenTimeout $script:RemoteOperationTimeoutMs
-        $result = Invoke-Command -ComputerName $serverName -SessionOption $sessionOption -ScriptBlock {
-            param($JunctionPath, $TargetPath)
+        $invokeParams = @{
+            ComputerName  = $serverName
+            SessionOption = $sessionOption
+            ArgumentList  = @($junctionLocalPath, $vssTargetPath)
+            ErrorAction   = 'Stop'
+            ScriptBlock   = {
+                param($JunctionPath, $TargetPath)
 
-            # Check if junction already exists
-            if (Test-Path $JunctionPath) {
-                return @{ Success = $false; ErrorMessage = "Junction path already exists: $JunctionPath" }
+                # Check if junction already exists
+                if (Test-Path $JunctionPath) {
+                    return @{ Success = $false; ErrorMessage = "Junction path already exists: $JunctionPath" }
+                }
+
+                # Create junction using cmd mklink /J
+                $output = cmd /c "mklink /J `"$JunctionPath`" `"$TargetPath`"" 2>&1
+
+                if ($LASTEXITCODE -ne 0) {
+                    return @{ Success = $false; ErrorMessage = "mklink failed: $output" }
+                }
+
+                # Verify
+                if (-not (Test-Path $JunctionPath)) {
+                    return @{ Success = $false; ErrorMessage = "Junction created but not accessible" }
+                }
+
+                return @{ Success = $true; JunctionPath = $JunctionPath }
             }
-
-            # Create junction using cmd mklink /J
-            $output = cmd /c "mklink /J `"$JunctionPath`" `"$TargetPath`"" 2>&1
-
-            if ($LASTEXITCODE -ne 0) {
-                return @{ Success = $false; ErrorMessage = "mklink failed: $output" }
-            }
-
-            # Verify
-            if (-not (Test-Path $JunctionPath)) {
-                return @{ Success = $false; ErrorMessage = "Junction created but not accessible" }
-            }
-
-            return @{ Success = $true; JunctionPath = $JunctionPath }
-        } -ArgumentList $junctionLocalPath, $vssTargetPath -ErrorAction Stop
+        }
+        # Add credential if provided (required for Session 0 scheduled tasks)
+        if ($Credential) {
+            $invokeParams['Credential'] = $Credential
+            Write-RobocurseLog -Message "Using explicit credentials for remote junction creation (user: $($Credential.UserName))" -Level 'Debug' -Component 'VSS'
+        }
+        $result = Invoke-Command @invokeParams
 
         if (-not $result.Success) {
             return New-OperationResult -Success $false -ErrorMessage "Failed to create remote junction: $($result.ErrorMessage)"
@@ -11020,6 +11825,9 @@ function Remove-RemoteVssJunction {
         The local path to the junction on the remote server
     .PARAMETER ServerName
         The remote server name
+    .PARAMETER Credential
+        Optional credential for remote session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult
     .EXAMPLE
@@ -11031,7 +11839,9 @@ function Remove-RemoteVssJunction {
         [string]$JunctionLocalPath,
 
         [Parameter(Mandatory)]
-        [string]$ServerName
+        [string]$ServerName,
+
+        [PSCredential]$Credential
     )
 
     Write-RobocurseLog -Message "Removing remote junction '$JunctionLocalPath' from '$ServerName'" -Level 'Debug' -Component 'VSS'
@@ -11039,7 +11849,12 @@ function Remove-RemoteVssJunction {
     try {
         # Use timeout to prevent indefinite hangs on slow or unreachable servers
         $sessionOption = New-PSSessionOption -OperationTimeout $script:RemoteOperationTimeoutMs -OpenTimeout $script:RemoteOperationTimeoutMs
-        $result = Invoke-Command -ComputerName $ServerName -SessionOption $sessionOption -ScriptBlock {
+        $invokeParams = @{
+            ComputerName  = $ServerName
+            SessionOption = $sessionOption
+            ErrorAction   = 'Stop'
+            ArgumentList  = $JunctionLocalPath
+            ScriptBlock   = {
             param($JunctionPath)
 
             if (-not (Test-Path $JunctionPath)) {
@@ -11064,7 +11879,14 @@ function Remove-RemoteVssJunction {
             }
 
             return @{ Success = $true }
-        } -ArgumentList $JunctionLocalPath -ErrorAction Stop
+            }
+        }
+        # Add credential if provided (required for Session 0 scheduled tasks)
+        if ($Credential) {
+            $invokeParams['Credential'] = $Credential
+            Write-RobocurseLog -Message "Using explicit credentials for remote junction removal (user: $($Credential.UserName))" -Level 'Debug' -Component 'VSS'
+        }
+        $result = Invoke-Command @invokeParams
 
         if (-not $result.Success) {
             return New-OperationResult -Success $false -ErrorMessage "Failed to remove remote junction: $($result.ErrorMessage)"
@@ -11150,6 +11972,9 @@ function Invoke-WithRemoteVssJunction {
     .PARAMETER ScriptBlock
         Code to execute. Receives $SourcePath parameter with the UNC path to the
         VSS junction that provides access to the snapshot.
+    .PARAMETER Credential
+        Optional credential for remote authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult with Data containing the scriptblock result
     .NOTES
@@ -11172,7 +11997,9 @@ function Invoke-WithRemoteVssJunction {
         [string]$UncPath,
 
         [Parameter(Mandatory)]
-        [scriptblock]$ScriptBlock
+        [scriptblock]$ScriptBlock,
+
+        [PSCredential]$Credential
     )
 
     $snapshot = $null
@@ -11181,7 +12008,7 @@ function Invoke-WithRemoteVssJunction {
     try {
         # Step 1: Create remote VSS snapshot
         Write-RobocurseLog -Message "Creating remote VSS snapshot for '$UncPath'" -Level 'Info' -Component 'VSS'
-        $snapshotResult = New-RemoteVssSnapshot -UncPath $UncPath
+        $snapshotResult = New-RemoteVssSnapshot -UncPath $UncPath -Credential $Credential
 
         if (-not $snapshotResult.Success) {
             return New-OperationResult -Success $false `
@@ -11191,7 +12018,7 @@ function Invoke-WithRemoteVssJunction {
         $snapshot = $snapshotResult.Data
 
         # Step 2: Create junction on remote server
-        $junctionResult = New-RemoteVssJunction -VssSnapshot $snapshot
+        $junctionResult = New-RemoteVssJunction -VssSnapshot $snapshot -Credential $Credential
         if (-not $junctionResult.Success) {
             return New-OperationResult -Success $false `
                 -ErrorMessage "Failed to create remote VSS junction: $($junctionResult.ErrorMessage)" `
@@ -11222,7 +12049,8 @@ function Invoke-WithRemoteVssJunction {
             Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
             $removeJunctionResult = Remove-RemoteVssJunction `
                 -JunctionLocalPath $junctionInfo.JunctionLocalPath `
-                -ServerName $junctionInfo.ServerName
+                -ServerName $junctionInfo.ServerName `
+                -Credential $Credential
             if (-not $removeJunctionResult.Success) {
                 Write-RobocurseLog -Message "Failed to cleanup remote junction: $($removeJunctionResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
             }
@@ -11233,7 +12061,8 @@ function Invoke-WithRemoteVssJunction {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot" -Level 'Info' -Component 'VSS'
             $removeSnapshotResult = Remove-RemoteVssSnapshot `
                 -ShadowId $snapshot.ShadowId `
-                -ServerName $snapshot.ServerName
+                -ServerName $snapshot.ServerName `
+                -Credential $Credential
             if (-not $removeSnapshotResult.Success) {
                 Write-RobocurseLog -Message "Failed to cleanup remote snapshot: $($removeSnapshotResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
             }
@@ -11253,6 +12082,9 @@ function Get-RemoteVssSnapshots {
         The remote server name to query
     .PARAMETER Volume
         Optional volume to filter (e.g., "D:"). If not specified, returns all.
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult with Data = array of snapshot objects
     .EXAMPLE
@@ -11265,14 +12097,24 @@ function Get-RemoteVssSnapshots {
         [string]$ServerName,
 
         [ValidatePattern('^[A-Za-z]:$')]
-        [string]$Volume
+        [string]$Volume,
+
+        [PSCredential]$Credential
     )
 
     Write-RobocurseLog -Message "Listing VSS snapshots on '$ServerName'$(if ($Volume) { " for volume $Volume" })" -Level 'Debug' -Component 'VSS'
 
     $cimSession = $null
     try {
-        $cimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+        # Use credential if provided (required for Session 0 scheduled tasks)
+        $cimParams = @{
+            ComputerName = $ServerName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $cimParams['Credential'] = $Credential
+        }
+        $cimSession = New-CimSession @cimParams
 
         $snapshots = Get-CimInstance -CimSession $cimSession -ClassName Win32_ShadowCopy -ErrorAction Stop
 
@@ -11373,6 +12215,9 @@ function Invoke-RemoteVssRetentionPolicy {
         Config object containing the snapshot registry.
     .PARAMETER ConfigPath
         Path to config file for saving after unregister.
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         OperationResult with Data containing DeletedCount, KeptCount, Errors, ExternalCount
     .EXAMPLE
@@ -11394,13 +12239,15 @@ function Invoke-RemoteVssRetentionPolicy {
         [PSCustomObject]$Config,
 
         [Parameter(Mandatory)]
-        [string]$ConfigPath
+        [string]$ConfigPath,
+
+        [PSCredential]$Credential
     )
 
     Write-RobocurseLog -Message "Applying VSS retention on '$ServerName' for $Volume (keep: $KeepCount)" -Level 'Info' -Component 'VSS'
 
     # Get current snapshots
-    $listResult = Get-RemoteVssSnapshots -ServerName $ServerName -Volume $Volume
+    $listResult = Get-RemoteVssSnapshots -ServerName $ServerName -Volume $Volume -Credential $Credential
     if (-not $listResult.Success) {
         return New-OperationResult -Success $false -ErrorMessage "Failed to list snapshots: $($listResult.ErrorMessage)"
     }
@@ -11450,7 +12297,7 @@ function Invoke-RemoteVssRetentionPolicy {
         $createdAt = $snapshot.CreatedAt
 
         if ($PSCmdlet.ShouldProcess("$shadowId on $ServerName (created $createdAt)", "Remove Remote VSS Snapshot")) {
-            $removeResult = Remove-RemoteVssSnapshot -ShadowId $shadowId -ServerName $ServerName
+            $removeResult = Remove-RemoteVssSnapshot -ShadowId $shadowId -ServerName $ServerName -Credential $Credential
             if ($removeResult.Success) {
                 $deletedCount++
                 Write-RobocurseLog -Message "Deleted remote snapshot $shadowId on '$ServerName'" -Level 'Debug' -Component 'VSS'
@@ -11498,6 +12345,9 @@ function Test-RemoteVssPrerequisites {
         Use this before deploying to a customer site to identify configuration issues.
     .PARAMETER ServerName
         The remote server to test
+    .PARAMETER Credential
+        Optional credential for remote authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .PARAMETER Detailed
         Show detailed output for each check
     .OUTPUTS
@@ -11513,6 +12363,8 @@ function Test-RemoteVssPrerequisites {
     param(
         [Parameter(Mandatory)]
         [string]$ServerName,
+
+        [PSCredential]$Credential,
 
         [switch]$Detailed
     )
@@ -11547,7 +12399,14 @@ function Test-RemoteVssPrerequisites {
     # Check 2: WinRM connectivity
     Write-Host "[2/5] Testing WinRM connectivity (port 5985/5986)..." -NoNewline
     try {
-        $wsmanTest = Test-WSMan -ComputerName $ServerName -ErrorAction Stop
+        $wsmanParams = @{
+            ComputerName = $ServerName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $wsmanParams['Credential'] = $Credential
+        }
+        $wsmanTest = Test-WSMan @wsmanParams
         Write-Host " PASS" -ForegroundColor Green
         $checks += [PSCustomObject]@{ Check = "WinRM Connectivity"; Status = "Pass"; Message = "WinRM is accessible" }
     }
@@ -11567,7 +12426,14 @@ function Test-RemoteVssPrerequisites {
     # Check 3: CIM session
     Write-Host "[3/5] Testing CIM session establishment..." -NoNewline
     try {
-        $cimSession = New-CimSession -ComputerName $ServerName -ErrorAction Stop
+        $cimParams = @{
+            ComputerName = $ServerName
+            ErrorAction  = 'Stop'
+        }
+        if ($Credential) {
+            $cimParams['Credential'] = $Credential
+        }
+        $cimSession = New-CimSession @cimParams
         Write-Host " PASS" -ForegroundColor Green
         $checks += [PSCustomObject]@{ Check = "CIM Session"; Status = "Pass"; Message = "CIM session established successfully" }
     }
@@ -11695,6 +12561,9 @@ function Clear-OrphanRemoteVssSnapshots {
 
         Only successfully deleted snapshots are removed from the tracking file.
         Failed deletions are retained for retry on the next cleanup attempt.
+    .PARAMETER Credential
+        Optional credential for CIM session authentication. Required for scheduled tasks
+        running in Session 0 where credentials don't delegate automatically.
     .OUTPUTS
         Number of remote snapshots cleaned up
     .EXAMPLE
@@ -11705,7 +12574,9 @@ function Clear-OrphanRemoteVssSnapshots {
         # Shows what snapshots would be cleaned without actually removing them
     #>
     [CmdletBinding(SupportsShouldProcess)]
-    param()
+    param(
+        [PSCredential]$Credential
+    )
 
     # Skip if not Windows
     if (-not (Test-IsWindowsPlatform)) {
@@ -11728,7 +12599,7 @@ function Clear-OrphanRemoteVssSnapshots {
             # Only process remote snapshots (IsRemote = $true)
             if ($snapshot.IsRemote -eq $true -and $snapshot.ShadowId -and $snapshot.ServerName) {
                 if ($PSCmdlet.ShouldProcess("$($snapshot.ShadowId) on $($snapshot.ServerName)", "Remove orphan remote VSS snapshot")) {
-                    $removeResult = Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName
+                    $removeResult = Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName -Credential $Credential
                     if ($removeResult.Success) {
                         Write-RobocurseLog -Message "Cleaned up orphan remote VSS snapshot: $($snapshot.ShadowId) on $($snapshot.ServerName)" -Level 'Info' -Component 'VSS'
                         $cleaned++
@@ -13410,6 +14281,142 @@ function Test-EmailConfiguration {
     return $sendResult
 }
 
+function Send-ReplicationCompletionNotification {
+    <#
+    .SYNOPSIS
+        Sends completion email notification for a replication run
+    .DESCRIPTION
+        Shared function used by both GUI and headless code paths to build
+        results data and send completion email. This ensures consistent
+        email content regardless of how the replication was initiated.
+    .PARAMETER Config
+        The Robocurse configuration object containing Email settings
+    .PARAMETER OrchestrationState
+        The orchestration state object with run results
+    .PARAMETER FailedFilesSummaryPath
+        Optional path to the failed files summary file
+    .OUTPUTS
+        PSCustomObject with Success, ErrorMessage, and EmailStatus properties
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Config,
+
+        [Parameter(Mandatory = $true)]
+        [object]$OrchestrationState,
+
+        [Parameter(Mandatory = $false)]
+        [string]$FailedFilesSummaryPath
+    )
+
+    # Check if email is configured and enabled
+    if (-not $Config.Email -or -not $Config.Email.Enabled) {
+        Write-RobocurseLog "Email notifications not enabled, skipping" -Level 'Debug' -Component 'Email'
+        return [PSCustomObject]@{
+            Success = $true
+            ErrorMessage = $null
+            EmailStatus = 'Skipped'
+            Skipped = $true
+        }
+    }
+
+    try {
+        # Get status from orchestration
+        $status = Get-OrchestrationStatus
+        $profileResultsArray = $OrchestrationState.GetProfileResultsArray()
+
+        # Calculate totals from profile results (more accurate than status for multi-profile runs)
+        $totalFailed = if ($profileResultsArray.Count -gt 0) {
+            ($profileResultsArray | Measure-Object -Property ChunksFailed -Sum).Sum
+        } else { $status.ChunksFailed }
+
+        $totalBytesCopied = if ($profileResultsArray.Count -gt 0) {
+            ($profileResultsArray | Measure-Object -Property BytesCopied -Sum).Sum
+        } else { $status.BytesComplete }
+
+        # Collect all errors from profiles
+        $allErrors = @()
+        if ($profileResultsArray.Count -gt 0) {
+            foreach ($pr in $profileResultsArray) {
+                $allErrors += $pr.Errors
+            }
+        }
+
+        # Build snapshot summary for email
+        $snapshotSummary = Get-SnapshotSummaryForEmail -Config $Config
+
+        # Build results object
+        $results = [PSCustomObject]@{
+            Duration = $status.Elapsed
+            TotalBytesCopied = $totalBytesCopied
+            TotalFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
+            TotalErrors = $totalFailed
+            Profiles = $profileResultsArray
+            Errors = $allErrors
+            SnapshotSummary = $snapshotSummary
+        }
+
+        # Determine overall status
+        $failedProfiles = @($profileResultsArray | Where-Object { $_.Status -eq 'Failed' })
+        $emailStatus = if ($failedProfiles.Count -gt 0) {
+            'Failed'  # Pre-flight failure (e.g., source path not accessible)
+        } elseif ($OrchestrationState.Phase -eq 'Stopped') {
+            'Failed'  # User stopped or critical failure
+        } elseif ($totalFailed -gt 0) {
+            'Warning'  # Some chunk failures
+        } else {
+            'Success'
+        }
+
+        # Get values for email
+        $emailSessionId = $OrchestrationState.SessionId
+        $emailFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
+        $emailFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
+
+        # Send the email
+        Write-RobocurseLog "Sending completion email (Status: $emailStatus, Files: $($status.FilesCopied), Skipped: $emailFilesSkipped, Failed: $emailFilesFailed)" -Level 'Info' -Component 'Email'
+
+        $sendParams = @{
+            Config = $Config.Email
+            Results = $results
+            Status = $emailStatus
+            SessionId = $emailSessionId
+            FilesSkipped = $emailFilesSkipped
+            FilesFailed = $emailFilesFailed
+        }
+        if ($FailedFilesSummaryPath) {
+            $sendParams['FailedFilesSummaryPath'] = $FailedFilesSummaryPath
+        }
+
+        $emailResult = Send-CompletionEmail @sendParams
+
+        if ($emailResult.Success) {
+            Write-RobocurseLog "Completion email sent successfully" -Level 'Info' -Component 'Email'
+        }
+        else {
+            Write-RobocurseLog "Failed to send completion email: $($emailResult.ErrorMessage)" -Level 'Error' -Component 'Email'
+        }
+
+        return [PSCustomObject]@{
+            Success = $emailResult.Success
+            ErrorMessage = $emailResult.ErrorMessage
+            EmailStatus = $emailStatus
+            Skipped = $false
+        }
+    }
+    catch {
+        $errorMsg = "Exception sending completion email: $($_.Exception.Message)"
+        Write-RobocurseLog $errorMsg -Level 'Error' -Component 'Email'
+        return [PSCustomObject]@{
+            Success = $false
+            ErrorMessage = $errorMsg
+            EmailStatus = 'Error'
+            Skipped = $false
+        }
+    }
+}
+
 #endregion
 
 #region ==================== SCHEDULING ====================
@@ -14501,12 +15508,17 @@ function New-ProfileScheduledTask {
         Creates a Windows scheduled task for profile execution
     .DESCRIPTION
         Registers a scheduled task that runs the specified profile at the configured schedule.
+        When Credential is provided, uses Password logon type which allows access to network
+        shares. Without Credential, uses S4U logon which only has local access.
     .PARAMETER Profile
         The profile object with Schedule property
     .PARAMETER ConfigPath
         Path to the Robocurse config file
     .PARAMETER ScriptPath
         Path to Robocurse.ps1 (optional, auto-detected)
+    .PARAMETER Credential
+        Optional credential for Password logon type. Required for network share access.
+        If not provided, uses S4U logon (local access only).
     .OUTPUTS
         OperationResult with Data = task name
     #>
@@ -14518,7 +15530,9 @@ function New-ProfileScheduledTask {
         [Parameter(Mandatory)]
         [string]$ConfigPath,
 
-        [string]$ScriptPath
+        [string]$ScriptPath,
+
+        [System.Management.Automation.PSCredential]$Credential
     )
 
     # Platform check
@@ -14591,9 +15605,6 @@ function New-ProfileScheduledTask {
             }
         }
 
-        # Run as current user with highest privileges (use full domain\username for domain-joined machines)
-        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Highest
-
         # Settings
         $settings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries `
@@ -14609,14 +15620,56 @@ function New-ProfileScheduledTask {
                 Write-RobocurseLog -Message "Removed existing task '$taskName'" -Level 'Debug' -Component 'ProfileSchedule'
             }
 
-            # Register the task
-            Register-ScheduledTask `
-                -TaskName $taskName `
-                -Action $action `
-                -Trigger $trigger `
-                -Principal $principal `
-                -Settings $settings `
-                -Description "Robocurse profile: $($Profile.Name)" | Out-Null
+            # Register the task - use Password logon if credential provided (for network access)
+            if ($Credential) {
+                # Password logon type - has network credentials for accessing shares
+                $taskUser = $Credential.UserName
+                $taskPassword = $Credential.GetNetworkCredential().Password
+
+                Write-RobocurseLog -Message "Registering task with Password logon (user: $taskUser)" -Level 'Debug' -Component 'ProfileSchedule'
+
+                # Use User parameter set with RunLevel Highest for elevated execution + network access
+                # Note: -Principal and -User/-Password are mutually exclusive parameter sets
+                Register-ScheduledTask `
+                    -TaskName $taskName `
+                    -Action $action `
+                    -Trigger $trigger `
+                    -Settings $settings `
+                    -Description "Robocurse profile: $($Profile.Name)" `
+                    -User $taskUser `
+                    -Password $taskPassword `
+                    -RunLevel Highest | Out-Null
+
+                # =====================================================================================
+                # SAVE CREDENTIALS FOR NETWORK PATH MOUNTING
+                # =====================================================================================
+                # Task Scheduler Password logon only authenticates the TASK execution context.
+                # Session 0 still has NTLM credential delegation issues for SMB/UNC access.
+                # We save the credential using DPAPI so JobManagement.ps1 can load it and
+                # explicitly mount UNC paths with the credential at runtime.
+                # See: src/Robocurse/Public/NetworkMapping.ps1 for full explanation.
+                # =====================================================================================
+                $saveResult = Save-NetworkCredential -ProfileName $Profile.Name -Credential $Credential -ConfigPath $ConfigPath
+                if ($saveResult.Success) {
+                    Write-RobocurseLog -Message "Saved network credentials for profile '$($Profile.Name)' (for UNC path mounting)" -Level 'Info' -Component 'ProfileSchedule'
+                }
+                else {
+                    Write-RobocurseLog -Message "Warning: Failed to save network credentials: $($saveResult.ErrorMessage)" -Level 'Warning' -Component 'ProfileSchedule'
+                }
+            }
+            else {
+                # S4U logon type - runs without password but no network credentials
+                # WARNING: S4U cannot access network shares requiring authentication
+                Write-RobocurseLog -Message "Registering task with S4U logon (local access only - no network share access)" -Level 'Warning' -Component 'ProfileSchedule'
+                $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Highest
+                Register-ScheduledTask `
+                    -TaskName $taskName `
+                    -Action $action `
+                    -Trigger $trigger `
+                    -Principal $principal `
+                    -Settings $settings `
+                    -Description "Robocurse profile: $($Profile.Name)" | Out-Null
+            }
 
             Write-RobocurseLog -Message "Created profile schedule '$taskName'" -Level 'Info' -Component 'ProfileSchedule'
         }
@@ -14817,6 +15870,9 @@ function Sync-ProfileSchedules {
         The Robocurse configuration object
     .PARAMETER ConfigPath
         Path to the configuration file
+    .PARAMETER Credential
+        Optional credential for Password logon type. Required for network share access.
+        If not provided, uses S4U logon (local access only).
     .OUTPUTS
         OperationResult with Data = summary of changes
     #>
@@ -14826,7 +15882,9 @@ function Sync-ProfileSchedules {
         [PSCustomObject]$Config,
 
         [Parameter(Mandatory)]
-        [string]$ConfigPath
+        [string]$ConfigPath,
+
+        [System.Management.Automation.PSCredential]$Credential
     )
 
     # Get profiles with enabled schedules
@@ -14854,7 +15912,7 @@ function Sync-ProfileSchedules {
 
     # Create/update tasks from config
     foreach ($profile in $scheduledProfiles) {
-        $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $ConfigPath
+        $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $ConfigPath -Credential $Credential
         if ($result.Success) {
             if ($profile.Name -notin $existingNames) {
                 $created++
@@ -17229,6 +18287,8 @@ function Show-CompletionDialog {
         Array of failed chunk objects with details for error display
     .PARAMETER WarningChunkDetails
         Array of warning chunk objects with details for warning display
+    .PARAMETER PreflightErrors
+        Array of pre-flight error messages (e.g., source path not accessible)
     #>
     [CmdletBinding()]
     param(
@@ -17240,7 +18300,8 @@ function Show-CompletionDialog {
         [long]$FilesFailed = 0,
         [string]$FailedFilesSummaryPath = $null,
         [PSCustomObject[]]$FailedChunkDetails = @(),
-        [PSCustomObject[]]$WarningChunkDetails = @()
+        [PSCustomObject[]]$WarningChunkDetails = @(),
+        [string[]]$PreflightErrors = @()
     )
 
     try {
@@ -17477,7 +18538,34 @@ function Show-CompletionDialog {
         }
 
         # Adjust appearance based on results
-        if ($ChunksFailed -gt 0) {
+        if ($PreflightErrors.Count -gt 0) {
+            # Pre-flight failure - show error state (red)
+            $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
+            $iconText.Text = [char]0x2716  # X mark
+            $txtTitle.Text = "Replication Failed"
+            $txtSubtitle.Text = "Pre-flight check failed - source not accessible"
+            $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
+
+            # Show pre-flight errors in error panel
+            $pnlErrors.Visibility = 'Visible'
+            foreach ($err in $PreflightErrors) {
+                $errorItem = New-Object System.Windows.Controls.Border
+                $errorItem.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#1E1E1E")
+                $errorItem.CornerRadius = 3
+                $errorItem.Padding = 8
+                $errorItem.Margin = "0,0,0,6"
+
+                $errorText = New-Object System.Windows.Controls.TextBlock
+                $errorText.Text = $err
+                $errorText.FontSize = 11
+                $errorText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
+                $errorText.TextWrapping = 'Wrap'
+                $errorItem.Child = $errorText
+
+                $lstErrors.Children.Add($errorItem) | Out-Null
+            }
+        }
+        elseif ($ChunksFailed -gt 0) {
             # Some failures - show error state (red/orange)
             $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
             $iconText.Text = [char]0x2716  # X mark
@@ -18566,10 +19654,34 @@ function Show-ProfileScheduleDialog {
 
                 # Create or remove task
                 if ($chkEnabled.IsChecked) {
+                    # Check if profile uses network paths - if so, require credentials
+                    $needsCredential = ($Profile.Source -match '^\\\\') -or ($Profile.Destination -match '^\\\\')
+                    $credential = $null
+
+                    if ($needsCredential) {
+                        # Prompt for credentials - required for network share access
+                        Write-GuiLog "Profile uses network paths - prompting for credentials"
+                        try {
+                            $credential = Get-Credential -Message "Enter credentials for scheduled task.`nRequired for network share access to:`n$($Profile.Source)" -UserName "$env:USERDOMAIN\$env:USERNAME"
+                            if (-not $credential) {
+                                Write-GuiLog "User cancelled credential prompt"
+                                Show-AlertDialog -Title "Credentials Required" -Message "Credentials are required for scheduled tasks that access network shares.`n`nThe task cannot run without credentials because Windows Task Scheduler`ncannot authenticate to network resources without a stored password." -Icon 'Warning'
+                                return
+                            }
+                        }
+                        catch {
+                            Write-GuiLog "Credential prompt failed: $($_.Exception.Message)"
+                            return
+                        }
+                    }
+
                     Write-GuiLog "Creating profile schedule for $($Profile.Name)"
-                    $result = New-ProfileScheduledTask -Profile $Profile -ConfigPath $script:ConfigPath
+                    $result = New-ProfileScheduledTask -Profile $Profile -ConfigPath $script:ConfigPath -Credential $credential
                     if ($result.Success) {
                         Write-GuiLog "Profile schedule created: $($result.Data)"
+                        if ($needsCredential) {
+                            Write-GuiLog "Task registered with Password logon (network access enabled)"
+                        }
                     } else {
                         Write-GuiLog "Failed to create profile schedule: $($result.ErrorMessage)"
                         Show-AlertDialog -Title "Error" -Message "Failed to create scheduled task:`n$($result.ErrorMessage)" -Icon 'Error'
@@ -19888,75 +21000,17 @@ function Complete-GuiReplication {
         Write-GuiLog "Warning: Failed to merge snapshot registry: $($_.Exception.Message)"
     }
 
-    # Send email notification if configured
-    try {
-        if ($script:Config.Email -and $script:Config.Email.Enabled) {
-            Write-GuiLog "Email notifications enabled, attempting to send..."
+    # Send email notification using shared function
+    $emailResult = Send-ReplicationCompletionNotification -Config $script:Config -OrchestrationState $script:OrchestrationState -FailedFilesSummaryPath $failedFilesSummaryPath
 
-            # Recalculate values for email (in case previous try block had issues)
-            $emailElapsed = if ($script:OrchestrationState -and $script:OrchestrationState.StartTime) {
-                [datetime]::Now - $script:OrchestrationState.StartTime
-            } else {
-                [timespan]::Zero
-            }
-
-            $emailProfileNames = @()
-            if ($script:OrchestrationState -and $script:OrchestrationState.Profiles) {
-                $emailProfileNames = @($script:OrchestrationState.Profiles | ForEach-Object { $_.Name })
-            }
-
-            $emailStatus = if ($status.ChunksFailed -eq 0) {
-                'Success'
-            } elseif ($status.ChunksComplete -gt 0) {
-                'PartialFailure'
-            } else {
-                'Failed'
-            }
-
-            # Build snapshot summary for email (tracked vs external per volume)
-            $snapshotSummary = Get-SnapshotSummaryForEmail -Config $script:Config
-
-            # Build results object matching what Send-CompletionEmail expects
-            $emailResults = [PSCustomObject]@{
-                Duration = $emailElapsed
-                TotalBytesCopied = if ($status.BytesComplete) { $status.BytesComplete } else { 0 }
-                TotalFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
-                TotalErrors = if ($status.ChunksFailed) { $status.ChunksFailed } else { 0 }
-                Profiles = @($emailProfileNames | ForEach-Object {
-                    [PSCustomObject]@{
-                        Name = $_
-                        Status = $emailStatus
-                        ChunksComplete = if ($status.ChunksComplete) { $status.ChunksComplete } else { 0 }
-                        ChunksTotal = if ($status.ChunksTotal) { $status.ChunksTotal } else { 0 }
-                        ChunksFailed = if ($status.ChunksFailed) { $status.ChunksFailed } else { 0 }
-                        FilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
-                        BytesCopied = if ($status.BytesComplete) { $status.BytesComplete } else { 0 }
-                        Errors = @()
-                    }
-                })
-                Errors = @()
-                SnapshotSummary = $snapshotSummary
-            }
-
-            # Get session ID from orchestration state for Message-Id header
-            $emailSessionId = if ($script:OrchestrationState) { $script:OrchestrationState.SessionId } else { $null }
-            $emailFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
-            $emailFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
-            $emailResult = Send-CompletionEmail -Config $script:Config.Email -Results $emailResults -Status $emailStatus -SessionId $emailSessionId -ProfileNames $emailProfileNames -FilesSkipped $emailFilesSkipped -FilesFailed $emailFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath
-
-            if ($emailResult.Success) {
-                Write-GuiLog "Completion email sent successfully"
-            }
-            else {
-                Write-GuiLog "ERROR: Failed to send completion email: $($emailResult.ErrorMessage)"
-            }
-        }
-        else {
-            Write-GuiLog "Email notifications not enabled, skipping"
-        }
+    if ($emailResult.Skipped) {
+        Write-GuiLog "Email notifications not enabled, skipping"
     }
-    catch {
-        Write-GuiLog "ERROR: Exception sending completion email: $($_.Exception.Message)"
+    elseif ($emailResult.Success) {
+        Write-GuiLog "Completion email sent successfully"
+    }
+    else {
+        Write-GuiLog "ERROR: Failed to send completion email: $($emailResult.ErrorMessage)"
     }
 
     # Gather failed and warning chunk details for the completion dialog
@@ -19969,10 +21023,19 @@ function Complete-GuiReplication {
         $warningDetails = @($script:OrchestrationState.WarningChunks.ToArray())
     }
 
+    # Gather pre-flight errors from profile results
+    $preflightErrors = @()
+    $profileResults = $script:OrchestrationState.GetProfileResultsArray()
+    foreach ($pr in $profileResults) {
+        if ($pr.PreflightError) {
+            $preflightErrors += $pr.PreflightError
+        }
+    }
+
     # Show completion dialog (modal - blocks until user clicks OK)
     $dialogFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
     $dialogFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
-    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails
+    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails -PreflightErrors $preflightErrors
 
     # Clean up config snapshot if it was created
     if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {
@@ -20589,8 +21652,8 @@ function Update-GuiProgress {
             $script:Window.UpdateLayout()
         }
 
-        # Check if complete
-        if ($status.Phase -eq 'Complete') {
+        # Check if complete or stopped
+        if ($status.Phase -in @('Complete', 'Stopped')) {
             Complete-GuiReplication
         }
     }
@@ -23805,8 +24868,15 @@ function Invoke-HeadlessReplication {
         SnapshotSummary = $snapshotSummary
     }
 
-    # Determine overall status
-    $emailStatus = if ($totalFailed -gt 0) { 'Warning' } else { 'Success' }
+    # Determine overall status - check for failed profiles (pre-flight errors) and chunk failures
+    $failedProfiles = @($profileResultsArray | Where-Object { $_.Status -eq 'Failed' })
+    $emailStatus = if ($failedProfiles.Count -gt 0) {
+        'Failed'  # Pre-flight failure (e.g., source path not accessible)
+    } elseif ($totalFailed -gt 0) {
+        'Warning'  # Chunk failures
+    } else {
+        'Success'
+    }
     if ($script:OrchestrationState.Phase -eq 'Stopped') {
         $emailStatus = 'Failed'
     }
@@ -23831,44 +24901,41 @@ function Invoke-HeadlessReplication {
         Write-Host ""
     }
 
-    # Track email status for exit code consideration
-    $emailFailed = $false
+    # Send email notification using shared function
+    Write-Host "Sending completion email..."
+    $emailResult = Send-ReplicationCompletionNotification -Config $Config -OrchestrationState $script:OrchestrationState
 
-    # Send email notification if configured
-    if ($Config.Email -and $Config.Email.Enabled) {
-        Write-Host "Sending completion email..."
-        $emailSessionId = if ($script:OrchestrationState) { $script:OrchestrationState.SessionId } else { $null }
-        $emailResult = Send-CompletionEmail -Config $Config.Email -Results $results -Status $emailStatus -SessionId $emailSessionId
-        if ($emailResult.Success) {
-            Write-Host "Email sent successfully." -ForegroundColor Green
+    if ($emailResult.Skipped) {
+        Write-Host "Email notifications not enabled, skipping."
+    }
+    elseif ($emailResult.Success) {
+        Write-Host "Email sent successfully." -ForegroundColor Green
+    }
+    else {
+        Write-RobocurseLog -Message "Failed to send completion email: $($emailResult.ErrorMessage)" -Level 'Error' -Component 'Email'
+        Write-SiemEvent -EventType 'ChunkError' -Data @{
+            errorType = 'EmailDeliveryFailure'
+            errorMessage = $emailResult.ErrorMessage
+            recipients = ($Config.Email.To -join ', ')
         }
-        else {
-            $emailFailed = $true
-            Write-RobocurseLog -Message "Failed to send completion email: $($emailResult.ErrorMessage)" -Level 'Error' -Component 'Email'
-            Write-SiemEvent -EventType 'ChunkError' -Data @{
-                errorType = 'EmailDeliveryFailure'
-                errorMessage = $emailResult.ErrorMessage
-                recipients = ($Config.Email.To -join ', ')
-            }
-            # Make email failure VERY visible in console
-            Write-Host ""
-            Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor Red
-            Write-Host "║  EMAIL NOTIFICATION FAILED                                 ║" -ForegroundColor Red
-            Write-Host "╠════════════════════════════════════════════════════════════╣" -ForegroundColor Red
-            Write-Host "║  Error: $($emailResult.ErrorMessage.PadRight(50).Substring(0,50)) ║" -ForegroundColor Red
-            Write-Host "║                                                            ║" -ForegroundColor Red
-            Write-Host "║  Replication completed but notification was NOT sent.      ║" -ForegroundColor Red
-            Write-Host "║  Check SMTP settings and credentials.                      ║" -ForegroundColor Red
-            Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor Red
-            Write-Host ""
-        }
+        # Make email failure VERY visible in console
+        Write-Host ""
+        Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor Red
+        Write-Host "║  EMAIL NOTIFICATION FAILED                                 ║" -ForegroundColor Red
+        Write-Host "╠════════════════════════════════════════════════════════════╣" -ForegroundColor Red
+        Write-Host "║  Error: $($emailResult.ErrorMessage.PadRight(50).Substring(0,50)) ║" -ForegroundColor Red
+        Write-Host "║                                                            ║" -ForegroundColor Red
+        Write-Host "║  Replication completed but notification was NOT sent.      ║" -ForegroundColor Red
+        Write-Host "║  Check SMTP settings and credentials.                      ║" -ForegroundColor Red
+        Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor Red
+        Write-Host ""
     }
 
     # Return exit code
     # Email failure alone doesn't cause exit code 1, but is logged prominently
     # Uncomment the following to treat email failure as a failure condition:
     # if ($emailFailed) { return 2 }  # Exit code 2 = email delivery failure
-    if ($totalFailed -gt 0 -or $script:OrchestrationState.Phase -eq 'Stopped') {
+    if ($failedProfiles.Count -gt 0 -or $totalFailed -gt 0 -or $script:OrchestrationState.Phase -eq 'Stopped') {
         return 1
     }
     return 0
@@ -24048,12 +25115,29 @@ function Start-RobocurseMain {
             return 1
         }
 
+        # Check if profile uses network paths - if so, require credentials
+        $credential = $null
+        if (($profile.Source -match '^\\\\') -or ($profile.Destination -match '^\\\\')) {
+            Write-Host "Profile uses network paths - credentials required for scheduled task" -ForegroundColor Yellow
+            Write-Host "Enter credentials for the user that will run the scheduled task:" -ForegroundColor Yellow
+            $credential = Get-Credential -Message "Credentials for scheduled task (network access)" -UserName "$env:USERDOMAIN\$env:USERNAME"
+            if (-not $credential) {
+                Write-Host "Error: Credentials are required for scheduled tasks that access network shares" -ForegroundColor Red
+                return 1
+            }
+        }
+
         # Create the scheduled task
-        $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $ConfigPath
+        $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $ConfigPath -Credential $credential
         if ($result.Success) {
             Write-Host "Profile schedule created for '$ProfileName'" -ForegroundColor Green
             Write-Host "  Frequency: $Frequency"
             Write-Host "  Time: $Time"
+            if ($credential) {
+                Write-Host "  Logon: Password (network access enabled)" -ForegroundColor Green
+            } else {
+                Write-Host "  Logon: S4U (local access only)" -ForegroundColor Yellow
+            }
             return 0
         } else {
             Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red

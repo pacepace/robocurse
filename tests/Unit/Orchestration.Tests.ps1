@@ -1210,6 +1210,32 @@ InModuleScope 'Robocurse' {
 
                 $script:OrchestrationState.Phase | Should -Be "Complete"
             }
+
+            It "Should set status to Failed and include PreflightError when pre-flight fails" {
+                # Clear any existing results
+                while ($script:OrchestrationState.ProfileResults.Count -gt 0) {
+                    $null = $script:OrchestrationState.ProfileResults.TryDequeue([ref]$null)
+                }
+                # Clear chunks so only pre-flight error is counted
+                while ($script:OrchestrationState.FailedChunks.Count -gt 0) {
+                    $null = $script:OrchestrationState.FailedChunks.TryDequeue([ref]$null)
+                }
+                while ($script:OrchestrationState.CompletedChunks.Count -gt 0) {
+                    $null = $script:OrchestrationState.CompletedChunks.TryDequeue([ref]$null)
+                }
+                $script:OrchestrationState.TotalChunks = 0
+
+                # Set pre-flight error (simulating what Start-ProfileReplication does)
+                $script:CurrentPreflightError = "Profile 'TestProfile' failed pre-flight check: Source path not accessible"
+
+                Complete-CurrentProfile
+
+                $results = $script:OrchestrationState.GetProfileResultsArray()
+                $results | Should -Not -BeNullOrEmpty
+                $results[0].Status | Should -Be 'Failed'
+                $results[0].PreflightError | Should -Be "Profile 'TestProfile' failed pre-flight check: Source path not accessible"
+                $results[0].Errors | Should -Contain "Profile 'TestProfile' failed pre-flight check: Source path not accessible"
+            }
         }
 
         Context "New-OperationResult" {

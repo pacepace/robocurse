@@ -53,10 +53,24 @@ InModuleScope 'Robocurse' {
                     Profiles = @(
                         [PSCustomObject]@{ Name = "TestProfile" }
                     )
+                    SessionId = "test-session-id"
+                    FailedChunks = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+                    WarningChunks = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+                }
+                # Add method for getting profile results
+                $script:OrchestrationState | Add-Member -MemberType ScriptMethod -Name 'GetProfileResultsArray' -Value {
+                    return @([PSCustomObject]@{
+                        Name = "TestProfile"
+                        Status = "Success"
+                        PreflightError = $null
+                        ChunksComplete = 5
+                        ChunksTotal = 5
+                        ChunksFailed = 0
+                    })
                 }
             }
 
-            It "Should call Send-CompletionEmail when email is enabled" {
+            It "Should call Send-ReplicationCompletionNotification when email is enabled" {
                 # Setup config with email enabled
                 $script:Config = [PSCustomObject]@{
                     Email = [PSCustomObject]@{
@@ -70,16 +84,16 @@ InModuleScope 'Robocurse' {
                     }
                 }
 
-                Mock Send-CompletionEmail {
-                    return [PSCustomObject]@{ Success = $true }
+                Mock Send-ReplicationCompletionNotification {
+                    return [PSCustomObject]@{ Success = $true; Skipped = $false }
                 }
 
                 Complete-GuiReplication
 
-                Should -Invoke Send-CompletionEmail -Times 1
+                Should -Invoke Send-ReplicationCompletionNotification -Times 1
             }
 
-            It "Should NOT call Send-CompletionEmail when email is disabled" {
+            It "Should skip email when email is disabled" {
                 # Setup config with email disabled
                 $script:Config = [PSCustomObject]@{
                     Email = [PSCustomObject]@{
@@ -87,22 +101,34 @@ InModuleScope 'Robocurse' {
                     }
                 }
 
-                Mock Send-CompletionEmail { }
+                Mock Send-ReplicationCompletionNotification {
+                    return [PSCustomObject]@{ Success = $true; Skipped = $true }
+                }
+
+                $script:logMessages = @()
+                Mock Write-GuiLog { param($Message) $script:logMessages += $Message }
 
                 Complete-GuiReplication
 
-                Should -Not -Invoke Send-CompletionEmail
+                Should -Invoke Send-ReplicationCompletionNotification -Times 1
+                ($script:logMessages -join "`n") | Should -Match "not enabled, skipping"
             }
 
-            It "Should NOT call Send-CompletionEmail when Email config is null" {
+            It "Should skip email when Email config is null" {
                 # Setup config with no email section
                 $script:Config = [PSCustomObject]@{}
 
-                Mock Send-CompletionEmail { }
+                Mock Send-ReplicationCompletionNotification {
+                    return [PSCustomObject]@{ Success = $true; Skipped = $true }
+                }
+
+                $script:logMessages = @()
+                Mock Write-GuiLog { param($Message) $script:logMessages += $Message }
 
                 Complete-GuiReplication
 
-                Should -Not -Invoke Send-CompletionEmail
+                Should -Invoke Send-ReplicationCompletionNotification -Times 1
+                ($script:logMessages -join "`n") | Should -Match "not enabled, skipping"
             }
 
             It "Should log success when email sends successfully" {
@@ -118,8 +144,8 @@ InModuleScope 'Robocurse' {
                     }
                 }
 
-                Mock Send-CompletionEmail {
-                    return [PSCustomObject]@{ Success = $true }
+                Mock Send-ReplicationCompletionNotification {
+                    return [PSCustomObject]@{ Success = $true; Skipped = $false }
                 }
 
                 $script:logMessages = @()
@@ -143,8 +169,8 @@ InModuleScope 'Robocurse' {
                     }
                 }
 
-                Mock Send-CompletionEmail {
-                    return [PSCustomObject]@{ Success = $false; ErrorMessage = "Credential not found" }
+                Mock Send-ReplicationCompletionNotification {
+                    return [PSCustomObject]@{ Success = $false; Skipped = $false; ErrorMessage = "Credential not found" }
                 }
 
                 $logMessages = @()
@@ -155,7 +181,7 @@ InModuleScope 'Robocurse' {
                 $script:logMessages -join "`n" | Should -Match "ERROR.*Failed to send completion email.*Credential not found"
             }
 
-            It "Should build results object with correct structure" {
+            It "Should call Send-ReplicationCompletionNotification with correct parameters" {
                 $script:Config = [PSCustomObject]@{
                     Email = [PSCustomObject]@{
                         Enabled = $true
@@ -168,22 +194,17 @@ InModuleScope 'Robocurse' {
                     }
                 }
 
-                $capturedResults = $null
-                Mock Send-CompletionEmail {
-                    param($Config, $Results, $Status)
-                    $script:capturedResults = $Results
-                    return [PSCustomObject]@{ Success = $true }
+                Mock Send-ReplicationCompletionNotification {
+                    param($Config, $OrchestrationState, $FailedFilesSummaryPath)
+                    # Verify parameters are passed correctly
+                    $Config | Should -Not -BeNullOrEmpty
+                    $OrchestrationState | Should -Not -BeNullOrEmpty
+                    return [PSCustomObject]@{ Success = $true; Skipped = $false }
                 }
 
                 Complete-GuiReplication
 
-                # Verify the results object has expected properties
-                Should -Invoke Send-CompletionEmail -Times 1
-                $script:capturedResults | Should -Not -BeNullOrEmpty
-                $script:capturedResults.Duration | Should -Not -BeNullOrEmpty
-                $script:capturedResults.TotalBytesCopied | Should -BeGreaterOrEqual 0
-                $script:capturedResults.TotalFilesCopied | Should -BeGreaterOrEqual 0
-                $script:capturedResults.Profiles | Should -Not -BeNullOrEmpty
+                Should -Invoke Send-ReplicationCompletionNotification -Times 1
             }
         }
     }

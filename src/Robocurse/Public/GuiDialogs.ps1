@@ -257,6 +257,8 @@ function Show-CompletionDialog {
         Array of failed chunk objects with details for error display
     .PARAMETER WarningChunkDetails
         Array of warning chunk objects with details for warning display
+    .PARAMETER PreflightErrors
+        Array of pre-flight error messages (e.g., source path not accessible)
     #>
     [CmdletBinding()]
     param(
@@ -268,7 +270,8 @@ function Show-CompletionDialog {
         [long]$FilesFailed = 0,
         [string]$FailedFilesSummaryPath = $null,
         [PSCustomObject[]]$FailedChunkDetails = @(),
-        [PSCustomObject[]]$WarningChunkDetails = @()
+        [PSCustomObject[]]$WarningChunkDetails = @(),
+        [string[]]$PreflightErrors = @()
     )
 
     try {
@@ -330,7 +333,34 @@ function Show-CompletionDialog {
         }
 
         # Adjust appearance based on results
-        if ($ChunksFailed -gt 0) {
+        if ($PreflightErrors.Count -gt 0) {
+            # Pre-flight failure - show error state (red)
+            $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
+            $iconText.Text = [char]0x2716  # X mark
+            $txtTitle.Text = "Replication Failed"
+            $txtSubtitle.Text = "Pre-flight check failed - source not accessible"
+            $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
+
+            # Show pre-flight errors in error panel
+            $pnlErrors.Visibility = 'Visible'
+            foreach ($err in $PreflightErrors) {
+                $errorItem = New-Object System.Windows.Controls.Border
+                $errorItem.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#1E1E1E")
+                $errorItem.CornerRadius = 3
+                $errorItem.Padding = 8
+                $errorItem.Margin = "0,0,0,6"
+
+                $errorText = New-Object System.Windows.Controls.TextBlock
+                $errorText.Text = $err
+                $errorText.FontSize = 11
+                $errorText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
+                $errorText.TextWrapping = 'Wrap'
+                $errorItem.Child = $errorText
+
+                $lstErrors.Children.Add($errorItem) | Out-Null
+            }
+        }
+        elseif ($ChunksFailed -gt 0) {
             # Some failures - show error state (red/orange)
             $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
             $iconText.Text = [char]0x2716  # X mark
@@ -943,10 +973,34 @@ function Show-ProfileScheduleDialog {
 
                 # Create or remove task
                 if ($chkEnabled.IsChecked) {
+                    # Check if profile uses network paths - if so, require credentials
+                    $needsCredential = ($Profile.Source -match '^\\\\') -or ($Profile.Destination -match '^\\\\')
+                    $credential = $null
+
+                    if ($needsCredential) {
+                        # Prompt for credentials - required for network share access
+                        Write-GuiLog "Profile uses network paths - prompting for credentials"
+                        try {
+                            $credential = Get-Credential -Message "Enter credentials for scheduled task.`nRequired for network share access to:`n$($Profile.Source)" -UserName "$env:USERDOMAIN\$env:USERNAME"
+                            if (-not $credential) {
+                                Write-GuiLog "User cancelled credential prompt"
+                                Show-AlertDialog -Title "Credentials Required" -Message "Credentials are required for scheduled tasks that access network shares.`n`nThe task cannot run without credentials because Windows Task Scheduler`ncannot authenticate to network resources without a stored password." -Icon 'Warning'
+                                return
+                            }
+                        }
+                        catch {
+                            Write-GuiLog "Credential prompt failed: $($_.Exception.Message)"
+                            return
+                        }
+                    }
+
                     Write-GuiLog "Creating profile schedule for $($Profile.Name)"
-                    $result = New-ProfileScheduledTask -Profile $Profile -ConfigPath $script:ConfigPath
+                    $result = New-ProfileScheduledTask -Profile $Profile -ConfigPath $script:ConfigPath -Credential $credential
                     if ($result.Success) {
                         Write-GuiLog "Profile schedule created: $($result.Data)"
+                        if ($needsCredential) {
+                            Write-GuiLog "Task registered with Password logon (network access enabled)"
+                        }
                     } else {
                         Write-GuiLog "Failed to create profile schedule: $($result.ErrorMessage)"
                         Show-AlertDialog -Title "Error" -Message "Failed to create scheduled task:`n$($result.ErrorMessage)" -Icon 'Error'

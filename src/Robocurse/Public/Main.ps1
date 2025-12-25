@@ -230,8 +230,15 @@ function Invoke-HeadlessReplication {
         SnapshotSummary = $snapshotSummary
     }
 
-    # Determine overall status
-    $emailStatus = if ($totalFailed -gt 0) { 'Warning' } else { 'Success' }
+    # Determine overall status - check for failed profiles (pre-flight errors) and chunk failures
+    $failedProfiles = @($profileResultsArray | Where-Object { $_.Status -eq 'Failed' })
+    $emailStatus = if ($failedProfiles.Count -gt 0) {
+        'Failed'  # Pre-flight failure (e.g., source path not accessible)
+    } elseif ($totalFailed -gt 0) {
+        'Warning'  # Chunk failures
+    } else {
+        'Success'
+    }
     if ($script:OrchestrationState.Phase -eq 'Stopped') {
         $emailStatus = 'Failed'
     }
@@ -256,44 +263,41 @@ function Invoke-HeadlessReplication {
         Write-Host ""
     }
 
-    # Track email status for exit code consideration
-    $emailFailed = $false
+    # Send email notification using shared function
+    Write-Host "Sending completion email..."
+    $emailResult = Send-ReplicationCompletionNotification -Config $Config -OrchestrationState $script:OrchestrationState
 
-    # Send email notification if configured
-    if ($Config.Email -and $Config.Email.Enabled) {
-        Write-Host "Sending completion email..."
-        $emailSessionId = if ($script:OrchestrationState) { $script:OrchestrationState.SessionId } else { $null }
-        $emailResult = Send-CompletionEmail -Config $Config.Email -Results $results -Status $emailStatus -SessionId $emailSessionId
-        if ($emailResult.Success) {
-            Write-Host "Email sent successfully." -ForegroundColor Green
+    if ($emailResult.Skipped) {
+        Write-Host "Email notifications not enabled, skipping."
+    }
+    elseif ($emailResult.Success) {
+        Write-Host "Email sent successfully." -ForegroundColor Green
+    }
+    else {
+        Write-RobocurseLog -Message "Failed to send completion email: $($emailResult.ErrorMessage)" -Level 'Error' -Component 'Email'
+        Write-SiemEvent -EventType 'ChunkError' -Data @{
+            errorType = 'EmailDeliveryFailure'
+            errorMessage = $emailResult.ErrorMessage
+            recipients = ($Config.Email.To -join ', ')
         }
-        else {
-            $emailFailed = $true
-            Write-RobocurseLog -Message "Failed to send completion email: $($emailResult.ErrorMessage)" -Level 'Error' -Component 'Email'
-            Write-SiemEvent -EventType 'ChunkError' -Data @{
-                errorType = 'EmailDeliveryFailure'
-                errorMessage = $emailResult.ErrorMessage
-                recipients = ($Config.Email.To -join ', ')
-            }
-            # Make email failure VERY visible in console
-            Write-Host ""
-            Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor Red
-            Write-Host "║  EMAIL NOTIFICATION FAILED                                 ║" -ForegroundColor Red
-            Write-Host "╠════════════════════════════════════════════════════════════╣" -ForegroundColor Red
-            Write-Host "║  Error: $($emailResult.ErrorMessage.PadRight(50).Substring(0,50)) ║" -ForegroundColor Red
-            Write-Host "║                                                            ║" -ForegroundColor Red
-            Write-Host "║  Replication completed but notification was NOT sent.      ║" -ForegroundColor Red
-            Write-Host "║  Check SMTP settings and credentials.                      ║" -ForegroundColor Red
-            Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor Red
-            Write-Host ""
-        }
+        # Make email failure VERY visible in console
+        Write-Host ""
+        Write-Host "╔════════════════════════════════════════════════════════════╗" -ForegroundColor Red
+        Write-Host "║  EMAIL NOTIFICATION FAILED                                 ║" -ForegroundColor Red
+        Write-Host "╠════════════════════════════════════════════════════════════╣" -ForegroundColor Red
+        Write-Host "║  Error: $($emailResult.ErrorMessage.PadRight(50).Substring(0,50)) ║" -ForegroundColor Red
+        Write-Host "║                                                            ║" -ForegroundColor Red
+        Write-Host "║  Replication completed but notification was NOT sent.      ║" -ForegroundColor Red
+        Write-Host "║  Check SMTP settings and credentials.                      ║" -ForegroundColor Red
+        Write-Host "╚════════════════════════════════════════════════════════════╝" -ForegroundColor Red
+        Write-Host ""
     }
 
     # Return exit code
     # Email failure alone doesn't cause exit code 1, but is logged prominently
     # Uncomment the following to treat email failure as a failure condition:
     # if ($emailFailed) { return 2 }  # Exit code 2 = email delivery failure
-    if ($totalFailed -gt 0 -or $script:OrchestrationState.Phase -eq 'Stopped') {
+    if ($failedProfiles.Count -gt 0 -or $totalFailed -gt 0 -or $script:OrchestrationState.Phase -eq 'Stopped') {
         return 1
     }
     return 0
@@ -473,12 +477,29 @@ function Start-RobocurseMain {
             return 1
         }
 
+        # Check if profile uses network paths - if so, require credentials
+        $credential = $null
+        if (($profile.Source -match '^\\\\') -or ($profile.Destination -match '^\\\\')) {
+            Write-Host "Profile uses network paths - credentials required for scheduled task" -ForegroundColor Yellow
+            Write-Host "Enter credentials for the user that will run the scheduled task:" -ForegroundColor Yellow
+            $credential = Get-Credential -Message "Credentials for scheduled task (network access)" -UserName "$env:USERDOMAIN\$env:USERNAME"
+            if (-not $credential) {
+                Write-Host "Error: Credentials are required for scheduled tasks that access network shares" -ForegroundColor Red
+                return 1
+            }
+        }
+
         # Create the scheduled task
-        $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $ConfigPath
+        $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $ConfigPath -Credential $credential
         if ($result.Success) {
             Write-Host "Profile schedule created for '$ProfileName'" -ForegroundColor Green
             Write-Host "  Frequency: $Frequency"
             Write-Host "  Time: $Time"
+            if ($credential) {
+                Write-Host "  Logon: Password (network access enabled)" -ForegroundColor Green
+            } else {
+                Write-Host "  Logon: S4U (local access only)" -ForegroundColor Yellow
+            }
             return 0
         } else {
             Write-Host "Error: $($result.ErrorMessage)" -ForegroundColor Red

@@ -49,21 +49,44 @@ Describe "OperationResult Pattern Enforcement" {
                 # Check if this return statement is inside an Invoke-Command ScriptBlock parameter
                 $parent = $returnStmt.Parent
                 $isInsideRemoteBlock = $false
+                $scriptBlockExpressionAst = $null
 
                 while ($parent) {
-                    # Check if we're in a ScriptBlock that's a parameter to Invoke-Command
+                    # Remember the ScriptBlockExpressionAst as we walk up
                     if ($parent -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
-                        $scriptBlockParent = $parent.Parent
+                        $scriptBlockExpressionAst = $parent
+                    }
 
-                        # Check if parent is a CommandParameterAst or part of a command that calls Invoke-Command
-                        if ($scriptBlockParent -is [System.Management.Automation.Language.CommandAst]) {
-                            $commandName = $scriptBlockParent.GetCommandName()
-                            if ($commandName -eq 'Invoke-Command') {
-                                $isInsideRemoteBlock = $true
-                                break
-                            }
+                    # Check if we're in a ScriptBlock that's a parameter to Invoke-Command
+                    if ($parent -is [System.Management.Automation.Language.CommandAst]) {
+                        $commandName = $parent.GetCommandName()
+                        if ($commandName -eq 'Invoke-Command') {
+                            $isInsideRemoteBlock = $true
+                            break
                         }
                     }
+
+                    # Check for splatting pattern: $params = @{ ScriptBlock = { ... } }
+                    # The HashtableAst is an ancestor of the ScriptBlockExpressionAst
+                    if ($parent -is [System.Management.Automation.Language.HashtableAst] -and $scriptBlockExpressionAst) {
+                        # Check if any key is 'ScriptBlock' and contains our scriptblock
+                        foreach ($kvp in $parent.KeyValuePairs) {
+                            $keyText = $kvp.Item1.Extent.Text -replace '[''"]', ''
+                            if ($keyText -eq 'ScriptBlock') {
+                                # Check if our ScriptBlockExpressionAst is contained in this value
+                                $containsScriptBlock = $kvp.Item2.FindAll({
+                                    param($n)
+                                    $n -eq $scriptBlockExpressionAst
+                                }, $true)
+                                if ($containsScriptBlock.Count -gt 0) {
+                                    $isInsideRemoteBlock = $true
+                                    break
+                                }
+                            }
+                        }
+                        if ($isInsideRemoteBlock) { break }
+                    }
+
                     $parent = $parent.Parent
                 }
 

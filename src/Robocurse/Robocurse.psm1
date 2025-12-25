@@ -183,6 +183,8 @@ $publicFunctionOrder = @(
     # Orchestration modules (split for maintainability)
     'OrchestrationCore.ps1'  # C# types, state management, circuit breaker
     'HealthCheck.ps1'        # Health monitoring (before JobManagement which uses it)
+    'CredentialStorage.ps1'  # DPAPI credential storage for network shares (before NetworkMapping)
+    'NetworkMapping.ps1'     # UNC path to drive letter mapping (before JobManagement)
     'JobManagement.ps1'      # Job execution, profile management
     'Progress.ps1'
     'VssCore.ps1'
