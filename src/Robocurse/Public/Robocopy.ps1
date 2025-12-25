@@ -546,9 +546,14 @@ function ConvertFrom-RobocopyLog {
         ErrorMessage = $null  # Extracted error message(s) from robocopy output
     }
 
+    # Track whether we're reading from file (progress polling) vs provided content (final parsing)
+    # When reading from file, missing stats is expected (job still running) - log at Debug level
+    # When content is provided, missing stats is unexpected (job completed) - log at Warning level
+    $isProgressPolling = [string]::IsNullOrEmpty($Content)
+
     # Get content from parameter or read from file
-    if ([string]::IsNullOrEmpty($Content)) {
-        # No content provided, read from file
+    if ($isProgressPolling) {
+        # No content provided, read from file (progress polling case)
         if ([string]::IsNullOrEmpty($LogPath)) {
             $result.ParseWarning = "Neither Content nor LogPath provided"
             return $result
@@ -687,7 +692,10 @@ function ConvertFrom-RobocopyLog {
             }
         }
         else {
-            Write-RobocurseLog -Message "No stats lines found in robocopy log (found $($statsLines.Count), need 3). Log path: $LogPath" -Level 'Warning' -Component 'Robocopy'
+            # During progress polling (reading from file), missing stats is expected - job still running
+            # During final parsing (content provided), missing stats is unexpected - warn about it
+            $logLevel = if ($isProgressPolling) { 'Debug' } else { 'Warning' }
+            Write-RobocurseLog -Message "No stats lines found in robocopy log (found $($statsLines.Count), need 3). Log path: $LogPath" -Level $logLevel -Component 'Robocopy'
         }
 
         # Parse Speed line - look for numeric pattern followed by common speed units
