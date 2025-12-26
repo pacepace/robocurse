@@ -136,12 +136,18 @@ jobs:
         shell: pwsh
         run: |
           $version = '${{ steps.version.outputs.VERSION }}'
-          $zipName = "Robocurse-v$version.zip"
+          $versionedZip = "Robocurse-v$version.zip"
+          $latestZip = "Robocurse.zip"
 
-          Compress-Archive -Path 'release-staging/*' -DestinationPath $zipName -Force
+          # Create versioned zip
+          Compress-Archive -Path 'release-staging/*' -DestinationPath $versionedZip -Force
 
-          $zipSize = (Get-Item $zipName).Length / 1KB
-          Write-Host "Created: $zipName ($([math]::Round($zipSize, 1)) KB)"
+          # Create fixed-name zip for easy "latest" download URL
+          Copy-Item $versionedZip $latestZip
+
+          $zipSize = (Get-Item $versionedZip).Length / 1KB
+          Write-Host "Created: $versionedZip ($([math]::Round($zipSize, 1)) KB)"
+          Write-Host "Created: $latestZip (copy for /releases/latest/download/ URL)"
 
       - name: Generate release notes
         id: release-notes
@@ -224,6 +230,7 @@ jobs:
           prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
           files: |
             Robocurse-v${{ steps.version.outputs.VERSION }}.zip
+            Robocurse.zip
             dist/Robocurse.ps1
             dist/Robocurse.ps1.sha256
         env:

@@ -30,14 +30,36 @@ Robocurse solves these problems with a single deployable PowerShell script.
 | **Bandwidth Throttling** | Aggregate limit across all concurrent jobs |
 | **Per-Profile Scheduling** | Independent schedules for each profile (Hourly, Daily, Weekly, Monthly) |
 
+## Download
+
+### Stable Release (Recommended)
+
+```powershell
+# Full bundle (script + helper utilities + batch launchers)
+iwr https://github.com/pacepace/robocurse/releases/latest/download/Robocurse.zip -OutFile Robocurse.zip
+
+# Script only
+iwr https://github.com/pacepace/robocurse/releases/latest/download/Robocurse.ps1 -OutFile Robocurse.ps1
+```
+
+Or browse [GitHub Releases](https://github.com/pacepace/robocurse/releases) for specific versions.
+
+### Development Build
+
+For the latest (potentially unstable) changes from the develop branch:
+- Clone the repo and use `dist/Robocurse.ps1` (auto-built on every push to develop)
+- Or build fresh: `.\build\Build-Robocurse.ps1`
+
+---
+
 ## Quick Start
 
 ### 1. Deploy
 
 Copy two files to your server:
 ```
-dist/Robocurse.ps1          # The application (~1MB)
-Robocurse.config.json       # Your configuration
+Robocurse.ps1               # From Releases or dist/
+Robocurse.config.json       # Your configuration (customize from template)
 ```
 
 ### 2. Configure
@@ -141,7 +163,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\Robocurse.ps1
 
 Copy to your server:
 ```
-Robocurse.ps1           # From dist/ folder (~1MB)
+Robocurse.ps1           # From Releases (stable) or dist/ (development)
 Robocurse.config.json   # Your configuration (customize from template)
 ```
 
