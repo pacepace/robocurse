@@ -12,11 +12,15 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    environment: development
 
     steps:
       # actions/checkout v6.0.1 (Dec 2024) - https://github.com/actions/checkout/releases
+      # Uses PAT to bypass branch protection for auto-commit of dist changes
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.DIST_BUILD_PAT }}
 
       - name: Build monolith
         shell: pwsh
