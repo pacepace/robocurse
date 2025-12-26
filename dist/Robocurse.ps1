@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Robocurse - Multi-share parallel robocopy orchestrator
@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-25 17:49:58
+    Built: 2025-12-26 21:49:50
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -24461,7 +24461,7 @@ function Write-GuiLog {
     .SYNOPSIS
         Writes a message to the GUI log buffer and console
     .DESCRIPTION
-        Uses a fixed-size ring buffer to prevent O(nÂ²) string concatenation
+        Uses a fixed-size ring buffer to prevent O(n²) string concatenation
         performance issues. When the buffer exceeds GuiLogMaxLines, oldest
         entries are removed. This keeps the GUI responsive during long runs.
         Also writes to console for debugging visibility with caller info.
@@ -25431,5 +25431,4 @@ if (-not (Test-IsBeingDotSourced)) {
     $exitCode = Start-RobocurseMain -Headless:$Headless -ConfigPath $ConfigPath -ProfileName $SyncProfile -AllProfiles:$AllProfiles -DryRun:$DryRun -ShowHelp:$Help
     exit $exitCode
 }
-
 
