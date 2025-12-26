@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-24 21:07:14
+    Built: 2025-12-25 17:49:58
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -24909,9 +24909,29 @@ function Invoke-HeadlessReplication {
         Write-Host ""
     }
 
+    # Generate failed files summary if there were failures
+    $failedFilesSummaryPath = $null
+    if ($status.FilesFailed -gt 0) {
+        try {
+            $logRoot = if ($Config.GlobalSettings.LogPath) { $Config.GlobalSettings.LogPath } else { '.\Logs' }
+            if (-not [System.IO.Path]::IsPathRooted($logRoot)) {
+                $configDir = Split-Path -Parent $ConfigPath
+                $logRoot = [System.IO.Path]::GetFullPath((Join-Path $configDir $logRoot))
+            }
+            $dateFolderName = (Get-Date).ToString('yyyy-MM-dd')
+            $failedFilesSummaryPath = New-FailedFilesSummary -LogPath $logRoot -Date $dateFolderName
+            if ($failedFilesSummaryPath) {
+                Write-Host "  Failed files summary: $failedFilesSummaryPath"
+            }
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to generate failed files summary: $($_.Exception.Message)" -Level 'Warning' -Component 'Email'
+        }
+    }
+
     # Send email notification using shared function
     Write-Host "Sending completion email..."
-    $emailResult = Send-ReplicationCompletionNotification -Config $Config -OrchestrationState $script:OrchestrationState
+    $emailResult = Send-ReplicationCompletionNotification -Config $Config -OrchestrationState $script:OrchestrationState -FailedFilesSummaryPath $failedFilesSummaryPath
 
     if ($emailResult.Skipped) {
         Write-Host "Email notifications not enabled, skipping."

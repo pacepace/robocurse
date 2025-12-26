@@ -558,5 +558,119 @@ InModuleScope 'Robocurse' {
                 $outputText | Should -Match "Profile1.*Profile2"
             }
         }
+
+        Context "Failed Files Summary Attachment" {
+            It "Should generate failed files summary when FilesFailed > 0" {
+                $script:OrchestrationState.Phase = "Complete"
+
+                # Mock status with failed files
+                Mock Get-OrchestrationStatus {
+                    return [PSCustomObject]@{
+                        ChunksComplete = 10
+                        ChunksTotal = 10
+                        ChunksFailed = 0
+                        BytesComplete = 1000000
+                        FilesCopied = 100
+                        FilesSkipped = 50
+                        FilesFailed = 1
+                        Elapsed = [timespan]::FromMinutes(5)
+                        ETA = [timespan]::Zero
+                        CurrentProfile = "TestProfile"
+                    }
+                }
+
+                Mock New-FailedFilesSummary { return "C:\Logs\2025-12-25\FailedFiles.txt" }
+                Mock Send-ReplicationCompletionNotification { return [PSCustomObject]@{ Success = $true; Skipped = $false } }
+
+                $config = [PSCustomObject]@{
+                    Email = [PSCustomObject]@{ Enabled = $true }
+                    GlobalSettings = [PSCustomObject]@{ LogPath = ".\Logs" }
+                }
+                $profile = [PSCustomObject]@{
+                    Name = "TestProfile"
+                    Source = "C:\Source"
+                    Destination = "C:\Dest"
+                }
+
+                Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
+
+                Should -Invoke New-FailedFilesSummary -Times 1
+            }
+
+            It "Should pass FailedFilesSummaryPath to Send-ReplicationCompletionNotification" {
+                $script:OrchestrationState.Phase = "Complete"
+
+                Mock Get-OrchestrationStatus {
+                    return [PSCustomObject]@{
+                        ChunksComplete = 10
+                        ChunksTotal = 10
+                        ChunksFailed = 0
+                        BytesComplete = 1000000
+                        FilesCopied = 100
+                        FilesSkipped = 50
+                        FilesFailed = 1
+                        Elapsed = [timespan]::FromMinutes(5)
+                        ETA = [timespan]::Zero
+                        CurrentProfile = "TestProfile"
+                    }
+                }
+
+                $expectedPath = "C:\Logs\2025-12-25\FailedFiles.txt"
+                Mock New-FailedFilesSummary { return $expectedPath }
+                Mock Send-ReplicationCompletionNotification { return [PSCustomObject]@{ Success = $true; Skipped = $false } }
+
+                $config = [PSCustomObject]@{
+                    Email = [PSCustomObject]@{ Enabled = $true }
+                    GlobalSettings = [PSCustomObject]@{ LogPath = ".\Logs" }
+                }
+                $profile = [PSCustomObject]@{
+                    Name = "TestProfile"
+                    Source = "C:\Source"
+                    Destination = "C:\Dest"
+                }
+
+                Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
+
+                Should -Invoke Send-ReplicationCompletionNotification -Times 1 -ParameterFilter {
+                    $FailedFilesSummaryPath -eq $expectedPath
+                }
+            }
+
+            It "Should not generate failed files summary when FilesFailed is 0" {
+                $script:OrchestrationState.Phase = "Complete"
+
+                Mock Get-OrchestrationStatus {
+                    return [PSCustomObject]@{
+                        ChunksComplete = 10
+                        ChunksTotal = 10
+                        ChunksFailed = 0
+                        BytesComplete = 1000000
+                        FilesCopied = 100
+                        FilesSkipped = 50
+                        FilesFailed = 0
+                        Elapsed = [timespan]::FromMinutes(5)
+                        ETA = [timespan]::Zero
+                        CurrentProfile = "TestProfile"
+                    }
+                }
+
+                Mock New-FailedFilesSummary { throw "Should not be called" }
+                Mock Send-ReplicationCompletionNotification { return [PSCustomObject]@{ Success = $true; Skipped = $false } }
+
+                $config = [PSCustomObject]@{
+                    Email = [PSCustomObject]@{ Enabled = $true }
+                    GlobalSettings = [PSCustomObject]@{ LogPath = ".\Logs" }
+                }
+                $profile = [PSCustomObject]@{
+                    Name = "TestProfile"
+                    Source = "C:\Source"
+                    Destination = "C:\Dest"
+                }
+
+                Invoke-HeadlessReplication -Config $config -ConfigPath $script:HeadlessTestConfigPath -ProfilesToRun @($profile) -MaxConcurrentJobs 4 6>&1 | Out-Null
+
+                Should -Invoke New-FailedFilesSummary -Times 0
+            }
+        }
     }
 }
