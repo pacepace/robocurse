@@ -26,7 +26,8 @@ jobs:
         id: check
         shell: pwsh
         run: |
-          $changed = -not (git diff --quiet dist/)
+          $diffOutput = git diff --name-only dist/
+          $changed = [bool]$diffOutput
           "changed=$($changed.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
       - name: Commit dist
