@@ -19,8 +19,9 @@
     certificate expires, as long as the signature was made while the cert was valid.
 
 .PARAMETER ScriptPath
-    Path to the script to sign. If not specified, defaults to Robocurse.ps1 in the
-    current directory. Accepts a positional argument.
+    Path to a specific script to sign. If not specified, signs all Robocurse scripts
+    found in the current directory (Robocurse.ps1, Sign-Robocurse.ps1, Set-*.ps1).
+    Missing files are skipped gracefully.
 
 .PARAMETER CertSubject
     Subject name for the certificate. Defaults to "Robocurse Signing".
@@ -33,22 +34,22 @@
 .EXAMPLE
     .\Sign-Robocurse.ps1
 
-    Signs .\Robocurse.ps1 in the current directory using the default certificate.
+    Signs all Robocurse scripts in the current directory, skipping any that are missing.
 
 .EXAMPLE
     .\Sign-Robocurse.ps1 C:\Deploy\Robocurse.ps1
 
-    Signs a script at a specific path (positional argument).
+    Signs a specific script at the given path (positional argument).
 
 .EXAMPLE
     .\Sign-Robocurse.ps1 -ScriptPath C:\Scripts\MyScript.ps1 -CertSubject "My Company Signing"
 
-    Signs a different script with a custom certificate name.
+    Signs a specific script with a custom certificate name.
 
 .EXAMPLE
     .\Sign-Robocurse.ps1 -Force
 
-    Creates a new certificate even if one already exists, then signs the script.
+    Creates a new certificate even if one already exists, then signs all scripts.
 
 .NOTES
     Requires: Administrator privileges (to install certificates to LocalMachine stores)
@@ -82,13 +83,42 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Default to Robocurse.ps1 in current directory
-if (-not $ScriptPath) {
-    $ScriptPath = Join-Path (Get-Location) "Robocurse.ps1"
-}
+# Known Robocurse scripts to sign when no specific path is given
+$knownScripts = @(
+    'Robocurse.ps1',
+    'Sign-Robocurse.ps1',
+    'Set-FileSharing.ps1',
+    'Set-PsRemoting.ps1',
+    'Set-SmbFirewall.ps1'
+)
 
-if (-not (Test-Path $ScriptPath)) {
-    throw "Script not found: $ScriptPath"
+# Determine what to sign
+$scriptsToSign = @()
+$singleFileMode = $false
+
+if ($ScriptPath) {
+    # Specific file requested
+    if (-not (Test-Path $ScriptPath)) {
+        throw "Script not found: $ScriptPath"
+    }
+    $scriptsToSign = @($ScriptPath)
+    $singleFileMode = $true
+} else {
+    # No path specified - find all known scripts in current directory
+    $baseDir = Get-Location
+    foreach ($scriptName in $knownScripts) {
+        $fullPath = Join-Path $baseDir $scriptName
+        if (Test-Path $fullPath) {
+            $scriptsToSign += $fullPath
+        }
+    }
+
+    if ($scriptsToSign.Count -eq 0) {
+        Write-Host "No Robocurse scripts found in current directory." -ForegroundColor Yellow
+        Write-Host "Looking for: $($knownScripts -join ', ')" -ForegroundColor Gray
+        Write-Host "`nTo sign a specific file, use: .\Sign-Robocurse.ps1 <path>" -ForegroundColor Gray
+        exit 0
+    }
 }
 
 $certName = "CN=$CertSubject"
@@ -155,33 +185,62 @@ try {
     }
 }
 
-# Sign the script
-Write-Host "Signing $ScriptPath..." -ForegroundColor Cyan
-
-$signParams = @{
-    FilePath = $ScriptPath
-    Certificate = $cert
-    TimestampServer = "https://timestamp.digicert.com"
-    HashAlgorithm = "SHA256"
+# Sign the scripts
+if (-not $singleFileMode) {
+    Write-Host "`nSigning scripts in current directory..." -ForegroundColor Cyan
+    Write-Host "Found $($scriptsToSign.Count) of $($knownScripts.Count) known scripts" -ForegroundColor Gray
 }
 
-$signature = Set-AuthenticodeSignature @signParams
+$signedCount = 0
+$failedCount = 0
 
-if ($signature.Status -eq 'Valid') {
-    Write-Host "`nScript signed successfully!" -ForegroundColor Green
-    Write-Host "  Status: $($signature.Status)"
-    Write-Host "  Signer: $($signature.SignerCertificate.Subject)"
-    Write-Host "  Expires: $($signature.SignerCertificate.NotAfter)"
-} else {
-    throw "Signing failed: $($signature.Status) - $($signature.StatusMessage)"
+foreach ($script in $scriptsToSign) {
+    $scriptName = Split-Path $script -Leaf
+    Write-Host "`nSigning $scriptName..." -ForegroundColor Cyan
+
+    $signParams = @{
+        FilePath = $script
+        Certificate = $cert
+        TimestampServer = "https://timestamp.digicert.com"
+        HashAlgorithm = "SHA256"
+    }
+
+    try {
+        $signature = Set-AuthenticodeSignature @signParams
+
+        if ($signature.Status -eq 'Valid') {
+            Write-Host "  Signed successfully" -ForegroundColor Green
+            $signedCount++
+        } else {
+            Write-Host "  Signing failed: $($signature.Status)" -ForegroundColor Red
+            $failedCount++
+        }
+    } catch {
+        Write-Host "  Error: $_" -ForegroundColor Red
+        $failedCount++
+    }
 }
 
-# Verify
-Write-Host "`nVerifying signature..." -ForegroundColor Cyan
-$verify = Get-AuthenticodeSignature $ScriptPath
-
-if ($verify.Status -eq 'Valid') {
-    Write-Host "Verification passed" -ForegroundColor Green
+# Summary
+Write-Host "`n" + ("=" * 50) -ForegroundColor Gray
+if ($failedCount -eq 0) {
+    Write-Host "Done! Signed $signedCount script(s) successfully." -ForegroundColor Green
 } else {
-    Write-Warning "Verification returned: $($verify.Status)"
+    Write-Host "Done! Signed: $signedCount, Failed: $failedCount" -ForegroundColor Yellow
+}
+
+Write-Host "`nCertificate: $($cert.Subject)" -ForegroundColor Gray
+Write-Host "Expires: $($cert.NotAfter)" -ForegroundColor Gray
+
+# Verify all signed scripts
+Write-Host "`nVerifying signatures..." -ForegroundColor Cyan
+foreach ($script in $scriptsToSign) {
+    $scriptName = Split-Path $script -Leaf
+    $verify = Get-AuthenticodeSignature $script
+
+    if ($verify.Status -eq 'Valid') {
+        Write-Host "  $scriptName - Valid" -ForegroundColor Green
+    } else {
+        Write-Host "  $scriptName - $($verify.Status)" -ForegroundColor Yellow
+    }
 }

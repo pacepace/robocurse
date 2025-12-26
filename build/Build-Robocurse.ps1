@@ -15,6 +15,9 @@
 .PARAMETER MinifyComments
     Remove comment-based help blocks to reduce file size (keeps inline comments)
 
+.PARAMETER Version
+    Optional version string to inject into the monolith header (used by CI builds)
+
 .EXAMPLE
     .\Build-Robocurse.ps1
     Builds the monolith script to ../dist/Robocurse.ps1
@@ -25,7 +28,8 @@
 #>
 param(
     [string]$OutputPath = (Join-Path $PSScriptRoot "..\dist\Robocurse.ps1"),
-    [switch]$MinifyComments
+    [switch]$MinifyComments,
+    [string]$Version
 )
 
 $ErrorActionPreference = 'Stop'
@@ -179,6 +183,14 @@ $script:RobocurseScriptPath = $PSCommandPath
 $buildDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $headerContent = $output.ToString()
 $headerContent = $headerContent -replace 'BUILDDATE', $buildDate
+
+# Inject version if provided (for CI builds)
+if ($Version) {
+    # Add version to the build info line
+    $headerContent = $headerContent -replace '(Built:\s*\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', "Version: $Version - `$1"
+    Write-Host "  Version: $Version" -ForegroundColor Cyan
+}
+
 $output.Clear()
 [void]$output.Append($headerContent)
 
