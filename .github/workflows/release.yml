@@ -13,6 +13,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      # actions/checkout v6.0.1 (Dec 2024) - https://github.com/actions/checkout/releases
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
