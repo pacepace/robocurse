@@ -383,7 +383,10 @@ function Start-RobocopyJob {
     $psi.Arguments = $argList -join ' '
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
-    $psi.RedirectStandardOutput = $false  # Using /LOG and /TEE instead
+    # Capture stdout for reliable stat parsing - avoids file system flush race conditions
+    # that occur in Session 0 (scheduled tasks) where log file may not be fully written
+    # when process exits. Stdout is immediately available in memory when process completes.
+    $psi.RedirectStandardOutput = $true
     # Note: Not redirecting stderr - robocopy rarely writes to stderr,
     # and redirecting without reading can cause deadlock on large error output.
     # Robocopy errors are captured in the log file via /LOG and exit codes.
@@ -395,12 +398,17 @@ function Start-RobocopyJob {
     # Start the process
     $process = [System.Diagnostics.Process]::Start($psi)
 
+    # Start async stdout read immediately to prevent buffer overflow
+    # Both Wait-RobocopyJob and Complete-RobocopyJob will use this
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+
     return [PSCustomObject]@{
         Process = $process
         Chunk = $Chunk
         StartTime = [datetime]::Now
         LogPath = $LogPath
         DryRun = $DryRun.IsPresent
+        StdoutTask = $stdoutTask
     }
 }
 
@@ -490,20 +498,32 @@ function Get-RobocopyExitMeaning {
 function ConvertFrom-RobocopyLog {
     <#
     .SYNOPSIS
-        Parses a robocopy log file for progress and statistics
+        Parses robocopy output for progress and statistics
+    .DESCRIPTION
+        Extracts file counts, byte counts, speed metrics, and error messages from robocopy
+        output using locale-independent patterns. Supports both direct content parsing (from
+        captured stdout) and file-based reading. Prefer passing Content parameter over LogPath
+        for reliability - captured stdout avoids file system flush race conditions that occur
+        in Session 0 scheduled tasks where log files may not be fully written when the
+        robocopy process exits.
     .PARAMETER LogPath
-        Path to log file
+        Path to log file. Used if Content not provided.
+    .PARAMETER Content
+        Raw robocopy output content. When provided, LogPath is ignored for reading.
+        This avoids file system flush race conditions in Session 0 scheduled tasks.
     .PARAMETER TailLines
         Number of lines to read from end (for in-progress parsing)
     .OUTPUTS
         PSCustomObject with file counts, byte counts, speed, and current file
     .NOTES
-        Handles file locking by using FileShare.ReadWrite when robocopy has the file open
+        Prefer passing Content (captured stdout) over LogPath for reliability.
+        File-based reading can fail in Session 0 due to buffering delays.
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]
         [string]$LogPath,
+
+        [string]$Content,
 
         [int]$TailLines = 100
     )
@@ -526,30 +546,49 @@ function ConvertFrom-RobocopyLog {
         ErrorMessage = $null  # Extracted error message(s) from robocopy output
     }
 
-    # Check if log file exists
-    if (-not (Test-Path $LogPath)) {
-        $result.ParseWarning = "Log file does not exist: $LogPath"
-        return $result
+    # Track whether we're reading from file (progress polling) vs provided content (final parsing)
+    # When reading from file, missing stats is expected (job still running) - log at Debug level
+    # When content is provided, missing stats is unexpected (job completed) - log at Warning level
+    $isProgressPolling = [string]::IsNullOrEmpty($Content)
+
+    # Get content from parameter or read from file
+    if ($isProgressPolling) {
+        # No content provided, read from file (progress polling case)
+        if ([string]::IsNullOrEmpty($LogPath)) {
+            $result.ParseWarning = "Neither Content nor LogPath provided"
+            return $result
+        }
+
+        if (-not (Test-Path $LogPath)) {
+            $result.ParseWarning = "Log file does not exist: $LogPath"
+            return $result
+        }
+
+        # Use FileShare.ReadWrite to allow robocopy to continue writing while we read
+        # This prevents ERROR 32 (sharing violation) when progress polling reads active log files
+        $fs = $null
+        $sr = $null
+        try {
+            $fs = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $sr = New-Object System.IO.StreamReader($fs)
+            $Content = $sr.ReadToEnd()
+        }
+        catch {
+            # Log at Debug level - file lock during progress polling is expected behavior
+            # The ParseWarning in the result object surfaces actual issues to callers
+            $result.ParseWarning = "Failed to read log file: $($_.Exception.Message)"
+            Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level 'Debug' -Component 'Robocopy'
+            return $result
+        }
+        finally {
+            if ($sr) { $sr.Dispose() }
+            if ($fs) { $fs.Dispose() }
+        }
     }
 
-    # Read log file with ReadWrite sharing to handle file locking
-    # Use try-finally to ensure proper disposal even if ReadToEnd() throws
-    $fs = $null
-    $sr = $null
-    try {
-        $fs = [System.IO.File]::Open($LogPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        $sr = New-Object System.IO.StreamReader($fs)
-        $content = $sr.ReadToEnd()
-    }
-    catch {
-        # If we can't read the file, log the warning and return zeros
-        $result.ParseWarning = "Failed to read log file: $($_.Exception.Message)"
-        Write-RobocurseLog "Failed to read robocopy log file '$LogPath': $_" -Level 'Warning' -Component 'Robocopy'
+    if ([string]::IsNullOrEmpty($Content)) {
+        $result.ParseWarning = "Content was empty"
         return $result
-    }
-    finally {
-        if ($sr) { $sr.Dispose() }
-        if ($fs) { $fs.Dispose() }
     }
 
     # Parse summary statistics using locale-independent patterns
@@ -567,7 +606,7 @@ function ConvertFrom-RobocopyLog {
     #   - We normalize by replacing commas with periods and removing spaces in numbers
 
     try {
-        $lines = $content -split "`n"
+        $lines = $Content -split "`n"
 
         # Find all lines that match the stats pattern: "label : numbers"
         # The last 3 such lines should be Dirs, Files, Bytes
@@ -611,6 +650,7 @@ function ConvertFrom-RobocopyLog {
         if ($statsLines.Count -ge 3) {
             # Mark as successful parse (we found stats lines)
             $result.ParseSuccess = $true
+            Write-RobocurseLog -Message "Found $($statsLines.Count) stats lines in robocopy log" -Level 'Debug' -Component 'Robocopy'
 
             # Last 3 lines: Dirs, Files, Bytes (in order)
             $dirsLine = $statsLines[$statsLines.Count - 3]
@@ -629,6 +669,10 @@ function ConvertFrom-RobocopyLog {
                 $result.FilesCopied = [int](& $parseLocaleNumber $matches[2])
                 $result.FilesSkipped = [int](& $parseLocaleNumber $matches[3])
                 $result.FilesFailed = [int](& $parseLocaleNumber $matches[5])
+                Write-RobocurseLog -Message "Parsed stats - FilesCopied: $($result.FilesCopied), FilesSkipped: $($result.FilesSkipped), FilesFailed: $($result.FilesFailed)" -Level 'Debug' -Component 'Robocopy'
+            }
+            else {
+                Write-RobocurseLog -Message "Files line did not match stats pattern. Line: '$filesLine'" -Level 'Warning' -Component 'Robocopy'
             }
 
             # Parse Bytes line - need to handle unit suffixes (k, m, g, t)
@@ -647,11 +691,17 @@ function ConvertFrom-RobocopyLog {
                 }
             }
         }
+        else {
+            # During progress polling (reading from file), missing stats is expected - job still running
+            # During final parsing (content provided), missing stats is unexpected - warn about it
+            $logLevel = if ($isProgressPolling) { 'Debug' } else { 'Warning' }
+            Write-RobocurseLog -Message "No stats lines found in robocopy log (found $($statsLines.Count), need 3). Log path: $LogPath" -Level $logLevel -Component 'Robocopy'
+        }
 
         # Parse Speed line - look for numeric pattern followed by common speed units
         # Robocopy outputs speed in format like "50.123 MegaBytes/min" or "2621440 Bytes/sec"
         # The unit names may be localized but the numeric pattern is consistent
-        if ($content -match '([\d.]+)\s+(Mega)?Bytes[/\s]*(min|sec)') {
+        if ($Content -match '([\d.]+)\s+(Mega)?Bytes[/\s]*(min|sec)') {
             $speedValue = $matches[1]
             $isMega = $matches[2] -eq 'Mega'
             $timeUnit = $matches[3]
@@ -662,7 +712,7 @@ function ConvertFrom-RobocopyLog {
         # Robocopy progress lines have: indicator (may contain spaces), size, path
         # Format: "  New File  1024  path\file.txt" or "  *EXTRA File  100  path\file.txt"
         # Key insight: look for a number followed by a backslash path
-        $progressMatches = [regex]::Matches($content, '([\d.]+)\s*[kmgt]?\s+(\S*[\\\/].+)$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
+        $progressMatches = [regex]::Matches($Content, '([\d.]+)\s*[kmgt]?\s+(\S*[\\\/].+)$', [System.Text.RegularExpressions.RegexOptions]::Multiline)
         if ($progressMatches.Count -gt 0) {
             $lastMatch = $progressMatches[$progressMatches.Count - 1]
             $potentialPath = $lastMatch.Groups[2].Value.Trim()
@@ -681,11 +731,11 @@ function ConvertFrom-RobocopyLog {
     # If we didn't find stats lines, this might be an in-progress job or unexpected format
     if (-not $result.ParseSuccess) {
         # Only warn if file had content (empty file is normal for just-started jobs)
-        if ($content -and $content.Length -gt 100) {
+        if ($Content -and $Content.Length -gt 100) {
             if (-not $result.ParseWarning) {
                 $result.ParseWarning = "No statistics found in log file (job may be in progress or log format unexpected)"
             }
-            Write-RobocurseLog "Could not extract statistics from robocopy log '$LogPath' ($($content.Length) bytes) - job may still be in progress" `
+            Write-RobocurseLog "Could not extract statistics from robocopy log '$LogPath' ($($Content.Length) bytes) - job may still be in progress" `
                 -Level 'Debug' -Component 'Robocopy'
         }
     }
@@ -697,9 +747,9 @@ function ConvertFrom-RobocopyLog {
     #   - "ERROR 2 (0x00000002) The system cannot find the file specified."
     #   - "ERROR 3 (0x00000003) The system cannot find the path specified."
     #   - "ERROR : xxx" (generic error lines)
-    if ($content) {
+    if ($Content) {
         $errorLines = @()
-        $lines = $content -split "`r?`n"
+        $lines = $Content -split "`r?`n"
         foreach ($line in $lines) {
             # Match ERROR followed by error code or message
             if ($line -match '\bERROR\s+(\d+|:)\s*(.*)') {
@@ -758,7 +808,11 @@ function Wait-RobocopyJob {
     )
 
     # Wait for process to complete with proper resource cleanup
+    $capturedOutput = $null
     try {
+        # Use stdout task from Start-RobocopyJob (already reading async)
+        $stdoutTask = $Job.StdoutTask
+
         if ($TimeoutSeconds -gt 0) {
             $completed = $Job.Process.WaitForExit($TimeoutSeconds * 1000)
             if (-not $completed) {
@@ -770,6 +824,11 @@ function Wait-RobocopyJob {
             $Job.Process.WaitForExit()
         }
 
+        # Get captured stdout - synchronous after process exit
+        $capturedOutput = if ($stdoutTask) {
+            $stdoutTask.GetAwaiter().GetResult()
+        } else { $null }
+
         # Calculate duration
         $duration = [datetime]::Now - $Job.StartTime
 
@@ -777,8 +836,15 @@ function Wait-RobocopyJob {
         $exitCode = $Job.Process.ExitCode
         $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
 
-        # Parse final statistics from log
-        $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
+        # Parse final statistics from captured stdout (avoids file flush race condition)
+        # Fall back to log file if stdout capture failed
+        $finalStats = if ($capturedOutput) {
+            ConvertFrom-RobocopyLog -Content $capturedOutput -LogPath $Job.LogPath
+        }
+        else {
+            Write-RobocurseLog -Message "No stdout captured, falling back to log file: $($Job.LogPath)" -Level 'Warning' -Component 'Robocopy'
+            ConvertFrom-RobocopyLog -LogPath $Job.LogPath
+        }
 
         return [PSCustomObject]@{
             ExitCode = $exitCode

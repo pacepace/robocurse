@@ -1192,3 +1192,139 @@ function Test-EmailConfiguration {
     $sendResult = Send-CompletionEmail -Config $Config -Results $testResults -Status 'Success' -SessionId $testSessionId
     return $sendResult
 }
+
+function Send-ReplicationCompletionNotification {
+    <#
+    .SYNOPSIS
+        Sends completion email notification for a replication run
+    .DESCRIPTION
+        Shared function used by both GUI and headless code paths to build
+        results data and send completion email. This ensures consistent
+        email content regardless of how the replication was initiated.
+    .PARAMETER Config
+        The Robocurse configuration object containing Email settings
+    .PARAMETER OrchestrationState
+        The orchestration state object with run results
+    .PARAMETER FailedFilesSummaryPath
+        Optional path to the failed files summary file
+    .OUTPUTS
+        PSCustomObject with Success, ErrorMessage, and EmailStatus properties
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$Config,
+
+        [Parameter(Mandatory = $true)]
+        [object]$OrchestrationState,
+
+        [Parameter(Mandatory = $false)]
+        [string]$FailedFilesSummaryPath
+    )
+
+    # Check if email is configured and enabled
+    if (-not $Config.Email -or -not $Config.Email.Enabled) {
+        Write-RobocurseLog "Email notifications not enabled, skipping" -Level 'Debug' -Component 'Email'
+        return [PSCustomObject]@{
+            Success = $true
+            ErrorMessage = $null
+            EmailStatus = 'Skipped'
+            Skipped = $true
+        }
+    }
+
+    try {
+        # Get status from orchestration
+        $status = Get-OrchestrationStatus
+        $profileResultsArray = $OrchestrationState.GetProfileResultsArray()
+
+        # Calculate totals from profile results (more accurate than status for multi-profile runs)
+        $totalFailed = if ($profileResultsArray.Count -gt 0) {
+            ($profileResultsArray | Measure-Object -Property ChunksFailed -Sum).Sum
+        } else { $status.ChunksFailed }
+
+        $totalBytesCopied = if ($profileResultsArray.Count -gt 0) {
+            ($profileResultsArray | Measure-Object -Property BytesCopied -Sum).Sum
+        } else { $status.BytesComplete }
+
+        # Collect all errors from profiles
+        $allErrors = @()
+        if ($profileResultsArray.Count -gt 0) {
+            foreach ($pr in $profileResultsArray) {
+                $allErrors += $pr.Errors
+            }
+        }
+
+        # Build snapshot summary for email
+        $snapshotSummary = Get-SnapshotSummaryForEmail -Config $Config
+
+        # Build results object
+        $results = [PSCustomObject]@{
+            Duration = $status.Elapsed
+            TotalBytesCopied = $totalBytesCopied
+            TotalFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
+            TotalErrors = $totalFailed
+            Profiles = $profileResultsArray
+            Errors = $allErrors
+            SnapshotSummary = $snapshotSummary
+        }
+
+        # Determine overall status
+        $failedProfiles = @($profileResultsArray | Where-Object { $_.Status -eq 'Failed' })
+        $emailStatus = if ($failedProfiles.Count -gt 0) {
+            'Failed'  # Pre-flight failure (e.g., source path not accessible)
+        } elseif ($OrchestrationState.Phase -eq 'Stopped') {
+            'Failed'  # User stopped or critical failure
+        } elseif ($totalFailed -gt 0) {
+            'Warning'  # Some chunk failures
+        } else {
+            'Success'
+        }
+
+        # Get values for email
+        $emailSessionId = $OrchestrationState.SessionId
+        $emailFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
+        $emailFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
+
+        # Send the email
+        Write-RobocurseLog "Sending completion email (Status: $emailStatus, Files: $($status.FilesCopied), Skipped: $emailFilesSkipped, Failed: $emailFilesFailed)" -Level 'Info' -Component 'Email'
+
+        $sendParams = @{
+            Config = $Config.Email
+            Results = $results
+            Status = $emailStatus
+            SessionId = $emailSessionId
+            FilesSkipped = $emailFilesSkipped
+            FilesFailed = $emailFilesFailed
+        }
+        if ($FailedFilesSummaryPath) {
+            $sendParams['FailedFilesSummaryPath'] = $FailedFilesSummaryPath
+        }
+
+        $emailResult = Send-CompletionEmail @sendParams
+
+        if ($emailResult.Success) {
+            Write-RobocurseLog "Completion email sent successfully" -Level 'Info' -Component 'Email'
+        }
+        else {
+            Write-RobocurseLog "Failed to send completion email: $($emailResult.ErrorMessage)" -Level 'Error' -Component 'Email'
+        }
+
+        return [PSCustomObject]@{
+            Success = $emailResult.Success
+            ErrorMessage = $emailResult.ErrorMessage
+            EmailStatus = $emailStatus
+            Skipped = $false
+        }
+    }
+    catch {
+        $errorMsg = "Exception sending completion email: $($_.Exception.Message)"
+        Write-RobocurseLog $errorMsg -Level 'Error' -Component 'Email'
+        return [PSCustomObject]@{
+            Success = $false
+            ErrorMessage = $errorMsg
+            EmailStatus = 'Error'
+            Skipped = $false
+        }
+    }
+}

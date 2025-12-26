@@ -317,6 +317,46 @@ namespace Robocurse
             set { lock (_lock) { _lastSnapshotResult = value; } }
         }
 
+        // =====================================================================================
+        // NETWORK PATH MAPPINGS (Session 0 Scheduled Task Fix)
+        // =====================================================================================
+        // WHY: Scheduled tasks run in Session 0 where NTLM doesn't delegate credentials.
+        // IP-based UNC paths can't use Kerberos. Result: "Access Denied" on network shares.
+        // FIX: Mount UNC paths to drive letters to force explicit SMB authentication.
+        // See: src/Robocurse/Public/NetworkMapping.ps1 for full explanation.
+        // Stores array of mapping PSCustomObjects with DriveLetter, Root, OriginalPath, MappedPath
+        private object _currentNetworkMappings;
+        public object CurrentNetworkMappings
+        {
+            get { lock (_lock) { return _currentNetworkMappings; } }
+            set { lock (_lock) { _currentNetworkMappings = value; } }
+        }
+
+        // Translated source path (using mapped drive letter if UNC was mounted)
+        private string _networkMappedSource;
+        public string NetworkMappedSource
+        {
+            get { lock (_lock) { return _networkMappedSource; } }
+            set { lock (_lock) { _networkMappedSource = value; } }
+        }
+
+        // Translated destination path (using mapped drive letter if UNC was mounted)
+        private string _networkMappedDest;
+        public string NetworkMappedDest
+        {
+            get { lock (_lock) { return _networkMappedDest; } }
+            set { lock (_lock) { _networkMappedDest = value; } }
+        }
+
+        // Credential for network operations (PSCredential from PowerShell)
+        // Used for remote VSS operations in Session 0 scheduled tasks
+        private object _networkCredential;
+        public object NetworkCredential
+        {
+            get { lock (_lock) { return _networkCredential; } }
+            set { lock (_lock) { _networkCredential = value; } }
+        }
+
         // Thread-safe collections (no additional locking needed)
         public ConcurrentQueue<object> ChunkQueue { get; private set; }
         public ConcurrentDictionary<int, object> ActiveJobs { get; private set; }

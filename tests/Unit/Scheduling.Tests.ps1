@@ -19,7 +19,7 @@ function global:New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDir
 function global:New-ScheduledTaskTrigger { param([switch]$Daily, [switch]$Weekly, [switch]$Once, $At, $DaysOfWeek, $RepetitionInterval, $RepetitionDuration) }
 function global:New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) }
 function global:New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [switch]$StartWhenAvailable, [switch]$RunOnlyIfNetworkAvailable, $MultipleInstances, $ExecutionTimeLimit, $Priority) }
-function global:Register-ScheduledTask { param($TaskName, $Action, $Trigger, $Principal, $Settings, $Description, [switch]$Force, $User, $Password) }
+function global:Register-ScheduledTask { param($TaskName, $Action, $Trigger, $Principal, $Settings, $Description, [switch]$Force, $User, $Password, $RunLevel) }
 function global:Unregister-ScheduledTask { param($TaskName, [switch]$Confirm) }
 function global:Get-ScheduledTask { param($TaskName) }
 function global:Get-ScheduledTaskInfo { param($TaskName) }

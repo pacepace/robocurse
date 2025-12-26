@@ -526,6 +526,22 @@ Scheduled tasks are created with the naming convention: `Robocurse-Profile-{Prof
 
 You can view these tasks in Windows Task Scheduler under the root folder.
 
+### Network Share Access
+
+Scheduled tasks run in Windows Session 0 where network credentials don't delegate properly. When a profile uses network paths (UNC like `\\server\share`), you must provide credentials:
+
+**GUI**: The Schedule dialog prompts for credentials when the profile has network paths.
+
+**CLI**: You'll be prompted for credentials:
+```powershell
+.\Robocurse.ps1 -SetProfileSchedule -ProfileName "NetworkBackup" -Frequency Daily -Time "02:00"
+# Enter credentials when prompted
+```
+
+**Security**: Credentials are encrypted using Windows DPAPI, bound to both the user account AND machine. Only the same user on the same machine can decrypt them. This is the most secure storage option available.
+
+**Important**: The scheduled task must run as the SAME user who saved the credentials. If you configure the task to run as a different account, credentials cannot be decrypted.
+
 ---
 
 ## Logging

@@ -387,75 +387,17 @@ function Complete-GuiReplication {
         Write-GuiLog "Warning: Failed to merge snapshot registry: $($_.Exception.Message)"
     }
 
-    # Send email notification if configured
-    try {
-        if ($script:Config.Email -and $script:Config.Email.Enabled) {
-            Write-GuiLog "Email notifications enabled, attempting to send..."
+    # Send email notification using shared function
+    $emailResult = Send-ReplicationCompletionNotification -Config $script:Config -OrchestrationState $script:OrchestrationState -FailedFilesSummaryPath $failedFilesSummaryPath
 
-            # Recalculate values for email (in case previous try block had issues)
-            $emailElapsed = if ($script:OrchestrationState -and $script:OrchestrationState.StartTime) {
-                [datetime]::Now - $script:OrchestrationState.StartTime
-            } else {
-                [timespan]::Zero
-            }
-
-            $emailProfileNames = @()
-            if ($script:OrchestrationState -and $script:OrchestrationState.Profiles) {
-                $emailProfileNames = @($script:OrchestrationState.Profiles | ForEach-Object { $_.Name })
-            }
-
-            $emailStatus = if ($status.ChunksFailed -eq 0) {
-                'Success'
-            } elseif ($status.ChunksComplete -gt 0) {
-                'PartialFailure'
-            } else {
-                'Failed'
-            }
-
-            # Build snapshot summary for email (tracked vs external per volume)
-            $snapshotSummary = Get-SnapshotSummaryForEmail -Config $script:Config
-
-            # Build results object matching what Send-CompletionEmail expects
-            $emailResults = [PSCustomObject]@{
-                Duration = $emailElapsed
-                TotalBytesCopied = if ($status.BytesComplete) { $status.BytesComplete } else { 0 }
-                TotalFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
-                TotalErrors = if ($status.ChunksFailed) { $status.ChunksFailed } else { 0 }
-                Profiles = @($emailProfileNames | ForEach-Object {
-                    [PSCustomObject]@{
-                        Name = $_
-                        Status = $emailStatus
-                        ChunksComplete = if ($status.ChunksComplete) { $status.ChunksComplete } else { 0 }
-                        ChunksTotal = if ($status.ChunksTotal) { $status.ChunksTotal } else { 0 }
-                        ChunksFailed = if ($status.ChunksFailed) { $status.ChunksFailed } else { 0 }
-                        FilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
-                        BytesCopied = if ($status.BytesComplete) { $status.BytesComplete } else { 0 }
-                        Errors = @()
-                    }
-                })
-                Errors = @()
-                SnapshotSummary = $snapshotSummary
-            }
-
-            # Get session ID from orchestration state for Message-Id header
-            $emailSessionId = if ($script:OrchestrationState) { $script:OrchestrationState.SessionId } else { $null }
-            $emailFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
-            $emailFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
-            $emailResult = Send-CompletionEmail -Config $script:Config.Email -Results $emailResults -Status $emailStatus -SessionId $emailSessionId -ProfileNames $emailProfileNames -FilesSkipped $emailFilesSkipped -FilesFailed $emailFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath
-
-            if ($emailResult.Success) {
-                Write-GuiLog "Completion email sent successfully"
-            }
-            else {
-                Write-GuiLog "ERROR: Failed to send completion email: $($emailResult.ErrorMessage)"
-            }
-        }
-        else {
-            Write-GuiLog "Email notifications not enabled, skipping"
-        }
+    if ($emailResult.Skipped) {
+        Write-GuiLog "Email notifications not enabled, skipping"
     }
-    catch {
-        Write-GuiLog "ERROR: Exception sending completion email: $($_.Exception.Message)"
+    elseif ($emailResult.Success) {
+        Write-GuiLog "Completion email sent successfully"
+    }
+    else {
+        Write-GuiLog "ERROR: Failed to send completion email: $($emailResult.ErrorMessage)"
     }
 
     # Gather failed and warning chunk details for the completion dialog
@@ -468,10 +410,19 @@ function Complete-GuiReplication {
         $warningDetails = @($script:OrchestrationState.WarningChunks.ToArray())
     }
 
+    # Gather pre-flight errors from profile results
+    $preflightErrors = @()
+    $profileResults = $script:OrchestrationState.GetProfileResultsArray()
+    foreach ($pr in $profileResults) {
+        if ($pr.PreflightError) {
+            $preflightErrors += $pr.PreflightError
+        }
+    }
+
     # Show completion dialog (modal - blocks until user clicks OK)
     $dialogFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
     $dialogFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
-    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails
+    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails -PreflightErrors $preflightErrors
 
     # Clean up config snapshot if it was created
     if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {

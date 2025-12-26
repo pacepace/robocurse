@@ -51,7 +51,10 @@ Output files:
 - `$env:TEMP\pester-summary.txt` - pass/fail counts
 - `$env:TEMP\pester-failures.txt` - failed test names and errors
 
-Read failures: `Get-Content $env:TEMP\pester-failures.txt`
+**Reading test results from bash** (use single quotes so PowerShell expands $env:TEMP):
+```bash
+powershell -NoProfile -Command 'Get-Content "$env:TEMP\pester-summary.txt"; Get-Content "$env:TEMP\pester-failures.txt"'
+```
 
 **Skipped tests:**
 - Remote VSS tests need `$env:ROBOCURSE_TEST_REMOTE_SHARE` set to UNC path
@@ -97,6 +100,22 @@ Local and remote VSS use same retry pattern. See `Test-VssErrorRetryable` in Vss
 - `0x80042325` - VSS_E_FLUSH_WRITES_TIMEOUT
 
 **Fallback patterns** (errors without HRESULT): `busy`, `timeout`, `lock`, `in use`, `try again`
+
+## Scheduled Tasks and Network Shares
+
+**S4U vs Password Logon:**
+- Default: `LogonType S4U` - runs without password but **cannot access network shares**
+- With credential: `LogonType Password` - has network credentials for `\\server\share` access
+
+When creating scheduled tasks for profiles with network paths:
+- GUI prompts for credentials automatically when Source or Destination starts with `\\`
+- CLI `-SetProfileSchedule` prompts via `Get-Credential` for network paths
+- `New-ProfileScheduledTask -Credential $cred` uses Password logon
+
+**Pre-flight failures:**
+- If source path is inaccessible, profile `Status` = `'Failed'` with `PreflightError` property
+- Email status = `'Failed'` when any profile has pre-flight error (not just chunk failures)
+- GUI completion dialog shows red failure state with pre-flight error details
 
 ## Security
 

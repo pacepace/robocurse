@@ -9,12 +9,17 @@ function New-ProfileScheduledTask {
         Creates a Windows scheduled task for profile execution
     .DESCRIPTION
         Registers a scheduled task that runs the specified profile at the configured schedule.
+        When Credential is provided, uses Password logon type which allows access to network
+        shares. Without Credential, uses S4U logon which only has local access.
     .PARAMETER Profile
         The profile object with Schedule property
     .PARAMETER ConfigPath
         Path to the Robocurse config file
     .PARAMETER ScriptPath
         Path to Robocurse.ps1 (optional, auto-detected)
+    .PARAMETER Credential
+        Optional credential for Password logon type. Required for network share access.
+        If not provided, uses S4U logon (local access only).
     .OUTPUTS
         OperationResult with Data = task name
     #>
@@ -26,7 +31,9 @@ function New-ProfileScheduledTask {
         [Parameter(Mandatory)]
         [string]$ConfigPath,
 
-        [string]$ScriptPath
+        [string]$ScriptPath,
+
+        [System.Management.Automation.PSCredential]$Credential
     )
 
     # Platform check
@@ -99,9 +106,6 @@ function New-ProfileScheduledTask {
             }
         }
 
-        # Run as current user with highest privileges (use full domain\username for domain-joined machines)
-        $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Highest
-
         # Settings
         $settings = New-ScheduledTaskSettingsSet `
             -AllowStartIfOnBatteries `
@@ -117,14 +121,56 @@ function New-ProfileScheduledTask {
                 Write-RobocurseLog -Message "Removed existing task '$taskName'" -Level 'Debug' -Component 'ProfileSchedule'
             }
 
-            # Register the task
-            Register-ScheduledTask `
-                -TaskName $taskName `
-                -Action $action `
-                -Trigger $trigger `
-                -Principal $principal `
-                -Settings $settings `
-                -Description "Robocurse profile: $($Profile.Name)" | Out-Null
+            # Register the task - use Password logon if credential provided (for network access)
+            if ($Credential) {
+                # Password logon type - has network credentials for accessing shares
+                $taskUser = $Credential.UserName
+                $taskPassword = $Credential.GetNetworkCredential().Password
+
+                Write-RobocurseLog -Message "Registering task with Password logon (user: $taskUser)" -Level 'Debug' -Component 'ProfileSchedule'
+
+                # Use User parameter set with RunLevel Highest for elevated execution + network access
+                # Note: -Principal and -User/-Password are mutually exclusive parameter sets
+                Register-ScheduledTask `
+                    -TaskName $taskName `
+                    -Action $action `
+                    -Trigger $trigger `
+                    -Settings $settings `
+                    -Description "Robocurse profile: $($Profile.Name)" `
+                    -User $taskUser `
+                    -Password $taskPassword `
+                    -RunLevel Highest | Out-Null
+
+                # =====================================================================================
+                # SAVE CREDENTIALS FOR NETWORK PATH MOUNTING
+                # =====================================================================================
+                # Task Scheduler Password logon only authenticates the TASK execution context.
+                # Session 0 still has NTLM credential delegation issues for SMB/UNC access.
+                # We save the credential using DPAPI so JobManagement.ps1 can load it and
+                # explicitly mount UNC paths with the credential at runtime.
+                # See: src/Robocurse/Public/NetworkMapping.ps1 for full explanation.
+                # =====================================================================================
+                $saveResult = Save-NetworkCredential -ProfileName $Profile.Name -Credential $Credential -ConfigPath $ConfigPath
+                if ($saveResult.Success) {
+                    Write-RobocurseLog -Message "Saved network credentials for profile '$($Profile.Name)' (for UNC path mounting)" -Level 'Info' -Component 'ProfileSchedule'
+                }
+                else {
+                    Write-RobocurseLog -Message "Warning: Failed to save network credentials: $($saveResult.ErrorMessage)" -Level 'Warning' -Component 'ProfileSchedule'
+                }
+            }
+            else {
+                # S4U logon type - runs without password but no network credentials
+                # WARNING: S4U cannot access network shares requiring authentication
+                Write-RobocurseLog -Message "Registering task with S4U logon (local access only - no network share access)" -Level 'Warning' -Component 'ProfileSchedule'
+                $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Highest
+                Register-ScheduledTask `
+                    -TaskName $taskName `
+                    -Action $action `
+                    -Trigger $trigger `
+                    -Principal $principal `
+                    -Settings $settings `
+                    -Description "Robocurse profile: $($Profile.Name)" | Out-Null
+            }
 
             Write-RobocurseLog -Message "Created profile schedule '$taskName'" -Level 'Info' -Component 'ProfileSchedule'
         }
@@ -325,6 +371,9 @@ function Sync-ProfileSchedules {
         The Robocurse configuration object
     .PARAMETER ConfigPath
         Path to the configuration file
+    .PARAMETER Credential
+        Optional credential for Password logon type. Required for network share access.
+        If not provided, uses S4U logon (local access only).
     .OUTPUTS
         OperationResult with Data = summary of changes
     #>
@@ -334,7 +383,9 @@ function Sync-ProfileSchedules {
         [PSCustomObject]$Config,
 
         [Parameter(Mandatory)]
-        [string]$ConfigPath
+        [string]$ConfigPath,
+
+        [System.Management.Automation.PSCredential]$Credential
     )
 
     # Get profiles with enabled schedules
@@ -362,7 +413,7 @@ function Sync-ProfileSchedules {
 
     # Create/update tasks from config
     foreach ($profile in $scheduledProfiles) {
-        $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $ConfigPath
+        $result = New-ProfileScheduledTask -Profile $profile -ConfigPath $ConfigPath -Credential $Credential
         if ($result.Success) {
             if ($profile.Name -notin $existingNames) {
                 $created++

@@ -596,8 +596,8 @@ function Update-GuiProgress {
             $script:Window.UpdateLayout()
         }
 
-        # Check if complete
-        if ($status.Phase -eq 'Complete') {
+        # Check if complete or stopped
+        if ($status.Phase -in @('Complete', 'Stopped')) {
             Complete-GuiReplication
         }
     }
