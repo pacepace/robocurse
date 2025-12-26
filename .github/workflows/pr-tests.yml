@@ -36,7 +36,7 @@ jobs:
           # Test results for GitHub
           $config.TestResult.Enabled = $true
           $config.TestResult.OutputPath = 'test-results.xml'
-          $config.TestResult.OutputFormat = 'NUnitXml'
+          $config.TestResult.OutputFormat = 'JUnitXml'
 
           # Code coverage
           $config.CodeCoverage.Enabled = $true
@@ -69,4 +69,4 @@ jobs:
         with:
           name: Pester Tests
           path: test-results.xml
-          reporter: dotnet-nunit
+          reporter: java-junit
