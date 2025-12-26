@@ -13,6 +13,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      # actions/checkout v6.0.1 (Dec 2024) - https://github.com/actions/checkout/releases
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
@@ -168,47 +169,48 @@ jobs:
             $commits = "- Initial release"
           }
 
-          $notes = @"
-## Robocurse $version
-
-### Downloads
-
-- **Full Bundle**: ``Robocurse-v$version.zip`` - includes helper scripts and batch launchers
-- **Script Only**: ``Robocurse.ps1`` - just the main script
-
-### Installation
-
-1. Download and extract the zip (or just grab ``Robocurse.ps1``)
-2. Verify integrity:
-   ``````powershell
-   Get-FileHash Robocurse.ps1 -Algorithm SHA256
-   ``````
-   Expected: ``$sha256``
-3. Run via batch file (bypasses execution policy):
-   ``````
-   Robocurse.bat
-   ``````
-4. (Optional) Self-sign all scripts for AllSigned execution policy:
-   ``````
-   Sign-Robocurse.bat
-   ``````
-
-### What's in the Bundle
-
-- ``Robocurse.ps1`` + ``.bat`` - Main application
-- ``Sign-Robocurse.ps1`` + ``.bat`` - Self-signing utility
-- ``Set-FileSharing.ps1`` + ``.bat`` - Network share setup
-- ``Set-PsRemoting.ps1`` + ``.bat`` - PS Remoting setup
-- ``Set-SmbFirewall.ps1`` + ``.bat`` - SMB firewall rules
-
-### Changes
-
-$commits
-
----
-
-**Full Changelog**: $compareUrl
-"@
+          # Build notes using array to avoid heredoc indentation issues
+          $notes = @(
+            "## Robocurse $version"
+            ""
+            "### Downloads"
+            ""
+            "- **Full Bundle**: ``Robocurse-v$version.zip`` - includes helper scripts and batch launchers"
+            "- **Script Only**: ``Robocurse.ps1`` - just the main script"
+            ""
+            "### Installation"
+            ""
+            "1. Download and extract the zip (or just grab ``Robocurse.ps1``)"
+            "2. Verify integrity:"
+            "   ``````powershell"
+            "   Get-FileHash Robocurse.ps1 -Algorithm SHA256"
+            "   ``````"
+            "   Expected: ``$sha256``"
+            "3. Run via batch file (bypasses execution policy):"
+            "   ``````"
+            "   Robocurse.bat"
+            "   ``````"
+            "4. (Optional) Self-sign all scripts for AllSigned execution policy:"
+            "   ``````"
+            "   Sign-Robocurse.bat"
+            "   ``````"
+            ""
+            "### What's in the Bundle"
+            ""
+            "- ``Robocurse.ps1`` + ``.bat`` - Main application"
+            "- ``Sign-Robocurse.ps1`` + ``.bat`` - Self-signing utility"
+            "- ``Set-FileSharing.ps1`` + ``.bat`` - Network share setup"
+            "- ``Set-PsRemoting.ps1`` + ``.bat`` - PS Remoting setup"
+            "- ``Set-SmbFirewall.ps1`` + ``.bat`` - SMB firewall rules"
+            ""
+            "### Changes"
+            ""
+            $commits
+            ""
+            "---"
+            ""
+            "**Full Changelog**: $compareUrl"
+          ) -join "`n"
 
           Set-Content -Path release-notes.md -Value $notes
           Write-Host "Generated release notes"
