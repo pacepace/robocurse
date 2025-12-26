@@ -36,7 +36,7 @@ Robocurse solves these problems with a single deployable PowerShell script.
 
 Copy two files to your server:
 ```
-dist/Robocurse.ps1          # The application (~550KB)
+dist/Robocurse.ps1          # The application (~1MB)
 Robocurse.config.json       # Your configuration
 ```
 
@@ -141,7 +141,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\Robocurse.ps1
 
 Copy to your server:
 ```
-Robocurse.ps1           # From dist/ folder (~550KB)
+Robocurse.ps1           # From dist/ folder (~1MB)
 Robocurse.config.json   # Your configuration (customize from template)
 ```
 
@@ -709,7 +709,7 @@ flowchart LR
     Main["Main.ps1"] --> Orch["Orchestration"]
     Main --> Config["Configuration"]
     Main --> Log["Logging"]
-    Main --> GUI["GUI*<br/>(10 modules)"]
+    Main --> GUI["GUI*<br/>(13 modules)"]
 
     Orch --> Job["JobManagement"]
     Orch --> Chunk["Chunking"]
@@ -728,17 +728,17 @@ flowchart LR
 
 ```
 src/Robocurse/           # Module source (edit here)
-├── Public/              # 32 function files
-├── Resources/           # 10 XAML templates
-├── Robocurse.psm1       # Module loader + 100 constants
+├── Public/              # 35 function files
+├── Resources/           # 11 XAML templates
+├── Robocurse.psm1       # Module loader + 36 constants
 └── Robocurse.psd1       # Module manifest
 
 build/                   # Build tools
 dist/                    # Built monolith (deploy this)
 tests/                   # Pester test suite
-├── Unit/                # 42 unit test files
+├── Unit/                # 47 unit test files
 ├── Integration/         # 9 integration tests
-└── Enforcement/         # 5 AST-based pattern tests
+└── Enforcement/         # 10 AST-based pattern tests
 scripts/                 # Utility scripts
 schemas/                 # JSON schema for config validation
 docs/                    # Task-based development docs
@@ -775,9 +775,9 @@ Invoke-Pester ./tests -CodeCoverage src/Robocurse/Public/*.ps1
 
 | Category | Count | Purpose |
 |----------|-------|---------|
-| **Unit** | 42 files | Individual function testing with mocks |
+| **Unit** | 47 files | Individual function testing with mocks |
 | **Integration** | 9 files | End-to-end workflows, real robocopy |
-| **Enforcement** | 5 files | AST-based pattern verification |
+| **Enforcement** | 10 files | AST-based pattern verification |
 
 #### Skipped Tests
 
