@@ -304,8 +304,9 @@ if (-not (Test-Path $outputDir)) {
     New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 }
 
-# Write output file
-$output.ToString() | Set-Content -Path $OutputPath -Encoding UTF8
+# Write output file with CRLF line endings (matches .gitattributes for *.ps1)
+$content = $output.ToString() -replace "`r?`n", "`r`n"
+[System.IO.File]::WriteAllText($OutputPath, $content)
 
 $fileSize = (Get-Item $OutputPath).Length
 $fileSizeKB = [math]::Round($fileSize / 1KB, 1)
