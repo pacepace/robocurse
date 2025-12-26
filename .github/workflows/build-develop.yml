@@ -1,0 +1,45 @@
+name: Build Develop
+
+on:
+  push:
+    branches: [develop]
+    paths-ignore:
+      - 'dist/**'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    environment: development
+
+    steps:
+      # actions/checkout v6.0.1 (Dec 2024) - https://github.com/actions/checkout/releases
+      # Uses PAT to bypass branch protection for auto-commit of dist changes
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.DIST_BUILD_PAT }}
+
+      - name: Build monolith
+        shell: pwsh
+        run: .\build\Build-Robocurse.ps1
+
+      - name: Check for changes
+        id: check
+        shell: pwsh
+        run: |
+          $diffOutput = git diff --name-only dist/
+          $changed = [bool]$diffOutput
+          "changed=$($changed.ToString().ToLower())" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Commit dist
+        if: steps.check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dist/
+          git commit -m "chore: rebuild dist from develop [skip ci]"
+          git push

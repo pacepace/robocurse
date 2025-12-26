@@ -11,15 +11,15 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
 
     BeforeAll {
         # Platform check
-        $isWindows = $IsWindows -or ($PSVersionTable.PSVersion.Major -le 5)
-        if (-not $isWindows) {
+        $runOnWindows = $IsWindows -or ($PSVersionTable.PSVersion.Major -le 5)
+        if (-not $runOnWindows) {
             Write-Warning "GUI state tests are Windows-only (WPF dependency)"
         }
     }
 
     Context "Get-GuiState - Default Values" {
 
-        It "Returns defaults when no settings file exists" -Skip:(-not $isWindows) {
+        It "Returns defaults when no settings file exists" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 # Use TestDrive for temp settings
                 $tempSettings = Join-Path $TestDrive "nonexistent.json"
@@ -39,7 +39,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
             }
         }
 
-        It "Returns defaults when settings file is corrupted" -Skip:(-not $isWindows) {
+        It "Returns defaults when settings file is corrupted" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "corrupted.json"
                 "{ invalid json }" | Set-Content -Path $tempSettings
@@ -56,7 +56,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
 
     Context "Get-GuiState - Loading Saved Values" {
 
-        It "Loads saved values from file" -Skip:(-not $isWindows) {
+        It "Loads saved values from file" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "saved.json"
                 $savedState = @{
@@ -93,7 +93,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
             }
         }
 
-        It "Merges defaults for missing properties" -Skip:(-not $isWindows) {
+        It "Merges defaults for missing properties" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "partial.json"
                 $partialState = @{
@@ -120,7 +120,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
 
     Context "Get-GuiState - Migration Logic" {
 
-        It "Migrates old 1100x800 window size to 650x550" -Skip:(-not $isWindows) {
+        It "Migrates old 1100x800 window size to 650x550" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "old-size.json"
                 $oldState = @{
@@ -141,7 +141,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
             }
         }
 
-        It "Does not migrate non-1100x800 sizes" -Skip:(-not $isWindows) {
+        It "Does not migrate non-1100x800 sizes" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "custom-size.json"
                 $customState = @{
@@ -162,7 +162,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
 
     Context "Save-GuiState - Saving All Properties" {
 
-        It "Saves state object with all properties including nested LastRun" -Skip:(-not $isWindows) {
+        It "Saves state object with all properties including nested LastRun" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "save-test.json"
                 Mock Get-GuiSettingsPath { return $tempSettings }
@@ -202,7 +202,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
             }
         }
 
-        It "Uses Depth 5 for proper nested serialization" -Skip:(-not $isWindows) {
+        It "Uses Depth 5 for proper nested serialization" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "depth-test.json"
                 Mock Get-GuiSettingsPath { return $tempSettings }
@@ -230,7 +230,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
 
     Context "Active Panel Validation" {
 
-        It "Accepts valid panel names" -Skip:(-not $isWindows) {
+        It "Accepts valid panel names" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "valid-panel.json"
                 Mock Get-GuiSettingsPath { return $tempSettings }
@@ -245,7 +245,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
             }
         }
 
-        It "Defaults to Profiles for invalid panel names" -Skip:(-not $isWindows) {
+        It "Defaults to Profiles for invalid panel names" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "invalid-panel.json"
                 Mock Get-GuiSettingsPath { return $tempSettings }
@@ -258,7 +258,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
             }
         }
 
-        It "Defaults to Profiles when ActivePanel is null" -Skip:(-not $isWindows) {
+        It "Defaults to Profiles when ActivePanel is null" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "null-panel.json"
                 Mock Get-GuiSettingsPath { return $tempSettings }
@@ -274,7 +274,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
 
     Context "Window Bounds Validation" {
 
-        It "Enforces minimum width of 500" -Skip:(-not $isWindows) {
+        It "Enforces minimum width of 500" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 # Create mock window object
                 $window = [PSCustomObject]@{
@@ -300,7 +300,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
             }
         }
 
-        It "Enforces minimum height of 400" -Skip:(-not $isWindows) {
+        It "Enforces minimum height of 400" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 # Create mock window object
                 $window = [PSCustomObject]@{
@@ -329,7 +329,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
 
     Context "Round-Trip Persistence" {
 
-        It "Preserves all data through save/load cycle" -Skip:(-not $isWindows) {
+        It "Preserves all data through save/load cycle" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "round-trip.json"
                 Mock Get-GuiSettingsPath { return $tempSettings }
@@ -383,7 +383,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
 
     Context "Restore-GuiState - Active Panel Restoration" {
 
-        It "Stores restored active panel in script scope" -Skip:(-not $isWindows) {
+        It "Stores restored active panel in script scope" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 # Create mock window
                 $window = [PSCustomObject]@{
@@ -415,7 +415,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
             }
         }
 
-        It "Stores 'Profiles' default when panel is invalid" -Skip:(-not $isWindows) {
+        It "Stores 'Profiles' default when panel is invalid" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $window = [PSCustomObject]@{
                     Left = 100
@@ -445,7 +445,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
 
     Context "Save-LastRunSummary and Get-LastRunSummary" {
 
-        It "Saves and retrieves last run summary" -Skip:(-not $isWindows) {
+        It "Saves and retrieves last run summary" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "last-run.json"
                 Mock Get-GuiSettingsPath { return $tempSettings }
@@ -468,7 +468,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
             }
         }
 
-        It "Returns null when no last run exists" -Skip:(-not $isWindows) {
+        It "Returns null when no last run exists" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "no-last-run.json"
                 Mock Get-GuiSettingsPath { return $tempSettings }
@@ -478,7 +478,7 @@ Describe "GUI State Persistence" -Tag 'Unit', 'GUI' {
             }
         }
 
-        It "Preserves other state when saving last run" -Skip:(-not $isWindows) {
+        It "Preserves other state when saving last run" -Skip:(-not $runOnWindows) {
             InModuleScope 'Robocurse' {
                 $tempSettings = Join-Path $TestDrive "preserve-state.json"
                 Mock Get-GuiSettingsPath { return $tempSettings }
