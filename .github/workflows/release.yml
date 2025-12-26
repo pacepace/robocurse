@@ -1,0 +1,228 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Parse version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $version = $tag -replace '^v', ''
+
+          # Validate semantic version format (X.Y.Z or X.Y.Z-prerelease)
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[\w.]+)?$') {
+            throw "Invalid version format: $version. Expected: X.Y.Z or X.Y.Z-prerelease"
+          }
+
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "TAG=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Parsed version: $version from tag: $tag"
+
+      - name: Install Pester
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module -Name Pester -RequiredVersion 5.7.1 -Force -Scope CurrentUser
+
+      - name: Run tests before release
+        shell: pwsh
+        run: |
+          $config = New-PesterConfiguration
+          $config.Run.Path = './tests'
+          $config.Run.Exit = $true
+          $config.Output.Verbosity = 'Minimal'
+          $config.Filter.ExcludeTag = @('RequiresRemoteShare', 'RequiresGUI', 'RequiresAdmin')
+          Invoke-Pester -Configuration $config
+
+      - name: Update module manifest version
+        shell: pwsh
+        run: |
+          $manifestPath = 'src/Robocurse/Robocurse.psd1'
+          $version = '${{ steps.version.outputs.VERSION }}'
+
+          $content = Get-Content $manifestPath -Raw
+
+          # Update ModuleVersion
+          $content = $content -replace "ModuleVersion\s*=\s*'[^']+'", "ModuleVersion = '$version'"
+
+          # Update ReleaseNotes in PrivateData
+          $content = $content -replace "ReleaseNotes\s*=\s*'[^']+'", "ReleaseNotes = '$version - Release build'"
+
+          Set-Content -Path $manifestPath -Value $content -NoNewline
+          Write-Host "Updated manifest to version $version"
+
+      - name: Build monolith
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.VERSION }}'
+          .\build\Build-Robocurse.ps1 -OutputPath dist/Robocurse.ps1 -Version $version
+
+      - name: Generate SHA256 hash
+        id: hash
+        shell: pwsh
+        run: |
+          $monolithPath = 'dist/Robocurse.ps1'
+          $hash = Get-FileHash -Path $monolithPath -Algorithm SHA256
+
+          # Write hash file (same format as existing)
+          "$($hash.Hash)  Robocurse.ps1" | Set-Content -Path 'dist/Robocurse.ps1.sha256' -NoNewline
+
+          "SHA256=$($hash.Hash)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "SHA256: $($hash.Hash)"
+
+      - name: Stage release bundle
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.VERSION }}'
+          $stagingDir = 'release-staging'
+
+          New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
+
+          # Copy monolith and hash
+          Copy-Item 'dist/Robocurse.ps1' $stagingDir
+          Copy-Item 'dist/Robocurse.ps1.sha256' $stagingDir
+          Copy-Item 'dist/Robocurse.bat' $stagingDir
+
+          # Copy helper scripts
+          $scripts = @(
+            'scripts/Sign-Robocurse.ps1',
+            'scripts/Set-FileSharing.ps1',
+            'scripts/Set-PsRemoting.ps1',
+            'scripts/Set-SmbFirewall.ps1'
+          )
+
+          foreach ($script in $scripts) {
+            if (Test-Path $script) {
+              Copy-Item $script $stagingDir
+              Write-Host "  Copied: $script"
+            } else {
+              Write-Warning "  Not found: $script"
+            }
+          }
+
+          # Generate batch launchers for each .ps1 file
+          $ps1Files = Get-ChildItem $stagingDir -Filter '*.ps1'
+          foreach ($ps1 in $ps1Files) {
+            $batPath = Join-Path $stagingDir ($ps1.BaseName + '.bat')
+            # Skip if bat already exists (e.g., Robocurse.bat)
+            if (-not (Test-Path $batPath)) {
+              $batContent = "@echo off`r`npowershell.exe -NoProfile -ExecutionPolicy Bypass -File `"%~dp0$($ps1.Name)`" %*`r`n"
+              Set-Content -Path $batPath -Value $batContent -NoNewline
+              Write-Host "  Created: $($ps1.BaseName).bat"
+            }
+          }
+
+          Write-Host "`nStaging directory contents:"
+          Get-ChildItem $stagingDir | ForEach-Object { Write-Host "  $_" }
+
+      - name: Create zip bundle
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.VERSION }}'
+          $zipName = "Robocurse-v$version.zip"
+
+          Compress-Archive -Path 'release-staging/*' -DestinationPath $zipName -Force
+
+          $zipSize = (Get-Item $zipName).Length / 1KB
+          Write-Host "Created: $zipName ($([math]::Round($zipSize, 1)) KB)"
+
+      - name: Generate release notes
+        id: release-notes
+        shell: pwsh
+        run: |
+          $version = '${{ steps.version.outputs.VERSION }}'
+          $sha256 = '${{ steps.hash.outputs.SHA256 }}'
+
+          # Get previous tag for changelog
+          $previousTag = git describe --tags --abbrev=0 HEAD^ 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            $previousTag = $null
+          }
+
+          # Get commits since last tag (or all commits if first release)
+          if ($previousTag) {
+            $commits = git log --pretty=format:"- %s (%h)" "$previousTag..HEAD" 2>$null
+            $compareUrl = "https://github.com/${{ github.repository }}/compare/$previousTag...${{ github.ref_name }}"
+          } else {
+            $commits = git log --pretty=format:"- %s (%h)" 2>$null
+            $compareUrl = "https://github.com/${{ github.repository }}/commits/${{ github.ref_name }}"
+          }
+
+          if (-not $commits) {
+            $commits = "- Initial release"
+          }
+
+          $notes = @"
+## Robocurse $version
+
+### Downloads
+
+- **Full Bundle**: ``Robocurse-v$version.zip`` - includes helper scripts and batch launchers
+- **Script Only**: ``Robocurse.ps1`` - just the main script
+
+### Installation
+
+1. Download and extract the zip (or just grab ``Robocurse.ps1``)
+2. Verify integrity:
+   ``````powershell
+   Get-FileHash Robocurse.ps1 -Algorithm SHA256
+   ``````
+   Expected: ``$sha256``
+3. Run via batch file (bypasses execution policy):
+   ``````
+   Robocurse.bat
+   ``````
+4. (Optional) Self-sign all scripts for AllSigned execution policy:
+   ``````
+   Sign-Robocurse.bat
+   ``````
+
+### What's in the Bundle
+
+- ``Robocurse.ps1`` + ``.bat`` - Main application
+- ``Sign-Robocurse.ps1`` + ``.bat`` - Self-signing utility
+- ``Set-FileSharing.ps1`` + ``.bat`` - Network share setup
+- ``Set-PsRemoting.ps1`` + ``.bat`` - PS Remoting setup
+- ``Set-SmbFirewall.ps1`` + ``.bat`` - SMB firewall rules
+
+### Changes
+
+$commits
+
+---
+
+**Full Changelog**: $compareUrl
+"@
+
+          Set-Content -Path release-notes.md -Value $notes
+          Write-Host "Generated release notes"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Robocurse ${{ steps.version.outputs.VERSION }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+          files: |
+            Robocurse-v${{ steps.version.outputs.VERSION }}.zip
+            dist/Robocurse.ps1
+            dist/Robocurse.ps1.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
