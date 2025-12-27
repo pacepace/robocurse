@@ -45,7 +45,7 @@ Write-Host "Source: $srcRoot" -ForegroundColor Gray
 $xamlResources = @{}
 $xamlFiles = Get-ChildItem -Path $resourcesRoot -Filter "*.xaml" -ErrorAction SilentlyContinue
 foreach ($xamlFile in $xamlFiles) {
-    $xamlContent = Get-Content -Path $xamlFile.FullName -Raw
+    $xamlContent = Get-Content -Path $xamlFile.FullName -Raw -Encoding UTF8
     # Escape single quotes for PowerShell here-string embedding
     $xamlResources[$xamlFile.Name] = $xamlContent
     Write-Host "  Loaded XAML: $($xamlFile.Name)" -ForegroundColor Gray
@@ -197,7 +197,7 @@ $output.Clear()
 # Read and extract constants from .psm1
 $psmPath = Join-Path $srcRoot "Robocurse.psm1"
 if (Test-Path $psmPath) {
-    $psmContent = Get-Content $psmPath -Raw
+    $psmContent = Get-Content $psmPath -Raw -Encoding UTF8
 
     # Extract the CONSTANTS region (use [\s\S] to match across newlines)
     if ($psmContent -match '(?s)#region ==================== CONSTANTS ====================(.*?)#endregion') {
@@ -223,7 +223,7 @@ foreach ($modulePath in $moduleOrder) {
 
     Write-Host "  Adding: $modulePath" -ForegroundColor Gray
 
-    $content = Get-Content $fullPath -Raw
+    $content = Get-Content $fullPath -Raw -Encoding UTF8
 
     # Remove the module header comment (first # Robocurse... line)
     $content = $content -replace '^#\s*Robocurse[^\r\n]*[\r\n]+', ''
@@ -304,9 +304,11 @@ if (-not (Test-Path $outputDir)) {
     New-Item -ItemType Directory -Path $outputDir -Force | Out-Null
 }
 
-# Write output file with CRLF line endings (matches .gitattributes for *.ps1)
+# Write output file with CRLF line endings and UTF-8 encoding (matches .gitattributes for *.ps1)
+# Use UTF-8 with BOM for consistent PowerShell parsing on Windows
 $content = $output.ToString() -replace "`r?`n", "`r`n"
-[System.IO.File]::WriteAllText($OutputPath, $content)
+$utf8Bom = [System.Text.UTF8Encoding]::new($true)  # $true = with BOM
+[System.IO.File]::WriteAllText($OutputPath, $content, $utf8Bom)
 
 $fileSize = (Get-Item $OutputPath).Length
 $fileSizeKB = [math]::Round($fileSize / 1KB, 1)
