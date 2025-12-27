@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Robocurse - Multi-share parallel robocopy orchestrator
@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-26 21:49:50
+    Built: 2025-12-26 17:07:37
 
 .LINK
     https://github.com/pacepace/robocurse
