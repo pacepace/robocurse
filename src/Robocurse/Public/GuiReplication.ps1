@@ -150,24 +150,11 @@ function Start-GuiReplication {
         }
     }
 
-    # Create a snapshot of the config to prevent external modifications during replication
-    # This ensures the running replication uses the config state at the time of start
-    $script:ConfigSnapshotPath = $null
-    try {
-        $snapshotDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
-        $script:ConfigSnapshotPath = Join-Path $snapshotDir "Robocurse-ConfigSnapshot-$([Guid]::NewGuid().ToString('N')).json"
-        Copy-Item -Path $script:ConfigPath -Destination $script:ConfigSnapshotPath -Force
-    }
-    catch {
-        Write-GuiLog "Warning: Could not create config snapshot, using live config: $($_.Exception.Message)"
-        $script:ConfigSnapshotPath = $script:ConfigPath  # Fall back to original
-    }
-
-    # Create and start background runspace (using snapshot path but pre-resolved log root)
+    # Create and start background runspace (using original config path for immediate persistence)
     # Pass current log path so background writes to same log file
     $currentLogPath = $script:CurrentOperationalLogPath
     try {
-        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigSnapshotPath -LogRoot $logRoot -LogPath $currentLogPath
+        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigPath -LogRoot $logRoot -LogPath $currentLogPath
 
         $script:ReplicationHandle = $runspaceInfo.Handle
         $script:ReplicationPowerShell = $runspaceInfo.PowerShell
@@ -359,34 +346,6 @@ function Complete-GuiReplication {
         Write-GuiLog "Warning: Failed to generate failed files summary: $($_.Exception.Message)"
     }
 
-    # Merge snapshot registry from temp config back to original config
-    # The background runspace wrote registry updates to the snapshot, not the original
-    try {
-        if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath) -and (Test-Path $script:ConfigSnapshotPath)) {
-            $snapshotConfig = Get-Content $script:ConfigSnapshotPath -Raw | ConvertFrom-Json
-            if ($snapshotConfig.snapshotRegistry) {
-                # Merge snapshot registry entries into the live config
-                $snapshotConfig.snapshotRegistry.PSObject.Properties | ForEach-Object {
-                    $volumeKey = $_.Name
-                    $snapshotIds = $_.Value
-                    if ($snapshotIds -and $snapshotIds.Count -gt 0) {
-                        $script:Config.SnapshotRegistry | Add-Member -NotePropertyName $volumeKey -NotePropertyValue $snapshotIds -Force
-                    }
-                }
-                # Save the merged config to the original path
-                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
-                if ($saveResult.Success) {
-                    Write-GuiLog "Snapshot registry merged from background runspace"
-                } else {
-                    Write-GuiLog "Warning: Failed to save merged snapshot registry: $($saveResult.ErrorMessage)"
-                }
-            }
-        }
-    }
-    catch {
-        Write-GuiLog "Warning: Failed to merge snapshot registry: $($_.Exception.Message)"
-    }
-
     # Send email notification using shared function
     $emailResult = Send-ReplicationCompletionNotification -Config $script:Config -OrchestrationState $script:OrchestrationState -FailedFilesSummaryPath $failedFilesSummaryPath
 
@@ -423,17 +382,4 @@ function Complete-GuiReplication {
     $dialogFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
     $dialogFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails -PreflightErrors $preflightErrors
-
-    # Clean up config snapshot if it was created
-    if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {
-        try {
-            if (Test-Path $script:ConfigSnapshotPath) {
-                Remove-Item $script:ConfigSnapshotPath -Force -ErrorAction SilentlyContinue
-            }
-        }
-        catch {
-            # Non-critical - temp files will be cleaned up eventually
-        }
-        $script:ConfigSnapshotPath = $null
-    }
 }
