@@ -1032,19 +1032,6 @@ function Wait-RobocopyJob {
             $Job.Process.WaitForExit()
         }
 
-        # Small delay to ensure all OutputDataReceived events have been processed
-        # The event handler runs on a thread pool thread and may still be processing
-        Start-Sleep -Milliseconds 100
-
-        # Get captured output from streaming buffer (new approach)
-        if ($Job.ProgressBuffer) {
-            # Drain all buffered lines and join into string for parsing
-            $allLines = $Job.ProgressBuffer.GetAllLines()
-            if ($allLines -and $allLines.Count -gt 0) {
-                $capturedOutput = $allLines -join "`n"
-            }
-        }
-
         # Calculate duration
         $duration = [datetime]::Now - $Job.StartTime
 
@@ -1052,15 +1039,10 @@ function Wait-RobocopyJob {
         $exitCode = $Job.Process.ExitCode
         $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
 
-        # Parse final statistics from captured stdout (avoids file flush race condition)
-        # Fall back to log file if stdout capture failed
-        $finalStats = if ($capturedOutput) {
-            ConvertFrom-RobocopyLog -Content $capturedOutput -LogPath $Job.LogPath
-        }
-        else {
-            Write-RobocurseLog -Message "No stdout captured, falling back to log file: $($Job.LogPath)" -Level 'Warning' -Component 'Robocopy'
-            ConvertFrom-RobocopyLog -LogPath $Job.LogPath
-        }
+        # Parse final stats from log file (authoritative source - robocopy flushes before exit)
+        # Note: ProgressBuffer is for real-time progress during the job (Get-RobocopyProgress).
+        # Do NOT use captured stdout for final stats - race condition with OutputDataReceived events.
+        $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
 
         return [PSCustomObject]@{
             ExitCode = $exitCode

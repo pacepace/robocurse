@@ -968,8 +968,12 @@ function Show-ProfileScheduleDialog {
                     DayOfMonth = [int]$cmbDayOfMonth.SelectedItem.Content
                 }
 
-                # Update profile
-                $Profile.Schedule = $newSchedule
+                # Update profile - add Schedule property if missing (defensive for old profiles)
+                if (-not ($Profile.PSObject.Properties.Name -contains 'Schedule')) {
+                    $Profile | Add-Member -NotePropertyName 'Schedule' -NotePropertyValue $newSchedule
+                } else {
+                    $Profile.Schedule = $newSchedule
+                }
 
                 # Create or remove task
                 if ($chkEnabled.IsChecked) {

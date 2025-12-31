@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-30 20:57:51
+    Built: 2025-12-30 23:33:40
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -77,22 +77,22 @@ $script:RobocurseScriptPath = $PSCommandPath
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
-# Maximum size for a single chunk. Larger directories will be split into smaller chunks.
-# 10GB is chosen to balance parallelism vs. overhead - large enough to avoid excessive splitting,
-# small enough to allow meaningful parallel processing.
-$script:DefaultMaxChunkSizeBytes = 10GB
-
-# Maximum number of files in a single chunk before splitting.
-# 50,000 files is chosen to prevent robocopy from being overwhelmed by file enumeration
-# while still processing meaningful batches.
-$script:DefaultMaxFilesPerChunk = 50000
-
-# Maximum directory depth to traverse when creating chunks.
-# Depth of 5 prevents excessive recursion while allowing reasonable directory structure analysis.
+# Maximum directory depth to traverse when creating chunks (used by Flat mode only).
+# Smart mode uses unlimited depth (-1). Flat mode uses this as the default.
 $script:DefaultMaxChunkDepth = 5
 
-# Minimum size threshold for creating a separate chunk.
-# 100MB ensures we don't create chunks for trivial directories, reducing overhead.
+# Internal chunking thresholds (not user-configurable).
+# These define when Smart mode decides a directory is "too large" and should be split.
+# Maximum chunk size in bytes - directories larger than this trigger recursive splitting.
+# 10GB is a good balance: large enough for efficient robocopy, small enough to parallelize.
+$script:DefaultMaxChunkSizeBytes = 10GB
+
+# Maximum files per chunk - directories with more files trigger recursive splitting.
+# 50,000 files prevents individual robocopy jobs from becoming I/O bottlenecks.
+$script:DefaultMaxFilesPerChunk = 50000
+
+# Minimum chunk size in bytes - directories smaller than this won't be split further.
+# 100MB prevents creating tiny chunks that add orchestration overhead.
 $script:DefaultMinChunkSizeBytes = 100MB
 
 # Retry policy
@@ -1313,13 +1313,7 @@ function ConvertTo-ChunkSettingsInternal {
     )
 
     if ($RawChunking) {
-        # Use $null -ne checks instead of truthiness to handle 0 and low values correctly
-        if ($null -ne $RawChunking.maxChunkSizeGB) {
-            $Profile.ChunkMaxSizeGB = $RawChunking.maxChunkSizeGB
-        }
-        if ($null -ne $RawChunking.maxFiles) {
-            $Profile.ChunkMaxFiles = $RawChunking.maxFiles
-        }
+        # Note: maxChunkSizeGB and maxFiles no longer used - chunking is directory-based
         # Note: parallelChunks from config is intentionally not mapped.
         # Parallelism is controlled by MaxConcurrentJobs at the orchestration level.
         if ($null -ne $RawChunking.maxDepthToScan) {
@@ -1493,13 +1487,8 @@ function ConvertFrom-FriendlyConfig {
         foreach ($profileName in $profileNames) {
             $rawProfile = $RawConfig.profiles.$profileName
 
-            # Skip disabled profiles
-            if ($null -ne $rawProfile.enabled -and $rawProfile.enabled -eq $false) {
-                Write-Verbose "Skipping disabled profile: $profileName"
-                continue
-            }
-
-            # Build sync profile
+            # Build sync profile (load ALL profiles, including disabled ones)
+            # The Enabled flag controls whether the profile runs, not whether it's loaded
             $syncProfile = [PSCustomObject]@{
                 Name = $profileName
                 Description = if ($rawProfile.description) { $rawProfile.description } else { "" }
@@ -1507,11 +1496,9 @@ function ConvertFrom-FriendlyConfig {
                 Destination = ""
                 UseVss = $false
                 ScanMode = "Smart"
-                ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
-                ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
                 ChunkMaxDepth = $script:DefaultMaxChunkDepth
                 RobocopyOptions = @{}
-                Enabled = $true
+                Enabled = if ($null -ne $rawProfile.enabled) { $rawProfile.enabled } else { $true }
                 SourceSnapshot = [PSCustomObject]@{
                     PersistentEnabled = $false    # Create persistent snapshot on source before backup
                     RetentionCount = 3            # How many snapshots to keep on source volume
@@ -1689,8 +1676,6 @@ function ConvertTo-FriendlyConfig {
                 path = $profile.Destination
             }
             chunking = [ordered]@{
-                maxChunkSizeGB = $profile.ChunkMaxSizeGB
-                maxFiles = $profile.ChunkMaxFiles
                 maxDepthToScan = $profile.ChunkMaxDepth
                 strategy = switch ($profile.ScanMode) {
                     'Smart' { 'auto' }
@@ -2064,29 +2049,8 @@ function Test-RobocurseConfig {
                 }
             }
 
-            # Validate chunk configuration if present
-            if ($propertyNames -contains 'ChunkMaxFiles') {
-                $maxFiles = $profile.ChunkMaxFiles
-                if ($null -ne $maxFiles -and ($maxFiles -lt 1 -or $maxFiles -gt 10000000)) {
-                    $errors += "$profilePrefix.ChunkMaxFiles must be between 1 and 10000000 (current: $maxFiles)"
-                }
-            }
-
-            if ($propertyNames -contains 'ChunkMaxSizeGB') {
-                $maxSizeGB = $profile.ChunkMaxSizeGB
-                if ($null -ne $maxSizeGB -and ($maxSizeGB -lt 0.001 -or $maxSizeGB -gt 1024)) {
-                    $errors += "$profilePrefix.ChunkMaxSizeGB must be between 0.001 and 1024 (current: $maxSizeGB)"
-                }
-            }
-
-            # Validate that ChunkMaxSizeGB > ChunkMinSizeGB if both are specified
-            if (($propertyNames -contains 'ChunkMaxSizeGB') -and ($propertyNames -contains 'ChunkMinSizeGB')) {
-                $maxSizeGB = $profile.ChunkMaxSizeGB
-                $minSizeGB = $profile.ChunkMinSizeGB
-                if ($null -ne $maxSizeGB -and $null -ne $minSizeGB -and $maxSizeGB -le $minSizeGB) {
-                    $errors += "$profilePrefix.ChunkMaxSizeGB ($maxSizeGB) must be greater than ChunkMinSizeGB ($minSizeGB)"
-                }
-            }
+            # ChunkMaxDepth validation is done in GUI (0-20 range)
+            # ChunkMaxSizeGB and ChunkMaxFiles are no longer used
         }
     }
 
@@ -4194,7 +4158,7 @@ function Get-DirectoryChunks {
         [ValidateRange(1, 10000000)]
         [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
 
-        [ValidateRange(0, 20)]
+        [ValidateRange(-1, 20)]
         [int]$MaxDepth = $script:DefaultMaxChunkDepth,
 
         [ValidateRange(1KB, 1TB)]
@@ -4255,7 +4219,8 @@ function Get-DirectoryChunks {
     }
 
     # Check if we've hit max depth - must accept as chunk even if large
-    if ($CurrentDepth -ge $MaxDepth) {
+    # MaxDepth = -1 means unlimited (Smart mode), so skip this check
+    if ($MaxDepth -ge 0 -and $CurrentDepth -ge $MaxDepth) {
         Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $totalSize, Files: $fileCount)" -Level 'Warning' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
@@ -4517,68 +4482,17 @@ function New-FilesOnlyChunk {
 function New-FlatChunks {
     <#
     .SYNOPSIS
-        Creates chunks using flat (non-recursive) scanning strategy
+        Creates chunks using flat scanning strategy with configurable depth
     .DESCRIPTION
-        Generates chunks without recursing into subdirectories.
-        This is a fast scanning mode that treats each top-level directory as a chunk.
+        Generates chunks by recursing to a specified depth. Each directory at that
+        depth becomes one chunk. Use MaxDepth=0 for top-level only, or higher values
+        for more granular chunking with predictable boundaries.
     .PARAMETER Path
         Root path to chunk
     .PARAMETER DestinationRoot
         Destination root path
-    .PARAMETER MaxChunkSizeBytes
-        Maximum size per chunk (default: 10GB)
-    .PARAMETER MaxFiles
-        Maximum files per chunk (default: 50000)
-    .OUTPUTS
-        Array of chunk objects
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [Parameter(Mandatory)]
-        [string]$DestinationRoot,
-
-        [int64]$MaxChunkSizeBytes = $script:DefaultMaxChunkSizeBytes,
-        [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
-
-        # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null,
-
-        # Pre-built directory tree for O(1) size lookups (optional, built if not provided)
-        [DirectoryNode]$TreeNode = $null
-    )
-
-    # Flat mode: MaxDepth = 0 (no recursion into subdirectories)
-    return Get-DirectoryChunks `
-        -Path $Path `
-        -DestinationRoot $DestinationRoot `
-        -MaxSizeBytes $MaxChunkSizeBytes `
-        -MaxFiles $MaxFiles `
-        -MaxDepth 0 `
-        -State $State `
-        -TreeNode $TreeNode
-}
-
-function New-SmartChunks {
-    <#
-    .SYNOPSIS
-        Creates chunks using smart (recursive) scanning strategy
-    .DESCRIPTION
-        Generates chunks by recursively analyzing the directory tree and
-        splitting based on size and file count thresholds.
-        This is the recommended mode for most use cases.
-    .PARAMETER Path
-        Root path to chunk
-    .PARAMETER DestinationRoot
-        Destination root path
-    .PARAMETER MaxChunkSizeBytes
-        Maximum size per chunk (default: 10GB)
-    .PARAMETER MaxFiles
-        Maximum files per chunk (default: 50000)
     .PARAMETER MaxDepth
-        Maximum recursion depth (default: 5)
+        Maximum recursion depth (0-20, default from profile)
     .OUTPUTS
         Array of chunk objects
     #>
@@ -4590,8 +4504,7 @@ function New-SmartChunks {
         [Parameter(Mandatory)]
         [string]$DestinationRoot,
 
-        [int64]$MaxChunkSizeBytes = $script:DefaultMaxChunkSizeBytes,
-        [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
+        [ValidateRange(0, 20)]
         [int]$MaxDepth = $script:DefaultMaxChunkDepth,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
@@ -4601,13 +4514,50 @@ function New-SmartChunks {
         [DirectoryNode]$TreeNode = $null
     )
 
-    # Smart mode: recursive chunking with configurable depth
+    # Flat mode: use specified depth limit
     return Get-DirectoryChunks `
         -Path $Path `
         -DestinationRoot $DestinationRoot `
-        -MaxSizeBytes $MaxChunkSizeBytes `
-        -MaxFiles $MaxFiles `
         -MaxDepth $MaxDepth `
+        -State $State `
+        -TreeNode $TreeNode
+}
+
+function New-SmartChunks {
+    <#
+    .SYNOPSIS
+        Creates chunks using smart (unlimited depth) scanning strategy
+    .DESCRIPTION
+        Generates chunks by recursively analyzing the directory tree with no depth limit.
+        Continues recursing until each chunk fits within thresholds or no more subdirectories
+        exist. This is the recommended mode for optimal chunk balancing.
+    .PARAMETER Path
+        Root path to chunk
+    .PARAMETER DestinationRoot
+        Destination root path
+    .OUTPUTS
+        Array of chunk objects
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$DestinationRoot,
+
+        # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
+        [object]$State = $null,
+
+        # Pre-built directory tree for O(1) size lookups (optional, built if not provided)
+        [DirectoryNode]$TreeNode = $null
+    )
+
+    # Smart mode: unlimited depth (-1) for optimal chunk balancing
+    return Get-DirectoryChunks `
+        -Path $Path `
+        -DestinationRoot $DestinationRoot `
+        -MaxDepth -1 `
         -State $State `
         -TreeNode $TreeNode
 }
@@ -5764,19 +5714,6 @@ function Wait-RobocopyJob {
             $Job.Process.WaitForExit()
         }
 
-        # Small delay to ensure all OutputDataReceived events have been processed
-        # The event handler runs on a thread pool thread and may still be processing
-        Start-Sleep -Milliseconds 100
-
-        # Get captured output from streaming buffer (new approach)
-        if ($Job.ProgressBuffer) {
-            # Drain all buffered lines and join into string for parsing
-            $allLines = $Job.ProgressBuffer.GetAllLines()
-            if ($allLines -and $allLines.Count -gt 0) {
-                $capturedOutput = $allLines -join "`n"
-            }
-        }
-
         # Calculate duration
         $duration = [datetime]::Now - $Job.StartTime
 
@@ -5784,15 +5721,10 @@ function Wait-RobocopyJob {
         $exitCode = $Job.Process.ExitCode
         $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
 
-        # Parse final statistics from captured stdout (avoids file flush race condition)
-        # Fall back to log file if stdout capture failed
-        $finalStats = if ($capturedOutput) {
-            ConvertFrom-RobocopyLog -Content $capturedOutput -LogPath $Job.LogPath
-        }
-        else {
-            Write-RobocurseLog -Message "No stdout captured, falling back to log file: $($Job.LogPath)" -Level 'Warning' -Component 'Robocopy'
-            ConvertFrom-RobocopyLog -LogPath $Job.LogPath
-        }
+        # Parse final stats from log file (authoritative source - robocopy flushes before exit)
+        # Note: ProgressBuffer is for real-time progress during the job (Get-RobocopyProgress).
+        # Do NOT use captured stdout for final stats - race condition with OutputDataReceived events.
+        $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
 
         return [PSCustomObject]@{
             ExitCode = $exitCode
@@ -8841,12 +8773,10 @@ function Start-ProfileReplication {
     # Generate chunks based on scan mode using the pre-built tree
     $state.ScanProgress = 0
     $state.CurrentActivity = "Creating chunks..."
-    # Convert ChunkMaxSizeGB to bytes
-    $maxChunkBytes = if ($Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB * 1GB } else { $script:DefaultMaxChunkSizeBytes }
-    $maxFiles = if ($Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
+    # MaxDepth is only used by Flat mode
     $maxDepth = if ($Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
-    Write-RobocurseLog -Message "Chunk settings: MaxSize=$([math]::Round($maxChunkBytes/1GB, 2))GB, MaxFiles=$maxFiles, MaxDepth=$maxDepth, Mode=$($Profile.ScanMode)" `
+    Write-RobocurseLog -Message "Chunk settings: Mode=$($Profile.ScanMode), MaxDepth=$maxDepth (Flat only)" `
         -Level 'Debug' -Component 'Orchestrator'
 
     # Use network-mapped destination if available
@@ -8857,8 +8787,7 @@ function Start-ProfileReplication {
             New-FlatChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
+                -MaxDepth $maxDepth `
                 -State $state `
                 -TreeNode $directoryTree
         }
@@ -8866,19 +8795,14 @@ function Start-ProfileReplication {
             New-SmartChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
-                -MaxDepth $maxDepth `
                 -State $state `
                 -TreeNode $directoryTree
         }
         default {
+            # Default to Smart mode (unlimited depth)
             New-SmartChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
-                -MaxDepth $maxDepth `
                 -State $state `
                 -TreeNode $directoryTree
         }
@@ -9223,24 +9147,10 @@ function Complete-RobocopyJob {
 
     $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode -MismatchSeverity $mismatchSeverity
 
-    # Get captured stdout from streaming progress buffer
-    # This avoids file flush race conditions in Session 0 scheduled tasks
-    $capturedOutput = $null
-    if ($Job.ProgressBuffer) {
-        try {
-            # Small delay to ensure all OutputDataReceived events have been processed
-            Start-Sleep -Milliseconds 50
-            $allLines = $Job.ProgressBuffer.GetAllLines()
-            if ($allLines -and $allLines.Count -gt 0) {
-                $capturedOutput = $allLines -join "`n"
-            }
-        }
-        catch {
-            Write-RobocurseLog "Failed to get captured stdout for chunk $($Job.Chunk.ChunkId): $_" -Level 'Warning' -Component 'Orchestrator'
-        }
-    }
-
     # Clean up the event subscription to prevent memory leaks
+    # Note: ProgressBuffer is used for real-time progress during the job (Get-RobocopyProgress),
+    # but for final stats we always read from the log file which is reliably flushed when robocopy exits.
+    # The stdout capture has race conditions - final stats lines may not be processed before we read.
     if ($Job.OutputEvent) {
         try {
             Unregister-Event -SourceIdentifier $Job.OutputEvent.Name -ErrorAction SilentlyContinue
@@ -9248,13 +9158,9 @@ function Complete-RobocopyJob {
         } catch { }
     }
 
-    # Parse stats from captured stdout (avoids file flush race), fallback to log file
-    $stats = if ($capturedOutput) {
-        ConvertFrom-RobocopyLog -Content $capturedOutput -LogPath $Job.LogPath
-    }
-    else {
-        ConvertFrom-RobocopyLog -LogPath $Job.LogPath
-    }
+    # Parse final stats from log file (authoritative source - robocopy flushes before exit)
+    # Do NOT use captured stdout here - race condition with OutputDataReceived event processing
+    $stats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
 
     $duration = [datetime]::Now - $Job.StartTime
 
@@ -18025,21 +17931,22 @@ function Import-ProfileToForm {
     # Refresh snapshot lists for this profile
     Update-ProfileSnapshotLists
 
-    # Set scan mode
+    # Set scan mode (Smart = 0, Flat = 1)
     $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
-    $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Quick") { 1 } else { 0 }
+    $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Flat") { 1 } else { 0 }
 
-    # Load chunk settings with defaults from module constants
-    $maxSize = if ($null -ne $Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB } else { $script:DefaultMaxChunkSizeBytes / 1GB }
-    $maxFiles = if ($null -ne $Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
+    # Load MaxDepth setting (only used in Flat mode)
     $maxDepth = if ($null -ne $Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
     # Debug: log what we're loading
-    Write-GuiLog "Loading profile '$($Profile.Name)': ChunkMaxSizeGB=$($Profile.ChunkMaxSizeGB) (display: $maxSize), ChunkMaxFiles=$($Profile.ChunkMaxFiles), ChunkMaxDepth=$($Profile.ChunkMaxDepth)"
+    Write-GuiLog "Loading profile '$($Profile.Name)': ScanMode=$scanMode, ChunkMaxDepth=$maxDepth"
 
-    $script:Controls.txtMaxSize.Text = $maxSize.ToString()
-    $script:Controls.txtMaxFiles.Text = $maxFiles.ToString()
     $script:Controls.txtMaxDepth.Text = $maxDepth.ToString()
+
+    # Enable/disable MaxDepth based on scan mode
+    $isFlat = $scanMode -eq "Flat"
+    $script:Controls.txtMaxDepth.IsEnabled = $isFlat
+    $script:Controls.txtMaxDepth.Opacity = if ($isFlat) { 1.0 } else { 0.5 }
 }
 
 function Save-ProfileFromForm {
@@ -18120,36 +18027,10 @@ function Save-ProfileFromForm {
         Write-GuiLog "Input corrected: $fieldName '$originalValue' -> '$correctedValue'"
     }
 
-    # ChunkMaxSizeGB: valid range 1-1000 GB
-    try {
-        $value = [int]$script:Controls.txtMaxSize.Text
-        $selected.ChunkMaxSizeGB = [Math]::Max(1, [Math]::Min(1000, $value))
-        if ($value -ne $selected.ChunkMaxSizeGB) {
-            & $showInputCorrected $script:Controls.txtMaxSize $value $selected.ChunkMaxSizeGB "Max Size (GB)"
-        }
-    } catch {
-        $originalText = $script:Controls.txtMaxSize.Text
-        $selected.ChunkMaxSizeGB = 10
-        & $showInputCorrected $script:Controls.txtMaxSize $originalText 10 "Max Size (GB)"
-    }
-
-    # ChunkMaxFiles: valid range 1000-10000000
-    try {
-        $value = [int]$script:Controls.txtMaxFiles.Text
-        $selected.ChunkMaxFiles = [Math]::Max(1000, [Math]::Min(10000000, $value))
-        if ($value -ne $selected.ChunkMaxFiles) {
-            & $showInputCorrected $script:Controls.txtMaxFiles $value $selected.ChunkMaxFiles "Max Files"
-        }
-    } catch {
-        $originalText = $script:Controls.txtMaxFiles.Text
-        $selected.ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
-        & $showInputCorrected $script:Controls.txtMaxFiles $originalText $script:DefaultMaxFilesPerChunk "Max Files"
-    }
-
-    # ChunkMaxDepth: valid range 1-20
+    # ChunkMaxDepth: valid range 0-20 (0 = top-level only in Flat mode)
     try {
         $value = [int]$script:Controls.txtMaxDepth.Text
-        $selected.ChunkMaxDepth = [Math]::Max(1, [Math]::Min(20, $value))
+        $selected.ChunkMaxDepth = [Math]::Max(0, [Math]::Min(20, $value))
         if ($value -ne $selected.ChunkMaxDepth) {
             & $showInputCorrected $script:Controls.txtMaxDepth $value $selected.ChunkMaxDepth "Max Depth"
         }
@@ -18184,9 +18065,16 @@ function Add-NewProfile {
         Enabled = $true
         UseVSS = $false
         ScanMode = "Smart"
-        ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
-        ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
         ChunkMaxDepth = $script:DefaultMaxChunkDepth
+        Schedule = [PSCustomObject]@{
+            Enabled = $false
+            Frequency = "Daily"
+            Time = "02:00"
+            Interval = 1
+            DayOfWeek = "Sunday"
+            DayOfMonth = 1
+        }
+        RobocopyOptions = @{}
         SourceSnapshot = [PSCustomObject]@{
             PersistentEnabled = $false
             RetentionCount = 3
@@ -20364,8 +20252,12 @@ function Show-ProfileScheduleDialog {
                     DayOfMonth = [int]$cmbDayOfMonth.SelectedItem.Content
                 }
 
-                # Update profile
-                $Profile.Schedule = $newSchedule
+                # Update profile - add Schedule property if missing (defensive for old profiles)
+                if (-not ($Profile.PSObject.Properties.Name -contains 'Schedule')) {
+                    $Profile | Add-Member -NotePropertyName 'Schedule' -NotePropertyValue $newSchedule
+                } else {
+                    $Profile.Schedule = $newSchedule
+                }
 
                 # Create or remove task
                 if ($chkEnabled.IsChecked) {
@@ -23744,28 +23636,21 @@ function Initialize-RobocurseGui {
                                 <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
                                         Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                                <!-- Chunking - after Destination -->
-                                <Label Grid.Row="3" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                <!-- Scan Mode + MaxDepth - after Destination -->
+                                <Label Grid.Row="3" Grid.Column="0" Content="Scan:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                                 <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,8">
-                                    <TextBox x:Name="txtMaxSize" Width="40" Style="{StaticResource DarkTextBox}" Text="10"
-                                             ToolTip="Max size (GB)"/>
-                                    <Label Content="GB" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-                                    <TextBox x:Name="txtMaxFiles" Width="50" Style="{StaticResource DarkTextBox}" Text="50000" Margin="10,0,0,0"
-                                             ToolTip="Max files"/>
-                                    <Label Content="files" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="cmbScanMode" Width="80" Style="{StaticResource DarkComboBox}"
+                                              ToolTip="Smart: unlimited depth (recommended). Flat: stops at max depth.">
+                                        <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
+                                        <ComboBoxItem Content="Flat" Style="{StaticResource DarkComboBoxItem}"/>
+                                    </ComboBox>
                                     <TextBox x:Name="txtMaxDepth" Width="30" Style="{StaticResource DarkTextBox}" Text="5" Margin="10,0,0,0"
-                                             ToolTip="Max depth"/>
+                                             ToolTip="Max depth (Flat mode only)"/>
                                     <Label Content="depth" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
                                 </StackPanel>
 
-                                <!-- Scan + Validate on same row -->
-                                <Label Grid.Row="4" Grid.Column="0" Content="Scan:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                                <ComboBox Grid.Row="4" Grid.Column="1" x:Name="cmbScanMode" Width="80" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="0,0,0,8"
-                                          Style="{StaticResource DarkComboBox}"
-                                          ToolTip="Scan mode: Smart or Quick">
-                                    <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
-                                    <ComboBoxItem Content="Quick" Style="{StaticResource DarkComboBoxItem}"/>
-                                </ComboBox>
+                                <!-- Schedule + Validate buttons -->
+                                <Label Grid.Row="4" Grid.Column="0" Content="" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                                 <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,8">
                                     <Button x:Name="btnProfileSchedule" Content="Schedule" Style="{StaticResource ScheduleButton}"
                                             VerticalAlignment="Center" Margin="0,0,8,0"
@@ -24421,7 +24306,7 @@ function Initialize-RobocurseGui {
     @(
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
-        'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'chkUseVss', 'cmbScanMode', 'txtMaxDepth',
         'tabSnapshotConfig', 'chkSourcePersistentSnapshot', 'txtSourceRetentionCount',
         'chkDestPersistentSnapshot', 'txtDestRetentionCount',
         'tabProfileSnapshots', 'dgSourceSnapshots', 'dgDestSnapshots',
@@ -24941,7 +24826,7 @@ function Initialize-EventHandlers {
     }
 
     # Form field changes - save to profile
-    @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
+    @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxDepth') | ForEach-Object {
         $script:Controls[$_].Add_LostFocus({
             Invoke-SafeEventHandler -HandlerName "SaveProfile" -ScriptBlock { Save-ProfileFromForm }
         })
@@ -24949,7 +24834,7 @@ function Initialize-EventHandlers {
 
     # Numeric input validation - reject non-numeric characters in real-time
     # This provides immediate feedback before the user finishes typing
-    @('txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
+    @('txtMaxDepth') | ForEach-Object {
         $control = $script:Controls[$_]
         if ($control) {
             $control.Add_PreviewTextInput({
@@ -25048,7 +24933,13 @@ function Initialize-EventHandlers {
         })
     }
     $script:Controls.cmbScanMode.Add_SelectionChanged({
-        Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock { Save-ProfileFromForm }
+        Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock {
+            # Enable/disable MaxDepth based on scan mode (Flat needs it, Smart doesn't)
+            $isFlat = $script:Controls.cmbScanMode.Text -eq "Flat"
+            $script:Controls.txtMaxDepth.IsEnabled = $isFlat
+            $script:Controls.txtMaxDepth.Opacity = if ($isFlat) { 1.0 } else { 0.5 }
+            Save-ProfileFromForm
+        }
     })
 
     # Settings panel event handlers
@@ -25936,14 +25827,19 @@ function Start-RobocurseMain {
             return 1
         }
 
-        # Update the profile's Schedule property
-        $profile.Schedule = [PSCustomObject]@{
+        # Update the profile's Schedule property - add if missing (defensive for old profiles)
+        $newSchedule = [PSCustomObject]@{
             Enabled = $true
             Frequency = $Frequency
             Time = $Time
             Interval = $Interval
             DayOfWeek = $DayOfWeek
             DayOfMonth = $DayOfMonth
+        }
+        if (-not ($profile.PSObject.Properties.Name -contains 'Schedule')) {
+            $profile | Add-Member -NotePropertyName 'Schedule' -NotePropertyValue $newSchedule
+        } else {
+            $profile.Schedule = $newSchedule
         }
 
         # Save the updated config

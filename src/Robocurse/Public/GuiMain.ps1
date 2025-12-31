@@ -73,7 +73,7 @@ function Initialize-RobocurseGui {
     @(
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
-        'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'chkUseVss', 'cmbScanMode', 'txtMaxDepth',
         'tabSnapshotConfig', 'chkSourcePersistentSnapshot', 'txtSourceRetentionCount',
         'chkDestPersistentSnapshot', 'txtDestRetentionCount',
         'tabProfileSnapshots', 'dgSourceSnapshots', 'dgDestSnapshots',
@@ -593,7 +593,7 @@ function Initialize-EventHandlers {
     }
 
     # Form field changes - save to profile
-    @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
+    @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxDepth') | ForEach-Object {
         $script:Controls[$_].Add_LostFocus({
             Invoke-SafeEventHandler -HandlerName "SaveProfile" -ScriptBlock { Save-ProfileFromForm }
         })
@@ -601,7 +601,7 @@ function Initialize-EventHandlers {
 
     # Numeric input validation - reject non-numeric characters in real-time
     # This provides immediate feedback before the user finishes typing
-    @('txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
+    @('txtMaxDepth') | ForEach-Object {
         $control = $script:Controls[$_]
         if ($control) {
             $control.Add_PreviewTextInput({
@@ -700,7 +700,13 @@ function Initialize-EventHandlers {
         })
     }
     $script:Controls.cmbScanMode.Add_SelectionChanged({
-        Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock { Save-ProfileFromForm }
+        Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock {
+            # Enable/disable MaxDepth based on scan mode (Flat needs it, Smart doesn't)
+            $isFlat = $script:Controls.cmbScanMode.Text -eq "Flat"
+            $script:Controls.txtMaxDepth.IsEnabled = $isFlat
+            $script:Controls.txtMaxDepth.Opacity = if ($isFlat) { 1.0 } else { 0.5 }
+            Save-ProfileFromForm
+        }
     })
 
     # Settings panel event handlers

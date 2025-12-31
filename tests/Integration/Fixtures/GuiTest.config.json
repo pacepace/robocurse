@@ -12,8 +12,6 @@
         "path": "D:\\TestDest1"
       },
       "chunking": {
-        "maxChunkSizeGB": 10,
-        "maxFiles": 50000,
         "maxDepthToScan": 3,
         "strategy": "auto"
       }
@@ -29,8 +27,6 @@
         "path": "D:\\TestDest2"
       },
       "chunking": {
-        "maxChunkSizeGB": 20,
-        "maxFiles": 50000,
         "maxDepthToScan": 5,
         "strategy": "flat"
       }

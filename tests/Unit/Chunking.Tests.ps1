@@ -48,8 +48,17 @@ InModuleScope 'Robocurse' {
             It "Should throw when MaxDepth is out of range (too low)" {
                 $testDir = New-Item -ItemType Directory -Path "$TestDrive/testdir4" -Force
                 {
-                    Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" -MaxDepth -1
+                    # -2 is invalid (below -1), -1 is valid (unlimited for Smart mode)
+                    Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" -MaxDepth -2
                 } | Should -Throw
+            }
+
+            It "Should accept MaxDepth of -1 for unlimited recursion (Smart mode)" {
+                $testDir = New-Item -ItemType Directory -Path "$TestDrive/testdir-unlimited" -Force
+                {
+                    # -1 is valid for unlimited depth
+                    Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" -MaxDepth -1
+                } | Should -Not -Throw
             }
 
             It "Should throw when MaxSizeBytes is less than or equal to MinSizeBytes" {
@@ -557,14 +566,14 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = @(New-FlatChunks -Path "C:\TestFlat" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 10GB)
+                $chunks = @(New-FlatChunks -Path "C:\TestFlat" -DestinationRoot "D:\Backup")
 
                 @($chunks).Count | Should -Be 1
                 $chunks[0].SourcePath | Should -Be "C:\TestFlat"
                 $chunks[0].DestinationPath | Should -Be "D:\Backup"
             }
 
-            It "Should use provided MaxChunkSizeBytes parameter" {
+            It "Should use provided MaxDepth parameter" {
                 Mock Test-Path { $true }
                 Mock Get-DirectoryProfile {
                     [PSCustomObject]@{
@@ -578,29 +587,11 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = @(New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 20GB)
+                # Flat mode with MaxDepth=0 means top-level only
+                $chunks = @(New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxDepth 0)
 
                 @($chunks).Count | Should -Be 1
                 $chunks[0].EstimatedSize | Should -Be 5GB
-            }
-
-            It "Should use provided MaxFiles parameter" {
-                Mock Test-Path { $true }
-                Mock Get-DirectoryProfile {
-                    [PSCustomObject]@{
-                        Path = $Path
-                        TotalSize = 1GB
-                        FileCount = 5000
-                        DirCount = 0
-                        AvgFileSize = 200KB
-                        LastScanned = Get-Date
-                    }
-                }
-                Mock Get-DirectoryChildren { @() }
-
-                $chunks = @(New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxFiles 10000)
-
-                @($chunks).Count | Should -Be 1
             }
         }
 
@@ -639,55 +630,71 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-FilesAtLevel { @() }
 
-                $chunks = @(New-SmartChunks -Path "C:\TestSmart" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 10GB)
+                # Smart mode uses unlimited depth (-1) automatically
+                $chunks = @(New-SmartChunks -Path "C:\TestSmart" -DestinationRoot "D:\Backup")
 
                 @($chunks).Count | Should -Be 2
                 $chunks[0].SourcePath | Should -BeLike "*Child*"
                 $chunks[1].SourcePath | Should -BeLike "*Child*"
             }
 
-            It "Should respect MaxDepth parameter" {
+            It "Should use unlimited depth by default" {
                 Mock Test-Path { $true }
+                # Create a deep structure: Root -> Level1 -> Level2 -> Level3 (leaf)
                 Mock Get-DirectoryProfile {
-                    [PSCustomObject]@{
-                        Path = $Path
-                        TotalSize = 100GB
-                        FileCount = 500000
-                        DirCount = 1
-                        AvgFileSize = 200KB
-                        LastScanned = Get-Date
+                    param($Path)
+                    switch -Wildcard ($Path) {
+                        "*Level3" {
+                            [PSCustomObject]@{
+                                Path = $Path
+                                TotalSize = 5GB
+                                FileCount = 10000
+                                DirCount = 0
+                                AvgFileSize = 500KB
+                                LastScanned = Get-Date
+                            }
+                        }
+                        default {
+                            [PSCustomObject]@{
+                                Path = $Path
+                                TotalSize = 100GB
+                                FileCount = 500000
+                                DirCount = 1
+                                AvgFileSize = 200KB
+                                LastScanned = Get-Date
+                            }
+                        }
                     }
                 }
                 Mock Get-DirectoryChildren {
                     param($Path)
-                    @("$Path\Child")
+                    switch -Wildcard ($Path) {
+                        "*Level3" { @() }
+                        "*Level2" { @("$Path\Level3") }
+                        "*Level1" { @("$Path\Level2") }
+                        default { @("$Path\Level1") }
+                    }
                 }
                 Mock Get-FilesAtLevel { @() }
 
-                $chunks = @(New-SmartChunks -Path "C:\Deep" -DestinationRoot "D:\Backup" -MaxDepth 0 -MaxChunkSizeBytes 10GB)
+                # Smart mode should recurse all the way to Level3 (unlimited depth)
+                $chunks = @(New-SmartChunks -Path "C:\Deep" -DestinationRoot "D:\Backup")
 
                 @($chunks).Count | Should -Be 1
-                $chunks[0].SourcePath | Should -Be "C:\Deep"
+                $chunks[0].SourcePath | Should -BeLike "*Level3"
             }
 
-            It "Should use provided MaxChunkSizeBytes parameter" {
-                Mock Test-Path { $true }
-                Mock Get-DirectoryProfile {
-                    [PSCustomObject]@{
-                        Path = $Path
-                        TotalSize = 15GB
-                        FileCount = 30000
-                        DirCount = 0
-                        AvgFileSize = 500KB
-                        LastScanned = Get-Date
-                    }
-                }
-                Mock Get-DirectoryChildren { @() }
-
-                $chunks = @(New-SmartChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 20GB)
-
-                @($chunks).Count | Should -Be 1
-                $chunks[0].EstimatedSize | Should -Be 15GB
+            It "Should only accept Path, DestinationRoot, State, and TreeNode parameters" {
+                # New-SmartChunks is fully automatic with no tuning parameters
+                $cmd = Get-Command New-SmartChunks
+                $paramNames = $cmd.Parameters.Keys | Where-Object { $_ -notmatch '^(Verbose|Debug|ErrorAction|WarningAction|InformationAction|ErrorVariable|WarningVariable|InformationVariable|OutVariable|OutBuffer|PipelineVariable)$' }
+                $paramNames | Should -Contain 'Path'
+                $paramNames | Should -Contain 'DestinationRoot'
+                $paramNames | Should -Contain 'State'
+                $paramNames | Should -Contain 'TreeNode'
+                $paramNames | Should -Not -Contain 'MaxChunkSizeBytes'
+                $paramNames | Should -Not -Contain 'MaxFiles'
+                $paramNames | Should -Not -Contain 'MaxDepth'
             }
 
             It "Should use default parameters when not specified" {

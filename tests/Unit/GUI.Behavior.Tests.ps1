@@ -327,9 +327,7 @@ Describe "GUI Behavior Tests" -Tag "GUI", "Behavior", "Unit" {
                 Source = "C:\Source"
                 Destination = "D:\Destination"
                 UseVSS = $true
-                ScanMode = "Smart"
-                MaxSize = 15
-                MaxFiles = 75000
+                ScanMode = "Flat"
                 MaxDepth = 6
             }
 
@@ -339,16 +337,13 @@ Describe "GUI Behavior Tests" -Tag "GUI", "Behavior", "Unit" {
                 Destination = $formValues.Destination
                 UseVSS = $formValues.UseVSS
                 ScanMode = $formValues.ScanMode
-                ChunkMaxSizeGB = $formValues.MaxSize
-                ChunkMaxFiles = $formValues.MaxFiles
                 ChunkMaxDepth = $formValues.MaxDepth
                 Enabled = $true
             }
 
             $profile.Name | Should -Be "Test Profile"
             $profile.Source | Should -Be "C:\Source"
-            $profile.ChunkMaxSizeGB | Should -Be 15
-            $profile.ChunkMaxFiles | Should -Be 75000
+            $profile.ChunkMaxDepth | Should -Be 6
             $profile.UseVSS | Should -Be $true
         }
 
@@ -358,9 +353,7 @@ Describe "GUI Behavior Tests" -Tag "GUI", "Behavior", "Unit" {
                 Source = "E:\Data"
                 Destination = "F:\Backup"
                 UseVSS = $false
-                ScanMode = "Quick"
-                ChunkMaxSizeGB = 20
-                ChunkMaxFiles = 100000
+                ScanMode = "Flat"
                 ChunkMaxDepth = 8
             }
 
@@ -369,15 +362,13 @@ Describe "GUI Behavior Tests" -Tag "GUI", "Behavior", "Unit" {
                 Source = $profile.Source
                 Destination = $profile.Destination
                 UseVSS = $profile.UseVSS
-                ScanModeIndex = if ($profile.ScanMode -eq "Quick") { 1 } else { 0 }
-                MaxSize = $profile.ChunkMaxSizeGB
-                MaxFiles = $profile.ChunkMaxFiles
+                ScanModeIndex = if ($profile.ScanMode -eq "Flat") { 1 } else { 0 }
                 MaxDepth = $profile.ChunkMaxDepth
             }
 
             $formValues.Name | Should -Be "Existing Profile"
             $formValues.ScanModeIndex | Should -Be 1
-            $formValues.MaxSize | Should -Be 20
+            $formValues.MaxDepth | Should -Be 8
         }
     }
 

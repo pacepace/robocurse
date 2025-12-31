@@ -13,22 +13,22 @@ $script:PreviousErrorActionPreference = $ErrorActionPreference
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
-# Maximum size for a single chunk. Larger directories will be split into smaller chunks.
-# 10GB is chosen to balance parallelism vs. overhead - large enough to avoid excessive splitting,
-# small enough to allow meaningful parallel processing.
-$script:DefaultMaxChunkSizeBytes = 10GB
-
-# Maximum number of files in a single chunk before splitting.
-# 50,000 files is chosen to prevent robocopy from being overwhelmed by file enumeration
-# while still processing meaningful batches.
-$script:DefaultMaxFilesPerChunk = 50000
-
-# Maximum directory depth to traverse when creating chunks.
-# Depth of 5 prevents excessive recursion while allowing reasonable directory structure analysis.
+# Maximum directory depth to traverse when creating chunks (used by Flat mode only).
+# Smart mode uses unlimited depth (-1). Flat mode uses this as the default.
 $script:DefaultMaxChunkDepth = 5
 
-# Minimum size threshold for creating a separate chunk.
-# 100MB ensures we don't create chunks for trivial directories, reducing overhead.
+# Internal chunking thresholds (not user-configurable).
+# These define when Smart mode decides a directory is "too large" and should be split.
+# Maximum chunk size in bytes - directories larger than this trigger recursive splitting.
+# 10GB is a good balance: large enough for efficient robocopy, small enough to parallelize.
+$script:DefaultMaxChunkSizeBytes = 10GB
+
+# Maximum files per chunk - directories with more files trigger recursive splitting.
+# 50,000 files prevents individual robocopy jobs from becoming I/O bottlenecks.
+$script:DefaultMaxFilesPerChunk = 50000
+
+# Minimum chunk size in bytes - directories smaller than this won't be split further.
+# 100MB prevents creating tiny chunks that add orchestration overhead.
 $script:DefaultMinChunkSizeBytes = 100MB
 
 # Retry policy

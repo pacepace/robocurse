@@ -58,7 +58,7 @@ function Get-DirectoryChunks {
         [ValidateRange(1, 10000000)]
         [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
 
-        [ValidateRange(0, 20)]
+        [ValidateRange(-1, 20)]
         [int]$MaxDepth = $script:DefaultMaxChunkDepth,
 
         [ValidateRange(1KB, 1TB)]
@@ -119,7 +119,8 @@ function Get-DirectoryChunks {
     }
 
     # Check if we've hit max depth - must accept as chunk even if large
-    if ($CurrentDepth -ge $MaxDepth) {
+    # MaxDepth = -1 means unlimited (Smart mode), so skip this check
+    if ($MaxDepth -ge 0 -and $CurrentDepth -ge $MaxDepth) {
         Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $totalSize, Files: $fileCount)" -Level 'Warning' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
@@ -381,68 +382,17 @@ function New-FilesOnlyChunk {
 function New-FlatChunks {
     <#
     .SYNOPSIS
-        Creates chunks using flat (non-recursive) scanning strategy
+        Creates chunks using flat scanning strategy with configurable depth
     .DESCRIPTION
-        Generates chunks without recursing into subdirectories.
-        This is a fast scanning mode that treats each top-level directory as a chunk.
+        Generates chunks by recursing to a specified depth. Each directory at that
+        depth becomes one chunk. Use MaxDepth=0 for top-level only, or higher values
+        for more granular chunking with predictable boundaries.
     .PARAMETER Path
         Root path to chunk
     .PARAMETER DestinationRoot
         Destination root path
-    .PARAMETER MaxChunkSizeBytes
-        Maximum size per chunk (default: 10GB)
-    .PARAMETER MaxFiles
-        Maximum files per chunk (default: 50000)
-    .OUTPUTS
-        Array of chunk objects
-    #>
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [Parameter(Mandatory)]
-        [string]$DestinationRoot,
-
-        [int64]$MaxChunkSizeBytes = $script:DefaultMaxChunkSizeBytes,
-        [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
-
-        # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null,
-
-        # Pre-built directory tree for O(1) size lookups (optional, built if not provided)
-        [DirectoryNode]$TreeNode = $null
-    )
-
-    # Flat mode: MaxDepth = 0 (no recursion into subdirectories)
-    return Get-DirectoryChunks `
-        -Path $Path `
-        -DestinationRoot $DestinationRoot `
-        -MaxSizeBytes $MaxChunkSizeBytes `
-        -MaxFiles $MaxFiles `
-        -MaxDepth 0 `
-        -State $State `
-        -TreeNode $TreeNode
-}
-
-function New-SmartChunks {
-    <#
-    .SYNOPSIS
-        Creates chunks using smart (recursive) scanning strategy
-    .DESCRIPTION
-        Generates chunks by recursively analyzing the directory tree and
-        splitting based on size and file count thresholds.
-        This is the recommended mode for most use cases.
-    .PARAMETER Path
-        Root path to chunk
-    .PARAMETER DestinationRoot
-        Destination root path
-    .PARAMETER MaxChunkSizeBytes
-        Maximum size per chunk (default: 10GB)
-    .PARAMETER MaxFiles
-        Maximum files per chunk (default: 50000)
     .PARAMETER MaxDepth
-        Maximum recursion depth (default: 5)
+        Maximum recursion depth (0-20, default from profile)
     .OUTPUTS
         Array of chunk objects
     #>
@@ -454,8 +404,7 @@ function New-SmartChunks {
         [Parameter(Mandatory)]
         [string]$DestinationRoot,
 
-        [int64]$MaxChunkSizeBytes = $script:DefaultMaxChunkSizeBytes,
-        [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
+        [ValidateRange(0, 20)]
         [int]$MaxDepth = $script:DefaultMaxChunkDepth,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
@@ -465,13 +414,50 @@ function New-SmartChunks {
         [DirectoryNode]$TreeNode = $null
     )
 
-    # Smart mode: recursive chunking with configurable depth
+    # Flat mode: use specified depth limit
     return Get-DirectoryChunks `
         -Path $Path `
         -DestinationRoot $DestinationRoot `
-        -MaxSizeBytes $MaxChunkSizeBytes `
-        -MaxFiles $MaxFiles `
         -MaxDepth $MaxDepth `
+        -State $State `
+        -TreeNode $TreeNode
+}
+
+function New-SmartChunks {
+    <#
+    .SYNOPSIS
+        Creates chunks using smart (unlimited depth) scanning strategy
+    .DESCRIPTION
+        Generates chunks by recursively analyzing the directory tree with no depth limit.
+        Continues recursing until each chunk fits within thresholds or no more subdirectories
+        exist. This is the recommended mode for optimal chunk balancing.
+    .PARAMETER Path
+        Root path to chunk
+    .PARAMETER DestinationRoot
+        Destination root path
+    .OUTPUTS
+        Array of chunk objects
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$DestinationRoot,
+
+        # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
+        [object]$State = $null,
+
+        # Pre-built directory tree for O(1) size lookups (optional, built if not provided)
+        [DirectoryNode]$TreeNode = $null
+    )
+
+    # Smart mode: unlimited depth (-1) for optimal chunk balancing
+    return Get-DirectoryChunks `
+        -Path $Path `
+        -DestinationRoot $DestinationRoot `
+        -MaxDepth -1 `
         -State $State `
         -TreeNode $TreeNode
 }

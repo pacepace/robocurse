@@ -854,12 +854,10 @@ function Start-ProfileReplication {
     # Generate chunks based on scan mode using the pre-built tree
     $state.ScanProgress = 0
     $state.CurrentActivity = "Creating chunks..."
-    # Convert ChunkMaxSizeGB to bytes
-    $maxChunkBytes = if ($Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB * 1GB } else { $script:DefaultMaxChunkSizeBytes }
-    $maxFiles = if ($Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
+    # MaxDepth is only used by Flat mode
     $maxDepth = if ($Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
-    Write-RobocurseLog -Message "Chunk settings: MaxSize=$([math]::Round($maxChunkBytes/1GB, 2))GB, MaxFiles=$maxFiles, MaxDepth=$maxDepth, Mode=$($Profile.ScanMode)" `
+    Write-RobocurseLog -Message "Chunk settings: Mode=$($Profile.ScanMode), MaxDepth=$maxDepth (Flat only)" `
         -Level 'Debug' -Component 'Orchestrator'
 
     # Use network-mapped destination if available
@@ -870,8 +868,7 @@ function Start-ProfileReplication {
             New-FlatChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
+                -MaxDepth $maxDepth `
                 -State $state `
                 -TreeNode $directoryTree
         }
@@ -879,19 +876,14 @@ function Start-ProfileReplication {
             New-SmartChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
-                -MaxDepth $maxDepth `
                 -State $state `
                 -TreeNode $directoryTree
         }
         default {
+            # Default to Smart mode (unlimited depth)
             New-SmartChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
-                -MaxDepth $maxDepth `
                 -State $state `
                 -TreeNode $directoryTree
         }
@@ -1236,24 +1228,10 @@ function Complete-RobocopyJob {
 
     $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode -MismatchSeverity $mismatchSeverity
 
-    # Get captured stdout from streaming progress buffer
-    # This avoids file flush race conditions in Session 0 scheduled tasks
-    $capturedOutput = $null
-    if ($Job.ProgressBuffer) {
-        try {
-            # Small delay to ensure all OutputDataReceived events have been processed
-            Start-Sleep -Milliseconds 50
-            $allLines = $Job.ProgressBuffer.GetAllLines()
-            if ($allLines -and $allLines.Count -gt 0) {
-                $capturedOutput = $allLines -join "`n"
-            }
-        }
-        catch {
-            Write-RobocurseLog "Failed to get captured stdout for chunk $($Job.Chunk.ChunkId): $_" -Level 'Warning' -Component 'Orchestrator'
-        }
-    }
-
     # Clean up the event subscription to prevent memory leaks
+    # Note: ProgressBuffer is used for real-time progress during the job (Get-RobocopyProgress),
+    # but for final stats we always read from the log file which is reliably flushed when robocopy exits.
+    # The stdout capture has race conditions - final stats lines may not be processed before we read.
     if ($Job.OutputEvent) {
         try {
             Unregister-Event -SourceIdentifier $Job.OutputEvent.Name -ErrorAction SilentlyContinue
@@ -1261,13 +1239,9 @@ function Complete-RobocopyJob {
         } catch { }
     }
 
-    # Parse stats from captured stdout (avoids file flush race), fallback to log file
-    $stats = if ($capturedOutput) {
-        ConvertFrom-RobocopyLog -Content $capturedOutput -LogPath $Job.LogPath
-    }
-    else {
-        ConvertFrom-RobocopyLog -LogPath $Job.LogPath
-    }
+    # Parse final stats from log file (authoritative source - robocopy flushes before exit)
+    # Do NOT use captured stdout here - race condition with OutputDataReceived event processing
+    $stats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
 
     $duration = [datetime]::Now - $Job.StartTime
 

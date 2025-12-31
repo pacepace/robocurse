@@ -433,19 +433,15 @@ Describe "Configuration Management" {
             It "Should apply chunking settings to profile" {
                 $profile = [PSCustomObject]@{
                     ScanMode = "Smart"
-                    ChunkMaxSizeGB = 10
-                    ChunkMaxFiles = 50000
                     ChunkMaxDepth = 5
                 }
                 $rawChunking = [PSCustomObject]@{
-                    maxChunkSizeGB = 50
                     maxDepthToScan = 8
                     strategy = "flat"
                 }
 
                 ConvertTo-ChunkSettingsInternal -Profile $profile -RawChunking $rawChunking
 
-                $profile.ChunkMaxSizeGB | Should -Be 50
                 $profile.ChunkMaxDepth | Should -Be 8
                 $profile.ScanMode | Should -Be "Flat"
             }
@@ -453,14 +449,14 @@ Describe "Configuration Management" {
             It "Should handle null chunking gracefully" {
                 $profile = [PSCustomObject]@{
                     ScanMode = "Smart"
-                    ChunkMaxSizeGB = 10
+                    ChunkMaxDepth = 5
                 }
 
                 ConvertTo-ChunkSettingsInternal -Profile $profile -RawChunking $null
 
                 # Should remain unchanged
                 $profile.ScanMode | Should -Be "Smart"
-                $profile.ChunkMaxSizeGB | Should -Be 10
+                $profile.ChunkMaxDepth | Should -Be 5
             }
 
             It "Should map strategy values correctly" {
@@ -671,7 +667,9 @@ Describe "Configuration Management" {
             $result.SyncProfiles.Name | Should -Contain "Profile2"
         }
 
-        It "Should skip disabled profiles" {
+        It "Should load disabled profiles with Enabled flag set to false" {
+            # Disabled profiles should be loaded (not skipped) so they appear in the UI
+            # The Enabled flag controls whether the profile runs, not whether it's loaded
             $rawConfig = [PSCustomObject]@{
                 version = "1.0"
                 profiles = [PSCustomObject]@{
@@ -691,8 +689,11 @@ Describe "Configuration Management" {
 
             $result = ConvertFrom-FriendlyConfig -RawConfig $rawConfig
 
-            $result.SyncProfiles.Count | Should -Be 1
-            $result.SyncProfiles[0].Name | Should -Be "EnabledProfile"
+            $result.SyncProfiles.Count | Should -Be 2
+            $enabledProfile = $result.SyncProfiles | Where-Object { $_.Name -eq "EnabledProfile" }
+            $disabledProfile = $result.SyncProfiles | Where-Object { $_.Name -eq "DisabledProfile" }
+            $enabledProfile.Enabled | Should -Be $true
+            $disabledProfile.Enabled | Should -Be $false
         }
 
         It "Should handle string source path" {
@@ -740,8 +741,6 @@ Describe "Configuration Management" {
                     Destination = "D:\Dest"
                     UseVss = $true
                     ScanMode = "Smart"
-                    ChunkMaxSizeGB = 50
-                    ChunkMaxFiles = 10000
                     ChunkMaxDepth = 3
                     RobocopyOptions = @{
                         Switches = @("/MIR")
@@ -758,7 +757,7 @@ Describe "Configuration Management" {
             $result.profiles.TestProfile.source.path | Should -Be "C:\Source"
             $result.profiles.TestProfile.source.useVss | Should -Be $true
             $result.profiles.TestProfile.destination.path | Should -Be "D:\Dest"
-            $result.profiles.TestProfile.chunking.maxChunkSizeGB | Should -Be 50
+            $result.profiles.TestProfile.chunking.maxDepthToScan | Should -Be 3
             $result.profiles.TestProfile.robocopy.switches | Should -Contain "/MIR"
         }
 
@@ -796,9 +795,7 @@ Describe "Configuration Management" {
                     Source = "C:\Data"
                     Destination = "D:\Backup"
                     UseVss = $true
-                    ScanMode = "Smart"
-                    ChunkMaxSizeGB = 25
-                    ChunkMaxFiles = 5000
+                    ScanMode = "Flat"
                     ChunkMaxDepth = 4
                     RobocopyOptions = @{}
                     Enabled = $true
@@ -815,7 +812,7 @@ Describe "Configuration Management" {
             $restored.SyncProfiles[0].Source | Should -Be "C:\Data"
             $restored.SyncProfiles[0].Destination | Should -Be "D:\Backup"
             $restored.SyncProfiles[0].UseVss | Should -Be $true
-            $restored.SyncProfiles[0].ChunkMaxSizeGB | Should -Be 25
+            $restored.SyncProfiles[0].ChunkMaxDepth | Should -Be 4
         }
 
         It "Should have correct function signature" {
@@ -925,69 +922,22 @@ Describe "Configuration Management" {
     }
 
     Context "Test-RobocurseConfig - Chunk Configuration Validation" {
-        It "Should validate ChunkMaxFiles range (too low)" {
+        It "Should accept ChunkMaxDepth -1 for unlimited (Smart mode)" {
+            # ChunkMaxDepth range validation moved to GUI level
+            # Config-level accepts -1 (unlimited) for Smart mode
             $config = New-DefaultConfig
             $config.SyncProfiles = @(
                 [PSCustomObject]@{
                     Name = "Test"
                     Source = "C:\Source"
                     Destination = "D:\Backup"
-                    ChunkMaxFiles = 0
+                    ChunkMaxDepth = -1
+                    ScanMode = "Smart"
                 }
             )
             $result = Test-RobocurseConfig -Config $config
 
-            $result.IsValid | Should -Be $false
-            $result.Errors | Should -Match "ChunkMaxFiles must be between 1 and 10000000"
-        }
-
-        It "Should validate ChunkMaxFiles range (too high)" {
-            $config = New-DefaultConfig
-            $config.SyncProfiles = @(
-                [PSCustomObject]@{
-                    Name = "Test"
-                    Source = "C:\Source"
-                    Destination = "D:\Backup"
-                    ChunkMaxFiles = 20000000
-                }
-            )
-            $result = Test-RobocurseConfig -Config $config
-
-            $result.IsValid | Should -Be $false
-            $result.Errors | Should -Match "ChunkMaxFiles must be between 1 and 10000000"
-        }
-
-        It "Should validate ChunkMaxSizeGB range (too low)" {
-            $config = New-DefaultConfig
-            $config.SyncProfiles = @(
-                [PSCustomObject]@{
-                    Name = "Test"
-                    Source = "C:\Source"
-                    Destination = "D:\Backup"
-                    ChunkMaxSizeGB = 0
-                }
-            )
-            $result = Test-RobocurseConfig -Config $config
-
-            $result.IsValid | Should -Be $false
-            $result.Errors | Should -Match "ChunkMaxSizeGB must be between 0.001 and 1024"
-        }
-
-        It "Should validate ChunkMaxSizeGB > ChunkMinSizeGB" {
-            $config = New-DefaultConfig
-            $config.SyncProfiles = @(
-                [PSCustomObject]@{
-                    Name = "Test"
-                    Source = "C:\Source"
-                    Destination = "D:\Backup"
-                    ChunkMaxSizeGB = 1
-                    ChunkMinSizeGB = 5
-                }
-            )
-            $result = Test-RobocurseConfig -Config $config
-
-            $result.IsValid | Should -Be $false
-            $result.Errors | Should -Match "ChunkMaxSizeGB.*greater than.*ChunkMinSizeGB"
+            $result.IsValid | Should -Be $true
         }
 
         It "Should accept valid chunk configuration" {
@@ -997,9 +947,8 @@ Describe "Configuration Management" {
                     Name = "Test"
                     Source = "C:\Source"
                     Destination = "D:\Backup"
-                    ChunkMaxSizeGB = 10
-                    ChunkMinSizeGB = 0.1
-                    ChunkMaxFiles = 50000
+                    ChunkMaxDepth = 5
+                    ScanMode = "Flat"
                 }
             )
             $result = Test-RobocurseConfig -Config $config
@@ -1108,8 +1057,6 @@ Describe "Configuration Management" {
                 Enabled = $true
                 UseVss = $false
                 ScanMode = "Smart"
-                ChunkMaxSizeGB = 10
-                ChunkMaxFiles = 50000
                 ChunkMaxDepth = 5
                 RobocopyOptions = @{}
             })
