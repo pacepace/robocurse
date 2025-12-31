@@ -296,7 +296,13 @@ function Update-GuiProgressText {
     } else {
         "Speed: -- MB/s"
     }
-    $chunksText = "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
+
+    # During scanning/preparing phases, show item count instead of chunk count
+    $chunksText = if ($Status.Phase -in @('Preparing', 'Scanning') -and $Status.ScanProgress -gt 0) {
+        "Items: $($Status.ScanProgress)"
+    } else {
+        "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
+    }
 
     # Build current state for comparison
     $currentState = @{
@@ -584,6 +590,13 @@ function Update-GuiProgress {
                 $script:Controls.txtStatus.Text = $newText
                 $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::CornflowerBlue
                 $script:Window.UpdateLayout()
+            }
+            # Show replication progress during active copying
+            elseif ($script:OrchestrationState.Phase -eq 'Replicating') {
+                $completed = $script:OrchestrationState.CompletedCount
+                $total = $script:OrchestrationState.TotalChunks
+                $script:Controls.txtStatus.Text = "Replicating... ($completed/$total chunks)"
+                $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::LimeGreen
             }
         }
 

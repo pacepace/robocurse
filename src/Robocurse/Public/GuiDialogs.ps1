@@ -1073,3 +1073,79 @@ function Show-ProfileScheduleDialog {
         return $false
     }
 }
+
+function Show-ErrorPopup {
+    <#
+    .SYNOPSIS
+        Shows a popup dialog with recent errors from the current replication run
+    .DESCRIPTION
+        Displays errors stored in $script:ErrorHistoryBuffer in a styled dialog.
+        Allows user to view error details and clear the error history.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        # Load XAML
+        $xamlPath = Join-Path $PSScriptRoot "..\Resources\ErrorPopup.xaml"
+        if (-not (Test-Path $xamlPath)) {
+            # Try embedded XAML for monolith builds
+            if ($script:EmbeddedXaml -and $script:EmbeddedXaml['ErrorPopup.xaml']) {
+                $xaml = $script:EmbeddedXaml['ErrorPopup.xaml']
+            } else {
+                Write-GuiLog "ErrorPopup.xaml not found"
+                return
+            }
+        } else {
+            $xaml = Get-Content $xamlPath -Raw
+        }
+
+        # Parse XAML
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+
+        # Get controls
+        $lstErrors = $dialog.FindName('lstErrors')
+        $btnClear = $dialog.FindName('btnClear')
+        $btnClose = $dialog.FindName('btnClose')
+
+        # Populate error list from buffer
+        [System.Threading.Monitor]::Enter($script:ErrorHistoryBuffer)
+        try {
+            $errors = $script:ErrorHistoryBuffer.ToArray()
+        }
+        finally {
+            [System.Threading.Monitor]::Exit($script:ErrorHistoryBuffer)
+        }
+
+        $lstErrors.ItemsSource = $errors
+
+        # Close button
+        $btnClose.Add_Click({
+            $dialog.Close()
+        }.GetNewClosure())
+
+        # Clear button - clears errors and closes
+        $btnClear.Add_Click({
+            Clear-ErrorHistory
+            $dialog.Close()
+        }.GetNewClosure())
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.LeftButton -eq [System.Windows.Input.MouseButtonState]::Pressed) {
+                $dialog.DragMove()
+            }
+        }.GetNewClosure())
+
+        # Set owner and show
+        if ($script:Window) {
+            $dialog.Owner = $script:Window
+        }
+        $dialog.ShowDialog() | Out-Null
+    }
+    catch {
+        Write-GuiLog "Error showing error popup: $($_.Exception.Message)"
+    }
+}

@@ -13,6 +13,10 @@ function Get-DirectoryChunks {
         minimum chunk sizes to avoid overhead. Handles both directory-based chunks and files-only
         chunks for optimal parallelization. This is the core chunking algorithm for the replication
         orchestrator.
+
+        PERFORMANCE: When a TreeNode is provided, uses pre-built tree data for O(1) size lookups
+        instead of calling Get-DirectoryProfile repeatedly. This avoids re-enumerating overlapping
+        subtrees which was the main performance bottleneck.
     .PARAMETER Path
         Root path to chunk
     .PARAMETER DestinationRoot
@@ -29,6 +33,9 @@ function Get-DirectoryChunks {
         Minimum size to create a chunk (default: 100MB)
     .PARAMETER CurrentDepth
         Current recursion depth (internal use)
+    .PARAMETER TreeNode
+        Pre-built DirectoryNode from New-DirectoryTree. When provided, uses tree data
+        for O(1) size lookups instead of calling Get-DirectoryProfile (major performance improvement).
     .OUTPUTS
         Array of chunk objects
     #>
@@ -61,11 +68,15 @@ function Get-DirectoryChunks {
         [int]$CurrentDepth = 0,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-built directory tree node for O(1) size lookups (avoids repeated enumeration)
+        [object]$TreeNode = $null
     )
 
     # Validate path exists (inside function body so mocks can intercept)
-    if (-not (Test-Path -Path $Path -PathType Container)) {
+    # Skip validation if we have a TreeNode (tree was already built from valid enumeration)
+    if (-not $TreeNode -and -not (Test-Path -Path $Path -PathType Container)) {
         throw "Path '$Path' does not exist or is not a directory"
     }
 
@@ -81,35 +92,61 @@ function Get-DirectoryChunks {
 
     Write-RobocurseLog "Analyzing directory at depth $CurrentDepth : $Path" -Level 'Debug' -Component 'Chunking'
 
-    # Get profile for this directory
-    $profile = Get-DirectoryProfile -Path $Path -UseCache $true -State $State
+    # Get size and file count - either from tree (O(1)) or profile (I/O)
+    if ($TreeNode) {
+        # Use pre-built tree data - no I/O needed!
+        $totalSize = $TreeNode.TotalSize
+        $fileCount = $TreeNode.TotalFileCount
+        $profile = [PSCustomObject]@{
+            TotalSize = $totalSize
+            FileCount = $fileCount
+            DirCount = $TreeNode.Children.Count
+            AvgFileSize = if ($fileCount -gt 0) { [math]::Round($totalSize / $fileCount, 0) } else { 0 }
+            LastScanned = Get-Date
+        }
+    } else {
+        # Fallback to old behavior (for backward compatibility)
+        $profile = Get-DirectoryProfile -Path $Path -UseCache $true -State $State
+        $totalSize = $profile.TotalSize
+        $fileCount = $profile.FileCount
+    }
 
     # Check if this directory is small enough to be a chunk
-    if ($profile.TotalSize -le $MaxSizeBytes -and $profile.FileCount -le $MaxFiles) {
-        Write-RobocurseLog "Directory fits in single chunk: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level 'Debug' -Component 'Chunking'
+    if ($totalSize -le $MaxSizeBytes -and $fileCount -le $MaxFiles) {
+        Write-RobocurseLog "Directory fits in single chunk: $Path (Size: $totalSize, Files: $fileCount)" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }
 
     # Check if we've hit max depth - must accept as chunk even if large
     if ($CurrentDepth -ge $MaxDepth) {
-        Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level 'Warning' -Component 'Chunking'
+        Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $totalSize, Files: $fileCount)" -Level 'Warning' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }
 
     # Check if directory is above MinSizeBytes - if not, accept as single chunk to reduce overhead
     # This prevents creating many tiny chunks which add more overhead than benefit
-    if ($profile.TotalSize -lt $MinSizeBytes) {
-        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $($profile.TotalSize))" -Level 'Debug' -Component 'Chunking'
+    if ($totalSize -lt $MinSizeBytes) {
+        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $totalSize)" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }
 
     # Directory is too big - recurse into children
-    $children = Get-DirectoryChildren -Path $Path
+    # Get children from tree if available, otherwise from filesystem
+    if ($TreeNode) {
+        # Use tree data exclusively - no filesystem fallback
+        $childNodes = $TreeNode.Children.Values
+        $childCount = $TreeNode.Children.Count
+    } else {
+        # Fallback to filesystem (backward compatibility)
+        $children = Get-DirectoryChildren -Path $Path
+        $childCount = $children.Count
+        $childNodes = $null
+    }
 
-    if ($children.Count -eq 0) {
+    if ($childCount -eq 0) {
         # No subdirs but too many files - must accept as large chunk
         Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level 'Warning' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
@@ -118,31 +155,67 @@ function Get-DirectoryChunks {
 
     # Recurse into each child
     # Use List<> instead of array concatenation for O(N) instead of O(N²) performance
-    Write-RobocurseLog "Directory too large, recursing into $($children.Count) children: $Path" -Level 'Debug' -Component 'Chunking'
+    Write-RobocurseLog "Directory too large, recursing into $childCount children: $Path" -Level 'Debug' -Component 'Chunking'
     $chunkList = [System.Collections.Generic.List[PSCustomObject]]::new()
-    foreach ($child in $children) {
-        $childChunks = Get-DirectoryChunks `
-            -Path $child `
-            -DestinationRoot $DestinationRoot `
-            -SourceRoot $SourceRoot `
-            -MaxSizeBytes $MaxSizeBytes `
-            -MaxFiles $MaxFiles `
-            -MaxDepth $MaxDepth `
-            -MinSizeBytes $MinSizeBytes `
-            -CurrentDepth ($CurrentDepth + 1) `
-            -State $State
 
-        foreach ($chunk in $childChunks) {
-            $chunkList.Add($chunk)
+    if ($childNodes) {
+        # Use tree nodes - no I/O for child enumeration!
+        foreach ($childNode in $childNodes) {
+            $childChunks = Get-DirectoryChunks `
+                -Path $childNode.Path `
+                -DestinationRoot $DestinationRoot `
+                -SourceRoot $SourceRoot `
+                -MaxSizeBytes $MaxSizeBytes `
+                -MaxFiles $MaxFiles `
+                -MaxDepth $MaxDepth `
+                -MinSizeBytes $MinSizeBytes `
+                -CurrentDepth ($CurrentDepth + 1) `
+                -State $State `
+                -TreeNode $childNode
+
+            foreach ($chunk in $childChunks) {
+                $chunkList.Add($chunk)
+            }
+        }
+    } else {
+        # Fallback to old behavior
+        foreach ($child in $children) {
+            $childChunks = Get-DirectoryChunks `
+                -Path $child `
+                -DestinationRoot $DestinationRoot `
+                -SourceRoot $SourceRoot `
+                -MaxSizeBytes $MaxSizeBytes `
+                -MaxFiles $MaxFiles `
+                -MaxDepth $MaxDepth `
+                -MinSizeBytes $MinSizeBytes `
+                -CurrentDepth ($CurrentDepth + 1) `
+                -State $State
+
+            foreach ($chunk in $childChunks) {
+                $chunkList.Add($chunk)
+            }
         }
     }
 
     # Handle files at this level (not in any subdir)
-    $filesAtLevel = Get-FilesAtLevel -Path $Path
-    if ($filesAtLevel.Count -gt 0) {
-        Write-RobocurseLog "Found $($filesAtLevel.Count) files at level: $Path" -Level 'Debug' -Component 'Chunking'
+    # Check if there are direct files using tree data or filesystem
+    $hasFilesAtLevel = if ($TreeNode) {
+        $TreeNode.DirectFileCount -gt 0
+    } else {
+        (Get-FilesAtLevel -Path $Path).Count -gt 0
+    }
+
+    if ($hasFilesAtLevel) {
+        $directFileCount = if ($TreeNode) { $TreeNode.DirectFileCount } else { (Get-FilesAtLevel -Path $Path).Count }
+        Write-RobocurseLog "Found $directFileCount files at level: $Path" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
-        $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath -State $State))
+
+        # Pass tree data to avoid filesystem I/O when using tree
+        if ($TreeNode) {
+            $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath -State $State -DirectSize $TreeNode.DirectSize -DirectFileCount $TreeNode.DirectFileCount))
+        } else {
+            $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath -State $State))
+        }
     }
 
     return $chunkList.ToArray()
@@ -252,6 +325,10 @@ function New-FilesOnlyChunk {
         Source directory path
     .PARAMETER DestinationPath
         Destination directory path
+    .PARAMETER DirectSize
+        Optional pre-calculated size of files at this level (from tree data)
+    .PARAMETER DirectFileCount
+        Optional pre-calculated file count at this level (from tree data)
     .OUTPUTS
         Chunk object
     #>
@@ -264,20 +341,30 @@ function New-FilesOnlyChunk {
         [string]$DestinationPath,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-calculated values from tree (avoids filesystem I/O)
+        [int64]$DirectSize = -1,
+        [int]$DirectFileCount = -1
     )
 
-    # Create a minimal profile for files at this level
-    # We don't need exact size since this is just for files at one level
-    $filesAtLevel = Get-FilesAtLevel -Path $SourcePath
-    $totalSize = ($filesAtLevel | Measure-Object -Property Length -Sum).Sum
-    if ($null -eq $totalSize) { $totalSize = 0 }
+    # Use pre-calculated values if provided, otherwise hit filesystem
+    if ($DirectSize -ge 0 -and $DirectFileCount -ge 0) {
+        $totalSize = $DirectSize
+        $fileCount = $DirectFileCount
+    } else {
+        # Fallback to filesystem enumeration
+        $filesAtLevel = Get-FilesAtLevel -Path $SourcePath
+        $totalSize = ($filesAtLevel | Measure-Object -Property Length -Sum).Sum
+        if ($null -eq $totalSize) { $totalSize = 0 }
+        $fileCount = $filesAtLevel.Count
+    }
 
     $profile = [PSCustomObject]@{
         TotalSize = $totalSize
-        FileCount = $filesAtLevel.Count
+        FileCount = $fileCount
         DirCount = 0
-        AvgFileSize = if ($filesAtLevel.Count -gt 0) { $totalSize / $filesAtLevel.Count } else { 0 }
+        AvgFileSize = if ($fileCount -gt 0) { $totalSize / $fileCount } else { 0 }
         LastScanned = Get-Date
     }
 
@@ -286,7 +373,7 @@ function New-FilesOnlyChunk {
     # Add robocopy args to copy only files at this level
     $chunk.RobocopyArgs = @("/LEV:1")
 
-    Write-RobocurseLog "Created files-only chunk #$($chunk.ChunkId): $SourcePath (Files: $($filesAtLevel.Count))" -Level 'Debug' -Component 'Chunking'
+    Write-RobocurseLog "Created files-only chunk #$($chunk.ChunkId): $SourcePath (Files: $fileCount)" -Level 'Debug' -Component 'Chunking'
 
     return $chunk
 }
@@ -321,7 +408,10 @@ function New-FlatChunks {
         [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-built directory tree for O(1) size lookups (optional, built if not provided)
+        [DirectoryNode]$TreeNode = $null
     )
 
     # Flat mode: MaxDepth = 0 (no recursion into subdirectories)
@@ -331,7 +421,8 @@ function New-FlatChunks {
         -MaxSizeBytes $MaxChunkSizeBytes `
         -MaxFiles $MaxFiles `
         -MaxDepth 0 `
-        -State $State
+        -State $State `
+        -TreeNode $TreeNode
 }
 
 function New-SmartChunks {
@@ -368,7 +459,10 @@ function New-SmartChunks {
         [int]$MaxDepth = $script:DefaultMaxChunkDepth,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-built directory tree for O(1) size lookups (optional, built if not provided)
+        [DirectoryNode]$TreeNode = $null
     )
 
     # Smart mode: recursive chunking with configurable depth
@@ -378,7 +472,8 @@ function New-SmartChunks {
         -MaxSizeBytes $MaxChunkSizeBytes `
         -MaxFiles $MaxFiles `
         -MaxDepth $MaxDepth `
-        -State $State
+        -State $State `
+        -TreeNode $TreeNode
 }
 
 function Get-NormalizedPath {

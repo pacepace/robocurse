@@ -837,11 +837,13 @@ function Start-ProfileReplication {
         return
     }
 
-    # Scan source directory (using VSS path if available)
+    # Build directory tree with single-pass enumeration (PERFORMANCE FIX)
+    # Previously used Get-DirectoryProfile here, then re-enumerated in chunking (O(N^2) robocopy calls)
+    # Now we enumerate once and pass the tree to chunking for O(1) size lookups
     $state.Phase = "Scanning"
     $state.ScanProgress = 0
-    $state.CurrentActivity = "Scanning source directory..."
-    $scanResult = Get-DirectoryProfile -Path $effectiveSource -State $state
+    $state.CurrentActivity = "Building directory tree..."
+    $directoryTree = New-DirectoryTree -RootPath $effectiveSource -State $state
 
     # Check for stop request after directory scan
     if ($state.StopRequested) {
@@ -849,7 +851,7 @@ function Start-ProfileReplication {
         return
     }
 
-    # Generate chunks based on scan mode
+    # Generate chunks based on scan mode using the pre-built tree
     $state.ScanProgress = 0
     $state.CurrentActivity = "Creating chunks..."
     # Convert ChunkMaxSizeGB to bytes
@@ -870,7 +872,8 @@ function Start-ProfileReplication {
                 -DestinationRoot $effectiveDestination `
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles `
-                -State $state
+                -State $state `
+                -TreeNode $directoryTree
         }
         'Smart' {
             New-SmartChunks `
@@ -879,7 +882,8 @@ function Start-ProfileReplication {
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles `
                 -MaxDepth $maxDepth `
-                -State $state
+                -State $state `
+                -TreeNode $directoryTree
         }
         default {
             New-SmartChunks `
@@ -888,7 +892,8 @@ function Start-ProfileReplication {
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles `
                 -MaxDepth $maxDepth `
-                -State $state
+                -State $state `
+                -TreeNode $directoryTree
         }
     }
 
@@ -905,13 +910,13 @@ function Start-ProfileReplication {
     }
 
     $state.TotalChunks = $chunks.Count
-    $state.TotalBytes = $scanResult.TotalSize
+    $state.TotalBytes = $directoryTree.TotalSize
     $state.CompletedCount = 0
     $state.BytesComplete = 0
     $state.Phase = "Replicating"
     $state.CurrentActivity = ""  # Clear activity when replicating starts
 
-    Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($scanResult.TotalSize/1GB, 2)) GB" `
+    Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($directoryTree.TotalSize/1GB, 2)) GB" `
         -Level 'Debug' -Component 'Orchestrator'
 }
 

@@ -558,8 +558,12 @@
                                  ToolTip="List of configured sync profiles">
                             <ListBox.ItemTemplate>
                                 <DataTemplate>
-                                    <CheckBox IsChecked="{Binding Enabled}" Content="{Binding Name}"
-                                              Style="{StaticResource DarkCheckBox}"/>
+                                    <StackPanel Orientation="Horizontal">
+                                        <CheckBox IsChecked="{Binding Enabled}" VerticalAlignment="Center"
+                                                  Style="{StaticResource DarkCheckBox}"/>
+                                        <TextBlock Text="{Binding Name}" Margin="5,0,0,0" VerticalAlignment="Center"
+                                                   Foreground="#E0E0E0" Cursor="Hand"/>
+                                    </StackPanel>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
                         </ListBox>

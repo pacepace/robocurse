@@ -348,6 +348,70 @@ function Initialize-EventHandlers {
         }
     })
 
+    # Profile row click - clicking anywhere on the row (except checkbox) should:
+    # 1. Deselect all other checkboxes
+    # 2. Select this profile's checkbox
+    # 3. Switch to this profile
+    $script:Controls.lstProfiles.Add_PreviewMouseLeftButtonDown({
+        param($sender, $e)
+        Invoke-SafeEventHandler -HandlerName "ProfileRowClick" -ScriptBlock {
+            # Find the clicked element
+            $clickedElement = $e.OriginalSource
+
+            # Walk up the visual tree to check if we hit a CheckBox
+            $current = $clickedElement
+            $foundCheckBox = $false
+
+            while ($current -ne $null) {
+                if ($current -is [System.Windows.Controls.CheckBox]) {
+                    $foundCheckBox = $true
+                    break
+                }
+                # Stop at ListBoxItem level
+                if ($current -is [System.Windows.Controls.ListBoxItem]) {
+                    break
+                }
+                # Get visual parent
+                $current = [System.Windows.Media.VisualTreeHelper]::GetParent($current)
+            }
+
+            # Handle click anywhere on the row EXCEPT on the checkbox
+            if (-not $foundCheckBox) {
+                # Find the profile from the DataContext
+                $profile = $null
+                $current = $clickedElement
+                while ($current -ne $null) {
+                    if ($current.DataContext -and $current.DataContext.PSObject.Properties['Name']) {
+                        $profile = $current.DataContext
+                        break
+                    }
+                    $current = [System.Windows.Media.VisualTreeHelper]::GetParent($current)
+                }
+
+                if ($profile) {
+                    # Deselect all other profiles (set Enabled = false)
+                    foreach ($p in $script:Config.SyncProfiles) {
+                        if ($p -ne $profile) {
+                            $p.Enabled = $false
+                        }
+                    }
+
+                    # Select this profile (set Enabled = true)
+                    $profile.Enabled = $true
+
+                    # Select this item in the ListBox (triggers SelectionChanged)
+                    $script:Controls.lstProfiles.SelectedItem = $profile
+
+                    # Force refresh of the ListBox to update checkbox states
+                    $script:Controls.lstProfiles.Items.Refresh()
+
+                    # Save the config to persist the changes
+                    Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath | Out-Null
+                }
+            }
+        }
+    })
+
     # Add/Remove profile buttons
     $script:Controls.btnAddProfile.Add_Click({
         Invoke-SafeEventHandler -HandlerName "AddProfile" -ScriptBlock { Add-NewProfile }

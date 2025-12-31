@@ -237,7 +237,7 @@ InModuleScope 'Robocurse' {
                 $vssCheck.Message | Should -Match "not enabled"
             }
 
-            It "Should profile source directory when accessible" {
+            It "Should verify source directory is readable" {
                 # Mock robocopy available
                 Mock Test-RobocopyAvailable {
                     return [PSCustomObject]@{
@@ -251,12 +251,9 @@ InModuleScope 'Robocurse' {
                     return $true
                 }
 
-                # Mock directory profile
-                Mock Get-DirectoryProfile { param($Path)
-                    return [PSCustomObject]@{
-                        TotalSize = 10GB
-                        FileCount = 1000
-                    }
+                # Mock Get-ChildItem for quick access check
+                Mock Get-ChildItem {
+                    return [PSCustomObject]@{ Name = "file.txt" }
                 }
 
                 Mock Get-PSDrive { return $null }
@@ -271,12 +268,11 @@ InModuleScope 'Robocurse' {
 
                 $results = Test-ProfileValidation -Profile $profile
 
-                # Find the source profile check result
-                $profileCheck = $results | Where-Object { $_.CheckName -eq "Source Profile" }
-                $profileCheck.Status | Should -Be "Pass"
-                $profileCheck.Severity | Should -Be "Success"
-                $profileCheck.Message | Should -Match "10 GB"
-                $profileCheck.Message | Should -Match "1000 files"
+                # Find the source access check result
+                $accessCheck = $results | Where-Object { $_.CheckName -eq "Source Access" }
+                $accessCheck.Status | Should -Be "Pass"
+                $accessCheck.Severity | Should -Be "Success"
+                $accessCheck.Message | Should -Match "readable"
             }
 
             It "Should handle empty source path" {
@@ -344,11 +340,8 @@ InModuleScope 'Robocurse' {
                 }
 
                 Mock Test-Path { return $true }
-                Mock Get-DirectoryProfile {
-                    return [PSCustomObject]@{
-                        TotalSize = 1GB
-                        FileCount = 100
-                    }
+                Mock Get-ChildItem {
+                    return [PSCustomObject]@{ Name = "file.txt" }
                 }
                 Mock Get-PSDrive {
                     return [PSCustomObject]@{
@@ -375,7 +368,55 @@ InModuleScope 'Robocurse' {
                 $checkNames | Should -Contain "Destination Path"
                 $checkNames | Should -Contain "Destination Disk Space"
                 $checkNames | Should -Contain "VSS Support"
-                $checkNames | Should -Contain "Source Profile"
+                $checkNames | Should -Contain "Source Access"
+            }
+
+            It "Should call ProgressCallback for each validation step" {
+                Mock Test-RobocopyAvailable {
+                    return [PSCustomObject]@{
+                        Success = $true
+                        Data = "C:\Windows\System32\robocopy.exe"
+                    }
+                }
+
+                Mock Test-Path { return $true }
+                Mock Get-ChildItem {
+                    return [PSCustomObject]@{ Name = "file.txt" }
+                }
+                Mock Get-PSDrive { return $null }
+                Mock Test-VssSupported { return $false }
+
+                $profile = [PSCustomObject]@{
+                    Name = "TestProfile"
+                    Source = "C:\Source"
+                    Destination = "D:\Dest"
+                    UseVSS = $false
+                }
+
+                # Track callback invocations using ArrayList (reference type for proper closure capture)
+                $callbackInvocations = [System.Collections.ArrayList]::new()
+                $progressCallback = {
+                    param($stepName, $currentStep, $totalSteps)
+                    $callbackInvocations.Add([PSCustomObject]@{
+                        StepName = $stepName
+                        CurrentStep = $currentStep
+                        TotalSteps = $totalSteps
+                    }) | Out-Null
+                }.GetNewClosure()
+
+                $results = Test-ProfileValidation -Profile $profile -ProgressCallback $progressCallback
+
+                # Should have been called 6 times (one for each validation step)
+                $callbackInvocations.Count | Should -Be 6
+
+                # Should have sequential step numbers
+                $callbackInvocations[0].CurrentStep | Should -Be 1
+                $callbackInvocations[5].CurrentStep | Should -Be 6
+
+                # All should report 6 total steps
+                $callbackInvocations | ForEach-Object {
+                    $_.TotalSteps | Should -Be 6
+                }
             }
         }
 

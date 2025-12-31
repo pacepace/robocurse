@@ -107,6 +107,7 @@ function Get-OrchestrationStatus {
         ETA = $eta
         ActiveJobs = $state.ActiveJobs.Count
         QueuedJobs = $state.ChunkQueue.Count
+        ScanProgress = $state.ScanProgress
     }
 }
 

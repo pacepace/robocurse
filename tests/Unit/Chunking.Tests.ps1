@@ -839,5 +839,199 @@ InModuleScope 'Robocurse' {
                 @($chunks).Count | Should -Be 2  # Two subdirectory chunks
             }
         }
+
+        Context "Get-DirectoryChunks with TreeNode Parameter" {
+            It "Should use TreeNode data instead of calling Get-DirectoryProfile" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 2GB
+                $tree.DirectFileCount = 500
+                $tree.TotalSize = 2GB
+                $tree.TotalFileCount = 500
+
+                # Get-DirectoryProfile should NOT be called when TreeNode is provided
+                Mock Get-DirectoryProfile { throw "Get-DirectoryProfile should not be called when TreeNode is provided" }
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree)
+
+                @($chunks).Count | Should -Be 1
+                $chunks[0].EstimatedSize | Should -Be 2GB
+                $chunks[0].EstimatedFiles | Should -Be 500
+            }
+
+            It "Should use tree children for recursion instead of Get-DirectoryChildren" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 0
+                $tree.DirectFileCount = 0
+
+                $child1 = [DirectoryNode]::new("C:\Test\Child1")
+                $child1.DirectSize = 3GB
+                $child1.DirectFileCount = 1000
+                $child1.TotalSize = 3GB
+                $child1.TotalFileCount = 1000
+                $tree.Children["Child1"] = $child1
+
+                $child2 = [DirectoryNode]::new("C:\Test\Child2")
+                $child2.DirectSize = 4GB
+                $child2.DirectFileCount = 2000
+                $child2.TotalSize = 4GB
+                $child2.TotalFileCount = 2000
+                $tree.Children["Child2"] = $child2
+
+                Update-TreeTotals -Node $tree
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Get-DirectoryChildren { throw "Should not be called" }
+                Mock Test-Path { $true }
+
+                # With 10GB max, both children fit in one chunk each
+                $chunks = @(Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree -MaxSizeBytes 10GB)
+
+                # Tree is 7GB total, which fits in one 10GB chunk
+                @($chunks).Count | Should -Be 1
+            }
+
+            It "Should produce chunks with total size matching tree total" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 1GB
+                $tree.DirectFileCount = 100
+
+                $child1 = [DirectoryNode]::new("C:\Test\Small")
+                $child1.DirectSize = 2GB
+                $child1.DirectFileCount = 200
+                $child1.TotalSize = 2GB
+                $child1.TotalFileCount = 200
+                $tree.Children["Small"] = $child1
+
+                $child2 = [DirectoryNode]::new("C:\Test\Large")
+                $child2.DirectSize = 15GB  # Exceeds 10GB chunk size
+                $child2.DirectFileCount = 1500
+                $child2.TotalSize = 15GB
+                $child2.TotalFileCount = 1500
+                $tree.Children["Large"] = $child2
+
+                Update-TreeTotals -Node $tree
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Test-Path { $true }
+                Mock Get-DirectoryChildren { throw "Should not be called" }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree -MaxSizeBytes 10GB)
+
+                # Verify total size matches tree
+                $chunkTotalSize = ($chunks | Measure-Object -Property EstimatedSize -Sum).Sum
+                $chunkTotalSize | Should -Be $tree.TotalSize
+            }
+
+            It "Should produce chunks with total file count matching tree total" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 500MB
+                $tree.DirectFileCount = 50
+
+                $child = [DirectoryNode]::new("C:\Test\Sub")
+                $child.DirectSize = 1GB
+                $child.DirectFileCount = 150
+                $child.TotalSize = 1GB
+                $child.TotalFileCount = 150
+                $tree.Children["Sub"] = $child
+
+                Update-TreeTotals -Node $tree
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree)
+
+                $chunkTotalFiles = ($chunks | Measure-Object -Property EstimatedFiles -Sum).Sum
+                $chunkTotalFiles | Should -Be $tree.TotalFileCount
+            }
+
+            It "Should handle tree with files at root level using DirectFileCount" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 2GB
+                $tree.DirectFileCount = 200
+
+                $child = [DirectoryNode]::new("C:\Test\Sub")
+                $child.DirectSize = 3GB
+                $child.DirectFileCount = 300
+                $child.TotalSize = 3GB
+                $child.TotalFileCount = 300
+                $tree.Children["Sub"] = $child
+
+                Update-TreeTotals -Node $tree
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Get-FilesAtLevel { throw "Should not be called when using tree" }
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree -MaxSizeBytes 10GB)
+
+                # Total should still match
+                $chunkTotalSize = ($chunks | Measure-Object -Property EstimatedSize -Sum).Sum
+                $chunkTotalSize | Should -Be $tree.TotalSize
+            }
+
+            It "New-SmartChunks should pass TreeNode to Get-DirectoryChunks" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 500MB
+                $tree.DirectFileCount = 50
+                $tree.TotalSize = 500MB
+                $tree.TotalFileCount = 50
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Test-Path { $true }
+
+                $chunks = @(New-SmartChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree)
+
+                @($chunks).Count | Should -Be 1
+                $chunks[0].EstimatedSize | Should -Be 500MB
+            }
+
+            It "New-FlatChunks should pass TreeNode to Get-DirectoryChunks" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 500MB
+                $tree.DirectFileCount = 50
+                $tree.TotalSize = 500MB
+                $tree.TotalFileCount = 50
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Test-Path { $true }
+
+                $chunks = @(New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree)
+
+                @($chunks).Count | Should -Be 1
+            }
+
+            It "Should handle deeply nested tree without calling Get-DirectoryProfile" {
+                $root = [DirectoryNode]::new("C:\Root")
+                $root.DirectSize = 100MB
+                $root.DirectFileCount = 10
+
+                $l1 = [DirectoryNode]::new("C:\Root\L1")
+                $l1.DirectSize = 200MB
+                $l1.DirectFileCount = 20
+
+                $l2 = [DirectoryNode]::new("C:\Root\L1\L2")
+                $l2.DirectSize = 300MB
+                $l2.DirectFileCount = 30
+                $l2.TotalSize = 300MB
+                $l2.TotalFileCount = 30
+
+                $l1.Children["L2"] = $l2
+                $root.Children["L1"] = $l1
+
+                Update-TreeTotals -Node $root
+
+                Mock Get-DirectoryProfile { throw "Should never be called with TreeNode" }
+                Mock Get-DirectoryChildren { throw "Should never be called with TreeNode" }
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Root" -DestinationRoot "D:\Backup" -TreeNode $root -MaxDepth 5)
+
+                $chunkTotalSize = ($chunks | Measure-Object -Property EstimatedSize -Sum).Sum
+                $chunkTotalSize | Should -Be $root.TotalSize
+                $root.TotalSize | Should -Be 600MB  # 100 + 200 + 300
+            }
+        }
     }
 }

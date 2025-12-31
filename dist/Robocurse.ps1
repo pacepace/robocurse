@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-27 01:28:56
+    Built: 2025-12-30 18:40:22
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -3102,6 +3102,259 @@ $script:ProfileCacheHits = 0
 $script:ProfileCacheMisses = 0
 $script:ProfileCacheEvictions = 0
 
+# DirectoryNode class for single-pass tree building
+# Used to avoid re-enumerating overlapping directory trees during chunking
+class DirectoryNode {
+    [string]$Path
+    [int64]$DirectSize        # Size of files directly in this directory
+    [int]$DirectFileCount     # Files directly in this directory
+    [int64]$TotalSize         # Aggregated size including all descendants
+    [int]$TotalFileCount      # Aggregated file count including all descendants
+    [System.Collections.Generic.Dictionary[string, DirectoryNode]]$Children
+
+    DirectoryNode([string]$path) {
+        $this.Path = $path
+        $this.DirectSize = 0
+        $this.DirectFileCount = 0
+        $this.TotalSize = 0
+        $this.TotalFileCount = 0
+        $this.Children = [System.Collections.Generic.Dictionary[string, DirectoryNode]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+    }
+}
+
+function Update-TreeTotals {
+    <#
+    .SYNOPSIS
+        Recursively aggregates sizes from leaves up to root
+    .DESCRIPTION
+        Performs bottom-up traversal to sum DirectSize and DirectFileCount
+        from all descendants into TotalSize and TotalFileCount.
+    .PARAMETER Node
+        The DirectoryNode to update (and all its descendants)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [DirectoryNode]$Node
+    )
+
+    # Recursively update all children first (bottom-up)
+    foreach ($child in $Node.Children.Values) {
+        Update-TreeTotals -Node $child
+    }
+
+    # Start with direct values
+    $Node.TotalSize = $Node.DirectSize
+    $Node.TotalFileCount = $Node.DirectFileCount
+
+    # Add all children's totals
+    foreach ($child in $Node.Children.Values) {
+        $Node.TotalSize += $child.TotalSize
+        $Node.TotalFileCount += $child.TotalFileCount
+    }
+}
+
+function New-DirectoryTree {
+    <#
+    .SYNOPSIS
+        Creates an in-memory directory tree from a single robocopy enumeration
+    .DESCRIPTION
+        Runs robocopy /L ONCE on the root path and parses the output to build
+        a tree structure with sizes at each node. This avoids the performance
+        problem of re-enumerating overlapping subtrees during chunking.
+
+        The tree is then used for O(1) size lookups during chunk decisions.
+    .PARAMETER RootPath
+        The root directory path to enumerate
+    .PARAMETER State
+        Optional OrchestrationState for progress updates during enumeration
+    .OUTPUTS
+        DirectoryNode representing the root with all descendants populated
+    .EXAMPLE
+        $tree = New-DirectoryTree -RootPath "C:\Data"
+        $tree.TotalSize  # Total size of entire tree
+        $tree.Children["Subdir"].TotalSize  # Size of specific subdirectory
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$RootPath,
+
+        [object]$State = $null
+    )
+
+    # Normalize root path (remove trailing slash for consistent matching)
+    $normalizedRoot = $RootPath.TrimEnd('\')
+
+    # Run robocopy ONCE to enumerate entire tree
+    if ($State) {
+        $State.CurrentActivity = "Starting directory enumeration..."
+    }
+
+    $output = Invoke-RobocopyList -Source $RootPath -State $State
+
+    # Create root node
+    $root = [DirectoryNode]::new($normalizedRoot)
+
+    # Dictionary for fast node lookup by path
+    $nodeMap = [System.Collections.Generic.Dictionary[string, DirectoryNode]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $nodeMap[$normalizedRoot] = $root
+
+    if ($State) {
+        $State.CurrentActivity = "Building directory tree..."
+        $State.ScanProgress = $output.Count
+    }
+
+    $lineCount = 0
+    foreach ($line in $output) {
+        $lineCount++
+
+        # Skip empty lines
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        # Parse "New File [size] [relativePath]" format
+        if ($line -match 'New File\s+(\d+)\s+(.+)$') {
+            $fileSize = [int64]$matches[1]
+            $relativePath = $matches[2].Trim()
+
+            # Get the directory containing this file
+            $dirRelPath = Split-Path -Path $relativePath -Parent
+            if ([string]::IsNullOrEmpty($dirRelPath)) {
+                # File is directly in root
+                $dirFullPath = $normalizedRoot
+            } else {
+                $dirFullPath = Join-Path $normalizedRoot $dirRelPath
+            }
+
+            # Ensure parent node exists (create intermediate nodes if needed)
+            $parentNode = Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirFullPath -RootNode $root
+
+            # Add file to parent's direct counts
+            $parentNode.DirectSize += $fileSize
+            $parentNode.DirectFileCount++
+        }
+        # Parse "New Dir [count] [absolutePath]" format
+        # NOTE: robocopy outputs ABSOLUTE paths for directories (e.g., "W:\subdir\")
+        elseif ($line -match 'New Dir\s+\d+\s+(.+)$') {
+            $dirPath = $matches[1].Trim().TrimEnd('\')
+            # Skip if this is the root directory itself (already have root node)
+            if ($dirPath -ne $normalizedRoot -and -not [string]::IsNullOrEmpty($dirPath)) {
+                # Path is already absolute from robocopy - use directly
+                Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirPath -RootNode $root | Out-Null
+            }
+        }
+        # Fallback: old format "[size] [path]" (for compatibility)
+        elseif ($line -match '^\s+(\d+)\s+(.+)$') {
+            $size = [int64]$matches[1]
+            $pathValue = $matches[2].Trim()
+
+            if ($pathValue.EndsWith('\')) {
+                # It's a directory - path is absolute from robocopy
+                $dirPath = $pathValue.TrimEnd('\')
+                if ($dirPath -ne $normalizedRoot -and -not [string]::IsNullOrEmpty($dirPath)) {
+                    Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirPath -RootNode $root | Out-Null
+                }
+            } else {
+                # It's a file - path is relative from robocopy
+                $dirRelPath = Split-Path -Path $pathValue -Parent
+                if ([string]::IsNullOrEmpty($dirRelPath)) {
+                    $dirFullPath = $normalizedRoot
+                } else {
+                    $dirFullPath = Join-Path $normalizedRoot $dirRelPath
+                }
+
+                $parentNode = Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirFullPath -RootNode $root
+                $parentNode.DirectSize += $size
+                $parentNode.DirectFileCount++
+            }
+        }
+
+        # Progress update every 1000 lines during parsing
+        if ($State -and ($lineCount % 1000 -eq 0)) {
+            $State.CurrentActivity = "Building tree..."
+            $State.ScanProgress = $lineCount
+        }
+    }
+
+    # Aggregate sizes from leaves up to root
+    if ($State) {
+        $State.CurrentActivity = "Calculating directory sizes..."
+    }
+
+    Update-TreeTotals -Node $root
+
+    Write-RobocurseLog "Built directory tree: $($nodeMap.Count) nodes, $($root.TotalFileCount) files, $([math]::Round($root.TotalSize / 1GB, 2)) GB" -Level 'Debug' -Component 'Profiling'
+
+    return $root
+}
+
+function Get-OrCreateNode {
+    <#
+    .SYNOPSIS
+        Gets an existing node or creates it (and any intermediate parents)
+    .DESCRIPTION
+        Helper function for New-DirectoryTree that ensures a node exists
+        for the given path, creating intermediate parent nodes as needed.
+    .PARAMETER NodeMap
+        Dictionary mapping paths to DirectoryNode instances for O(1) lookup
+    .PARAMETER RootPath
+        The root path of the tree being built (for determining parent boundaries)
+    .PARAMETER FullPath
+        The full path of the node to get or create
+    .PARAMETER RootNode
+        The root DirectoryNode to attach top-level children to
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.Generic.Dictionary[string, DirectoryNode]]$NodeMap,
+
+        [Parameter(Mandatory)]
+        [string]$RootPath,
+
+        [Parameter(Mandatory)]
+        [string]$FullPath,
+
+        [Parameter(Mandatory)]
+        [DirectoryNode]$RootNode
+    )
+
+    $normalizedPath = $FullPath.TrimEnd('\')
+
+    # Check if node already exists
+    if ($NodeMap.ContainsKey($normalizedPath)) {
+        return $NodeMap[$normalizedPath]
+    }
+
+    # Need to create this node and possibly parents
+    # Get parent path
+    $parentPath = Split-Path -Path $normalizedPath -Parent
+
+    if ([string]::IsNullOrEmpty($parentPath) -or $parentPath -eq $RootPath) {
+        # Parent is root
+        $parentNode = $RootNode
+    } else {
+        # Recursively ensure parent exists
+        $parentNode = Get-OrCreateNode -NodeMap $NodeMap -RootPath $RootPath -FullPath $parentPath -RootNode $RootNode
+    }
+
+    # Create this node
+    $newNode = [DirectoryNode]::new($normalizedPath)
+    $NodeMap[$normalizedPath] = $newNode
+
+    # Add to parent's children
+    $childName = Split-Path -Path $normalizedPath -Leaf
+    $parentNode.Children[$childName] = $newNode
+
+    return $newNode
+}
+
 function Get-ProfileCacheStatistics {
     <#
     .SYNOPSIS
@@ -3168,28 +3421,99 @@ function Reset-ProfileCacheStatistics {
 function Invoke-RobocopyList {
     <#
     .SYNOPSIS
-        Runs robocopy in list-only mode (wrapper for testing/mocking)
+        Runs robocopy in list-only mode with streaming progress updates
+    .DESCRIPTION
+        Uses ProcessStartInfo pattern from Robocopy.ps1:376-393 to capture stdout
+        and reads line-by-line to provide live progress updates during enumeration.
+        This prevents the GUI from appearing frozen on large network shares.
     .PARAMETER Source
         Source path to list
+    .PARAMETER State
+        Optional OrchestrationState object for progress updates
     .OUTPUTS
         Array of output lines from robocopy
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$Source
+        [string]$Source,
+
+        # Optional OrchestrationState for progress updates during enumeration
+        [object]$State = $null
     )
 
-    # Wrapper so we can mock this in tests
     # Use a non-existent temp path as destination - robocopy /L lists without creating it
     # Note: \\?\NULL doesn't work on all Windows versions, and src=dest doesn't list files
     $nullDest = Join-Path $env:TEMP "robocurse-null-$(Get-Random)"
-    $output = & robocopy $Source $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
-    # Ensure we always return an array (robocopy can return empty/null for root drives)
-    if ($null -eq $output) {
+
+    # Reuse ProcessStartInfo pattern from Start-RobocopyJob (Robocopy.ps1:376-393)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+
+    # Use validated robocopy path if available (set by Test-RobocopyAvailable in Robocopy.ps1)
+    if ($script:RobocopyPath) {
+        $psi.FileName = $script:RobocopyPath
+    } else {
+        $psi.FileName = "robocopy.exe"
+    }
+
+    # Quote paths properly for command line (handles paths with spaces)
+    $quotedSource = "`"$Source`""
+    $quotedDest = "`"$nullDest`""
+    # /NODCOPY improves performance by not copying directory attributes (see Microsoft KB)
+    $psi.Arguments = "$quotedSource $quotedDest /L /E /NJH /NJS /BYTES /R:0 /W:0 /NODCOPY"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    # Don't redirect stderr to avoid deadlock (see Robocopy.ps1:391-392)
+    $psi.RedirectStandardError = $false
+
+    $process = $null
+    $output = [System.Collections.ArrayList]::new()
+
+    try {
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $lineCount = 0
+
+        # Read line by line with progress updates (instead of ReadToEndAsync)
+        # This allows the GUI to show live progress during enumeration
+        while ($null -ne ($line = $process.StandardOutput.ReadLine())) {
+            $output.Add($line) | Out-Null
+            $lineCount++
+
+            # Update progress every 100 lines for responsive feedback
+            # Set ScanProgress for the progress bar area, keep CurrentActivity simple for chunks list
+            if ($State -and ($lineCount % 100 -eq 0)) {
+                $State.CurrentActivity = "Enumerating..."
+                $State.ScanProgress = $lineCount
+            }
+        }
+
+        $process.WaitForExit()
+
+        # Final count update
+        if ($State) {
+            $State.CurrentActivity = "Processing..."
+            $State.ScanProgress = $lineCount
+        }
+
+        Write-RobocurseLog "Enumerated $lineCount items from: $Source" -Level 'Debug' -Component 'Profiling'
+
+        return $output.ToArray()
+    }
+    catch {
+        Write-RobocurseLog "Error during robocopy enumeration of '$Source': $_" -Level 'Warning' -Component 'Profiling'
+        # Return whatever we collected so far, or empty array
+        if ($output.Count -gt 0) {
+            return $output.ToArray()
+        }
         return @()
     }
-    return @($output)
+    finally {
+        # Always dispose process handle to prevent handle leaks
+        if ($process) {
+            try { $process.Dispose() } catch { }
+        }
+    }
 }
 
 function ConvertFrom-RobocopyListOutput {
@@ -3324,11 +3648,11 @@ function Get-DirectoryProfile {
         }
     }
 
-    # Run robocopy list
+    # Run robocopy list with streaming progress
     Write-RobocurseLog "Profiling directory: $Path" -Level 'Debug' -Component 'Profiling'
 
     try {
-        $output = Invoke-RobocopyList -Source $Path
+        $output = Invoke-RobocopyList -Source $Path -State $State
 
         # Parse the output (pass State for progress counter updates)
         $parseResult = ConvertFrom-RobocopyListOutput -Output $output -State $State
@@ -3648,7 +3972,8 @@ function Get-DirectoryProfilesParallel {
                 # Run robocopy in list mode
                 # Use random temp path as destination - \\?\NULL breaks on some Windows versions
                 $nullDest = Join-Path $env:TEMP "robocurse-null-$(Get-Random)"
-                $output = & robocopy $Path $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
+                # /NODCOPY improves performance by not copying directory attributes
+                $output = & robocopy $Path $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 /NODCOPY 2>&1
 
                 $totalSize = 0
                 $fileCount = 0
@@ -3824,6 +4149,10 @@ function Get-DirectoryChunks {
         minimum chunk sizes to avoid overhead. Handles both directory-based chunks and files-only
         chunks for optimal parallelization. This is the core chunking algorithm for the replication
         orchestrator.
+
+        PERFORMANCE: When a TreeNode is provided, uses pre-built tree data for O(1) size lookups
+        instead of calling Get-DirectoryProfile repeatedly. This avoids re-enumerating overlapping
+        subtrees which was the main performance bottleneck.
     .PARAMETER Path
         Root path to chunk
     .PARAMETER DestinationRoot
@@ -3840,6 +4169,9 @@ function Get-DirectoryChunks {
         Minimum size to create a chunk (default: 100MB)
     .PARAMETER CurrentDepth
         Current recursion depth (internal use)
+    .PARAMETER TreeNode
+        Pre-built DirectoryNode from New-DirectoryTree. When provided, uses tree data
+        for O(1) size lookups instead of calling Get-DirectoryProfile (major performance improvement).
     .OUTPUTS
         Array of chunk objects
     #>
@@ -3872,11 +4204,15 @@ function Get-DirectoryChunks {
         [int]$CurrentDepth = 0,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-built directory tree node for O(1) size lookups (avoids repeated enumeration)
+        [object]$TreeNode = $null
     )
 
     # Validate path exists (inside function body so mocks can intercept)
-    if (-not (Test-Path -Path $Path -PathType Container)) {
+    # Skip validation if we have a TreeNode (tree was already built from valid enumeration)
+    if (-not $TreeNode -and -not (Test-Path -Path $Path -PathType Container)) {
         throw "Path '$Path' does not exist or is not a directory"
     }
 
@@ -3892,35 +4228,61 @@ function Get-DirectoryChunks {
 
     Write-RobocurseLog "Analyzing directory at depth $CurrentDepth : $Path" -Level 'Debug' -Component 'Chunking'
 
-    # Get profile for this directory
-    $profile = Get-DirectoryProfile -Path $Path -UseCache $true -State $State
+    # Get size and file count - either from tree (O(1)) or profile (I/O)
+    if ($TreeNode) {
+        # Use pre-built tree data - no I/O needed!
+        $totalSize = $TreeNode.TotalSize
+        $fileCount = $TreeNode.TotalFileCount
+        $profile = [PSCustomObject]@{
+            TotalSize = $totalSize
+            FileCount = $fileCount
+            DirCount = $TreeNode.Children.Count
+            AvgFileSize = if ($fileCount -gt 0) { [math]::Round($totalSize / $fileCount, 0) } else { 0 }
+            LastScanned = Get-Date
+        }
+    } else {
+        # Fallback to old behavior (for backward compatibility)
+        $profile = Get-DirectoryProfile -Path $Path -UseCache $true -State $State
+        $totalSize = $profile.TotalSize
+        $fileCount = $profile.FileCount
+    }
 
     # Check if this directory is small enough to be a chunk
-    if ($profile.TotalSize -le $MaxSizeBytes -and $profile.FileCount -le $MaxFiles) {
-        Write-RobocurseLog "Directory fits in single chunk: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level 'Debug' -Component 'Chunking'
+    if ($totalSize -le $MaxSizeBytes -and $fileCount -le $MaxFiles) {
+        Write-RobocurseLog "Directory fits in single chunk: $Path (Size: $totalSize, Files: $fileCount)" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }
 
     # Check if we've hit max depth - must accept as chunk even if large
     if ($CurrentDepth -ge $MaxDepth) {
-        Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level 'Warning' -Component 'Chunking'
+        Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $totalSize, Files: $fileCount)" -Level 'Warning' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }
 
     # Check if directory is above MinSizeBytes - if not, accept as single chunk to reduce overhead
     # This prevents creating many tiny chunks which add more overhead than benefit
-    if ($profile.TotalSize -lt $MinSizeBytes) {
-        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $($profile.TotalSize))" -Level 'Debug' -Component 'Chunking'
+    if ($totalSize -lt $MinSizeBytes) {
+        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $totalSize)" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }
 
     # Directory is too big - recurse into children
-    $children = Get-DirectoryChildren -Path $Path
+    # Get children from tree if available, otherwise from filesystem
+    if ($TreeNode) {
+        # Use tree data exclusively - no filesystem fallback
+        $childNodes = $TreeNode.Children.Values
+        $childCount = $TreeNode.Children.Count
+    } else {
+        # Fallback to filesystem (backward compatibility)
+        $children = Get-DirectoryChildren -Path $Path
+        $childCount = $children.Count
+        $childNodes = $null
+    }
 
-    if ($children.Count -eq 0) {
+    if ($childCount -eq 0) {
         # No subdirs but too many files - must accept as large chunk
         Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level 'Warning' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
@@ -3929,31 +4291,67 @@ function Get-DirectoryChunks {
 
     # Recurse into each child
     # Use List<> instead of array concatenation for O(N) instead of O(N²) performance
-    Write-RobocurseLog "Directory too large, recursing into $($children.Count) children: $Path" -Level 'Debug' -Component 'Chunking'
+    Write-RobocurseLog "Directory too large, recursing into $childCount children: $Path" -Level 'Debug' -Component 'Chunking'
     $chunkList = [System.Collections.Generic.List[PSCustomObject]]::new()
-    foreach ($child in $children) {
-        $childChunks = Get-DirectoryChunks `
-            -Path $child `
-            -DestinationRoot $DestinationRoot `
-            -SourceRoot $SourceRoot `
-            -MaxSizeBytes $MaxSizeBytes `
-            -MaxFiles $MaxFiles `
-            -MaxDepth $MaxDepth `
-            -MinSizeBytes $MinSizeBytes `
-            -CurrentDepth ($CurrentDepth + 1) `
-            -State $State
 
-        foreach ($chunk in $childChunks) {
-            $chunkList.Add($chunk)
+    if ($childNodes) {
+        # Use tree nodes - no I/O for child enumeration!
+        foreach ($childNode in $childNodes) {
+            $childChunks = Get-DirectoryChunks `
+                -Path $childNode.Path `
+                -DestinationRoot $DestinationRoot `
+                -SourceRoot $SourceRoot `
+                -MaxSizeBytes $MaxSizeBytes `
+                -MaxFiles $MaxFiles `
+                -MaxDepth $MaxDepth `
+                -MinSizeBytes $MinSizeBytes `
+                -CurrentDepth ($CurrentDepth + 1) `
+                -State $State `
+                -TreeNode $childNode
+
+            foreach ($chunk in $childChunks) {
+                $chunkList.Add($chunk)
+            }
+        }
+    } else {
+        # Fallback to old behavior
+        foreach ($child in $children) {
+            $childChunks = Get-DirectoryChunks `
+                -Path $child `
+                -DestinationRoot $DestinationRoot `
+                -SourceRoot $SourceRoot `
+                -MaxSizeBytes $MaxSizeBytes `
+                -MaxFiles $MaxFiles `
+                -MaxDepth $MaxDepth `
+                -MinSizeBytes $MinSizeBytes `
+                -CurrentDepth ($CurrentDepth + 1) `
+                -State $State
+
+            foreach ($chunk in $childChunks) {
+                $chunkList.Add($chunk)
+            }
         }
     }
 
     # Handle files at this level (not in any subdir)
-    $filesAtLevel = Get-FilesAtLevel -Path $Path
-    if ($filesAtLevel.Count -gt 0) {
-        Write-RobocurseLog "Found $($filesAtLevel.Count) files at level: $Path" -Level 'Debug' -Component 'Chunking'
+    # Check if there are direct files using tree data or filesystem
+    $hasFilesAtLevel = if ($TreeNode) {
+        $TreeNode.DirectFileCount -gt 0
+    } else {
+        (Get-FilesAtLevel -Path $Path).Count -gt 0
+    }
+
+    if ($hasFilesAtLevel) {
+        $directFileCount = if ($TreeNode) { $TreeNode.DirectFileCount } else { (Get-FilesAtLevel -Path $Path).Count }
+        Write-RobocurseLog "Found $directFileCount files at level: $Path" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
-        $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath -State $State))
+
+        # Pass tree data to avoid filesystem I/O when using tree
+        if ($TreeNode) {
+            $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath -State $State -DirectSize $TreeNode.DirectSize -DirectFileCount $TreeNode.DirectFileCount))
+        } else {
+            $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath -State $State))
+        }
     }
 
     return $chunkList.ToArray()
@@ -4063,6 +4461,10 @@ function New-FilesOnlyChunk {
         Source directory path
     .PARAMETER DestinationPath
         Destination directory path
+    .PARAMETER DirectSize
+        Optional pre-calculated size of files at this level (from tree data)
+    .PARAMETER DirectFileCount
+        Optional pre-calculated file count at this level (from tree data)
     .OUTPUTS
         Chunk object
     #>
@@ -4075,20 +4477,30 @@ function New-FilesOnlyChunk {
         [string]$DestinationPath,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-calculated values from tree (avoids filesystem I/O)
+        [int64]$DirectSize = -1,
+        [int]$DirectFileCount = -1
     )
 
-    # Create a minimal profile for files at this level
-    # We don't need exact size since this is just for files at one level
-    $filesAtLevel = Get-FilesAtLevel -Path $SourcePath
-    $totalSize = ($filesAtLevel | Measure-Object -Property Length -Sum).Sum
-    if ($null -eq $totalSize) { $totalSize = 0 }
+    # Use pre-calculated values if provided, otherwise hit filesystem
+    if ($DirectSize -ge 0 -and $DirectFileCount -ge 0) {
+        $totalSize = $DirectSize
+        $fileCount = $DirectFileCount
+    } else {
+        # Fallback to filesystem enumeration
+        $filesAtLevel = Get-FilesAtLevel -Path $SourcePath
+        $totalSize = ($filesAtLevel | Measure-Object -Property Length -Sum).Sum
+        if ($null -eq $totalSize) { $totalSize = 0 }
+        $fileCount = $filesAtLevel.Count
+    }
 
     $profile = [PSCustomObject]@{
         TotalSize = $totalSize
-        FileCount = $filesAtLevel.Count
+        FileCount = $fileCount
         DirCount = 0
-        AvgFileSize = if ($filesAtLevel.Count -gt 0) { $totalSize / $filesAtLevel.Count } else { 0 }
+        AvgFileSize = if ($fileCount -gt 0) { $totalSize / $fileCount } else { 0 }
         LastScanned = Get-Date
     }
 
@@ -4097,7 +4509,7 @@ function New-FilesOnlyChunk {
     # Add robocopy args to copy only files at this level
     $chunk.RobocopyArgs = @("/LEV:1")
 
-    Write-RobocurseLog "Created files-only chunk #$($chunk.ChunkId): $SourcePath (Files: $($filesAtLevel.Count))" -Level 'Debug' -Component 'Chunking'
+    Write-RobocurseLog "Created files-only chunk #$($chunk.ChunkId): $SourcePath (Files: $fileCount)" -Level 'Debug' -Component 'Chunking'
 
     return $chunk
 }
@@ -4132,7 +4544,10 @@ function New-FlatChunks {
         [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-built directory tree for O(1) size lookups (optional, built if not provided)
+        [DirectoryNode]$TreeNode = $null
     )
 
     # Flat mode: MaxDepth = 0 (no recursion into subdirectories)
@@ -4142,7 +4557,8 @@ function New-FlatChunks {
         -MaxSizeBytes $MaxChunkSizeBytes `
         -MaxFiles $MaxFiles `
         -MaxDepth 0 `
-        -State $State
+        -State $State `
+        -TreeNode $TreeNode
 }
 
 function New-SmartChunks {
@@ -4179,7 +4595,10 @@ function New-SmartChunks {
         [int]$MaxDepth = $script:DefaultMaxChunkDepth,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-built directory tree for O(1) size lookups (optional, built if not provided)
+        [DirectoryNode]$TreeNode = $null
     )
 
     # Smart mode: recursive chunking with configurable depth
@@ -4189,7 +4608,8 @@ function New-SmartChunks {
         -MaxSizeBytes $MaxChunkSizeBytes `
         -MaxFiles $MaxFiles `
         -MaxDepth $MaxDepth `
-        -State $State
+        -State $State `
+        -TreeNode $TreeNode
 }
 
 function Get-NormalizedPath {
@@ -8180,11 +8600,13 @@ function Start-ProfileReplication {
         return
     }
 
-    # Scan source directory (using VSS path if available)
+    # Build directory tree with single-pass enumeration (PERFORMANCE FIX)
+    # Previously used Get-DirectoryProfile here, then re-enumerated in chunking (O(N^2) robocopy calls)
+    # Now we enumerate once and pass the tree to chunking for O(1) size lookups
     $state.Phase = "Scanning"
     $state.ScanProgress = 0
-    $state.CurrentActivity = "Scanning source directory..."
-    $scanResult = Get-DirectoryProfile -Path $effectiveSource -State $state
+    $state.CurrentActivity = "Building directory tree..."
+    $directoryTree = New-DirectoryTree -RootPath $effectiveSource -State $state
 
     # Check for stop request after directory scan
     if ($state.StopRequested) {
@@ -8192,7 +8614,7 @@ function Start-ProfileReplication {
         return
     }
 
-    # Generate chunks based on scan mode
+    # Generate chunks based on scan mode using the pre-built tree
     $state.ScanProgress = 0
     $state.CurrentActivity = "Creating chunks..."
     # Convert ChunkMaxSizeGB to bytes
@@ -8213,7 +8635,8 @@ function Start-ProfileReplication {
                 -DestinationRoot $effectiveDestination `
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles `
-                -State $state
+                -State $state `
+                -TreeNode $directoryTree
         }
         'Smart' {
             New-SmartChunks `
@@ -8222,7 +8645,8 @@ function Start-ProfileReplication {
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles `
                 -MaxDepth $maxDepth `
-                -State $state
+                -State $state `
+                -TreeNode $directoryTree
         }
         default {
             New-SmartChunks `
@@ -8231,7 +8655,8 @@ function Start-ProfileReplication {
                 -MaxChunkSizeBytes $maxChunkBytes `
                 -MaxFiles $maxFiles `
                 -MaxDepth $maxDepth `
-                -State $state
+                -State $state `
+                -TreeNode $directoryTree
         }
     }
 
@@ -8248,13 +8673,13 @@ function Start-ProfileReplication {
     }
 
     $state.TotalChunks = $chunks.Count
-    $state.TotalBytes = $scanResult.TotalSize
+    $state.TotalBytes = $directoryTree.TotalSize
     $state.CompletedCount = 0
     $state.BytesComplete = 0
     $state.Phase = "Replicating"
     $state.CurrentActivity = ""  # Clear activity when replicating starts
 
-    Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($scanResult.TotalSize/1GB, 2)) GB" `
+    Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($directoryTree.TotalSize/1GB, 2)) GB" `
         -Level 'Debug' -Component 'Orchestrator'
 }
 
@@ -9180,6 +9605,7 @@ function Get-OrchestrationStatus {
         ETA = $eta
         ActiveJobs = $state.ActiveJobs.Count
         QueuedJobs = $state.ChunkQueue.Count
+        ScanProgress = $state.ScanProgress
     }
 }
 
@@ -16010,23 +16436,48 @@ function Test-ProfileValidation {
         6. Chunk estimate to verify source can be profiled
     .PARAMETER Profile
         The sync profile to validate (PSCustomObject with Name, Source, Destination, UseVSS properties)
+    .PARAMETER ProgressCallback
+        Optional scriptblock to call with progress updates. Receives (stepName, stepNumber, totalSteps)
     .OUTPUTS
         Array of validation result objects with CheckName, Status, Message, Severity properties
     .EXAMPLE
         $results = Test-ProfileValidation -Profile $profile
         $results | Where-Object { $_.Status -eq 'Fail' }
+    .EXAMPLE
+        $results = Test-ProfileValidation -Profile $profile -ProgressCallback {
+            param($step, $current, $total)
+            Write-Host "[$current/$total] $step"
+        }
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [PSCustomObject]$Profile
+        [PSCustomObject]$Profile,
+
+        [scriptblock]$ProgressCallback
     )
 
     $results = @()
+    $totalSteps = 6
+    $progressState = @{ CurrentStep = 0 }
+
+    # Helper to report progress
+    $reportProgress = {
+        param($stepName)
+        $progressState.CurrentStep++
+        if ($ProgressCallback) {
+            try {
+                & $ProgressCallback $stepName $progressState.CurrentStep $totalSteps
+            } catch {
+                # Ignore callback errors
+            }
+        }
+    }.GetNewClosure()
 
     Write-RobocurseLog "Starting validation for profile: $($Profile.Name)" -Level 'Info' -Component 'Validation'
 
     # Check 1: Robocopy available
+    & $reportProgress "Checking robocopy availability..."
     try {
         $robocopyCheck = Test-RobocopyAvailable
         if ($robocopyCheck.Success) {
@@ -16056,6 +16507,7 @@ function Test-ProfileValidation {
     }
 
     # Check 2: Source path accessible
+    & $reportProgress "Checking source path..."
     try {
         if ([string]::IsNullOrWhiteSpace($Profile.Source)) {
             $results += [PSCustomObject]@{
@@ -16092,6 +16544,7 @@ function Test-ProfileValidation {
     }
 
     # Check 3: Destination path or parent exists
+    & $reportProgress "Checking destination path..."
     try {
         if ([string]::IsNullOrWhiteSpace($Profile.Destination)) {
             $results += [PSCustomObject]@{
@@ -16140,6 +16593,7 @@ function Test-ProfileValidation {
     }
 
     # Check 4: Disk space on destination (if accessible)
+    & $reportProgress "Checking disk space..."
     try {
         $destPathToCheck = if (Test-Path -Path $Profile.Destination -PathType Container) {
             $Profile.Destination
@@ -16206,6 +16660,7 @@ function Test-ProfileValidation {
     }
 
     # Check 5: VSS support if UseVSS is enabled
+    & $reportProgress "Checking VSS support..."
     if ($Profile.UseVSS) {
         try {
             if (-not [string]::IsNullOrWhiteSpace($Profile.Source) -and (Test-Path -Path $Profile.Source)) {
@@ -16280,33 +16735,24 @@ function Test-ProfileValidation {
         }
     }
 
-    # Check 6: Source can be profiled (chunk estimate)
+    # Check 6: Source is readable (quick access check, no full enumeration)
+    & $reportProgress "Checking source access..."
     try {
         if (-not [string]::IsNullOrWhiteSpace($Profile.Source) -and (Test-Path -Path $Profile.Source)) {
-            Write-RobocurseLog "Profiling source directory: $($Profile.Source)" -Level 'Debug' -Component 'Validation'
-            $dirProfile = Get-DirectoryProfile -Path $Profile.Source -UseCache $true
-            if ($dirProfile) {
-                $sizeGB = [math]::Round($dirProfile.TotalSize / 1GB, 2)
-                $fileCount = $dirProfile.FileCount
-                $results += [PSCustomObject]@{
-                    CheckName = "Source Profile"
-                    Status = "Pass"
-                    Message = "Source contains ${sizeGB} GB ($fileCount files)"
-                    Severity = "Success"
-                }
-            }
-            else {
-                $results += [PSCustomObject]@{
-                    CheckName = "Source Profile"
-                    Status = "Warning"
-                    Message = "Unable to profile source directory"
-                    Severity = "Warning"
-                }
+            Write-RobocurseLog "Checking source directory access: $($Profile.Source)" -Level 'Debug' -Component 'Validation'
+            # Quick check - just verify we can list the directory (first item only)
+            $canRead = $null -ne (Get-ChildItem -Path $Profile.Source -ErrorAction Stop | Select-Object -First 1)
+            # Even empty directories pass - we just verified access
+            $results += [PSCustomObject]@{
+                CheckName = "Source Access"
+                Status = "Pass"
+                Message = "Source directory is readable"
+                Severity = "Success"
             }
         }
         else {
             $results += [PSCustomObject]@{
-                CheckName = "Source Profile"
+                CheckName = "Source Access"
                 Status = "Info"
                 Message = "Skipped - source path not accessible"
                 Severity = "Info"
@@ -16315,9 +16761,9 @@ function Test-ProfileValidation {
     }
     catch {
         $results += [PSCustomObject]@{
-            CheckName = "Source Profile"
+            CheckName = "Source Access"
             Status = "Warning"
-            Message = "Error profiling source: $($_.Exception.Message)"
+            Message = "Cannot read source directory: $($_.Exception.Message)"
             Severity = "Warning"
         }
     }
@@ -16354,7 +16800,31 @@ function Show-ValidationDialog {
     try {
         # Run validation if results not provided
         if (-not $Results) {
-            $Results = Test-ProfileValidation -Profile $Profile
+            # Show progress in main window status bar while validating
+            $originalStatus = $null
+            if ($script:Controls -and $script:Controls['txtStatus']) {
+                $originalStatus = $script:Controls.txtStatus.Text
+                $script:Controls.txtStatus.Text = "Validating profile..."
+                # Force UI update
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+
+            # Progress callback to update status during validation
+            $progressCallback = {
+                param($stepName, $currentStep, $totalSteps)
+                if ($script:Controls -and $script:Controls['txtStatus']) {
+                    $script:Controls.txtStatus.Text = "Validating [$currentStep/$totalSteps]: $stepName"
+                    # Force UI update to show progress
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+            }
+
+            $Results = Test-ProfileValidation -Profile $Profile -ProgressCallback $progressCallback
+
+            # Restore original status
+            if ($script:Controls -and $script:Controls['txtStatus'] -and $originalStatus) {
+                $script:Controls.txtStatus.Text = $originalStatus
+            }
         }
 
         # Load XAML from resource file
@@ -19763,6 +20233,82 @@ function Show-ProfileScheduleDialog {
     }
 }
 
+function Show-ErrorPopup {
+    <#
+    .SYNOPSIS
+        Shows a popup dialog with recent errors from the current replication run
+    .DESCRIPTION
+        Displays errors stored in $script:ErrorHistoryBuffer in a styled dialog.
+        Allows user to view error details and clear the error history.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        # Load XAML
+        $xamlPath = Join-Path $PSScriptRoot "..\Resources\ErrorPopup.xaml"
+        if (-not (Test-Path $xamlPath)) {
+            # Try embedded XAML for monolith builds
+            if ($script:EmbeddedXaml -and $script:EmbeddedXaml['ErrorPopup.xaml']) {
+                $xaml = $script:EmbeddedXaml['ErrorPopup.xaml']
+            } else {
+                Write-GuiLog "ErrorPopup.xaml not found"
+                return
+            }
+        } else {
+            $xaml = Get-Content $xamlPath -Raw
+        }
+
+        # Parse XAML
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+
+        # Get controls
+        $lstErrors = $dialog.FindName('lstErrors')
+        $btnClear = $dialog.FindName('btnClear')
+        $btnClose = $dialog.FindName('btnClose')
+
+        # Populate error list from buffer
+        [System.Threading.Monitor]::Enter($script:ErrorHistoryBuffer)
+        try {
+            $errors = $script:ErrorHistoryBuffer.ToArray()
+        }
+        finally {
+            [System.Threading.Monitor]::Exit($script:ErrorHistoryBuffer)
+        }
+
+        $lstErrors.ItemsSource = $errors
+
+        # Close button
+        $btnClose.Add_Click({
+            $dialog.Close()
+        }.GetNewClosure())
+
+        # Clear button - clears errors and closes
+        $btnClear.Add_Click({
+            Clear-ErrorHistory
+            $dialog.Close()
+        }.GetNewClosure())
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.LeftButton -eq [System.Windows.Input.MouseButtonState]::Pressed) {
+                $dialog.DragMove()
+            }
+        }.GetNewClosure())
+
+        # Set owner and show
+        if ($script:Window) {
+            $dialog.Owner = $script:Window
+        }
+        $dialog.ShowDialog() | Out-Null
+    }
+    catch {
+        Write-GuiLog "Error showing error popup: $($_.Exception.Message)"
+    }
+}
+
 #endregion
 
 #region ==================== GUILOGWINDOW ====================
@@ -21360,7 +21906,13 @@ function Update-GuiProgressText {
     } else {
         "Speed: -- MB/s"
     }
-    $chunksText = "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
+
+    # During scanning/preparing phases, show item count instead of chunk count
+    $chunksText = if ($Status.Phase -in @('Preparing', 'Scanning') -and $Status.ScanProgress -gt 0) {
+        "Items: $($Status.ScanProgress)"
+    } else {
+        "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
+    }
 
     # Build current state for comparison
     $currentState = @{
@@ -21648,6 +22200,13 @@ function Update-GuiProgress {
                 $script:Controls.txtStatus.Text = $newText
                 $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::CornflowerBlue
                 $script:Window.UpdateLayout()
+            }
+            # Show replication progress during active copying
+            elseif ($script:OrchestrationState.Phase -eq 'Replicating') {
+                $completed = $script:OrchestrationState.CompletedCount
+                $total = $script:OrchestrationState.TotalChunks
+                $script:Controls.txtStatus.Text = "Replicating... ($completed/$total chunks)"
+                $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::LimeGreen
             }
         }
 
@@ -22946,8 +23505,12 @@ function Initialize-RobocurseGui {
                                  ToolTip="List of configured sync profiles">
                             <ListBox.ItemTemplate>
                                 <DataTemplate>
-                                    <CheckBox IsChecked="{Binding Enabled}" Content="{Binding Name}"
-                                              Style="{StaticResource DarkCheckBox}"/>
+                                    <StackPanel Orientation="Horizontal">
+                                        <CheckBox IsChecked="{Binding Enabled}" VerticalAlignment="Center"
+                                                  Style="{StaticResource DarkCheckBox}"/>
+                                        <TextBlock Text="{Binding Name}" Margin="5,0,0,0" VerticalAlignment="Center"
+                                                   Foreground="#E0E0E0" Cursor="Hand"/>
+                                    </StackPanel>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
                         </ListBox>
@@ -23946,6 +24509,70 @@ function Initialize-EventHandlers {
             $selected = $script:Controls.lstProfiles.SelectedItem
             if ($selected) {
                 Import-ProfileToForm -Profile $selected
+            }
+        }
+    })
+
+    # Profile row click - clicking anywhere on the row (except checkbox) should:
+    # 1. Deselect all other checkboxes
+    # 2. Select this profile's checkbox
+    # 3. Switch to this profile
+    $script:Controls.lstProfiles.Add_PreviewMouseLeftButtonDown({
+        param($sender, $e)
+        Invoke-SafeEventHandler -HandlerName "ProfileRowClick" -ScriptBlock {
+            # Find the clicked element
+            $clickedElement = $e.OriginalSource
+
+            # Walk up the visual tree to check if we hit a CheckBox
+            $current = $clickedElement
+            $foundCheckBox = $false
+
+            while ($current -ne $null) {
+                if ($current -is [System.Windows.Controls.CheckBox]) {
+                    $foundCheckBox = $true
+                    break
+                }
+                # Stop at ListBoxItem level
+                if ($current -is [System.Windows.Controls.ListBoxItem]) {
+                    break
+                }
+                # Get visual parent
+                $current = [System.Windows.Media.VisualTreeHelper]::GetParent($current)
+            }
+
+            # Handle click anywhere on the row EXCEPT on the checkbox
+            if (-not $foundCheckBox) {
+                # Find the profile from the DataContext
+                $profile = $null
+                $current = $clickedElement
+                while ($current -ne $null) {
+                    if ($current.DataContext -and $current.DataContext.PSObject.Properties['Name']) {
+                        $profile = $current.DataContext
+                        break
+                    }
+                    $current = [System.Windows.Media.VisualTreeHelper]::GetParent($current)
+                }
+
+                if ($profile) {
+                    # Deselect all other profiles (set Enabled = false)
+                    foreach ($p in $script:Config.SyncProfiles) {
+                        if ($p -ne $profile) {
+                            $p.Enabled = $false
+                        }
+                    }
+
+                    # Select this profile (set Enabled = true)
+                    $profile.Enabled = $true
+
+                    # Select this item in the ListBox (triggers SelectionChanged)
+                    $script:Controls.lstProfiles.SelectedItem = $profile
+
+                    # Force refresh of the ListBox to update checkbox states
+                    $script:Controls.lstProfiles.Items.Refresh()
+
+                    # Save the config to persist the changes
+                    Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath | Out-Null
+                }
             }
         }
     })

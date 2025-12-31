@@ -93,6 +93,14 @@ InModuleScope 'Robocurse' {
 
                 $status.ActiveJobs | Should -Be 1
             }
+
+            It "Should include ScanProgress in status" {
+                $script:OrchestrationState.ScanProgress = 1234
+
+                $status = Get-OrchestrationStatus
+
+                $status.ScanProgress | Should -Be 1234
+            }
         }
 
         Context "Get-ETAEstimate" {

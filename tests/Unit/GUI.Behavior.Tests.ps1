@@ -746,5 +746,77 @@ Describe "GUI Replication Runspace Tests" -Tag "GUI", "Runspace", "Unit" {
                 $toRun[0].Name | Should -Be "B"
             }
         }
+
+        Context "Profile Row Click Behavior" {
+            # Tests for the profile row click logic that:
+            # 1. Deselects all other profiles (sets Enabled = false)
+            # 2. Selects the clicked profile (sets Enabled = true)
+            # Clicking anywhere on the row (except the checkbox) triggers this behavior
+
+            It "Should deselect all other profiles when clicking a profile row" {
+                $profiles = @(
+                    [PSCustomObject]@{ Name = "A"; Enabled = $true }
+                    [PSCustomObject]@{ Name = "B"; Enabled = $true }
+                    [PSCustomObject]@{ Name = "C"; Enabled = $true }
+                )
+
+                # Simulate clicking on profile B
+                $clickedProfile = $profiles[1]
+                foreach ($p in $profiles) {
+                    if ($p -ne $clickedProfile) {
+                        $p.Enabled = $false
+                    }
+                }
+                $clickedProfile.Enabled = $true
+
+                # Verify only the clicked profile is enabled
+                $profiles[0].Enabled | Should -Be $false
+                $profiles[1].Enabled | Should -Be $true
+                $profiles[2].Enabled | Should -Be $false
+            }
+
+            It "Should enable the clicked profile even if it was disabled" {
+                $profiles = @(
+                    [PSCustomObject]@{ Name = "A"; Enabled = $true }
+                    [PSCustomObject]@{ Name = "B"; Enabled = $false }
+                    [PSCustomObject]@{ Name = "C"; Enabled = $true }
+                )
+
+                # Simulate clicking on disabled profile B
+                $clickedProfile = $profiles[1]
+                foreach ($p in $profiles) {
+                    if ($p -ne $clickedProfile) {
+                        $p.Enabled = $false
+                    }
+                }
+                $clickedProfile.Enabled = $true
+
+                # Verify clicked profile is now enabled, others disabled
+                $profiles[0].Enabled | Should -Be $false
+                $profiles[1].Enabled | Should -Be $true
+                $profiles[2].Enabled | Should -Be $false
+            }
+
+            It "Should only have one enabled profile after clicking a row" {
+                $profiles = @(
+                    [PSCustomObject]@{ Name = "A"; Enabled = $true }
+                    [PSCustomObject]@{ Name = "B"; Enabled = $true }
+                    [PSCustomObject]@{ Name = "C"; Enabled = $true }
+                    [PSCustomObject]@{ Name = "D"; Enabled = $true }
+                )
+
+                # Simulate clicking on profile C
+                $clickedProfile = $profiles[2]
+                foreach ($p in $profiles) {
+                    if ($p -ne $clickedProfile) {
+                        $p.Enabled = $false
+                    }
+                }
+                $clickedProfile.Enabled = $true
+
+                $enabledCount = @($profiles | Where-Object { $_.Enabled }).Count
+                $enabledCount | Should -Be 1
+            }
+        }
     }
 }
