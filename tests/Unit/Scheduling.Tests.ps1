@@ -38,6 +38,28 @@ Initialize-OrchestrationStateType | Out-Null
 
 InModuleScope 'Robocurse' {
     Describe "Scheduling" {
+        BeforeAll {
+            # Ensure stub functions exist - they may have been removed by integration tests
+            # when running the full test suite
+            if (Get-Module ScheduledTasks -ErrorAction SilentlyContinue) {
+                Remove-Module ScheduledTasks -Force -ErrorAction SilentlyContinue
+            }
+            # Recreate stubs if they don't exist
+            if (-not (Get-Item -Path "function:global:New-ScheduledTaskAction" -ErrorAction SilentlyContinue)) {
+                function global:New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) }
+                function global:New-ScheduledTaskTrigger { param([switch]$Daily, [switch]$Weekly, [switch]$Once, $At, $DaysOfWeek, $RepetitionInterval, $RepetitionDuration) }
+                function global:New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) }
+                function global:New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [switch]$StartWhenAvailable, [switch]$RunOnlyIfNetworkAvailable, $MultipleInstances, $ExecutionTimeLimit, $Priority) }
+                function global:Register-ScheduledTask { param($TaskName, $Action, $Trigger, $Principal, $Settings, $Description, [switch]$Force, $User, $Password, $RunLevel) }
+                function global:Unregister-ScheduledTask { param($TaskName, [switch]$Confirm) }
+                function global:Get-ScheduledTask { param($TaskName) }
+                function global:Get-ScheduledTaskInfo { param($TaskName) }
+                function global:Start-ScheduledTask { param($TaskName) }
+                function global:Enable-ScheduledTask { param($TaskName) }
+                function global:Disable-ScheduledTask { param($TaskName) }
+            }
+        }
+
         Context "Register-RobocurseTask Validation" {
             BeforeEach {
                 # Create a temporary config file for testing

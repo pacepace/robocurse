@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-30 18:40:22
+    Built: 2025-12-30 20:57:51
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -4734,6 +4734,137 @@ function Convert-ToDestinationPath {
 # Script-level bandwidth limit (set from config during replication start)
 $script:BandwidthLimitMbps = 0
 
+# Script variable to track if RobocopyProgressBuffer type has been initialized
+$script:RobocopyProgressBufferTypeInitialized = $false
+
+function Initialize-RobocopyProgressBufferType {
+    <#
+    .SYNOPSIS
+        Lazy-loads the C# RobocopyProgressBuffer type for streaming stdout capture
+    .DESCRIPTION
+        Compiles and loads the C# RobocopyProgressBuffer class only when first needed.
+        This class provides thread-safe storage for robocopy output lines and progress
+        counters, enabling real-time progress updates during file copy operations.
+
+        The type is only compiled once per PowerShell session. Subsequent calls
+        return immediately if the type already exists.
+    .OUTPUTS
+        $true if type is available, $false on compilation failure
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Fast path: already initialized this session
+    if ($script:RobocopyProgressBufferTypeInitialized) {
+        return $true
+    }
+
+    # Check if type exists from a previous session/import
+    if (([System.Management.Automation.PSTypeName]'Robocurse.RobocopyProgressBuffer').Type) {
+        $script:RobocopyProgressBufferTypeInitialized = $true
+        return $true
+    }
+
+    # Compile the C# type
+    try {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Threading;
+
+namespace Robocurse
+{
+    /// <summary>
+    /// Thread-safe buffer for streaming robocopy stdout capture.
+    /// Used for real-time progress updates during file copy operations.
+    /// Event handler runs on thread pool - all operations must be thread-safe.
+    /// </summary>
+    public class RobocopyProgressBuffer
+    {
+        /// <summary>Lines captured from stdout - use Enqueue/TryDequeue for thread safety</summary>
+        public ConcurrentQueue<string> Lines { get; private set; }
+
+        /// <summary>Running total of bytes copied (parsed from New File lines)</summary>
+        private long _bytesCopied;
+        public long BytesCopied
+        {
+            get { return Interlocked.Read(ref _bytesCopied); }
+            set { Interlocked.Exchange(ref _bytesCopied, value); }
+        }
+
+        /// <summary>Atomically add bytes to the running total</summary>
+        public long AddBytes(long bytes)
+        {
+            return Interlocked.Add(ref _bytesCopied, bytes);
+        }
+
+        /// <summary>Count of files copied (incremented on New File detection)</summary>
+        private int _filesCopied;
+        public int FilesCopied
+        {
+            get { return Interlocked.CompareExchange(ref _filesCopied, 0, 0); }
+            set { Interlocked.Exchange(ref _filesCopied, value); }
+        }
+
+        /// <summary>Atomically increment files copied counter</summary>
+        public int IncrementFiles()
+        {
+            return Interlocked.Increment(ref _filesCopied);
+        }
+
+        /// <summary>Current file being copied (for progress display)</summary>
+        private string _currentFile = "";
+        private readonly object _fileLock = new object();
+        public string CurrentFile
+        {
+            get { lock (_fileLock) { return _currentFile; } }
+            set { lock (_fileLock) { _currentFile = value ?? ""; } }
+        }
+
+        /// <summary>Timestamp of last progress update</summary>
+        private long _lastUpdateTicks;
+        public DateTime LastUpdate
+        {
+            get { return new DateTime(Interlocked.Read(ref _lastUpdateTicks)); }
+            set { Interlocked.Exchange(ref _lastUpdateTicks, value.Ticks); }
+        }
+
+        /// <summary>Create a new progress buffer with empty collections</summary>
+        public RobocopyProgressBuffer()
+        {
+            Lines = new ConcurrentQueue<string>();
+            _bytesCopied = 0;
+            _filesCopied = 0;
+            _currentFile = "";
+            _lastUpdateTicks = DateTime.Now.Ticks;
+        }
+
+        /// <summary>Get all buffered lines as array (for final parsing)</summary>
+        public string[] GetAllLines()
+        {
+            return Lines.ToArray();
+        }
+
+        /// <summary>Get count of buffered lines</summary>
+        public int LineCount
+        {
+            get { return Lines.Count; }
+        }
+    }
+}
+'@ -ErrorAction Stop
+
+        $script:RobocopyProgressBufferTypeInitialized = $true
+        Write-Verbose "RobocopyProgressBuffer C# type compiled and initialized"
+        return $true
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to compile RobocopyProgressBuffer type: $($_.Exception.Message)" `
+            -Level 'Error' -Component 'Robocopy'
+        return $false
+    }
+}
+
 function Get-BandwidthThrottleIPG {
     <#
     .SYNOPSIS
@@ -5105,6 +5236,14 @@ function Start-RobocopyJob {
         -DryRun:$DryRun `
         -VerboseFileLogging:$VerboseFileLogging
 
+    # Initialize the progress buffer type (lazy load C# class)
+    if (-not (Initialize-RobocopyProgressBufferType)) {
+        throw "Failed to initialize RobocopyProgressBuffer type. Check logs for compilation errors."
+    }
+
+    # Create thread-safe progress buffer for streaming stdout capture
+    $progressBuffer = [Robocurse.RobocopyProgressBuffer]::new()
+
     # Create process start info
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     # Require validated robocopy path - no fallback to prevent unvalidated execution
@@ -5127,12 +5266,47 @@ function Start-RobocopyJob {
     Write-RobocurseLog -Message "Robocopy args: $($argList -join ' ')" -Level 'Debug' -Component 'Robocopy'
     Write-Host "[ROBOCOPY CMD] $($psi.FileName) $($psi.Arguments)"
 
-    # Start the process
-    $process = [System.Diagnostics.Process]::Start($psi)
+    # Create and configure the process object
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+    # Enable events for async output capture
+    $process.EnableRaisingEvents = $true
 
-    # Start async stdout read immediately to prevent buffer overflow
-    # Both Wait-RobocopyJob and Complete-RobocopyJob will use this
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    # Set up streaming output handler for real-time progress
+    # Event handler runs on thread pool - keep it fast, use thread-safe operations only
+    # Note: We need to use Register-ObjectEvent instead of add_OutputDataReceived for proper
+    # PowerShell variable capture. The scriptblock captures $progressBuffer by reference.
+    $outputEvent = Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action {
+        param($sender, $eventArgs)
+        if ($null -ne $eventArgs.Data) {
+            $line = $eventArgs.Data
+
+            # Add to buffer for final parsing (ConcurrentQueue.Enqueue is thread-safe)
+            $Event.MessageData.Lines.Enqueue($line)
+
+            # Parse progress indicators in real-time
+            # Look for: "New File [size] [path]" or "Newer [size] [path]" patterns
+            # Robocopy format: leading whitespace + indicator + whitespace + size + whitespace + path
+            if ($line -match '^\s*(New File|Newer|Older|Changed)\s+(\d+)\s+(.+)$') {
+                $fileSize = [int64]$Matches[2]
+                $filePath = $Matches[3]
+
+                # Update current file and byte count
+                $Event.MessageData.CurrentFile = $filePath
+                $Event.MessageData.AddBytes($fileSize)
+                $Event.MessageData.IncrementFiles()
+            }
+
+            # Update timestamp
+            $Event.MessageData.LastUpdate = [datetime]::Now
+        }
+    } -MessageData $progressBuffer
+
+    # Start the process
+    $process.Start() | Out-Null
+
+    # Begin async output reading (triggers OutputDataReceived events)
+    $process.BeginOutputReadLine()
 
     return [PSCustomObject]@{
         Process = $process
@@ -5140,7 +5314,8 @@ function Start-RobocopyJob {
         StartTime = [datetime]::Now
         LogPath = $LogPath
         DryRun = $DryRun.IsPresent
-        StdoutTask = $stdoutTask
+        ProgressBuffer = $progressBuffer
+        OutputEvent = $outputEvent  # Keep reference for cleanup
     }
 }
 
@@ -5505,10 +5680,18 @@ function Get-RobocopyProgress {
     <#
     .SYNOPSIS
         Gets current progress from a running robocopy job
+    .DESCRIPTION
+        Returns real-time progress from the streaming stdout buffer if available,
+        or falls back to log file reading for jobs started without streaming.
+
+        The streaming approach provides:
+        - Immediate progress updates (no file I/O during copy)
+        - No file locking issues (robocopy owns the log file exclusively)
+        - More accurate byte/file counts (parsed as events arrive)
     .PARAMETER Job
         Job object from Start-RobocopyJob
     .OUTPUTS
-        PSCustomObject with CurrentFile, BytesCopied, FilesCopied, etc.
+        PSCustomObject with CurrentFile, BytesCopied, FilesCopied, IsComplete, LastUpdate
     #>
     [CmdletBinding()]
     param(
@@ -5516,7 +5699,31 @@ function Get-RobocopyProgress {
         [PSCustomObject]$Job
     )
 
-    # Use ConvertFrom-RobocopyLog with tail parsing to get current status
+    # Check if job has streaming progress buffer (new streaming approach)
+    $buffer = $Job.ProgressBuffer
+    if ($buffer) {
+        # Return live progress from buffer (thread-safe reads)
+        return [PSCustomObject]@{
+            BytesCopied = $buffer.BytesCopied
+            FilesCopied = $buffer.FilesCopied
+            CurrentFile = $buffer.CurrentFile
+            LastUpdate = $buffer.LastUpdate
+            IsComplete = $Job.Process.HasExited
+            LineCount = $buffer.LineCount
+            # Include zeros for compatibility with ConvertFrom-RobocopyLog result shape
+            FilesSkipped = 0
+            FilesFailed = 0
+            DirsCopied = 0
+            DirsSkipped = 0
+            DirsFailed = 0
+            Speed = ""
+            ParseSuccess = $true
+            ParseWarning = $null
+            ErrorMessage = $null
+        }
+    }
+
+    # Fallback for jobs without streaming buffer (legacy compatibility)
     return ConvertFrom-RobocopyLog -LogPath $Job.LogPath -TailLines 100
 }
 
@@ -5524,6 +5731,10 @@ function Wait-RobocopyJob {
     <#
     .SYNOPSIS
         Waits for a robocopy job to complete
+    .DESCRIPTION
+        Waits for the robocopy process to exit and collects final statistics.
+        Uses the streaming progress buffer to get captured output, avoiding
+        file system race conditions that occur in Session 0 scheduled tasks.
     .PARAMETER Job
         Job object from Start-RobocopyJob
     .PARAMETER TimeoutSeconds
@@ -5542,9 +5753,6 @@ function Wait-RobocopyJob {
     # Wait for process to complete with proper resource cleanup
     $capturedOutput = $null
     try {
-        # Use stdout task from Start-RobocopyJob (already reading async)
-        $stdoutTask = $Job.StdoutTask
-
         if ($TimeoutSeconds -gt 0) {
             $completed = $Job.Process.WaitForExit($TimeoutSeconds * 1000)
             if (-not $completed) {
@@ -5556,10 +5764,18 @@ function Wait-RobocopyJob {
             $Job.Process.WaitForExit()
         }
 
-        # Get captured stdout - synchronous after process exit
-        $capturedOutput = if ($stdoutTask) {
-            $stdoutTask.GetAwaiter().GetResult()
-        } else { $null }
+        # Small delay to ensure all OutputDataReceived events have been processed
+        # The event handler runs on a thread pool thread and may still be processing
+        Start-Sleep -Milliseconds 100
+
+        # Get captured output from streaming buffer (new approach)
+        if ($Job.ProgressBuffer) {
+            # Drain all buffered lines and join into string for parsing
+            $allLines = $Job.ProgressBuffer.GetAllLines()
+            if ($allLines -and $allLines.Count -gt 0) {
+                $capturedOutput = $allLines -join "`n"
+            }
+        }
 
         # Calculate duration
         $duration = [datetime]::Now - $Job.StartTime
@@ -5586,6 +5802,14 @@ function Wait-RobocopyJob {
         }
     }
     finally {
+        # Clean up the event subscription to prevent memory leaks
+        if ($Job.OutputEvent) {
+            try {
+                Unregister-Event -SourceIdentifier $Job.OutputEvent.Name -ErrorAction SilentlyContinue
+                Remove-Job -Id $Job.OutputEvent.Id -Force -ErrorAction SilentlyContinue
+            } catch { }
+        }
+
         # Always dispose process handle to prevent handle leaks
         # Critical for long-running operations with many jobs
         try { $Job.Process.Dispose() } catch { }
@@ -8999,16 +9223,29 @@ function Complete-RobocopyJob {
 
     $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode -MismatchSeverity $mismatchSeverity
 
-    # Get captured stdout (was started async in Start-RobocopyJob)
+    # Get captured stdout from streaming progress buffer
     # This avoids file flush race conditions in Session 0 scheduled tasks
     $capturedOutput = $null
-    if ($Job.StdoutTask) {
+    if ($Job.ProgressBuffer) {
         try {
-            $capturedOutput = $Job.StdoutTask.GetAwaiter().GetResult()
+            # Small delay to ensure all OutputDataReceived events have been processed
+            Start-Sleep -Milliseconds 50
+            $allLines = $Job.ProgressBuffer.GetAllLines()
+            if ($allLines -and $allLines.Count -gt 0) {
+                $capturedOutput = $allLines -join "`n"
+            }
         }
         catch {
             Write-RobocurseLog "Failed to get captured stdout for chunk $($Job.Chunk.ChunkId): $_" -Level 'Warning' -Component 'Orchestrator'
         }
+    }
+
+    # Clean up the event subscription to prevent memory leaks
+    if ($Job.OutputEvent) {
+        try {
+            Unregister-Event -SourceIdentifier $Job.OutputEvent.Name -ErrorAction SilentlyContinue
+            Remove-Job -Id $Job.OutputEvent.Id -Force -ErrorAction SilentlyContinue
+        } catch { }
     }
 
     # Parse stats from captured stdout (avoids file flush race), fallback to log file
@@ -21317,24 +21554,11 @@ function Start-GuiReplication {
         }
     }
 
-    # Create a snapshot of the config to prevent external modifications during replication
-    # This ensures the running replication uses the config state at the time of start
-    $script:ConfigSnapshotPath = $null
-    try {
-        $snapshotDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
-        $script:ConfigSnapshotPath = Join-Path $snapshotDir "Robocurse-ConfigSnapshot-$([Guid]::NewGuid().ToString('N')).json"
-        Copy-Item -Path $script:ConfigPath -Destination $script:ConfigSnapshotPath -Force
-    }
-    catch {
-        Write-GuiLog "Warning: Could not create config snapshot, using live config: $($_.Exception.Message)"
-        $script:ConfigSnapshotPath = $script:ConfigPath  # Fall back to original
-    }
-
-    # Create and start background runspace (using snapshot path but pre-resolved log root)
+    # Create and start background runspace (using original config path for immediate persistence)
     # Pass current log path so background writes to same log file
     $currentLogPath = $script:CurrentOperationalLogPath
     try {
-        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigSnapshotPath -LogRoot $logRoot -LogPath $currentLogPath
+        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigPath -LogRoot $logRoot -LogPath $currentLogPath
 
         $script:ReplicationHandle = $runspaceInfo.Handle
         $script:ReplicationPowerShell = $runspaceInfo.PowerShell
@@ -21526,34 +21750,6 @@ function Complete-GuiReplication {
         Write-GuiLog "Warning: Failed to generate failed files summary: $($_.Exception.Message)"
     }
 
-    # Merge snapshot registry from temp config back to original config
-    # The background runspace wrote registry updates to the snapshot, not the original
-    try {
-        if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath) -and (Test-Path $script:ConfigSnapshotPath)) {
-            $snapshotConfig = Get-Content $script:ConfigSnapshotPath -Raw | ConvertFrom-Json
-            if ($snapshotConfig.snapshotRegistry) {
-                # Merge snapshot registry entries into the live config
-                $snapshotConfig.snapshotRegistry.PSObject.Properties | ForEach-Object {
-                    $volumeKey = $_.Name
-                    $snapshotIds = $_.Value
-                    if ($snapshotIds -and $snapshotIds.Count -gt 0) {
-                        $script:Config.SnapshotRegistry | Add-Member -NotePropertyName $volumeKey -NotePropertyValue $snapshotIds -Force
-                    }
-                }
-                # Save the merged config to the original path
-                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
-                if ($saveResult.Success) {
-                    Write-GuiLog "Snapshot registry merged from background runspace"
-                } else {
-                    Write-GuiLog "Warning: Failed to save merged snapshot registry: $($saveResult.ErrorMessage)"
-                }
-            }
-        }
-    }
-    catch {
-        Write-GuiLog "Warning: Failed to merge snapshot registry: $($_.Exception.Message)"
-    }
-
     # Send email notification using shared function
     $emailResult = Send-ReplicationCompletionNotification -Config $script:Config -OrchestrationState $script:OrchestrationState -FailedFilesSummaryPath $failedFilesSummaryPath
 
@@ -21590,19 +21786,6 @@ function Complete-GuiReplication {
     $dialogFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
     $dialogFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails -PreflightErrors $preflightErrors
-
-    # Clean up config snapshot if it was created
-    if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {
-        try {
-            if (Test-Path $script:ConfigSnapshotPath) {
-                Remove-Item $script:ConfigSnapshotPath -Force -ErrorAction SilentlyContinue
-            }
-        }
-        catch {
-            # Non-critical - temp files will be cleaned up eventually
-        }
-        $script:ConfigSnapshotPath = $null
-    }
 }
 
 #endregion

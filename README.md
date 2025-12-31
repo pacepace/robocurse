@@ -798,7 +798,7 @@ Invoke-Pester ./tests -CodeCoverage src/Robocurse/Public/*.ps1
 | Category | Count | Purpose |
 |----------|-------|---------|
 | **Unit** | 47 files | Individual function testing with mocks |
-| **Integration** | 9 files | End-to-end workflows, real robocopy |
+| **Integration** | 14 files | End-to-end workflows, real robocopy |
 | **Enforcement** | 10 files | AST-based pattern verification |
 
 #### Skipped Tests
@@ -808,6 +808,8 @@ Some tests require environment setup and are skipped by default:
 | Requirement | Environment Variable | Description |
 |-------------|---------------------|-------------|
 | Remote VSS | `ROBOCURSE_TEST_REMOTE_SHARE` | UNC path to test share (e.g., `\\server\share`) |
+| Email | `ROBOCURSE_TEST_SMTP_*` | SMTP server, port, user, password, recipient |
+| Scheduling | N/A | Requires Administrator privileges |
 | Platform | N/A | VSS/scheduling tests skip on non-Windows |
 
 To run remote VSS tests:
