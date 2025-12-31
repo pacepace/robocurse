@@ -676,6 +676,113 @@ Describe "Robocopy Wrapper" {
             $cmd.Parameters.ContainsKey('Job') | Should -Be $true
             $cmd.Parameters['Job'].ParameterType.Name | Should -Be 'PSObject'
         }
+
+        It "Should return progress from ProgressBuffer when present" {
+            # Initialize the type
+            Initialize-RobocopyProgressBufferType | Should -Be $true
+
+            # Create a mock job with ProgressBuffer
+            $buffer = [Robocurse.RobocopyProgressBuffer]::new()
+            $buffer.BytesCopied = 12345
+            $buffer.FilesCopied = 5
+            $buffer.CurrentFile = "test\file.txt"
+
+            $mockProcess = [PSCustomObject]@{
+                HasExited = $false
+            }
+
+            $mockJob = [PSCustomObject]@{
+                ProgressBuffer = $buffer
+                Process = $mockProcess
+                LogPath = "$TestDrive\test.log"
+            }
+
+            $result = Get-RobocopyProgress -Job $mockJob
+
+            $result.BytesCopied | Should -Be 12345
+            $result.FilesCopied | Should -Be 5
+            $result.CurrentFile | Should -Be "test\file.txt"
+            $result.IsComplete | Should -Be $false
+        }
+
+        It "Should fall back to log file when no ProgressBuffer" {
+            $logContent = @"
+               Total    Copied   Skipped  Mismatch    FAILED    Extras
+    Dirs :      10         1         9         0         0         0
+   Files :     100        50        50         0         0         0
+   Bytes :   1024      512       512         0         0         0
+"@
+            $logPath = "$TestDrive\fallback.log"
+            $logContent | Set-Content $logPath
+
+            $mockJob = [PSCustomObject]@{
+                ProgressBuffer = $null
+                LogPath = $logPath
+            }
+
+            $result = Get-RobocopyProgress -Job $mockJob
+
+            $result.FilesCopied | Should -Be 50
+        }
+    }
+
+    Context "Initialize-RobocopyProgressBufferType" {
+        It "Should compile and initialize the C# type" {
+            $result = Initialize-RobocopyProgressBufferType
+            $result | Should -Be $true
+        }
+
+        It "Should return true on subsequent calls (cached)" {
+            # First call (may or may not compile)
+            Initialize-RobocopyProgressBufferType | Out-Null
+
+            # Second call should return true immediately (cached)
+            $result = Initialize-RobocopyProgressBufferType
+            $result | Should -Be $true
+        }
+
+        It "Should create type with correct properties" {
+            Initialize-RobocopyProgressBufferType | Out-Null
+
+            $buffer = [Robocurse.RobocopyProgressBuffer]::new()
+
+            $buffer | Should -Not -BeNullOrEmpty
+            $buffer.BytesCopied | Should -Be 0
+            $buffer.FilesCopied | Should -Be 0
+            $buffer.CurrentFile | Should -Be ""
+            # ConcurrentQueue check - use variable to avoid pipeline enumeration issues
+            # When piped, empty ConcurrentQueue returns nothing which Pester sees as null
+            $linesNotNull = ($null -ne $buffer.Lines)
+            $linesNotNull | Should -Be $true
+            $buffer.Lines.GetType().Name | Should -Match 'ConcurrentQueue'
+            $buffer.LineCount | Should -Be 0
+        }
+
+        It "Should support thread-safe operations" {
+            Initialize-RobocopyProgressBufferType | Out-Null
+
+            $buffer = [Robocurse.RobocopyProgressBuffer]::new()
+
+            # Test AddBytes
+            $newTotal = $buffer.AddBytes(1000)
+            $newTotal | Should -Be 1000
+            $buffer.BytesCopied | Should -Be 1000
+
+            # Test IncrementFiles
+            $newCount = $buffer.IncrementFiles()
+            $newCount | Should -Be 1
+            $buffer.FilesCopied | Should -Be 1
+
+            # Test Lines queue
+            $buffer.Lines.Enqueue("test line 1")
+            $buffer.Lines.Enqueue("test line 2")
+            $buffer.LineCount | Should -Be 2
+
+            # Test GetAllLines
+            $allLines = $buffer.GetAllLines()
+            $allLines.Count | Should -Be 2
+            $allLines[0] | Should -Be "test line 1"
+        }
     }
 
     Context "Wait-RobocopyJob" {

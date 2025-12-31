@@ -1236,16 +1236,29 @@ function Complete-RobocopyJob {
 
     $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode -MismatchSeverity $mismatchSeverity
 
-    # Get captured stdout (was started async in Start-RobocopyJob)
+    # Get captured stdout from streaming progress buffer
     # This avoids file flush race conditions in Session 0 scheduled tasks
     $capturedOutput = $null
-    if ($Job.StdoutTask) {
+    if ($Job.ProgressBuffer) {
         try {
-            $capturedOutput = $Job.StdoutTask.GetAwaiter().GetResult()
+            # Small delay to ensure all OutputDataReceived events have been processed
+            Start-Sleep -Milliseconds 50
+            $allLines = $Job.ProgressBuffer.GetAllLines()
+            if ($allLines -and $allLines.Count -gt 0) {
+                $capturedOutput = $allLines -join "`n"
+            }
         }
         catch {
             Write-RobocurseLog "Failed to get captured stdout for chunk $($Job.Chunk.ChunkId): $_" -Level 'Warning' -Component 'Orchestrator'
         }
+    }
+
+    # Clean up the event subscription to prevent memory leaks
+    if ($Job.OutputEvent) {
+        try {
+            Unregister-Event -SourceIdentifier $Job.OutputEvent.Name -ErrorAction SilentlyContinue
+            Remove-Job -Id $Job.OutputEvent.Id -Force -ErrorAction SilentlyContinue
+        } catch { }
     }
 
     # Parse stats from captured stdout (avoids file flush race), fallback to log file
