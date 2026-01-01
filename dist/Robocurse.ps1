@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-31 22:30:22
+    Built: 2025-12-31 23:40:05
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -84,12 +84,12 @@ $script:DefaultMaxChunkDepth = 5
 # Internal chunking thresholds (not user-configurable).
 # These define when Smart mode decides a directory is "too large" and should be split.
 # Maximum chunk size in bytes - directories larger than this trigger recursive splitting.
-# 10GB is a good balance: large enough for efficient robocopy, small enough to parallelize.
-$script:DefaultMaxChunkSizeBytes = 10GB
+# 50GB balances parallelism with efficiency - robocopy handles large chunks well with /J.
+$script:DefaultMaxChunkSizeBytes = 50GB
 
 # Maximum files per chunk - directories with more files trigger recursive splitting.
-# 50,000 files prevents individual robocopy jobs from becoming I/O bottlenecks.
-$script:DefaultMaxFilesPerChunk = 50000
+# 200,000 files is safe for 64-bit robocopy (issues start at millions, not hundreds of thousands).
+$script:DefaultMaxFilesPerChunk = 200000
 
 # Minimum chunk size in bytes - directories smaller than this won't be split further.
 # 100MB prevents creating tiny chunks that add orchestration overhead.
@@ -4266,7 +4266,7 @@ function Get-DirectoryChunks {
 
     if ($childCount -eq 0) {
         # No subdirs but too many files - must accept as large chunk
-        Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level 'Warning' -Component 'Chunking'
+        Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }
@@ -5350,6 +5350,7 @@ function New-RobocopyArguments {
 
     # Threading, retry, and logging (always applied)
     $argList.Add("/MT:$ThreadsPerJob")
+    $argList.Add("/J")  # Unbuffered I/O - prevents memory exhaustion on large files
     $argList.Add("/R:$retryCount")
     $argList.Add("/W:$retryWait")
     $argList.Add("/LOG:$(Format-QuotedPath -Path $safeLogPath)")

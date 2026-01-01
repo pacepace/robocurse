@@ -149,7 +149,7 @@ function Get-DirectoryChunks {
 
     if ($childCount -eq 0) {
         # No subdirs but too many files - must accept as large chunk
-        Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level 'Warning' -Component 'Chunking'
+        Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }

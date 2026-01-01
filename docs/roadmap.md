@@ -13,6 +13,9 @@ This document tracks potential improvements and enhancements identified during c
 ### Documentation
 - [x] **Document complex regex patterns in Logging.ps1** - Added inline comments explaining path redaction regex patterns
 
+### Testing
+- [x] **GUI Config Save/Load Integration Test** - Test that simulates load → modify → save → reload → verify values match
+
 ---
 
 ## Planned Improvements
@@ -64,6 +67,42 @@ if ($siemEventCount -gt $script:SiemRateLimitThreshold) {
     Add-SiemEventBatch -Events $pendingEvents
 }
 ```
+
+---
+
+### Configuration
+
+#### Configurable Robocopy Performance Settings
+**Priority:** Medium
+**Effort:** Medium
+
+Expose robocopy performance settings in config and GUI for per-profile tuning:
+
+- **Unbuffered I/O (`/J`)**: Currently enabled by default. Allow per-profile toggle for WAN scenarios where buffered I/O may perform better.
+- **Threads per job (`/MT:n`)**: Currently global setting (default 8). Consider per-profile override for profiles with different characteristics (many small files vs few large files).
+- **Chunk size thresholds**: Currently hardcoded (50GB size, 200K files). Allow per-profile configuration for fine-tuning based on source characteristics.
+
+```json
+{
+  "profiles": {
+    "LargeFiles": {
+      "robocopy": {
+        "unbufferedIO": true,
+        "threadsPerJob": 16
+      },
+      "chunking": {
+        "maxSizeGB": 100,
+        "maxFiles": 500000
+      }
+    }
+  }
+}
+```
+
+**Benefits:**
+- Optimize for different workload types (many small files vs few large files)
+- Allow WAN-optimized profiles to disable `/J` if needed
+- Fine-tune parallelism based on storage/network capabilities
 
 ---
 
@@ -127,14 +166,6 @@ Add JSON schema validation for config to prevent malformed input:
 
 ### Testing
 
-#### GUI Config Save/Load Integration Test
-**Priority:** Medium
-**Effort:** Low
-
-Test that simulates: load config → modify values → save → reload → verify values match. Would have caught the initialization bug.
-
----
-
 #### Mutation Testing
 **Priority:** Low
 **Effort:** High
@@ -178,28 +209,6 @@ Current checkpoint format is functional but could be enhanced:
 - Add version field for future format changes
 - Include partial chunk progress (files completed within chunk)
 - Store robocopy process state for true resume
-
----
-
-## Architecture Considerations
-
-### Future: Cross-Platform Support
-**Priority:** Future
-**Effort:** Very High
-
-Currently Windows-only due to:
-- robocopy.exe dependency
-- VSS (Volume Shadow Copy Service)
-- Windows Task Scheduler
-- WPF GUI
-
-For cross-platform, would need:
-- rsync/rclone backend for Unix
-- LVM snapshots instead of VSS
-- cron instead of Task Scheduler
-- Avalonia or terminal UI instead of WPF
-
-**Recommendation:** Keep Windows-focused; document alternatives for Linux users.
 
 ---
 

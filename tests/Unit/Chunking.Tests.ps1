@@ -598,23 +598,28 @@ InModuleScope 'Robocurse' {
         Context "New-SmartChunks" {
             It "Should create chunks recursively" {
                 Mock Test-Path { $true }
+                # Use values relative to actual defaults so test adapts when defaults change
+                $maxSize = $script:DefaultMaxChunkSizeBytes
+                $maxFiles = $script:DefaultMaxFilesPerChunk
                 Mock Get-DirectoryProfile {
                     param($Path)
                     if ($Path -eq "C:\TestSmart") {
+                        # Exceeds thresholds to trigger splitting (2x defaults)
                         [PSCustomObject]@{
                             Path = $Path
-                            TotalSize = 50GB
-                            FileCount = 100000
+                            TotalSize = $maxSize * 2
+                            FileCount = $maxFiles * 2
                             DirCount = 2
                             AvgFileSize = 500KB
                             LastScanned = Get-Date
                         }
                     }
                     else {
+                        # Child directories are under thresholds (20% of defaults)
                         [PSCustomObject]@{
                             Path = $Path
-                            TotalSize = 5GB
-                            FileCount = 10000
+                            TotalSize = [int64]($maxSize * 0.2)
+                            FileCount = [int]($maxFiles * 0.2)
                             DirCount = 0
                             AvgFileSize = 500KB
                             LastScanned = Get-Date

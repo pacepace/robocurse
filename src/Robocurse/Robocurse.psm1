@@ -20,12 +20,12 @@ $script:DefaultMaxChunkDepth = 5
 # Internal chunking thresholds (not user-configurable).
 # These define when Smart mode decides a directory is "too large" and should be split.
 # Maximum chunk size in bytes - directories larger than this trigger recursive splitting.
-# 10GB is a good balance: large enough for efficient robocopy, small enough to parallelize.
-$script:DefaultMaxChunkSizeBytes = 10GB
+# 50GB balances parallelism with efficiency - robocopy handles large chunks well with /J.
+$script:DefaultMaxChunkSizeBytes = 50GB
 
 # Maximum files per chunk - directories with more files trigger recursive splitting.
-# 50,000 files prevents individual robocopy jobs from becoming I/O bottlenecks.
-$script:DefaultMaxFilesPerChunk = 50000
+# 200,000 files is safe for 64-bit robocopy (issues start at millions, not hundreds of thousands).
+$script:DefaultMaxFilesPerChunk = 200000
 
 # Minimum chunk size in bytes - directories smaller than this won't be split further.
 # 100MB prevents creating tiny chunks that add orchestration overhead.

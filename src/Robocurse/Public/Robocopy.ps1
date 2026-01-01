@@ -651,6 +651,7 @@ function New-RobocopyArguments {
 
     # Threading, retry, and logging (always applied)
     $argList.Add("/MT:$ThreadsPerJob")
+    $argList.Add("/J")  # Unbuffered I/O - prevents memory exhaustion on large files
     $argList.Add("/R:$retryCount")
     $argList.Add("/W:$retryWait")
     $argList.Add("/LOG:$(Format-QuotedPath -Path $safeLogPath)")
