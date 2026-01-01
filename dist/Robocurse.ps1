@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.a723d7f - Built: 2026-01-01 19:01:50
+    Version: dev.55254d3 - Built: 2026-01-01 12:25:51
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.a723d7f'
+$script:RobocurseVersion = 'dev.55254d3'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -8499,6 +8499,104 @@ function Remove-NetworkMappingTracking {
     }
 }
 
+function Remove-DriveMapping {
+    <#
+    .SYNOPSIS
+        Removes a drive mapping using Remove-SmbMapping
+    .DESCRIPTION
+        Uses Remove-SmbMapping to fully clear Windows SMB remembered connections.
+        Only falls back to Remove-PSDrive if SmbShare module is unavailable.
+    .PARAMETER DriveLetter
+        Drive letter to remove (e.g., "Z" or "Z:")
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$DriveLetter
+    )
+
+    $letter = $DriveLetter.TrimEnd(':')
+    $drivePath = "${letter}:"
+
+    # Use Remove-SmbMapping - this properly clears Windows SMB remembered connections
+    try {
+        Remove-SmbMapping -LocalPath $drivePath -Force -UpdateProfile -ErrorAction Stop
+        Write-RobocurseLog -Message "Removed drive mapping $drivePath via Remove-SmbMapping" `
+            -Level 'Debug' -Component 'NetworkMapping'
+        return $true
+    }
+    catch [System.Management.Automation.CommandNotFoundException] {
+        # SmbShare module not available - fall back to Remove-PSDrive
+        # This is less robust but works on systems without the module
+        Write-RobocurseLog -Message "SmbShare module unavailable, using Remove-PSDrive fallback" `
+            -Level 'Debug' -Component 'NetworkMapping'
+        try {
+            Remove-PSDrive -Name $letter -Force -ErrorAction Stop
+            Write-RobocurseLog -Message "Removed drive mapping $drivePath via Remove-PSDrive" `
+                -Level 'Debug' -Component 'NetworkMapping'
+            return $true
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to remove drive mapping ${drivePath}: $($_.Exception.Message)" `
+                -Level 'Warning' -Component 'NetworkMapping'
+            return $false
+        }
+    }
+    catch {
+        # Other error (e.g., mapping doesn't exist) - not a failure
+        Write-RobocurseLog -Message "Remove-SmbMapping for ${drivePath}: $($_.Exception.Message)" `
+            -Level 'Debug' -Component 'NetworkMapping'
+        return $true  # Mapping is gone, that's what we wanted
+    }
+}
+
+function Get-SmbMappedDriveLetters {
+    <#
+    .SYNOPSIS
+        Gets all drive letters with SMB mappings (including disconnected/remembered)
+    .DESCRIPTION
+        Uses Get-SmbMapping to detect drive letters that Windows remembers,
+        even if Get-PSDrive doesn't see them. Falls back to parsing net use output.
+    .OUTPUTS
+        Array of single-character drive letters (e.g., @('Z', 'Y'))
+    #>
+    [CmdletBinding()]
+    param()
+
+    $smbUsed = @()
+
+    try {
+        $smbMappings = Get-SmbMapping -ErrorAction Stop
+        if ($smbMappings) {
+            $smbUsed = @($smbMappings | ForEach-Object {
+                if ($_.LocalPath -match '^([A-Z]):') {
+                    $Matches[1]
+                }
+            } | Where-Object { $_ })
+        }
+    }
+    catch {
+        # SmbShare module may not be available - fall back to net use parsing
+        Write-RobocurseLog -Message "Get-SmbMapping unavailable, falling back to net use" `
+            -Level 'Debug' -Component 'NetworkMapping'
+
+        try {
+            $netUseOutput = & net use 2>&1
+            foreach ($line in $netUseOutput) {
+                if ($line -match '^\s*(?:OK|Disconnected|Unavailable)\s+([A-Z]):') {
+                    $smbUsed += $Matches[1]
+                }
+            }
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to parse net use output: $($_.Exception.Message)" `
+                -Level 'Warning' -Component 'NetworkMapping'
+        }
+    }
+
+    return $smbUsed
+}
+
 function Clear-OrphanNetworkMappings {
     <#
     .SYNOPSIS
@@ -8545,13 +8643,25 @@ function Clear-OrphanNetworkMappings {
 
             if ($PSCmdlet.ShouldProcess($displayName, "Remove orphan network mapping")) {
                 try {
-                    # Check if drive is actually mapped
+                    # Check if drive is actually mapped (via PSDrive or SMB mapping)
                     $existingDrive = Get-PSDrive -Name $letter -ErrorAction SilentlyContinue
+                    $smbMapping = $null
 
-                    if ($existingDrive) {
+                    if (-not $existingDrive) {
+                        # Check if Windows remembers this as an SMB mapping
+                        try {
+                            $smbMapping = Get-SmbMapping -LocalPath "${letter}:" -ErrorAction SilentlyContinue
+                        } catch { }
+                    }
+
+                    if ($existingDrive -or $smbMapping) {
                         # Verify it's the same mapping (not a different user mapping)
-                        if ($existingDrive.Root -eq $mapping.Root) {
-                            Remove-PSDrive -Name $letter -Force -ErrorAction Stop
+                        $currentRoot = if ($existingDrive) { $existingDrive.Root }
+                                       elseif ($smbMapping) { $smbMapping.RemotePath }
+                                       else { $null }
+
+                        if ($currentRoot -eq $mapping.Root) {
+                            Remove-DriveMapping -DriveLetter $letter | Out-Null
                             Write-RobocurseLog -Message "Cleaned up orphan network mapping: $displayName" `
                                 -Level 'Info' -Component 'NetworkMapping'
                             $cleaned++
@@ -8623,22 +8733,27 @@ function Get-UncRoot {
 function Get-NextAvailableDriveLetter {
     <#
     .SYNOPSIS
-        Gets the next available drive letter, excluding reserved letters
+        Gets the next available drive letter, excluding reserved and SMB-mapped letters
     .DESCRIPTION
         Returns the first available drive letter from Z down to D, excluding:
         - Letters already in use by the system (Get-PSDrive)
         - Letters reserved by other concurrent mount operations
+        - Letters with Windows SMB remembered connections (Get-SmbMapping)
     .OUTPUTS
         Single character (drive letter) or $null if none available
     #>
     [CmdletBinding()]
     param()
 
+    # Check PowerShell drives (includes local drives like C:, D:)
     $used = @((Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue).Name)
     $reserved = @($script:ReservedDriveLetters)
 
-    # Combine used and reserved letters
-    $unavailable = $used + $reserved
+    # ALSO check Windows SMB mappings (catches disconnected/remembered connections)
+    $smbUsed = Get-SmbMappedDriveLetters
+
+    # Combine all unavailable letters
+    $unavailable = $used + $reserved + $smbUsed
 
     $letter = [char[]](90..68) | Where-Object { [string]$_ -notin $unavailable } | Select-Object -First 1
     return $letter
@@ -8709,11 +8824,23 @@ function Mount-SingleNetworkPath {
         $existingDrive = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
             Where-Object { $_.DisplayRoot -eq $root }
         if ($existingDrive) {
-            Write-RobocurseLog -Message "Removing stale mapping $($existingDrive.Name): to '$root'" -Level 'Debug' -Component 'NetworkMapping'
-            Remove-PSDrive -Name $existingDrive.Name -Force -ErrorAction SilentlyContinue
+            Write-RobocurseLog -Message "Removing stale PSDrive mapping $($existingDrive.Name): to '$root'" -Level 'Debug' -Component 'NetworkMapping'
+            Remove-DriveMapping -DriveLetter $existingDrive.Name | Out-Null
             # Also remove from reserved if it was there
             $script:ReservedDriveLetters.Remove([string]$existingDrive.Name) | Out-Null
         }
+
+        # Also check for SMB-only remembered mappings to the same root
+        try {
+            $existingSmbMapping = Get-SmbMapping -ErrorAction SilentlyContinue |
+                Where-Object { $_.RemotePath -eq $root }
+            if ($existingSmbMapping -and $existingSmbMapping.LocalPath) {
+                $smbLetter = $existingSmbMapping.LocalPath -replace ':$', ''
+                Write-RobocurseLog -Message "Removing stale SMB mapping $smbLetter`: to '$root'" -Level 'Debug' -Component 'NetworkMapping'
+                Remove-DriveMapping -DriveLetter $smbLetter | Out-Null
+                $script:ReservedDriveLetters.Remove($smbLetter) | Out-Null
+            }
+        } catch { }
 
         # Find available letter (Z down to D), excluding reserved letters
         $letter = Get-NextAvailableDriveLetter
@@ -8800,7 +8927,7 @@ function Mount-SingleNetworkPath {
     catch {
         # Mount appeared to work but drive isn't accessible - clean up and throw
         Write-RobocurseLog -Message "Mount verification FAILED for $drivePath`: $($_.Exception.Message)" -Level 'Error' -Component 'NetworkMapping'
-        Remove-PSDrive -Name $letter -Force -ErrorAction SilentlyContinue
+        Remove-DriveMapping -DriveLetter $letter | Out-Null
         Remove-NetworkMappingTracking -DriveLetter $letter  # Clean up tracking entry
         throw "Network mount to '$root' created but drive $drivePath is not accessible: $($_.Exception.Message)"
     }
@@ -8882,6 +9009,9 @@ function Dismount-NetworkPaths {
     <#
     .SYNOPSIS
         Removes drive mappings created by Mount-NetworkPaths
+    .DESCRIPTION
+        Uses Remove-SmbMapping to fully clear Windows SMB remembered connections,
+        preventing "remembered connection" errors on subsequent mounts.
     .PARAMETER Mappings
         Array of mapping objects from Mount-NetworkPaths
     #>
@@ -8891,16 +9021,15 @@ function Dismount-NetworkPaths {
     )
 
     foreach ($mapping in $Mappings) {
-        try {
-            Remove-PSDrive -Name $mapping.DriveLetter -Force -ErrorAction Stop
-            Write-RobocurseLog -Message "Unmapped $($mapping.DriveLetter): from '$($mapping.Root)'" -Level 'Debug' -Component 'NetworkMapping'
+        $letter = $mapping.DriveLetter
 
-            # Remove from tracking
-            Remove-NetworkMappingTracking -DriveLetter $mapping.DriveLetter
+        if (Remove-DriveMapping -DriveLetter $letter) {
+            Write-RobocurseLog -Message "Unmapped $letter`: from '$($mapping.Root)'" `
+                -Level 'Debug' -Component 'NetworkMapping'
         }
-        catch {
-            Write-RobocurseLog -Message "Failed to unmount $($mapping.DriveLetter): $($_.Exception.Message)" -Level 'Warning' -Component 'NetworkMapping'
-        }
+
+        # Always remove from tracking, even if unmount failed
+        Remove-NetworkMappingTracking -DriveLetter $letter
     }
 }
 
