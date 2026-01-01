@@ -117,6 +117,10 @@ When creating scheduled tasks for profiles with network paths:
 - Email status = `'Failed'` when any profile has pre-flight error (not just chunk failures)
 - GUI completion dialog shows red failure state with pre-flight error details
 
+## PowerShell Gotchas
+
+**DO NOT use `$IsWindows` as a variable name** - it's read-only in PS Core. Use `$RunningOnWindows` instead.
+
 ## Security
 
 DEBUG logs contain full paths (project names, robocopy commands, VSS junctions). Keep secure or redact in production. SIEM logs (JSON Lines) have structured path data.

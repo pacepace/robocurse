@@ -21,10 +21,11 @@
 
 BeforeDiscovery {
     # Check if we're on Windows with admin privileges
+    # NOTE: Do NOT use $IsWindows - it's a read-only automatic variable in PS Core!
     $script:CanCreateTasks = $false
-    $script:IsWindows = $env:OS -eq 'Windows_NT' -or $PSVersionTable.Platform -eq 'Win32NT' -or (-not $PSVersionTable.Platform)
+    $script:RunningOnWindows = $env:OS -eq 'Windows_NT' -or $PSVersionTable.Platform -eq 'Win32NT' -or (-not $PSVersionTable.Platform)
 
-    if ($script:IsWindows) {
+    if ($script:RunningOnWindows) {
         # Check admin privileges
         $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
         $principal = [Security.Principal.WindowsPrincipal]$identity
