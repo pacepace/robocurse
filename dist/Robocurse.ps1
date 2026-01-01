@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-31 23:40:05
+    Version: dev.2c95b6b - Built: 2026-01-01 08:39:54
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -74,6 +74,9 @@ param(
 
 # Capture script path at initialization for use by functions
 $script:RobocurseScriptPath = $PSCommandPath
+
+# Version injected at build time
+$script:RobocurseVersion = 'dev.2c95b6b'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -25061,6 +25064,10 @@ function Initialize-RobocurseGui {
     $panelToActivate = if ($script:RestoredActivePanel) { $script:RestoredActivePanel } else { 'Profiles' }
     Set-ActivePanel -PanelName $panelToActivate
 
+    # Set window title with version
+    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
+    $script:Window.Title = "Robocurse $version - Replication Cursed Robo"
+
     Write-GuiLog "Robocurse GUI initialized"
 
     return $script:Window
@@ -26002,8 +26009,9 @@ function Show-RobocurseHelp {
     [CmdletBinding()]
     param()
 
+    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
     Write-Host @"
-ROBOCURSE - Chunked Robocopy Orchestrator with VSS Support
+ROBOCURSE $version - Chunked Robocopy Orchestrator with VSS Support
 
 USAGE:
     .\Robocurse.ps1 [options]

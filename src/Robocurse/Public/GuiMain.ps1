@@ -181,6 +181,10 @@ function Initialize-RobocurseGui {
     $panelToActivate = if ($script:RestoredActivePanel) { $script:RestoredActivePanel } else { 'Profiles' }
     Set-ActivePanel -PanelName $panelToActivate
 
+    # Set window title with version
+    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
+    $script:Window.Title = "Robocurse $version - Replication Cursed Robo"
+
     Write-GuiLog "Robocurse GUI initialized"
 
     return $script:Window

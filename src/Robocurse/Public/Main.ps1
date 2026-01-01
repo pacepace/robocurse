@@ -8,8 +8,9 @@ function Show-RobocurseHelp {
     [CmdletBinding()]
     param()
 
+    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
     Write-Host @"
-ROBOCURSE - Chunked Robocopy Orchestrator with VSS Support
+ROBOCURSE $version - Chunked Robocopy Orchestrator with VSS Support
 
 USAGE:
     .\Robocurse.ps1 [options]

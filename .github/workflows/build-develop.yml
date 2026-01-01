@@ -22,9 +22,18 @@ jobs:
         with:
           token: ${{ secrets.DIST_BUILD_PAT }}
 
+      - name: Get dev version
+        id: version
+        shell: pwsh
+        run: |
+          $hash = git rev-parse --short HEAD
+          $version = "dev.$hash"
+          "VERSION=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Dev version: $version"
+
       - name: Build monolith
         shell: pwsh
-        run: .\build\Build-Robocurse.ps1
+        run: .\build\Build-Robocurse.ps1 -Version ${{ steps.version.outputs.VERSION }}
 
       - name: Check for changes
         id: check

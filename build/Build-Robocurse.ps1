@@ -34,6 +34,22 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Auto-detect version if not provided
+if (-not $Version) {
+    try {
+        # Try to get git short hash
+        $gitHash = git rev-parse --short HEAD 2>$null
+        if ($LASTEXITCODE -eq 0 -and $gitHash) {
+            $Version = "dev.$gitHash"
+        } else {
+            $Version = "dev.local"
+        }
+    }
+    catch {
+        $Version = "dev.local"
+    }
+}
+
 $scriptRoot = Split-Path -Parent $PSScriptRoot
 $srcRoot = Join-Path $scriptRoot "src\Robocurse"
 $resourcesRoot = Join-Path $srcRoot "Resources"
@@ -177,6 +193,9 @@ param(
 # Capture script path at initialization for use by functions
 $script:RobocurseScriptPath = $PSCommandPath
 
+# Version injected at build time
+$script:RobocurseVersion = 'VERSION_PLACEHOLDER'
+
 '@)
 
 # Replace build date placeholder
@@ -184,12 +203,12 @@ $buildDate = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $headerContent = $output.ToString()
 $headerContent = $headerContent -replace 'BUILDDATE', $buildDate
 
-# Inject version if provided (for CI builds)
-if ($Version) {
-    # Add version to the build info line
-    $headerContent = $headerContent -replace '(Built:\s*\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', "Version: $Version - `$1"
-    Write-Host "  Version: $Version" -ForegroundColor Cyan
-}
+# Inject version into both the header comment and the runtime variable
+# Add version to the build info line in header comment
+$headerContent = $headerContent -replace '(Built:\s*\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', "Version: $Version - `$1"
+# Replace VERSION_PLACEHOLDER with actual version
+$headerContent = $headerContent -replace 'VERSION_PLACEHOLDER', $Version
+Write-Host "  Version: $Version" -ForegroundColor Cyan
 
 $output.Clear()
 [void]$output.Append($headerContent)
