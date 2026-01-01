@@ -124,6 +124,25 @@ InModuleScope 'Robocurse' {
                 Should -Invoke Invoke-RobocopyList -Times 1
             }
 
+            It "Should pass State to Invoke-RobocopyList for progress updates" {
+                $mockState = [PSCustomObject]@{ CurrentActivity = "" }
+
+                Mock Invoke-RobocopyList {
+                    param($Source, $State)
+                    # Verify State parameter was passed
+                    if ($State) {
+                        $State.CurrentActivity = "Test activity"
+                    }
+                    return @("          1000    file1.txt")
+                }
+
+                $result = Get-DirectoryProfile -Path "C:\Test" -UseCache $false -State $mockState
+
+                # Verify State was passed and could be updated
+                $mockState.CurrentActivity | Should -Be "Test activity"
+                Should -Invoke Invoke-RobocopyList -Times 1 -ParameterFilter { $null -ne $State }
+            }
+
             It "Should use cache when available" {
                 Mock Invoke-RobocopyList { return @() }
 

@@ -28,9 +28,21 @@ Describe "Naming Convention Enforcement" {
                 $file.FullName, [ref]$null, [ref]$null
             )
 
+            # Find all function definitions (excluding class methods/constructors)
             $functions = $ast.FindAll({
                 param($node)
-                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+                if ($node -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                    # Exclude class methods - they have a parent TypeDefinitionAst
+                    $parent = $node.Parent
+                    while ($parent) {
+                        if ($parent -is [System.Management.Automation.Language.TypeDefinitionAst]) {
+                            return $false  # Skip class members
+                        }
+                        $parent = $parent.Parent
+                    }
+                    return $true
+                }
+                return $false
             }, $true)
 
             $invalidNames = @()
@@ -58,9 +70,21 @@ Describe "Naming Convention Enforcement" {
                 $file.FullName, [ref]$null, [ref]$null
             )
 
+            # Find all function definitions (excluding class methods/constructors)
             $functions = $ast.FindAll({
                 param($node)
-                $node -is [System.Management.Automation.Language.FunctionDefinitionAst]
+                if ($node -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                    # Exclude class methods - they have a parent TypeDefinitionAst
+                    $parent = $node.Parent
+                    while ($parent) {
+                        if ($parent -is [System.Management.Automation.Language.TypeDefinitionAst]) {
+                            return $false  # Skip class members
+                        }
+                        $parent = $parent.Parent
+                    }
+                    return $true
+                }
+                return $false
             }, $true)
 
             $unapprovedVerbs = @()

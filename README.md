@@ -235,16 +235,24 @@ Run `Get-Help .\scripts\<script>.ps1 -Full` for detailed documentation.
 
 ## Configuration Reference
 
-### Chunk Settings
+### Scan Modes
 
-Control how directories are split for parallel processing:
+Control how directories are chunked for parallel processing:
 
-| Setting | Range | Default | Description |
-|---------|-------|---------|-------------|
-| `ChunkMaxSizeGB` | 0.001 - 1024 | 10 | Maximum GB per chunk |
-| `ChunkMinSizeGB` | 0.001 - 1024 | 0.1 | Minimum GB to create a chunk |
-| `ChunkMaxFiles` | 1 - 10M | 50,000 | Maximum files per chunk |
-| `ChunkMaxDepth` | 0 - 20 | 5 | Maximum directory recursion |
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| **Smart** | Unlimited depth recursion, fully automatic | Recommended - optimal chunk balance |
+| **Flat** | Recurses to `ChunkMaxDepth` (default 5) | Predictable chunk boundaries |
+
+**Smart mode** (recommended): Automatically recurses as deep as needed until each directory
+either fits as a single chunk or has no more subdirectories to split. No configuration needed -
+the algorithm finds optimal chunk boundaries automatically.
+
+**Flat mode**: Recurses to a specified depth, then each directory at that depth becomes one chunk.
+Configure via:
+- `ChunkMaxDepth` - Maximum directory recursion (0-20, default 5)
+  - 0 = each top-level directory is one chunk
+  - 5 = recurse up to 5 levels deep
 
 ### Robocopy Options
 
@@ -798,7 +806,7 @@ Invoke-Pester ./tests -CodeCoverage src/Robocurse/Public/*.ps1
 | Category | Count | Purpose |
 |----------|-------|---------|
 | **Unit** | 47 files | Individual function testing with mocks |
-| **Integration** | 9 files | End-to-end workflows, real robocopy |
+| **Integration** | 14 files | End-to-end workflows, real robocopy |
 | **Enforcement** | 10 files | AST-based pattern verification |
 
 #### Skipped Tests
@@ -808,6 +816,8 @@ Some tests require environment setup and are skipped by default:
 | Requirement | Environment Variable | Description |
 |-------------|---------------------|-------------|
 | Remote VSS | `ROBOCURSE_TEST_REMOTE_SHARE` | UNC path to test share (e.g., `\\server\share`) |
+| Email | `ROBOCURSE_TEST_SMTP_*` | SMTP server, port, user, password, recipient |
+| Scheduling | N/A | Requires Administrator privileges |
 | Platform | N/A | VSS/scheduling tests skip on non-Windows |
 
 To run remote VSS tests:
@@ -851,7 +861,7 @@ Before replication, Robocurse checks:
 | **Script won't load** | Execution policy | `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` |
 | **Exit code confusion** | Robocopy bitmask codes | Use `Get-RobocopyExitMeaning -ExitCode <n>` |
 | **Remote VSS fails** | WinRM not enabled | Run `Enable-PSRemoting -Force` on remote server |
-| **Chunks too large** | Default 10GB limit | Adjust `ChunkMaxSizeGB` in profile config |
+| **Chunks too large** | Leaf directories with no subdirs | Expected behavior - can't split dirs without subdirs |
 | **Email not sending** | Missing credentials | Run `cmdkey /list:Robocurse-SMTP` to verify |
 | **Circuit breaker trips** | 10+ consecutive failures | Check logs for root cause; may be access/path issue |
 

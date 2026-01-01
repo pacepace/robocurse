@@ -8,8 +8,9 @@ function Show-RobocurseHelp {
     [CmdletBinding()]
     param()
 
+    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
     Write-Host @"
-ROBOCURSE - Chunked Robocopy Orchestrator with VSS Support
+ROBOCURSE $version - Chunked Robocopy Orchestrator with VSS Support
 
 USAGE:
     .\Robocurse.ps1 [options]
@@ -480,14 +481,19 @@ function Start-RobocurseMain {
             return 1
         }
 
-        # Update the profile's Schedule property
-        $profile.Schedule = [PSCustomObject]@{
+        # Update the profile's Schedule property - add if missing (defensive for old profiles)
+        $newSchedule = [PSCustomObject]@{
             Enabled = $true
             Frequency = $Frequency
             Time = $Time
             Interval = $Interval
             DayOfWeek = $DayOfWeek
             DayOfMonth = $DayOfMonth
+        }
+        if (-not ($profile.PSObject.Properties.Name -contains 'Schedule')) {
+            $profile | Add-Member -NotePropertyName 'Schedule' -NotePropertyValue $newSchedule
+        } else {
+            $profile.Schedule = $newSchedule
         }
 
         # Save the updated config

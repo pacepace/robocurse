@@ -73,7 +73,7 @@ function Initialize-RobocurseGui {
     @(
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
-        'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'chkUseVss', 'cmbScanMode', 'txtMaxDepth',
         'tabSnapshotConfig', 'chkSourcePersistentSnapshot', 'txtSourceRetentionCount',
         'chkDestPersistentSnapshot', 'txtDestRetentionCount',
         'tabProfileSnapshots', 'dgSourceSnapshots', 'dgDestSnapshots',
@@ -180,6 +180,10 @@ function Initialize-RobocurseGui {
     # Set active panel (from restored state or default to Profiles)
     $panelToActivate = if ($script:RestoredActivePanel) { $script:RestoredActivePanel } else { 'Profiles' }
     Set-ActivePanel -PanelName $panelToActivate
+
+    # Set window title with version
+    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
+    $script:Window.Title = "Robocurse $version - Replication Cursed Robo"
 
     Write-GuiLog "Robocurse GUI initialized"
 
@@ -344,6 +348,70 @@ function Initialize-EventHandlers {
             $selected = $script:Controls.lstProfiles.SelectedItem
             if ($selected) {
                 Import-ProfileToForm -Profile $selected
+            }
+        }
+    })
+
+    # Profile row click - clicking anywhere on the row (except checkbox) should:
+    # 1. Deselect all other checkboxes
+    # 2. Select this profile's checkbox
+    # 3. Switch to this profile
+    $script:Controls.lstProfiles.Add_PreviewMouseLeftButtonDown({
+        param($sender, $e)
+        Invoke-SafeEventHandler -HandlerName "ProfileRowClick" -ScriptBlock {
+            # Find the clicked element
+            $clickedElement = $e.OriginalSource
+
+            # Walk up the visual tree to check if we hit a CheckBox
+            $current = $clickedElement
+            $foundCheckBox = $false
+
+            while ($current -ne $null) {
+                if ($current -is [System.Windows.Controls.CheckBox]) {
+                    $foundCheckBox = $true
+                    break
+                }
+                # Stop at ListBoxItem level
+                if ($current -is [System.Windows.Controls.ListBoxItem]) {
+                    break
+                }
+                # Get visual parent
+                $current = [System.Windows.Media.VisualTreeHelper]::GetParent($current)
+            }
+
+            # Handle click anywhere on the row EXCEPT on the checkbox
+            if (-not $foundCheckBox) {
+                # Find the profile from the DataContext
+                $profile = $null
+                $current = $clickedElement
+                while ($current -ne $null) {
+                    if ($current.DataContext -and $current.DataContext.PSObject.Properties['Name']) {
+                        $profile = $current.DataContext
+                        break
+                    }
+                    $current = [System.Windows.Media.VisualTreeHelper]::GetParent($current)
+                }
+
+                if ($profile) {
+                    # Deselect all other profiles (set Enabled = false)
+                    foreach ($p in $script:Config.SyncProfiles) {
+                        if ($p -ne $profile) {
+                            $p.Enabled = $false
+                        }
+                    }
+
+                    # Select this profile (set Enabled = true)
+                    $profile.Enabled = $true
+
+                    # Select this item in the ListBox (triggers SelectionChanged)
+                    $script:Controls.lstProfiles.SelectedItem = $profile
+
+                    # Force refresh of the ListBox to update checkbox states
+                    $script:Controls.lstProfiles.Items.Refresh()
+
+                    # Save the config to persist the changes
+                    Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath | Out-Null
+                }
             }
         }
     })
@@ -529,7 +597,7 @@ function Initialize-EventHandlers {
     }
 
     # Form field changes - save to profile
-    @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
+    @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxDepth') | ForEach-Object {
         $script:Controls[$_].Add_LostFocus({
             Invoke-SafeEventHandler -HandlerName "SaveProfile" -ScriptBlock { Save-ProfileFromForm }
         })
@@ -537,7 +605,7 @@ function Initialize-EventHandlers {
 
     # Numeric input validation - reject non-numeric characters in real-time
     # This provides immediate feedback before the user finishes typing
-    @('txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
+    @('txtMaxDepth') | ForEach-Object {
         $control = $script:Controls[$_]
         if ($control) {
             $control.Add_PreviewTextInput({
@@ -636,7 +704,13 @@ function Initialize-EventHandlers {
         })
     }
     $script:Controls.cmbScanMode.Add_SelectionChanged({
-        Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock { Save-ProfileFromForm }
+        Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock {
+            # Enable/disable MaxDepth based on scan mode (Flat needs it, Smart doesn't)
+            $isFlat = $script:Controls.cmbScanMode.Text -eq "Flat"
+            $script:Controls.txtMaxDepth.IsEnabled = $isFlat
+            $script:Controls.txtMaxDepth.Opacity = if ($isFlat) { 1.0 } else { 0.5 }
+            Save-ProfileFromForm
+        }
     })
 
     # Settings panel event handlers

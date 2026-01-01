@@ -134,8 +134,6 @@ InModuleScope 'Robocurse' {
                     Source = $script:SourceDir
                     Destination = $script:DestDir
                     ScanMode = 'Smart'
-                    ChunkMaxSizeGB = 10
-                    ChunkMaxFiles = 50000
                     ChunkMaxDepth = 5
                     UseVSS = $false
                 }
@@ -158,9 +156,7 @@ InModuleScope 'Robocurse' {
                     Name = "TestProfile"
                     Source = $script:SourceDir
                     Destination = $script:DestDir
-                    ScanMode = 'Smart'  # Smart mode respects folder structure
-                    ChunkMaxSizeGB = 10
-                    ChunkMaxFiles = 50000
+                    ScanMode = 'Smart'  # Smart mode uses unlimited depth
                     ChunkMaxDepth = 5
                     UseVSS = $false
                 }
@@ -212,7 +208,7 @@ InModuleScope 'Robocurse' {
                     Source = $script:SourceDir
                     Destination = $script:DestDir
                     ScanMode = 'Smart'
-                    ChunkMaxSizeGB = 10
+                    ChunkMaxDepth = 5
                     UseVSS = $false
                 }
 
@@ -477,7 +473,7 @@ InModuleScope 'Robocurse' {
                     Source = $script:Source1
                     Destination = $script:DestDir
                     ScanMode = 'Smart'
-                    ChunkMaxSizeGB = 10
+                    ChunkMaxDepth = 5
                     UseVSS = $false
                 }
 
@@ -486,7 +482,7 @@ InModuleScope 'Robocurse' {
                     Source = $script:Source2
                     Destination = $script:DestDir
                     ScanMode = 'Smart'
-                    ChunkMaxSizeGB = 10
+                    ChunkMaxDepth = 5
                     UseVSS = $false
                 }
 

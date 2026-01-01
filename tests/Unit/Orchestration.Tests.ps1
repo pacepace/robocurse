@@ -826,6 +826,9 @@ InModuleScope 'Robocurse' {
                 $script:OrchestrationState.CurrentProfile = [PSCustomObject]@{ Name = "TestProfile" }
                 $script:OrchestrationState.TotalChunks = 10
                 $script:OrchestrationState.CompletedCount = 5
+                # ProfileProgress is now based on bytes, not chunks
+                $script:OrchestrationState.TotalBytes = 10000000
+                $script:OrchestrationState.BytesComplete = 5000000
                 $script:OrchestrationState.StartTime = [datetime]::Now.AddMinutes(-5)
 
                 Mock Get-ETAEstimate { [timespan]::FromMinutes(5) }

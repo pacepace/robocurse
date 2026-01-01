@@ -28,3 +28,6 @@ Write-Host ""
 Write-Host "Results written to:"
 Write-Host "  $env:TEMP\pester-summary.txt"
 Write-Host "  $env:TEMP\pester-failures.txt"
+
+# Set exit code based on Pester results, not robocopy exit codes
+exit $(if ($result.FailedCount -gt 0) { 1 } else { 0 })

@@ -398,13 +398,6 @@ Describe "Robocopy Wrapper" {
             $cmd.Parameters['RobocopyOptions'].ParameterType.Name | Should -Be 'Hashtable'
         }
 
-        It "Should have VerboseFileLogging parameter" {
-            $cmd = Get-Command Start-RobocopyJob
-
-            $cmd.Parameters.ContainsKey('VerboseFileLogging') | Should -Be $true
-            $cmd.Parameters['VerboseFileLogging'].ParameterType.Name | Should -Be 'SwitchParameter'
-        }
-
         It "Should have InterPacketGapMs documented in function help" {
             # Check the RobocopyOptions parameter description mentions InterPacketGapMs
             $help = Get-Help Start-RobocopyJob -Parameter RobocopyOptions -ErrorAction SilentlyContinue
@@ -639,33 +632,17 @@ Describe "Robocopy Wrapper" {
             $cmd.Parameters['DryRun'].ParameterType.Name | Should -Be 'SwitchParameter'
         }
 
-        It "Should include /NFL and /NDL by default (VerboseFileLogging disabled)" {
+        It "Should include /NDL but NOT /NFL for real-time progress tracking" {
+            # /NFL removed to enable "New File" output for BytesCopied progress tracking
+            # /NDL kept to reduce log noise (directory names not needed for progress)
             $args = New-RobocopyArguments `
                 -SourcePath "C:\Source" `
                 -DestinationPath "D:\Dest" `
                 -LogPath "C:\log.txt"
 
             $argString = $args -join ' '
-            $argString | Should -Match '/NFL'
-            $argString | Should -Match '/NDL'
-        }
-
-        It "Should exclude /NFL and /NDL when VerboseFileLogging is enabled" {
-            $args = New-RobocopyArguments `
-                -SourcePath "C:\Source" `
-                -DestinationPath "D:\Dest" `
-                -LogPath "C:\log.txt" `
-                -VerboseFileLogging
-
-            $argString = $args -join ' '
-            $argString | Should -Not -Match '/NFL'
-            $argString | Should -Not -Match '/NDL'
-        }
-
-        It "Should have VerboseFileLogging parameter" {
-            $cmd = Get-Command New-RobocopyArguments
-            $cmd.Parameters.ContainsKey('VerboseFileLogging') | Should -Be $true
-            $cmd.Parameters['VerboseFileLogging'].ParameterType.Name | Should -Be 'SwitchParameter'
+            $argString | Should -Not -Match '/NFL'  # Removed for progress tracking
+            $argString | Should -Match '/NDL'       # Kept to reduce log noise
         }
     }
 
@@ -675,6 +652,150 @@ Describe "Robocopy Wrapper" {
 
             $cmd.Parameters.ContainsKey('Job') | Should -Be $true
             $cmd.Parameters['Job'].ParameterType.Name | Should -Be 'PSObject'
+        }
+
+        It "Should return progress from log file by parsing file listing lines" {
+            # Create a log file with robocopy output - incremental progress (no final summary yet)
+            # Format: whitespace + "New File" + whitespace + size + whitespace + path
+            # Each "New File" line finalizes the previous file and starts tracking the new one
+            $logContent = @"
+	    New File  		    5000	C:\source\file1.txt
+	    New File  		    5000	C:\source\file2.txt
+	    New File  		    5000	C:\source\file3.txt
+"@
+            $logPath = "$TestDrive\progress.log"
+            $logContent | Set-Content $logPath
+
+            $mockJob = [PSCustomObject]@{
+                LogPath = $logPath
+            }
+
+            $result = Get-RobocopyProgress -Job $mockJob
+
+            # BytesCopied = file1 (5000) + file2 (5000) = 10000 (file3 not finalized)
+            $result.BytesCopied | Should -Be 10000
+            $result.FilesCopied | Should -Be 2
+            $result.CurrentFile | Should -Be "C:\source\file3.txt"
+        }
+
+        It "Should fall back to log file when no ProgressBuffer" {
+            $logContent = @"
+               Total    Copied   Skipped  Mismatch    FAILED    Extras
+    Dirs :      10         1         9         0         0         0
+   Files :     100        50        50         0         0         0
+   Bytes :   1024      512       512         0         0         0
+"@
+            $logPath = "$TestDrive\fallback.log"
+            $logContent | Set-Content $logPath
+
+            $mockJob = [PSCustomObject]@{
+                ProgressBuffer = $null
+                LogPath = $logPath
+            }
+
+            $result = Get-RobocopyProgress -Job $mockJob
+
+            $result.FilesCopied | Should -Be 50
+        }
+    }
+
+    Context "Initialize-RobocopyProgressBufferType" {
+        It "Should compile and initialize the C# type" {
+            $result = Initialize-RobocopyProgressBufferType
+            $result | Should -Be $true
+        }
+
+        It "Should return true on subsequent calls (cached)" {
+            # First call (may or may not compile)
+            Initialize-RobocopyProgressBufferType | Out-Null
+
+            # Second call should return true immediately (cached)
+            $result = Initialize-RobocopyProgressBufferType
+            $result | Should -Be $true
+        }
+
+        It "Should create type with correct properties" {
+            Initialize-RobocopyProgressBufferType | Out-Null
+
+            $buffer = [Robocurse.RobocopyProgressBuffer]::new()
+
+            $buffer | Should -Not -BeNullOrEmpty
+            $buffer.BytesCopied | Should -Be 0
+            $buffer.FilesCopied | Should -Be 0
+            $buffer.CurrentFile | Should -Be ""
+            # ConcurrentQueue check - use variable to avoid pipeline enumeration issues
+            # When piped, empty ConcurrentQueue returns nothing which Pester sees as null
+            $linesNotNull = ($null -ne $buffer.Lines)
+            $linesNotNull | Should -Be $true
+            $buffer.Lines.GetType().Name | Should -Match 'ConcurrentQueue'
+            $buffer.LineCount | Should -Be 0
+        }
+
+        It "Should support thread-safe operations" {
+            Initialize-RobocopyProgressBufferType | Out-Null
+
+            $buffer = [Robocurse.RobocopyProgressBuffer]::new()
+
+            # Test AddCompletedBytes
+            $newTotal = $buffer.AddCompletedBytes(1000)
+            $newTotal | Should -Be 1000
+            $buffer.CompletedFilesBytes | Should -Be 1000
+
+            # Test current file progress
+            $buffer.CurrentFileSize = 5000
+            $buffer.CurrentFileBytes = 2500
+            # BytesCopied = CompletedFilesBytes + CurrentFileBytes
+            $buffer.BytesCopied | Should -Be 3500
+
+            # Test IncrementFiles
+            $newCount = $buffer.IncrementFiles()
+            $newCount | Should -Be 1
+            $buffer.FilesCopied | Should -Be 1
+
+            # Test Lines queue
+            $buffer.Lines.Enqueue("test line 1")
+            $buffer.Lines.Enqueue("test line 2")
+            $buffer.LineCount | Should -Be 2
+
+            # Test GetAllLines
+            $allLines = $buffer.GetAllLines()
+            $allLines.Count | Should -Be 2
+            $allLines[0] | Should -Be "test line 1"
+        }
+
+        It "Should track progress for multi-file copy scenario" {
+            Initialize-RobocopyProgressBufferType | Out-Null
+            $buffer = [Robocurse.RobocopyProgressBuffer]::new()
+
+            # Simulate: File 1 (1000 bytes) starts
+            $buffer.CurrentFileSize = 1000
+            $buffer.CurrentFileBytes = 0
+            $buffer.BytesCopied | Should -Be 0
+
+            # File 1 at 50%
+            $buffer.CurrentFileBytes = 500
+            $buffer.BytesCopied | Should -Be 500
+
+            # File 1 completes (100%)
+            $buffer.CurrentFileBytes = 1000
+            $buffer.BytesCopied | Should -Be 1000
+
+            # File 2 starts - finalize file 1
+            $buffer.AddCompletedBytes($buffer.CurrentFileSize)
+            $buffer.IncrementFiles()
+            $buffer.CurrentFileSize = 2000
+            $buffer.CurrentFileBytes = 0
+            # CompletedFilesBytes=1000, CurrentFileBytes=0
+            $buffer.BytesCopied | Should -Be 1000
+            $buffer.FilesCopied | Should -Be 1
+
+            # File 2 at 50%
+            $buffer.CurrentFileBytes = 1000
+            $buffer.BytesCopied | Should -Be 2000
+
+            # File 2 completes
+            $buffer.CurrentFileBytes = 2000
+            $buffer.BytesCopied | Should -Be 3000
         }
     }
 
@@ -807,8 +928,10 @@ Describe "Robocopy Wrapper" {
             Test-SafeRobocopyArgument -Value "C:\path; del *" | Should -Be $false
         }
 
-        It "Should reject command separator ampersand" {
-            Test-SafeRobocopyArgument -Value "C:\path & malicious" | Should -Be $false
+        It "Should allow ampersand in paths (valid Windows character)" {
+            Test-SafeRobocopyArgument -Value "C:\AT&T\Data" | Should -Be $true
+            Test-SafeRobocopyArgument -Value "D:\R&D\Projects" | Should -Be $true
+            Test-SafeRobocopyArgument -Value "E:\Ben & Jerry's" | Should -Be $true
         }
 
         It "Should reject command separator pipe" {
@@ -914,7 +1037,7 @@ Describe "Robocopy Wrapper" {
         It "Should throw when destination path contains injection" {
             { New-RobocopyArguments `
                 -SourcePath "C:\Source" `
-                -DestinationPath "D:\Dest & format C:" `
+                -DestinationPath "D:\Dest; format C:" `
                 -LogPath "C:\log.txt"
             } | Should -Throw "*unsafe*"
         }
@@ -958,7 +1081,7 @@ Describe "Robocopy Wrapper" {
                 -SourcePath "C:\Source" `
                 -DestinationPath "D:\Dest" `
                 -LogPath "C:\log.txt" `
-                -RobocopyOptions @{ ExcludeFiles = @("bad; del", "evil & cmd") }
+                -RobocopyOptions @{ ExcludeFiles = @("bad; del", "evil; cmd") }
 
             $argString = $args -join ' '
             $argString | Should -Not -Match '/XF'

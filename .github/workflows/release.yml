@@ -31,7 +31,10 @@ jobs:
             throw "Invalid version format: $version. Expected: X.Y.Z or X.Y.Z-prerelease"
           }
 
+          # VERSION = semantic version without 'v' (for module manifest)
+          # DISPLAY_VERSION = full tag with 'v' (for display in app)
           "VERSION=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "DISPLAY_VERSION=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "TAG=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "Parsed version: $version from tag: $tag"
 
@@ -71,8 +74,9 @@ jobs:
       - name: Build monolith
         shell: pwsh
         run: |
-          $version = '${{ steps.version.outputs.VERSION }}'
-          .\build\Build-Robocurse.ps1 -OutputPath dist/Robocurse.ps1 -Version $version
+          # Use DISPLAY_VERSION (with 'v' prefix) for the runtime version variable
+          $displayVersion = '${{ steps.version.outputs.DISPLAY_VERSION }}'
+          .\build\Build-Robocurse.ps1 -OutputPath dist/Robocurse.ps1 -Version $displayVersion
 
       - name: Generate SHA256 hash
         id: hash

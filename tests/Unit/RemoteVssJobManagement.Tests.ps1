@@ -118,8 +118,6 @@ InModuleScope 'Robocurse' {
                     Destination = "D:\Backup"
                     UseVSS = $true
                     ScanMode = "Smart"
-                    ChunkMaxSizeGB = 1
-                    ChunkMaxFiles = 1000
                     ChunkMaxDepth = 3
                 }
             }
@@ -223,8 +221,6 @@ InModuleScope 'Robocurse' {
                     Destination = "D:\Backup"
                     UseVSS = $true
                     ScanMode = "Smart"
-                    ChunkMaxSizeGB = 1
-                    ChunkMaxFiles = 1000
                     ChunkMaxDepth = 3
                 }
             }

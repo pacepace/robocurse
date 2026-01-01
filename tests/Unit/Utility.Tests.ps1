@@ -61,10 +61,21 @@ InModuleScope 'Robocurse' {
                 Test-SafeRobocopyArgument -Value "~*" | Should -Be $true
             }
 
-            It "Should reject command separators" {
+            It "Should allow ampersand in paths (valid Windows character)" {
+                Test-SafeRobocopyArgument -Value "Y:\AT&T" | Should -Be $true
+                Test-SafeRobocopyArgument -Value "C:\R&D" | Should -Be $true
+                Test-SafeRobocopyArgument -Value "D:\Ben & Jerry's" | Should -Be $true
+                Test-SafeRobocopyArgument -Value "C:\path & more" | Should -Be $true
+            }
+
+            It "Should reject semicolon (potential injection)" {
                 Test-SafeRobocopyArgument -Value "path; del *" | Should -Be $false
-                Test-SafeRobocopyArgument -Value "path & calc" | Should -Be $false
+                Test-SafeRobocopyArgument -Value "C:\data;backup" | Should -Be $false
+            }
+
+            It "Should reject pipe (invalid Windows character)" {
                 Test-SafeRobocopyArgument -Value "path | cmd" | Should -Be $false
+                Test-SafeRobocopyArgument -Value "C:\bad|path" | Should -Be $false
             }
 
             It "Should reject shell redirectors" {

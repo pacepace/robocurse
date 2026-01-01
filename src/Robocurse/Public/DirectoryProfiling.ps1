@@ -11,6 +11,276 @@ $script:ProfileCacheHits = 0
 $script:ProfileCacheMisses = 0
 $script:ProfileCacheEvictions = 0
 
+# DirectoryNode class for single-pass tree building
+# Used to avoid re-enumerating overlapping directory trees during chunking
+class DirectoryNode {
+    [string]$Path
+    [int64]$DirectSize        # Size of files directly in this directory
+    [int]$DirectFileCount     # Files directly in this directory
+    [int64]$TotalSize         # Aggregated size including all descendants
+    [int]$TotalFileCount      # Aggregated file count including all descendants
+    [System.Collections.Generic.Dictionary[string, DirectoryNode]]$Children
+
+    DirectoryNode([string]$path) {
+        $this.Path = $path
+        $this.DirectSize = 0
+        $this.DirectFileCount = 0
+        $this.TotalSize = 0
+        $this.TotalFileCount = 0
+        $this.Children = [System.Collections.Generic.Dictionary[string, DirectoryNode]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+    }
+}
+
+function Update-TreeTotals {
+    <#
+    .SYNOPSIS
+        Recursively aggregates sizes from leaves up to root
+    .DESCRIPTION
+        Performs bottom-up traversal to sum DirectSize and DirectFileCount
+        from all descendants into TotalSize and TotalFileCount.
+    .PARAMETER Node
+        The DirectoryNode to update (and all its descendants)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [DirectoryNode]$Node
+    )
+
+    # Recursively update all children first (bottom-up)
+    foreach ($child in $Node.Children.Values) {
+        Update-TreeTotals -Node $child
+    }
+
+    # Start with direct values
+    $Node.TotalSize = $Node.DirectSize
+    $Node.TotalFileCount = $Node.DirectFileCount
+
+    # Add all children's totals
+    foreach ($child in $Node.Children.Values) {
+        $Node.TotalSize += $child.TotalSize
+        $Node.TotalFileCount += $child.TotalFileCount
+    }
+}
+
+function New-DirectoryTree {
+    <#
+    .SYNOPSIS
+        Creates an in-memory directory tree from a single robocopy enumeration
+    .DESCRIPTION
+        Runs robocopy /L ONCE on the root path and parses the output to build
+        a tree structure with sizes at each node. This avoids the performance
+        problem of re-enumerating overlapping subtrees during chunking.
+
+        The tree is then used for O(1) size lookups during chunk decisions.
+    .PARAMETER RootPath
+        The root directory path to enumerate
+    .PARAMETER State
+        Optional OrchestrationState for progress updates during enumeration
+    .OUTPUTS
+        DirectoryNode representing the root with all descendants populated
+    .EXAMPLE
+        $tree = New-DirectoryTree -RootPath "C:\Data"
+        $tree.TotalSize  # Total size of entire tree
+        $tree.Children["Subdir"].TotalSize  # Size of specific subdirectory
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$RootPath,
+
+        [object]$State = $null
+    )
+
+    # Normalize root path (remove trailing slash for consistent matching)
+    $normalizedRoot = $RootPath.TrimEnd('\')
+
+    # Run robocopy ONCE to enumerate entire tree
+    if ($State) {
+        $State.CurrentActivity = "Starting directory enumeration..."
+    }
+
+    $output = Invoke-RobocopyList -Source $RootPath -State $State
+
+    # Create root node
+    $root = [DirectoryNode]::new($normalizedRoot)
+
+    # Dictionary for fast node lookup by path
+    $nodeMap = [System.Collections.Generic.Dictionary[string, DirectoryNode]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $nodeMap[$normalizedRoot] = $root
+
+    if ($State) {
+        $State.CurrentActivity = "Building directory tree..."
+        $State.ScanProgress = $output.Count
+    }
+
+    $lineCount = 0
+    $matchedLines = 0
+    # Track the current directory context - robocopy outputs files as relative to the last "New Dir"
+    $currentDir = $normalizedRoot
+
+    foreach ($line in $output) {
+        $lineCount++
+
+        # Skip empty lines
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        # Parse "New Dir [count] [absolutePath]" format FIRST
+        # NOTE: robocopy outputs ABSOLUTE paths for directories (e.g., "D:\subdir\")
+        # This MUST be parsed before files because it sets the current directory context
+        if ($line -match 'New Dir\s+\d+\s+(.+)$') {
+            $dirPath = $matches[1].Trim().TrimEnd('\')
+            # Update current directory context for subsequent file entries
+            $currentDir = $dirPath
+            # Skip if this is the root directory itself (already have root node)
+            if ($dirPath -ne $normalizedRoot -and -not [string]::IsNullOrEmpty($dirPath)) {
+                # Path is already absolute from robocopy - use directly
+                Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirPath -RootNode $root | Out-Null
+            }
+            $matchedLines++
+        }
+        # Parse "New File [size] [filename]" format
+        # NOTE: robocopy outputs just the FILENAME (not full path) - file is in $currentDir
+        elseif ($line -match 'New File\s+(\d+)\s+(.+)$') {
+            $fileSize = [int64]$matches[1]
+            # File is in the current directory context (set by last New Dir)
+            $dirFullPath = $currentDir
+
+            # Ensure parent node exists (create intermediate nodes if needed)
+            $parentNode = Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirFullPath -RootNode $root
+
+            # Add file to parent's direct counts
+            $parentNode.DirectSize += $fileSize
+            $parentNode.DirectFileCount++
+            $matchedLines++
+        }
+        # Fallback: old format "[size] [path]" (for compatibility with different robocopy versions)
+        # This format has directory info embedded in file paths (e.g., "subdir\file.txt")
+        elseif ($line -match '^\s+(\d+)\s+(.+)$') {
+            $size = [int64]$matches[1]
+            $pathValue = $matches[2].Trim()
+
+            if ($pathValue.EndsWith('\')) {
+                # It's a directory - path may be absolute or relative
+                $dirPath = $pathValue.TrimEnd('\')
+                $isAbsolute = $dirPath -match '^([A-Za-z]:|\\\\)'
+                if ($isAbsolute) {
+                    $currentDir = $dirPath
+                } else {
+                    $currentDir = Join-Path $normalizedRoot $dirPath
+                }
+                if ($currentDir -ne $normalizedRoot -and -not [string]::IsNullOrEmpty($currentDir)) {
+                    Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $currentDir -RootNode $root | Out-Null
+                }
+            } else {
+                # It's a file - path may contain directory components (e.g., "subdir\file.txt")
+                # Parse directory from the path and join with root
+                $dirRelPath = Split-Path -Path $pathValue -Parent
+                if ([string]::IsNullOrEmpty($dirRelPath)) {
+                    # File is directly in root
+                    $dirFullPath = $normalizedRoot
+                } else {
+                    # Determine if path is absolute
+                    $isAbsolute = $dirRelPath -match '^([A-Za-z]:|\\\\)'
+                    if ($isAbsolute) {
+                        $dirFullPath = $dirRelPath.TrimEnd('\')
+                    } else {
+                        $dirFullPath = Join-Path $normalizedRoot $dirRelPath
+                    }
+                }
+                $parentNode = Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirFullPath -RootNode $root
+                $parentNode.DirectSize += $size
+                $parentNode.DirectFileCount++
+            }
+            $matchedLines++
+        }
+
+        # Progress update every 1000 lines during parsing
+        if ($State -and ($lineCount % 1000 -eq 0)) {
+            $State.CurrentActivity = "Building tree..."
+            $State.ScanProgress = $lineCount
+        }
+    }
+
+    # Aggregate sizes from leaves up to root
+    if ($State) {
+        $State.CurrentActivity = "Calculating directory sizes..."
+    }
+
+    Update-TreeTotals -Node $root
+
+    Write-RobocurseLog "Built directory tree: $($nodeMap.Count) nodes, $($root.TotalFileCount) files, $([math]::Round($root.TotalSize / 1GB, 2)) GB" -Level 'Debug' -Component 'Profiling'
+
+    return $root
+}
+
+function Get-OrCreateNode {
+    <#
+    .SYNOPSIS
+        Gets an existing node or creates it (and any intermediate parents)
+    .DESCRIPTION
+        Helper function for New-DirectoryTree that ensures a node exists
+        for the given path, creating intermediate parent nodes as needed.
+    .PARAMETER NodeMap
+        Dictionary mapping paths to DirectoryNode instances for O(1) lookup
+    .PARAMETER RootPath
+        The root path of the tree being built (for determining parent boundaries)
+    .PARAMETER FullPath
+        The full path of the node to get or create
+    .PARAMETER RootNode
+        The root DirectoryNode to attach top-level children to
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.Generic.Dictionary[string, DirectoryNode]]$NodeMap,
+
+        [Parameter(Mandatory)]
+        [string]$RootPath,
+
+        [Parameter(Mandatory)]
+        [string]$FullPath,
+
+        [Parameter(Mandatory)]
+        [DirectoryNode]$RootNode
+    )
+
+    $normalizedPath = $FullPath.TrimEnd('\')
+
+    # Check if node already exists
+    if ($NodeMap.ContainsKey($normalizedPath)) {
+        return $NodeMap[$normalizedPath]
+    }
+
+    # Need to create this node and possibly parents
+    # Get parent path
+    $parentPath = Split-Path -Path $normalizedPath -Parent
+
+    if ([string]::IsNullOrEmpty($parentPath) -or $parentPath -eq $RootPath) {
+        # Parent is root
+        $parentNode = $RootNode
+    } else {
+        # Recursively ensure parent exists
+        $parentNode = Get-OrCreateNode -NodeMap $NodeMap -RootPath $RootPath -FullPath $parentPath -RootNode $RootNode
+    }
+
+    # Create this node
+    $newNode = [DirectoryNode]::new($normalizedPath)
+    $NodeMap[$normalizedPath] = $newNode
+
+    # Add to parent's children
+    $childName = Split-Path -Path $normalizedPath -Leaf
+    $parentNode.Children[$childName] = $newNode
+
+    return $newNode
+}
+
 function Get-ProfileCacheStatistics {
     <#
     .SYNOPSIS
@@ -77,28 +347,103 @@ function Reset-ProfileCacheStatistics {
 function Invoke-RobocopyList {
     <#
     .SYNOPSIS
-        Runs robocopy in list-only mode (wrapper for testing/mocking)
+        Runs robocopy in list-only mode with streaming progress updates
+    .DESCRIPTION
+        Uses ProcessStartInfo pattern from Robocopy.ps1:376-393 to capture stdout
+        and reads line-by-line to provide live progress updates during enumeration.
+        This prevents the GUI from appearing frozen on large network shares.
     .PARAMETER Source
         Source path to list
+    .PARAMETER State
+        Optional OrchestrationState object for progress updates
     .OUTPUTS
         Array of output lines from robocopy
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$Source
+        [string]$Source,
+
+        # Optional OrchestrationState for progress updates during enumeration
+        [object]$State = $null
     )
 
-    # Wrapper so we can mock this in tests
     # Use a non-existent temp path as destination - robocopy /L lists without creating it
     # Note: \\?\NULL doesn't work on all Windows versions, and src=dest doesn't list files
     $nullDest = Join-Path $env:TEMP "robocurse-null-$(Get-Random)"
-    $output = & robocopy $Source $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
-    # Ensure we always return an array (robocopy can return empty/null for root drives)
-    if ($null -eq $output) {
+
+    # Reuse ProcessStartInfo pattern from Start-RobocopyJob (Robocopy.ps1:376-393)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+
+    # Use validated robocopy path if available (set by Test-RobocopyAvailable in Robocopy.ps1)
+    if ($script:RobocopyPath) {
+        $psi.FileName = $script:RobocopyPath
+    } else {
+        $psi.FileName = "robocopy.exe"
+    }
+
+    # Quote paths properly for command line (handles paths with spaces)
+    # IMPORTANT: Trailing backslash before closing quote (e.g., "D:\") is interpreted as
+    # an escaped quote on the command line, corrupting the argument string.
+    # Remove trailing backslash from source path to avoid this issue.
+    $safeSource = $Source.TrimEnd('\')
+    $quotedSource = "`"$safeSource`""
+    $quotedDest = "`"$nullDest`""
+    # /NODCOPY improves performance by not copying directory attributes (see Microsoft KB)
+    $psi.Arguments = "$quotedSource $quotedDest /L /E /NJH /NJS /BYTES /R:0 /W:0 /NODCOPY"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    # Don't redirect stderr to avoid deadlock (see Robocopy.ps1:391-392)
+    $psi.RedirectStandardError = $false
+
+    $process = $null
+    $output = [System.Collections.ArrayList]::new()
+
+    try {
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $lineCount = 0
+
+        # Read line by line with progress updates (instead of ReadToEndAsync)
+        # This allows the GUI to show live progress during enumeration
+        while ($null -ne ($line = $process.StandardOutput.ReadLine())) {
+            $output.Add($line) | Out-Null
+            $lineCount++
+
+            # Update progress every 100 lines for responsive feedback
+            # Set ScanProgress for the progress bar area, keep CurrentActivity simple for chunks list
+            if ($State -and ($lineCount % 100 -eq 0)) {
+                $State.CurrentActivity = "Enumerating..."
+                $State.ScanProgress = $lineCount
+            }
+        }
+
+        $process.WaitForExit()
+
+        # Final count update
+        if ($State) {
+            $State.CurrentActivity = "Processing..."
+            $State.ScanProgress = $lineCount
+        }
+
+        Write-RobocurseLog "Enumerated $lineCount items from: $Source" -Level 'Debug' -Component 'Profiling'
+
+        return $output.ToArray()
+    }
+    catch {
+        Write-RobocurseLog "Error during robocopy enumeration of '$Source': $_" -Level 'Warning' -Component 'Profiling'
+        # Return whatever we collected so far, or empty array
+        if ($output.Count -gt 0) {
+            return $output.ToArray()
+        }
         return @()
     }
-    return @($output)
+    finally {
+        # Always dispose process handle to prevent handle leaks
+        if ($process) {
+            try { $process.Dispose() } catch { }
+        }
+    }
 }
 
 function ConvertFrom-RobocopyListOutput {
@@ -233,11 +578,11 @@ function Get-DirectoryProfile {
         }
     }
 
-    # Run robocopy list
+    # Run robocopy list with streaming progress
     Write-RobocurseLog "Profiling directory: $Path" -Level 'Debug' -Component 'Profiling'
 
     try {
-        $output = Invoke-RobocopyList -Source $Path
+        $output = Invoke-RobocopyList -Source $Path -State $State
 
         # Parse the output (pass State for progress counter updates)
         $parseResult = ConvertFrom-RobocopyListOutput -Output $output -State $State
@@ -557,7 +902,8 @@ function Get-DirectoryProfilesParallel {
                 # Run robocopy in list mode
                 # Use random temp path as destination - \\?\NULL breaks on some Windows versions
                 $nullDest = Join-Path $env:TEMP "robocurse-null-$(Get-Random)"
-                $output = & robocopy $Path $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
+                # /NODCOPY improves performance by not copying directory attributes
+                $output = & robocopy $Path $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 /NODCOPY 2>&1
 
                 $totalSize = 0
                 $fileCount = 0

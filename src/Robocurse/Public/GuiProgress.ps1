@@ -296,7 +296,13 @@ function Update-GuiProgressText {
     } else {
         "Speed: -- MB/s"
     }
-    $chunksText = "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
+
+    # During scanning/preparing phases, show item count instead of chunk count
+    $chunksText = if ($Status.Phase -in @('Preparing', 'Scanning') -and $Status.ScanProgress -gt 0) {
+        "Items: $($Status.ScanProgress)"
+    } else {
+        "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
+    }
 
     # Build current state for comparison
     $currentState = @{
@@ -391,7 +397,7 @@ function Get-ChunkDisplayItems {
         })
     }
 
-    # Add active jobs (typically small - MaxConcurrentJobs)
+    # 1. RUNNING JOBS AT TOP (most important - actively copying)
     foreach ($kvp in $script:OrchestrationState.ActiveJobs.ToArray()) {
         $job = $kvp.Value
 
@@ -425,7 +431,32 @@ function Get-ChunkDisplayItems {
         })
     }
 
-    # Add failed chunks (show all - usually small or indicates problems)
+    # 2. PENDING CHUNKS (first N with summary)
+    $pendingSnapshot = $script:OrchestrationState.ChunkQueue.ToArray()
+    $pendingToShow = [Math]::Min($pendingSnapshot.Length, 10)
+    for ($i = 0; $i -lt $pendingToShow; $i++) {
+        $chunk = $pendingSnapshot[$i]
+        $chunkDisplayItems.Add([PSCustomObject]@{
+            ChunkId = $chunk.ChunkId
+            SourcePath = $chunk.SourcePath
+            Status = "Pending"
+            Progress = 0
+            ProgressScale = [double]0
+            Speed = "--"
+        })
+    }
+    if ($pendingSnapshot.Length -gt $pendingToShow) {
+        $chunkDisplayItems.Add([PSCustomObject]@{
+            ChunkId = "--"
+            SourcePath = "... and $($pendingSnapshot.Length - $pendingToShow) more pending"
+            Status = "Pending"
+            Progress = 0
+            ProgressScale = [double]0
+            Speed = "--"
+        })
+    }
+
+    # 3. FAILED CHUNKS (show all - usually small or indicates problems)
     foreach ($chunk in $script:OrchestrationState.FailedChunks.ToArray()) {
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = $chunk.ChunkId
@@ -441,11 +472,9 @@ function Get-ChunkDisplayItems {
         })
     }
 
-    # Add completed chunks - limit to last N to prevent UI lag
+    # 4. COMPLETED CHUNKS - show ALL (user requested full list)
     $completedSnapshot = $script:OrchestrationState.CompletedChunks.ToArray()
-    $startIndex = [Math]::Max(0, $completedSnapshot.Length - $MaxCompletedItems)
-    for ($i = $startIndex; $i -lt $completedSnapshot.Length; $i++) {
-        $chunk = $completedSnapshot[$i]
+    foreach ($chunk in $completedSnapshot) {
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = $chunk.ChunkId
             SourcePath = $chunk.SourcePath
@@ -524,6 +553,7 @@ function Update-GuiProgress {
     param()
 
     try {
+        # BytesComplete is updated by the background thread in Invoke-ReplicationTick
         $status = Get-OrchestrationStatus
 
         # Update progress text (always - lightweight)
@@ -584,6 +614,13 @@ function Update-GuiProgress {
                 $script:Controls.txtStatus.Text = $newText
                 $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::CornflowerBlue
                 $script:Window.UpdateLayout()
+            }
+            # Show replication progress during active copying
+            elseif ($script:OrchestrationState.Phase -eq 'Replicating') {
+                $completed = $script:OrchestrationState.CompletedCount
+                $total = $script:OrchestrationState.TotalChunks
+                $script:Controls.txtStatus.Text = "Replicating... ($completed/$total chunks)"
+                $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::LimeGreen
             }
         }
 
