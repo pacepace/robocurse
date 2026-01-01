@@ -135,33 +135,71 @@ BeforeAll {
             # Ignore cleanup errors
         }
     }
+
+    # Clean up ANY orphaned test tasks from previous runs (different GUIDs)
+    # This ensures we start with a clean slate regardless of previous test failures
+    # Run unconditionally - if we can query tasks, we can delete them
+    try {
+        $orphanedTasks = Get-ScheduledTask -ErrorAction Stop |
+            Where-Object { $_.TaskName -like 'RobocurseTest_*' -or $_.TaskName -like 'Robocurse-Profile-RobocurseTest_*' }
+
+        $orphanCount = 0
+        $failedCount = 0
+        foreach ($task in $orphanedTasks) {
+            try {
+                Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false -ErrorAction Stop
+                $orphanCount++
+            }
+            catch {
+                $failedCount++
+            }
+        }
+
+        if ($orphanCount -gt 0) {
+            Write-Warning "Cleaned up $orphanCount orphaned test task(s) from previous runs"
+        }
+        if ($failedCount -gt 0) {
+            Write-Warning "Failed to clean up $failedCount orphaned test task(s) - may require elevated permissions"
+        }
+    }
+    catch {
+        Write-Warning "Could not query scheduled tasks for cleanup: $($_.Exception.Message)"
+    }
 }
 
 AfterAll {
-    # Cleanup ALL test tasks that were created
-    if ($script:CanCreateTasks -and $script:CreatedTasks) {
+    # Cleanup ALL test tasks that were created during this run
+    if ($script:CreatedTasks) {
         foreach ($taskName in $script:CreatedTasks) {
             Remove-TestTask -TaskName $taskName
         }
     }
 
-    # Also cleanup any orphaned test tasks matching our prefix pattern
-    if ($script:CanCreateTasks -and $script:TestTaskPrefix) {
-        try {
-            $orphanedTasks = Get-ScheduledTask -TaskName "$script:TestTaskPrefix*" -ErrorAction SilentlyContinue
-            foreach ($task in $orphanedTasks) {
-                Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false -ErrorAction SilentlyContinue
-            }
+    # Final cleanup: Remove ALL RobocurseTest tasks to ensure we leave no orphans
+    # This catches any tasks that might have been created but not tracked
+    # Run unconditionally - if we can query tasks, we can delete them
+    try {
+        $allTestTasks = Get-ScheduledTask -ErrorAction Stop |
+            Where-Object { $_.TaskName -like 'RobocurseTest_*' -or $_.TaskName -like 'Robocurse-Profile-RobocurseTest_*' }
 
-            # Also cleanup any Robocurse-Profile- tasks that were created by profile tests
-            $profileTasks = Get-ScheduledTask -TaskName "Robocurse-Profile-$script:TestTaskPrefix*" -ErrorAction SilentlyContinue
-            foreach ($task in $profileTasks) {
-                Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        $cleanedCount = 0
+        $failedCount = 0
+        foreach ($task in $allTestTasks) {
+            try {
+                Unregister-ScheduledTask -TaskName $task.TaskName -Confirm:$false -ErrorAction Stop
+                $cleanedCount++
+            }
+            catch {
+                $failedCount++
             }
         }
-        catch {
-            # Ignore cleanup errors
+
+        if ($failedCount -gt 0) {
+            Write-Warning "AfterAll: Failed to clean up $failedCount test task(s) - may require elevated permissions"
         }
+    }
+    catch {
+        Write-Warning "AfterAll: Could not query scheduled tasks for cleanup: $($_.Exception.Message)"
     }
 
     # Cleanup temp directory

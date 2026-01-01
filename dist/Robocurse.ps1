@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-31 21:52:49
+    Built: 2025-12-31 22:30:22
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -8186,7 +8186,11 @@ function Remove-NetworkMappingTracking {
     $letter = $DriveLetter.TrimEnd(':')
 
     try {
-        $trackedMappings = @(Get-Content $script:NetworkMappingTrackingFile -Raw | ConvertFrom-Json)
+        # Read and parse JSON separately to avoid pipeline issues with array wrapping
+        $rawContent = Get-Content $script:NetworkMappingTrackingFile -Raw
+        $parsed = ConvertFrom-Json $rawContent
+        $trackedMappings = @($parsed)
+
         $remainingMappings = @($trackedMappings | Where-Object { $_.DriveLetter -ne "$letter`:" -and $_.DriveLetter -ne $letter })
 
         if ($remainingMappings.Count -eq 0) {
@@ -8195,7 +8199,8 @@ function Remove-NetworkMappingTracking {
                 -Level 'Debug' -Component 'NetworkMapping'
         }
         else {
-            $remainingMappings | ConvertTo-Json -Depth 5 | Set-Content $script:NetworkMappingTrackingFile -Encoding UTF8
+            # Use -InputObject to preserve array structure (piping unrolls arrays)
+            ConvertTo-Json -InputObject $remainingMappings -Depth 5 | Set-Content $script:NetworkMappingTrackingFile -Encoding UTF8
         }
 
         Write-RobocurseLog -Message "Removed mapping from tracking: $letter" `

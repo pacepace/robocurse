@@ -238,5 +238,248 @@ InModuleScope 'Robocurse' {
                     Should -Throw "*Access denied*"
             }
         }
+
+        Context "Network Mapping Tracking" {
+            BeforeEach {
+                # Set up isolated tracking directory
+                $script:TestTrackingDir = Join-Path $env:TEMP "RobocurseTrackingTest_$(Get-Random)"
+                New-Item -Path $script:TestTrackingDir -ItemType Directory -Force | Out-Null
+                $script:LogPath = $script:TestTrackingDir
+                Initialize-NetworkMappingTracking
+            }
+
+            AfterEach {
+                if (Test-Path $script:TestTrackingDir) {
+                    Remove-Item $script:TestTrackingDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            It "Add-NetworkMappingTracking should create tracking file" {
+                $mapping = [PSCustomObject]@{
+                    DriveLetter = 'Z'
+                    Root = '\\server\share'
+                    OriginalPath = '\\server\share\data'
+                    MappedPath = 'Z:\data'
+                }
+
+                Add-NetworkMappingTracking -Mapping $mapping
+
+                Test-Path $script:NetworkMappingTrackingFile | Should -Be $true
+                $content = Get-Content $script:NetworkMappingTrackingFile -Raw | ConvertFrom-Json
+                @($content).Count | Should -Be 1
+                $content.DriveLetter | Should -Be 'Z'
+                $content.Root | Should -Be '\\server\share'
+            }
+
+            It "Add-NetworkMappingTracking should append to existing file" {
+                $mapping1 = [PSCustomObject]@{
+                    DriveLetter = 'Z'
+                    Root = '\\server1\share'
+                    OriginalPath = '\\server1\share\data'
+                    MappedPath = 'Z:\data'
+                }
+                $mapping2 = [PSCustomObject]@{
+                    DriveLetter = 'Y'
+                    Root = '\\server2\share'
+                    OriginalPath = '\\server2\share\backup'
+                    MappedPath = 'Y:\backup'
+                }
+
+                Add-NetworkMappingTracking -Mapping $mapping1
+                Add-NetworkMappingTracking -Mapping $mapping2
+
+                $content = Get-Content $script:NetworkMappingTrackingFile -Raw | ConvertFrom-Json
+                @($content).Count | Should -Be 2
+            }
+
+            It "Remove-NetworkMappingTracking should remove mapping from file" {
+                $mapping1 = [PSCustomObject]@{
+                    DriveLetter = 'Z'
+                    Root = '\\server1\share'
+                    OriginalPath = '\\server1\share'
+                    MappedPath = 'Z:\'
+                }
+                $mapping2 = [PSCustomObject]@{
+                    DriveLetter = 'Y'
+                    Root = '\\server2\share'
+                    OriginalPath = '\\server2\share'
+                    MappedPath = 'Y:\'
+                }
+
+                Add-NetworkMappingTracking -Mapping $mapping1
+                Add-NetworkMappingTracking -Mapping $mapping2
+
+                Remove-NetworkMappingTracking -DriveLetter 'Z'
+
+                $content = @(Get-Content $script:NetworkMappingTrackingFile -Raw | ConvertFrom-Json)
+                $content.Count | Should -Be 1
+                $content[0].DriveLetter | Should -Be 'Y'
+            }
+
+            It "Remove-NetworkMappingTracking should delete file when last mapping removed" {
+                $mapping = [PSCustomObject]@{
+                    DriveLetter = 'Z'
+                    Root = '\\server\share'
+                    OriginalPath = '\\server\share'
+                    MappedPath = 'Z:\'
+                }
+
+                Add-NetworkMappingTracking -Mapping $mapping
+                Remove-NetworkMappingTracking -DriveLetter 'Z'
+
+                Test-Path $script:NetworkMappingTrackingFile | Should -Be $false
+            }
+        }
+
+        Context "Clear-OrphanNetworkMappings" {
+            BeforeEach {
+                # Set up isolated tracking directory
+                $script:TestTrackingDir = Join-Path $env:TEMP "RobocurseOrphanTest_$(Get-Random)"
+                New-Item -Path $script:TestTrackingDir -ItemType Directory -Force | Out-Null
+                $script:LogPath = $script:TestTrackingDir
+                Initialize-NetworkMappingTracking
+            }
+
+            AfterEach {
+                if (Test-Path $script:TestTrackingDir) {
+                    Remove-Item $script:TestTrackingDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            It "Should return 0 when no tracking file exists" {
+                $result = Clear-OrphanNetworkMappings
+                $result | Should -Be 0
+            }
+
+            It "Should clean up tracking file when drives no longer exist" {
+                # Create tracking file with non-existent mapping
+                $trackingData = @(
+                    @{ DriveLetter = "Q:"; Root = "\\nonexistent\share"; OriginalPath = "\\nonexistent\share"; MappedPath = "Q:\" }
+                )
+                $trackingData | ConvertTo-Json | Set-Content $script:NetworkMappingTrackingFile
+
+                Mock Get-PSDrive { $null } -ParameterFilter { $Name -eq 'Q' }
+
+                Clear-OrphanNetworkMappings
+
+                Test-Path $script:NetworkMappingTrackingFile | Should -Be $false
+            }
+
+            It "Should remove drive if it matches tracked mapping" {
+                Mock Get-PSDrive {
+                    [PSCustomObject]@{ Name = "Q"; Root = "\\server\share" }
+                } -ParameterFilter { $Name -eq 'Q' }
+                Mock Remove-PSDrive { }
+
+                $trackingData = @(
+                    @{ DriveLetter = "Q:"; Root = "\\server\share"; OriginalPath = "\\server\share"; MappedPath = "Q:\" }
+                )
+                $trackingData | ConvertTo-Json | Set-Content $script:NetworkMappingTrackingFile
+
+                $result = Clear-OrphanNetworkMappings
+
+                $result | Should -Be 1
+                Should -Invoke Remove-PSDrive -Times 1 -ParameterFilter { $Name -eq 'Q' }
+            }
+
+            It "Should not remove drive if it points to different location" {
+                Mock Get-PSDrive {
+                    [PSCustomObject]@{ Name = "Q"; Root = "\\different\server" }
+                } -ParameterFilter { $Name -eq 'Q' }
+                Mock Remove-PSDrive { }
+
+                $trackingData = @(
+                    @{ DriveLetter = "Q:"; Root = "\\server\share"; OriginalPath = "\\server\share"; MappedPath = "Q:\" }
+                )
+                $trackingData | ConvertTo-Json | Set-Content $script:NetworkMappingTrackingFile
+
+                $result = Clear-OrphanNetworkMappings
+
+                $result | Should -Be 0
+                Should -Invoke Remove-PSDrive -Times 0
+            }
+
+            It "Should support -WhatIf" {
+                Mock Get-PSDrive {
+                    [PSCustomObject]@{ Name = "Q"; Root = "\\server\share" }
+                } -ParameterFilter { $Name -eq 'Q' }
+                Mock Remove-PSDrive { }
+
+                $trackingData = @(
+                    @{ DriveLetter = "Q:"; Root = "\\server\share" }
+                )
+                $trackingData | ConvertTo-Json | Set-Content $script:NetworkMappingTrackingFile
+
+                Clear-OrphanNetworkMappings -WhatIf
+
+                Should -Invoke Remove-PSDrive -Times 0
+                Test-Path $script:NetworkMappingTrackingFile | Should -Be $true
+            }
+        }
+
+        Context "Mount-SingleNetworkPath tracking integration" {
+            BeforeEach {
+                # Set up isolated tracking directory
+                $script:TestTrackingDir = Join-Path $env:TEMP "RobocurseMountTrackTest_$(Get-Random)"
+                New-Item -Path $script:TestTrackingDir -ItemType Directory -Force | Out-Null
+                $script:LogPath = $script:TestTrackingDir
+                Initialize-NetworkMappingTracking
+
+                Mock Get-PSDrive {
+                    @([PSCustomObject]@{ Name = 'C'; Provider = @{ Name = 'FileSystem' }; DisplayRoot = $null })
+                } -ParameterFilter { $PSProvider -eq 'FileSystem' }
+                Mock New-PSDrive { }
+                Mock Get-ChildItem { @() }
+            }
+
+            AfterEach {
+                if (Test-Path $script:TestTrackingDir) {
+                    Remove-Item $script:TestTrackingDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            It "Should add mapping to tracking file when mounted" {
+                Mount-SingleNetworkPath -UncPath '\\server\share\data'
+
+                Test-Path $script:NetworkMappingTrackingFile | Should -Be $true
+                $content = Get-Content $script:NetworkMappingTrackingFile -Raw | ConvertFrom-Json
+                @($content).Count | Should -Be 1
+                $content.Root | Should -Be '\\server\share'
+            }
+        }
+
+        Context "Dismount-NetworkPaths tracking integration" {
+            BeforeEach {
+                # Set up isolated tracking directory
+                $script:TestTrackingDir = Join-Path $env:TEMP "RobocurseDismountTrackTest_$(Get-Random)"
+                New-Item -Path $script:TestTrackingDir -ItemType Directory -Force | Out-Null
+                $script:LogPath = $script:TestTrackingDir
+                Initialize-NetworkMappingTracking
+
+                Mock Remove-PSDrive { }
+            }
+
+            AfterEach {
+                if (Test-Path $script:TestTrackingDir) {
+                    Remove-Item $script:TestTrackingDir -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+
+            It "Should remove mapping from tracking file when dismounted" {
+                # Pre-populate tracking file
+                $trackingData = @(
+                    @{ DriveLetter = "Z:"; Root = "\\server\share"; OriginalPath = "\\server\share"; MappedPath = "Z:\" }
+                )
+                $trackingData | ConvertTo-Json | Set-Content $script:NetworkMappingTrackingFile
+
+                $mappings = @(
+                    [PSCustomObject]@{ DriveLetter = 'Z'; Root = '\\server\share' }
+                )
+
+                Dismount-NetworkPaths -Mappings $mappings
+
+                Test-Path $script:NetworkMappingTrackingFile | Should -Be $false
+            }
+        }
     }
 }
