@@ -10,6 +10,11 @@
 $script:OrchestrationTypeInitialized = $false
 $script:OrchestrationState = $null
 
+# Running profile tracking - prevents the same profile from being run twice simultaneously
+# Uses named mutexes which work across processes and are auto-released on crash
+# Key: profile name, Value: mutex object (must be held to keep the lock)
+$script:RunningProfileMutexes = [System.Collections.Concurrent.ConcurrentDictionary[string, System.Threading.Mutex]]::new()
+
 function Initialize-OrchestrationStateType {
     <#
     .SYNOPSIS
@@ -742,3 +747,272 @@ function Get-OrchestrationState {
 
     return $script:OrchestrationState
 }
+
+#region Running Profile Tracking
+
+function Get-ProfileMutexName {
+    <#
+    .SYNOPSIS
+        Gets the named mutex name for a profile
+    .DESCRIPTION
+        Creates a consistent, safe mutex name for a profile.
+        Uses Global\ prefix so mutex is visible across all sessions.
+    .PARAMETER ProfileName
+        Name of the profile
+    .OUTPUTS
+        Mutex name string
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    # Sanitize profile name for use in mutex name (replace invalid characters)
+    $safeName = $ProfileName -replace '[\\/:*?"<>|]', '_'
+    return "Global\RobocurseProfile_$safeName"
+}
+
+function Test-ProfileRunning {
+    <#
+    .SYNOPSIS
+        Checks if a profile is currently running
+    .DESCRIPTION
+        Uses named mutex to determine if a profile with the given name
+        is already running in ANY process. This works across processes
+        and handles crashes (mutex auto-released when process dies).
+    .PARAMETER ProfileName
+        Name of the profile to check
+    .OUTPUTS
+        $true if the profile is currently running, $false otherwise
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    # First check our local dictionary (we might already own it)
+    if ($script:RunningProfileMutexes.ContainsKey($ProfileName)) {
+        return $true
+    }
+
+    # Try to acquire the mutex with zero timeout to test if it's held
+    $mutexName = Get-ProfileMutexName -ProfileName $ProfileName
+    $mutex = $null
+    $acquired = $false
+
+    try {
+        $createdNew = $false
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName, [ref]$createdNew)
+
+        # Try to acquire with 0 timeout (immediate check)
+        $acquired = $mutex.WaitOne(0)
+
+        if ($acquired) {
+            # We acquired it, so profile was NOT running. Release immediately.
+            $mutex.ReleaseMutex()
+            return $false
+        }
+        else {
+            # Couldn't acquire, profile IS running
+            return $true
+        }
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # Previous owner crashed - mutex is now ours, so profile was NOT running
+        # Release it since we're just testing
+        if ($mutex) {
+            try { $mutex.ReleaseMutex() } catch { }
+        }
+        return $false
+    }
+    finally {
+        if ($mutex) {
+            $mutex.Dispose()
+        }
+    }
+}
+
+function Register-RunningProfile {
+    <#
+    .SYNOPSIS
+        Registers a profile as running by acquiring a named mutex
+    .DESCRIPTION
+        Acquires a system-wide named mutex for this profile. This prevents
+        duplicate runs across:
+        - Multiple PowerShell sessions
+        - Multiple scheduled task instances
+        - GUI and CLI running simultaneously
+
+        The mutex is automatically released by Windows if the process crashes.
+    .PARAMETER ProfileName
+        Name of the profile to register
+    .OUTPUTS
+        $true if registration succeeded (profile was not running),
+        $false if profile was already running
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    # Check if we already own this mutex
+    if ($script:RunningProfileMutexes.ContainsKey($ProfileName)) {
+        Write-RobocurseLog -Message "Profile '$ProfileName' mutex already owned by this process" `
+            -Level 'Debug' -Component 'ProfileTracking'
+        return $true
+    }
+
+    $mutexName = Get-ProfileMutexName -ProfileName $ProfileName
+    $mutex = $null
+    $acquired = $false
+
+    try {
+        $createdNew = $false
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName, [ref]$createdNew)
+
+        # Try to acquire with 0 timeout (don't wait)
+        $acquired = $mutex.WaitOne(0)
+
+        if ($acquired) {
+            # Store the mutex so we keep ownership and can release it later
+            if ($script:RunningProfileMutexes.TryAdd($ProfileName, $mutex)) {
+                Write-RobocurseLog -Message "Profile '$ProfileName' registered as running (mutex acquired)" `
+                    -Level 'Debug' -Component 'ProfileTracking'
+                return $true
+            }
+            else {
+                # Race condition - another thread in this process added it
+                $mutex.ReleaseMutex()
+                $mutex.Dispose()
+                return $true
+            }
+        }
+        else {
+            # Couldn't acquire - another process holds it
+            Write-RobocurseLog -Message "Profile '$ProfileName' is already running in another process" `
+                -Level 'Warning' -Component 'ProfileTracking'
+            $mutex.Dispose()
+            return $false
+        }
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # Previous owner crashed - we now own the mutex
+        if ($script:RunningProfileMutexes.TryAdd($ProfileName, $mutex)) {
+            Write-RobocurseLog -Message "Profile '$ProfileName' registered (recovered abandoned mutex from crashed process)" `
+                -Level 'Warning' -Component 'ProfileTracking'
+            return $true
+        }
+        else {
+            try { $mutex.ReleaseMutex() } catch { }
+            $mutex.Dispose()
+            return $true
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to acquire profile mutex for '$ProfileName': $($_.Exception.Message)" `
+            -Level 'Error' -Component 'ProfileTracking'
+        if ($mutex) { $mutex.Dispose() }
+        return $false
+    }
+}
+
+function Unregister-RunningProfile {
+    <#
+    .SYNOPSIS
+        Unregisters a profile by releasing its mutex
+    .DESCRIPTION
+        Releases the named mutex for a profile, allowing other processes
+        to run it. Called when a profile completes or is stopped.
+    .PARAMETER ProfileName
+        Name of the profile to unregister
+    .OUTPUTS
+        $true if profile was unregistered, $false if it wasn't registered
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    $mutex = $null
+    $removed = $script:RunningProfileMutexes.TryRemove($ProfileName, [ref]$mutex)
+
+    if ($removed -and $mutex) {
+        try {
+            $mutex.ReleaseMutex()
+            Write-RobocurseLog -Message "Profile '$ProfileName' unregistered (mutex released)" `
+                -Level 'Debug' -Component 'ProfileTracking'
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to release mutex for '$ProfileName': $($_.Exception.Message)" `
+                -Level 'Warning' -Component 'ProfileTracking'
+        }
+        finally {
+            $mutex.Dispose()
+        }
+        return $true
+    }
+
+    return $false
+}
+
+function Get-RunningProfiles {
+    <#
+    .SYNOPSIS
+        Returns list of profiles registered as running in this process
+    .DESCRIPTION
+        Returns profiles that THIS process has registered as running.
+        Does not detect profiles running in other processes (use Test-ProfileRunning for that).
+    .OUTPUTS
+        Array of profile name strings
+    #>
+    [CmdletBinding()]
+    param()
+
+    return @($script:RunningProfileMutexes.Keys)
+}
+
+function Clear-RunningProfiles {
+    <#
+    .SYNOPSIS
+        Releases all profile mutexes held by this process
+    .DESCRIPTION
+        Releases all profile mutexes and clears the dictionary.
+        Used during initialization or for cleanup after abnormal termination.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $count = $script:RunningProfileMutexes.Count
+    if ($count -eq 0) {
+        return
+    }
+
+    foreach ($kvp in $script:RunningProfileMutexes.ToArray()) {
+        $profileName = $kvp.Key
+        $mutex = $kvp.Value
+
+        try {
+            $mutex.ReleaseMutex()
+        }
+        catch {
+            # Ignore release errors during cleanup
+        }
+        finally {
+            try { $mutex.Dispose() } catch { }
+        }
+
+        $script:RunningProfileMutexes.TryRemove($profileName, [ref]$null) | Out-Null
+    }
+
+    Write-RobocurseLog -Message "Cleared $count running profile registration(s)" `
+        -Level 'Debug' -Component 'ProfileTracking'
+}
+
+#endregion Running Profile Tracking

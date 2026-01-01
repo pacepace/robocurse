@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.2c95b6b - Built: 2026-01-01 08:39:54
+    Version: dev.f75fb91 - Built: 2026-01-01 09:51:04
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.2c95b6b'
+$script:RobocurseVersion = 'dev.f75fb91'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -6890,6 +6890,11 @@ function Test-ChunkAlreadyCompleted {
 $script:OrchestrationTypeInitialized = $false
 $script:OrchestrationState = $null
 
+# Running profile tracking - prevents the same profile from being run twice simultaneously
+# Uses named mutexes which work across processes and are auto-released on crash
+# Key: profile name, Value: mutex object (must be held to keep the lock)
+$script:RunningProfileMutexes = [System.Collections.Concurrent.ConcurrentDictionary[string, System.Threading.Mutex]]::new()
+
 function Initialize-OrchestrationStateType {
     <#
     .SYNOPSIS
@@ -7623,6 +7628,275 @@ function Get-OrchestrationState {
     return $script:OrchestrationState
 }
 
+#region Running Profile Tracking
+
+function Get-ProfileMutexName {
+    <#
+    .SYNOPSIS
+        Gets the named mutex name for a profile
+    .DESCRIPTION
+        Creates a consistent, safe mutex name for a profile.
+        Uses Global\ prefix so mutex is visible across all sessions.
+    .PARAMETER ProfileName
+        Name of the profile
+    .OUTPUTS
+        Mutex name string
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    # Sanitize profile name for use in mutex name (replace invalid characters)
+    $safeName = $ProfileName -replace '[\\/:*?"<>|]', '_'
+    return "Global\RobocurseProfile_$safeName"
+}
+
+function Test-ProfileRunning {
+    <#
+    .SYNOPSIS
+        Checks if a profile is currently running
+    .DESCRIPTION
+        Uses named mutex to determine if a profile with the given name
+        is already running in ANY process. This works across processes
+        and handles crashes (mutex auto-released when process dies).
+    .PARAMETER ProfileName
+        Name of the profile to check
+    .OUTPUTS
+        $true if the profile is currently running, $false otherwise
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    # First check our local dictionary (we might already own it)
+    if ($script:RunningProfileMutexes.ContainsKey($ProfileName)) {
+        return $true
+    }
+
+    # Try to acquire the mutex with zero timeout to test if it's held
+    $mutexName = Get-ProfileMutexName -ProfileName $ProfileName
+    $mutex = $null
+    $acquired = $false
+
+    try {
+        $createdNew = $false
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName, [ref]$createdNew)
+
+        # Try to acquire with 0 timeout (immediate check)
+        $acquired = $mutex.WaitOne(0)
+
+        if ($acquired) {
+            # We acquired it, so profile was NOT running. Release immediately.
+            $mutex.ReleaseMutex()
+            return $false
+        }
+        else {
+            # Couldn't acquire, profile IS running
+            return $true
+        }
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # Previous owner crashed - mutex is now ours, so profile was NOT running
+        # Release it since we're just testing
+        if ($mutex) {
+            try { $mutex.ReleaseMutex() } catch { }
+        }
+        return $false
+    }
+    finally {
+        if ($mutex) {
+            $mutex.Dispose()
+        }
+    }
+}
+
+function Register-RunningProfile {
+    <#
+    .SYNOPSIS
+        Registers a profile as running by acquiring a named mutex
+    .DESCRIPTION
+        Acquires a system-wide named mutex for this profile. This prevents
+        duplicate runs across:
+        - Multiple PowerShell sessions
+        - Multiple scheduled task instances
+        - GUI and CLI running simultaneously
+
+        The mutex is automatically released by Windows if the process crashes.
+    .PARAMETER ProfileName
+        Name of the profile to register
+    .OUTPUTS
+        $true if registration succeeded (profile was not running),
+        $false if profile was already running
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    # Check if we already own this mutex
+    if ($script:RunningProfileMutexes.ContainsKey($ProfileName)) {
+        Write-RobocurseLog -Message "Profile '$ProfileName' mutex already owned by this process" `
+            -Level 'Debug' -Component 'ProfileTracking'
+        return $true
+    }
+
+    $mutexName = Get-ProfileMutexName -ProfileName $ProfileName
+    $mutex = $null
+    $acquired = $false
+
+    try {
+        $createdNew = $false
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName, [ref]$createdNew)
+
+        # Try to acquire with 0 timeout (don't wait)
+        $acquired = $mutex.WaitOne(0)
+
+        if ($acquired) {
+            # Store the mutex so we keep ownership and can release it later
+            if ($script:RunningProfileMutexes.TryAdd($ProfileName, $mutex)) {
+                Write-RobocurseLog -Message "Profile '$ProfileName' registered as running (mutex acquired)" `
+                    -Level 'Debug' -Component 'ProfileTracking'
+                return $true
+            }
+            else {
+                # Race condition - another thread in this process added it
+                $mutex.ReleaseMutex()
+                $mutex.Dispose()
+                return $true
+            }
+        }
+        else {
+            # Couldn't acquire - another process holds it
+            Write-RobocurseLog -Message "Profile '$ProfileName' is already running in another process" `
+                -Level 'Warning' -Component 'ProfileTracking'
+            $mutex.Dispose()
+            return $false
+        }
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # Previous owner crashed - we now own the mutex
+        if ($script:RunningProfileMutexes.TryAdd($ProfileName, $mutex)) {
+            Write-RobocurseLog -Message "Profile '$ProfileName' registered (recovered abandoned mutex from crashed process)" `
+                -Level 'Warning' -Component 'ProfileTracking'
+            return $true
+        }
+        else {
+            try { $mutex.ReleaseMutex() } catch { }
+            $mutex.Dispose()
+            return $true
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to acquire profile mutex for '$ProfileName': $($_.Exception.Message)" `
+            -Level 'Error' -Component 'ProfileTracking'
+        if ($mutex) { $mutex.Dispose() }
+        return $false
+    }
+}
+
+function Unregister-RunningProfile {
+    <#
+    .SYNOPSIS
+        Unregisters a profile by releasing its mutex
+    .DESCRIPTION
+        Releases the named mutex for a profile, allowing other processes
+        to run it. Called when a profile completes or is stopped.
+    .PARAMETER ProfileName
+        Name of the profile to unregister
+    .OUTPUTS
+        $true if profile was unregistered, $false if it wasn't registered
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    $mutex = $null
+    $removed = $script:RunningProfileMutexes.TryRemove($ProfileName, [ref]$mutex)
+
+    if ($removed -and $mutex) {
+        try {
+            $mutex.ReleaseMutex()
+            Write-RobocurseLog -Message "Profile '$ProfileName' unregistered (mutex released)" `
+                -Level 'Debug' -Component 'ProfileTracking'
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to release mutex for '$ProfileName': $($_.Exception.Message)" `
+                -Level 'Warning' -Component 'ProfileTracking'
+        }
+        finally {
+            $mutex.Dispose()
+        }
+        return $true
+    }
+
+    return $false
+}
+
+function Get-RunningProfiles {
+    <#
+    .SYNOPSIS
+        Returns list of profiles registered as running in this process
+    .DESCRIPTION
+        Returns profiles that THIS process has registered as running.
+        Does not detect profiles running in other processes (use Test-ProfileRunning for that).
+    .OUTPUTS
+        Array of profile name strings
+    #>
+    [CmdletBinding()]
+    param()
+
+    return @($script:RunningProfileMutexes.Keys)
+}
+
+function Clear-RunningProfiles {
+    <#
+    .SYNOPSIS
+        Releases all profile mutexes held by this process
+    .DESCRIPTION
+        Releases all profile mutexes and clears the dictionary.
+        Used during initialization or for cleanup after abnormal termination.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $count = $script:RunningProfileMutexes.Count
+    if ($count -eq 0) {
+        return
+    }
+
+    foreach ($kvp in $script:RunningProfileMutexes.ToArray()) {
+        $profileName = $kvp.Key
+        $mutex = $kvp.Value
+
+        try {
+            $mutex.ReleaseMutex()
+        }
+        catch {
+            # Ignore release errors during cleanup
+        }
+        finally {
+            try { $mutex.Dispose() } catch { }
+        }
+
+        $script:RunningProfileMutexes.TryRemove($profileName, [ref]$null) | Out-Null
+    }
+
+    Write-RobocurseLog -Message "Cleared $count running profile registration(s)" `
+        -Level 'Debug' -Component 'ProfileTracking'
+}
+
+#endregion Running Profile Tracking
+
 #endregion
 
 #region ==================== HEALTHCHECK ====================
@@ -8102,6 +8376,15 @@ function Test-NetworkCredentialExists {
 # Tracking file for network mappings - enables cleanup after crash
 $script:NetworkMappingTrackingFile = $null  # Initialized when needed
 
+# Named mutex for thread-safe drive letter allocation
+# Prevents race condition when multiple jobs start simultaneously
+$script:DriveLetterMutexName = "Global\RobocurseDriveLetterAllocation"
+$script:DriveLetterMutex = $null
+
+# Reserved drive letters (letters we've allocated but New-PSDrive hasn't completed yet)
+# This handles the window between checking available letters and completing the mount
+$script:ReservedDriveLetters = [System.Collections.Generic.HashSet[string]]::new()
+
 function Initialize-NetworkMappingTracking {
     <#
     .SYNOPSIS
@@ -8337,10 +8620,38 @@ function Get-UncRoot {
     return $UncPath
 }
 
+function Get-NextAvailableDriveLetter {
+    <#
+    .SYNOPSIS
+        Gets the next available drive letter, excluding reserved letters
+    .DESCRIPTION
+        Returns the first available drive letter from Z down to D, excluding:
+        - Letters already in use by the system (Get-PSDrive)
+        - Letters reserved by other concurrent mount operations
+    .OUTPUTS
+        Single character (drive letter) or $null if none available
+    #>
+    [CmdletBinding()]
+    param()
+
+    $used = @((Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue).Name)
+    $reserved = @($script:ReservedDriveLetters)
+
+    # Combine used and reserved letters
+    $unavailable = $used + $reserved
+
+    $letter = [char[]](90..68) | Where-Object { [string]$_ -notin $unavailable } | Select-Object -First 1
+    return $letter
+}
+
 function Mount-SingleNetworkPath {
     <#
     .SYNOPSIS
         Mounts a single UNC path to an available drive letter
+    .DESCRIPTION
+        Thread-safe mounting of UNC paths to drive letters. Uses a named mutex
+        to prevent race conditions when multiple jobs start simultaneously.
+        Each call gets a unique drive letter even under concurrent access.
     .PARAMETER UncPath
         UNC path to mount
     .PARAMETER Credential
@@ -8360,34 +8671,115 @@ function Mount-SingleNetworkPath {
     $root = Get-UncRoot $UncPath
     $remainder = $UncPath.Substring($root.Length)
 
-    # Clean up stale mapping to same root (from crashed previous runs)
-    $existingDrive = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayRoot -eq $root }
-    if ($existingDrive) {
-        Write-RobocurseLog -Message "Removing stale mapping $($existingDrive.Name): to '$root'" -Level 'Debug' -Component 'NetworkMapping'
-        Remove-PSDrive -Name $existingDrive.Name -Force -ErrorAction SilentlyContinue
-    }
+    $letter = $null
+    $mutexAcquired = $false
+    $mutexOwned = $false
 
-    # Find available letter (Z down to D)
-    $used = @((Get-PSDrive -PSProvider FileSystem).Name)
-    $letter = [char[]](90..68) | Where-Object { [string]$_ -notin $used } | Select-Object -First 1
-    if (-not $letter) {
-        throw "No available drive letters for network mapping"
-    }
+    try {
+        # =====================================================================================
+        # THREAD-SAFE DRIVE LETTER ALLOCATION
+        # =====================================================================================
+        # Use a named mutex to ensure only one process/thread can allocate a drive letter
+        # at a time. This prevents race conditions where two concurrent jobs both try to
+        # use the same letter (e.g., both see Z is available, both try to mount to Z).
+        #
+        # The mutex is held from letter selection through New-PSDrive completion.
+        # =====================================================================================
 
-    # Mount with or without explicit credentials
-    # With credential: Required for Session 0 scheduled tasks (NTLM doesn't delegate in Session 0)
-    # Without credential: Works in interactive sessions where user credentials are available
-    #
-    # CRITICAL: -Persist is REQUIRED for robocopy.exe to see the drive!
-    # Without -Persist, New-PSDrive creates a PowerShell-only drive invisible to external processes.
-    if ($Credential) {
-        Write-RobocurseLog -Message "Mounting '$root' as $letter`: with explicit credentials (user: $($Credential.UserName))" -Level 'Debug' -Component 'NetworkMapping'
-        New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Credential $Credential -Scope Global -Persist -ErrorAction Stop | Out-Null
+        # Create or open the named mutex
+        $createdNew = $false
+        try {
+            $script:DriveLetterMutex = [System.Threading.Mutex]::new($false, $script:DriveLetterMutexName, [ref]$createdNew)
+        }
+        catch [System.Threading.WaitHandleCannotBeOpenedException] {
+            # Mutex doesn't exist yet, create it
+            $script:DriveLetterMutex = [System.Threading.Mutex]::new($false, $script:DriveLetterMutexName)
+        }
+
+        # Acquire the mutex (wait up to 30 seconds)
+        $mutexAcquired = $script:DriveLetterMutex.WaitOne(30000)
+        if (-not $mutexAcquired) {
+            throw "Timeout waiting for drive letter allocation mutex. Another Robocurse instance may be stuck."
+        }
+        $mutexOwned = $true
+
+        Write-RobocurseLog -Message "Acquired drive letter mutex for '$root'" -Level 'Debug' -Component 'NetworkMapping'
+
+        # Clean up stale mapping to same root (from crashed previous runs)
+        $existingDrive = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayRoot -eq $root }
+        if ($existingDrive) {
+            Write-RobocurseLog -Message "Removing stale mapping $($existingDrive.Name): to '$root'" -Level 'Debug' -Component 'NetworkMapping'
+            Remove-PSDrive -Name $existingDrive.Name -Force -ErrorAction SilentlyContinue
+            # Also remove from reserved if it was there
+            $script:ReservedDriveLetters.Remove([string]$existingDrive.Name) | Out-Null
+        }
+
+        # Find available letter (Z down to D), excluding reserved letters
+        $letter = Get-NextAvailableDriveLetter
+        if (-not $letter) {
+            throw "No available drive letters for network mapping"
+        }
+
+        # Reserve this letter immediately to prevent other threads from using it
+        $script:ReservedDriveLetters.Add([string]$letter) | Out-Null
+        Write-RobocurseLog -Message "Reserved drive letter $letter for '$root'" -Level 'Debug' -Component 'NetworkMapping'
+
+        # Mount with or without explicit credentials
+        # With credential: Required for Session 0 scheduled tasks (NTLM doesn't delegate in Session 0)
+        # Without credential: Works in interactive sessions where user credentials are available
+        #
+        # CRITICAL: -Persist is REQUIRED for robocopy.exe to see the drive!
+        # Without -Persist, New-PSDrive creates a PowerShell-only drive invisible to external processes.
+        if ($Credential) {
+            Write-RobocurseLog -Message "Mounting '$root' as $letter`: with explicit credentials (user: $($Credential.UserName))" -Level 'Debug' -Component 'NetworkMapping'
+            New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Credential $Credential -Scope Global -Persist -ErrorAction Stop | Out-Null
+        }
+        else {
+            Write-RobocurseLog -Message "Mounting '$root' as $letter`: (using session credentials)" -Level 'Debug' -Component 'NetworkMapping'
+            New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Scope Global -Persist -ErrorAction Stop | Out-Null
+        }
+
+        # Mount succeeded - remove from reserved (it's now a real mount)
+        $script:ReservedDriveLetters.Remove([string]$letter) | Out-Null
+
+        # Build result object and track BEFORE releasing mutex to prevent race on tracking file
+        $result = [PSCustomObject]@{
+            DriveLetter = [string]$letter
+            Root        = $root
+            OriginalPath = $UncPath
+            MappedPath  = "${letter}:$remainder"
+        }
+
+        # Track the mapping for crash recovery (inside mutex to prevent concurrent file writes)
+        Add-NetworkMappingTracking -Mapping $result
+
+        # Release mutex before verification (mount is complete, letter is allocated, tracking is done)
+        if ($mutexOwned) {
+            $script:DriveLetterMutex.ReleaseMutex()
+            $mutexOwned = $false
+            Write-RobocurseLog -Message "Released drive letter mutex after mounting $letter" -Level 'Debug' -Component 'NetworkMapping'
+        }
     }
-    else {
-        Write-RobocurseLog -Message "Mounting '$root' as $letter`: (using session credentials)" -Level 'Debug' -Component 'NetworkMapping'
-        New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Scope Global -Persist -ErrorAction Stop | Out-Null
+    catch {
+        # On failure, clean up reservation
+        if ($letter) {
+            $script:ReservedDriveLetters.Remove([string]$letter) | Out-Null
+        }
+
+        # Release mutex if we still hold it
+        if ($mutexOwned) {
+            try { $script:DriveLetterMutex.ReleaseMutex() } catch { }
+            $mutexOwned = $false
+        }
+
+        throw
+    }
+    finally {
+        # Ensure mutex is released (safety net)
+        if ($mutexOwned) {
+            try { $script:DriveLetterMutex.ReleaseMutex() } catch { }
+        }
     }
 
     # =====================================================================================
@@ -8409,18 +8801,9 @@ function Mount-SingleNetworkPath {
         # Mount appeared to work but drive isn't accessible - clean up and throw
         Write-RobocurseLog -Message "Mount verification FAILED for $drivePath`: $($_.Exception.Message)" -Level 'Error' -Component 'NetworkMapping'
         Remove-PSDrive -Name $letter -Force -ErrorAction SilentlyContinue
+        Remove-NetworkMappingTracking -DriveLetter $letter  # Clean up tracking entry
         throw "Network mount to '$root' created but drive $drivePath is not accessible: $($_.Exception.Message)"
     }
-
-    $result = [PSCustomObject]@{
-        DriveLetter = [string]$letter
-        Root        = $root
-        OriginalPath = $UncPath
-        MappedPath  = "${letter}:$remainder"
-    }
-
-    # Track the mapping for crash recovery
-    Add-NetworkMappingTracking -Mapping $result
 
     return $result
 }
@@ -9066,6 +9449,10 @@ function Start-ProfileReplication {
     <#
     .SYNOPSIS
         Starts replication for a single profile
+    .DESCRIPTION
+        Starts replication for a single profile. Includes duplicate run prevention -
+        if the same profile is already running, returns an error instead of starting
+        a concurrent run that could cause conflicts.
     .PARAMETER Profile
         Profile object from config
     .PARAMETER MaxConcurrentJobs
@@ -9078,6 +9465,24 @@ function Start-ProfileReplication {
 
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs
     )
+
+    # =====================================================================================
+    # DUPLICATE RUN PREVENTION
+    # =====================================================================================
+    # Check if this profile is already running. This prevents issues like:
+    # - Drive letter conflicts when both runs try to mount the same UNC path
+    # - Robocopy conflicts when both runs try to write to the same destination
+    # - Checkpoint corruption from concurrent writes
+    # =====================================================================================
+    if (-not (Register-RunningProfile -ProfileName $Profile.Name)) {
+        $errorMsg = "Profile '$($Profile.Name)' is already running. Cannot start duplicate run."
+        Write-RobocurseLog -Message $errorMsg -Level 'Error' -Component 'Orchestrator'
+        $script:OrchestrationState.EnqueueError($errorMsg)
+        $script:CurrentPreflightError = $errorMsg
+        # Skip to completion handler which will move to next profile
+        Complete-CurrentProfile
+        return
+    }
 
     $state = $script:OrchestrationState
     $state.CurrentProfile = $Profile
@@ -10082,6 +10487,9 @@ function Complete-CurrentProfile {
     }
     $state.NetworkCredential = $null
 
+    # Unregister the profile as running (release the mutex)
+    Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
+
     # Invoke callback
     if ($script:OnProfileComplete) {
         & $script:OnProfileComplete $state.CurrentProfile
@@ -10234,6 +10642,11 @@ function Stop-AllJobs {
         }
     }
     $state.NetworkCredential = $null
+
+    # Unregister the current profile as running (release the mutex)
+    if ($state.CurrentProfile) {
+        Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
+    }
 
     Write-SiemEvent -EventType 'SessionEnd' -Data @{
         reason = 'Stopped by user'

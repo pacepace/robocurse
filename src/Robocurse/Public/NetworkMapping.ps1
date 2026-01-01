@@ -27,6 +27,15 @@
 # Tracking file for network mappings - enables cleanup after crash
 $script:NetworkMappingTrackingFile = $null  # Initialized when needed
 
+# Named mutex for thread-safe drive letter allocation
+# Prevents race condition when multiple jobs start simultaneously
+$script:DriveLetterMutexName = "Global\RobocurseDriveLetterAllocation"
+$script:DriveLetterMutex = $null
+
+# Reserved drive letters (letters we've allocated but New-PSDrive hasn't completed yet)
+# This handles the window between checking available letters and completing the mount
+$script:ReservedDriveLetters = [System.Collections.Generic.HashSet[string]]::new()
+
 function Initialize-NetworkMappingTracking {
     <#
     .SYNOPSIS
@@ -262,10 +271,38 @@ function Get-UncRoot {
     return $UncPath
 }
 
+function Get-NextAvailableDriveLetter {
+    <#
+    .SYNOPSIS
+        Gets the next available drive letter, excluding reserved letters
+    .DESCRIPTION
+        Returns the first available drive letter from Z down to D, excluding:
+        - Letters already in use by the system (Get-PSDrive)
+        - Letters reserved by other concurrent mount operations
+    .OUTPUTS
+        Single character (drive letter) or $null if none available
+    #>
+    [CmdletBinding()]
+    param()
+
+    $used = @((Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue).Name)
+    $reserved = @($script:ReservedDriveLetters)
+
+    # Combine used and reserved letters
+    $unavailable = $used + $reserved
+
+    $letter = [char[]](90..68) | Where-Object { [string]$_ -notin $unavailable } | Select-Object -First 1
+    return $letter
+}
+
 function Mount-SingleNetworkPath {
     <#
     .SYNOPSIS
         Mounts a single UNC path to an available drive letter
+    .DESCRIPTION
+        Thread-safe mounting of UNC paths to drive letters. Uses a named mutex
+        to prevent race conditions when multiple jobs start simultaneously.
+        Each call gets a unique drive letter even under concurrent access.
     .PARAMETER UncPath
         UNC path to mount
     .PARAMETER Credential
@@ -285,34 +322,115 @@ function Mount-SingleNetworkPath {
     $root = Get-UncRoot $UncPath
     $remainder = $UncPath.Substring($root.Length)
 
-    # Clean up stale mapping to same root (from crashed previous runs)
-    $existingDrive = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayRoot -eq $root }
-    if ($existingDrive) {
-        Write-RobocurseLog -Message "Removing stale mapping $($existingDrive.Name): to '$root'" -Level 'Debug' -Component 'NetworkMapping'
-        Remove-PSDrive -Name $existingDrive.Name -Force -ErrorAction SilentlyContinue
-    }
+    $letter = $null
+    $mutexAcquired = $false
+    $mutexOwned = $false
 
-    # Find available letter (Z down to D)
-    $used = @((Get-PSDrive -PSProvider FileSystem).Name)
-    $letter = [char[]](90..68) | Where-Object { [string]$_ -notin $used } | Select-Object -First 1
-    if (-not $letter) {
-        throw "No available drive letters for network mapping"
-    }
+    try {
+        # =====================================================================================
+        # THREAD-SAFE DRIVE LETTER ALLOCATION
+        # =====================================================================================
+        # Use a named mutex to ensure only one process/thread can allocate a drive letter
+        # at a time. This prevents race conditions where two concurrent jobs both try to
+        # use the same letter (e.g., both see Z is available, both try to mount to Z).
+        #
+        # The mutex is held from letter selection through New-PSDrive completion.
+        # =====================================================================================
 
-    # Mount with or without explicit credentials
-    # With credential: Required for Session 0 scheduled tasks (NTLM doesn't delegate in Session 0)
-    # Without credential: Works in interactive sessions where user credentials are available
-    #
-    # CRITICAL: -Persist is REQUIRED for robocopy.exe to see the drive!
-    # Without -Persist, New-PSDrive creates a PowerShell-only drive invisible to external processes.
-    if ($Credential) {
-        Write-RobocurseLog -Message "Mounting '$root' as $letter`: with explicit credentials (user: $($Credential.UserName))" -Level 'Debug' -Component 'NetworkMapping'
-        New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Credential $Credential -Scope Global -Persist -ErrorAction Stop | Out-Null
+        # Create or open the named mutex
+        $createdNew = $false
+        try {
+            $script:DriveLetterMutex = [System.Threading.Mutex]::new($false, $script:DriveLetterMutexName, [ref]$createdNew)
+        }
+        catch [System.Threading.WaitHandleCannotBeOpenedException] {
+            # Mutex doesn't exist yet, create it
+            $script:DriveLetterMutex = [System.Threading.Mutex]::new($false, $script:DriveLetterMutexName)
+        }
+
+        # Acquire the mutex (wait up to 30 seconds)
+        $mutexAcquired = $script:DriveLetterMutex.WaitOne(30000)
+        if (-not $mutexAcquired) {
+            throw "Timeout waiting for drive letter allocation mutex. Another Robocurse instance may be stuck."
+        }
+        $mutexOwned = $true
+
+        Write-RobocurseLog -Message "Acquired drive letter mutex for '$root'" -Level 'Debug' -Component 'NetworkMapping'
+
+        # Clean up stale mapping to same root (from crashed previous runs)
+        $existingDrive = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayRoot -eq $root }
+        if ($existingDrive) {
+            Write-RobocurseLog -Message "Removing stale mapping $($existingDrive.Name): to '$root'" -Level 'Debug' -Component 'NetworkMapping'
+            Remove-PSDrive -Name $existingDrive.Name -Force -ErrorAction SilentlyContinue
+            # Also remove from reserved if it was there
+            $script:ReservedDriveLetters.Remove([string]$existingDrive.Name) | Out-Null
+        }
+
+        # Find available letter (Z down to D), excluding reserved letters
+        $letter = Get-NextAvailableDriveLetter
+        if (-not $letter) {
+            throw "No available drive letters for network mapping"
+        }
+
+        # Reserve this letter immediately to prevent other threads from using it
+        $script:ReservedDriveLetters.Add([string]$letter) | Out-Null
+        Write-RobocurseLog -Message "Reserved drive letter $letter for '$root'" -Level 'Debug' -Component 'NetworkMapping'
+
+        # Mount with or without explicit credentials
+        # With credential: Required for Session 0 scheduled tasks (NTLM doesn't delegate in Session 0)
+        # Without credential: Works in interactive sessions where user credentials are available
+        #
+        # CRITICAL: -Persist is REQUIRED for robocopy.exe to see the drive!
+        # Without -Persist, New-PSDrive creates a PowerShell-only drive invisible to external processes.
+        if ($Credential) {
+            Write-RobocurseLog -Message "Mounting '$root' as $letter`: with explicit credentials (user: $($Credential.UserName))" -Level 'Debug' -Component 'NetworkMapping'
+            New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Credential $Credential -Scope Global -Persist -ErrorAction Stop | Out-Null
+        }
+        else {
+            Write-RobocurseLog -Message "Mounting '$root' as $letter`: (using session credentials)" -Level 'Debug' -Component 'NetworkMapping'
+            New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Scope Global -Persist -ErrorAction Stop | Out-Null
+        }
+
+        # Mount succeeded - remove from reserved (it's now a real mount)
+        $script:ReservedDriveLetters.Remove([string]$letter) | Out-Null
+
+        # Build result object and track BEFORE releasing mutex to prevent race on tracking file
+        $result = [PSCustomObject]@{
+            DriveLetter = [string]$letter
+            Root        = $root
+            OriginalPath = $UncPath
+            MappedPath  = "${letter}:$remainder"
+        }
+
+        # Track the mapping for crash recovery (inside mutex to prevent concurrent file writes)
+        Add-NetworkMappingTracking -Mapping $result
+
+        # Release mutex before verification (mount is complete, letter is allocated, tracking is done)
+        if ($mutexOwned) {
+            $script:DriveLetterMutex.ReleaseMutex()
+            $mutexOwned = $false
+            Write-RobocurseLog -Message "Released drive letter mutex after mounting $letter" -Level 'Debug' -Component 'NetworkMapping'
+        }
     }
-    else {
-        Write-RobocurseLog -Message "Mounting '$root' as $letter`: (using session credentials)" -Level 'Debug' -Component 'NetworkMapping'
-        New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Scope Global -Persist -ErrorAction Stop | Out-Null
+    catch {
+        # On failure, clean up reservation
+        if ($letter) {
+            $script:ReservedDriveLetters.Remove([string]$letter) | Out-Null
+        }
+
+        # Release mutex if we still hold it
+        if ($mutexOwned) {
+            try { $script:DriveLetterMutex.ReleaseMutex() } catch { }
+            $mutexOwned = $false
+        }
+
+        throw
+    }
+    finally {
+        # Ensure mutex is released (safety net)
+        if ($mutexOwned) {
+            try { $script:DriveLetterMutex.ReleaseMutex() } catch { }
+        }
     }
 
     # =====================================================================================
@@ -334,18 +452,9 @@ function Mount-SingleNetworkPath {
         # Mount appeared to work but drive isn't accessible - clean up and throw
         Write-RobocurseLog -Message "Mount verification FAILED for $drivePath`: $($_.Exception.Message)" -Level 'Error' -Component 'NetworkMapping'
         Remove-PSDrive -Name $letter -Force -ErrorAction SilentlyContinue
+        Remove-NetworkMappingTracking -DriveLetter $letter  # Clean up tracking entry
         throw "Network mount to '$root' created but drive $drivePath is not accessible: $($_.Exception.Message)"
     }
-
-    $result = [PSCustomObject]@{
-        DriveLetter = [string]$letter
-        Root        = $root
-        OriginalPath = $UncPath
-        MappedPath  = "${letter}:$remainder"
-    }
-
-    # Track the mapping for crash recovery
-    Add-NetworkMappingTracking -Mapping $result
 
     return $result
 }

@@ -540,6 +540,10 @@ function Start-ProfileReplication {
     <#
     .SYNOPSIS
         Starts replication for a single profile
+    .DESCRIPTION
+        Starts replication for a single profile. Includes duplicate run prevention -
+        if the same profile is already running, returns an error instead of starting
+        a concurrent run that could cause conflicts.
     .PARAMETER Profile
         Profile object from config
     .PARAMETER MaxConcurrentJobs
@@ -552,6 +556,24 @@ function Start-ProfileReplication {
 
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs
     )
+
+    # =====================================================================================
+    # DUPLICATE RUN PREVENTION
+    # =====================================================================================
+    # Check if this profile is already running. This prevents issues like:
+    # - Drive letter conflicts when both runs try to mount the same UNC path
+    # - Robocopy conflicts when both runs try to write to the same destination
+    # - Checkpoint corruption from concurrent writes
+    # =====================================================================================
+    if (-not (Register-RunningProfile -ProfileName $Profile.Name)) {
+        $errorMsg = "Profile '$($Profile.Name)' is already running. Cannot start duplicate run."
+        Write-RobocurseLog -Message $errorMsg -Level 'Error' -Component 'Orchestrator'
+        $script:OrchestrationState.EnqueueError($errorMsg)
+        $script:CurrentPreflightError = $errorMsg
+        # Skip to completion handler which will move to next profile
+        Complete-CurrentProfile
+        return
+    }
 
     $state = $script:OrchestrationState
     $state.CurrentProfile = $Profile
@@ -1556,6 +1578,9 @@ function Complete-CurrentProfile {
     }
     $state.NetworkCredential = $null
 
+    # Unregister the profile as running (release the mutex)
+    Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
+
     # Invoke callback
     if ($script:OnProfileComplete) {
         & $script:OnProfileComplete $state.CurrentProfile
@@ -1708,6 +1733,11 @@ function Stop-AllJobs {
         }
     }
     $state.NetworkCredential = $null
+
+    # Unregister the current profile as running (release the mutex)
+    if ($state.CurrentProfile) {
+        Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
+    }
 
     Write-SiemEvent -EventType 'SessionEnd' -Data @{
         reason = 'Stopped by user'

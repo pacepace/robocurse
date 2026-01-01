@@ -481,5 +481,130 @@ InModuleScope 'Robocurse' {
                 Test-Path $script:NetworkMappingTrackingFile | Should -Be $false
             }
         }
+
+        Context "Get-NextAvailableDriveLetter" {
+            It "Should return Z when no drives are reserved" {
+                Mock Get-PSDrive {
+                    @(
+                        [PSCustomObject]@{ Name = 'C'; Provider = @{ Name = 'FileSystem' }; DisplayRoot = $null }
+                    )
+                } -ParameterFilter { $PSProvider -eq 'FileSystem' }
+
+                # Clear any reserved letters
+                $script:ReservedDriveLetters.Clear()
+
+                $letter = Get-NextAvailableDriveLetter
+
+                $letter | Should -Be 'Z'
+            }
+
+            It "Should skip reserved letters" {
+                Mock Get-PSDrive {
+                    @(
+                        [PSCustomObject]@{ Name = 'C'; Provider = @{ Name = 'FileSystem' }; DisplayRoot = $null }
+                    )
+                } -ParameterFilter { $PSProvider -eq 'FileSystem' }
+
+                # Reserve Z and Y
+                $script:ReservedDriveLetters.Clear()
+                $script:ReservedDriveLetters.Add('Z') | Out-Null
+                $script:ReservedDriveLetters.Add('Y') | Out-Null
+
+                $letter = Get-NextAvailableDriveLetter
+
+                $letter | Should -Be 'X'
+
+                # Cleanup
+                $script:ReservedDriveLetters.Clear()
+            }
+
+            It "Should skip both used and reserved letters" {
+                Mock Get-PSDrive {
+                    @(
+                        [PSCustomObject]@{ Name = 'C'; Provider = @{ Name = 'FileSystem' }; DisplayRoot = $null },
+                        [PSCustomObject]@{ Name = 'Z'; Provider = @{ Name = 'FileSystem' }; DisplayRoot = $null }
+                    )
+                } -ParameterFilter { $PSProvider -eq 'FileSystem' }
+
+                # Reserve Y
+                $script:ReservedDriveLetters.Clear()
+                $script:ReservedDriveLetters.Add('Y') | Out-Null
+
+                $letter = Get-NextAvailableDriveLetter
+
+                $letter | Should -Be 'X'
+
+                # Cleanup
+                $script:ReservedDriveLetters.Clear()
+            }
+
+            It "Should return null when all letters are used or reserved" {
+                Mock Get-PSDrive {
+                    # Return all letters D-Z as used
+                    $allLetters = @('C') + [char[]](68..90)  # C + D through Z
+                    $allLetters | ForEach-Object {
+                        [PSCustomObject]@{ Name = $_; Provider = @{ Name = 'FileSystem' }; DisplayRoot = $null }
+                    }
+                } -ParameterFilter { $PSProvider -eq 'FileSystem' }
+
+                $script:ReservedDriveLetters.Clear()
+
+                $letter = Get-NextAvailableDriveLetter
+
+                $letter | Should -Be $null
+            }
+        }
+
+        Context "Concurrent drive letter allocation" {
+            BeforeEach {
+                Mock Get-ChildItem { @() }
+                Mock New-PSDrive { }
+                Mock Remove-PSDrive { }
+                $script:ReservedDriveLetters.Clear()
+            }
+
+            It "Should allocate different letters to concurrent requests" {
+                # This test simulates what happens when two mount operations happen concurrently
+                # by manually reserving letters as they would be during the mount operation
+
+                Mock Get-PSDrive {
+                    @(
+                        [PSCustomObject]@{ Name = 'C'; Provider = @{ Name = 'FileSystem' }; DisplayRoot = $null }
+                    )
+                } -ParameterFilter { $PSProvider -eq 'FileSystem' }
+
+                # First allocation gets Z
+                $letter1 = Get-NextAvailableDriveLetter
+                $script:ReservedDriveLetters.Add([string]$letter1) | Out-Null
+
+                # Second allocation should get Y (Z is reserved)
+                $letter2 = Get-NextAvailableDriveLetter
+
+                $letter1 | Should -Be 'Z'
+                $letter2 | Should -Be 'Y'
+                $letter1 | Should -Not -Be $letter2
+
+                # Cleanup
+                $script:ReservedDriveLetters.Clear()
+            }
+
+            It "Reserved letters should be cleaned up on mount failure" {
+                Mock Get-PSDrive {
+                    @(
+                        [PSCustomObject]@{ Name = 'C'; Provider = @{ Name = 'FileSystem' }; DisplayRoot = $null }
+                    )
+                } -ParameterFilter { $PSProvider -eq 'FileSystem' }
+
+                Mock New-PSDrive { throw "Access denied" }
+
+                $script:ReservedDriveLetters.Clear()
+
+                # This should fail and clean up the reserved letter
+                { Mount-SingleNetworkPath -UncPath '\\server\share' } | Should -Throw
+
+                # Reserved letters should be empty after failure
+                $script:ReservedDriveLetters.Count | Should -Be 0
+            }
+        }
     }
 }
