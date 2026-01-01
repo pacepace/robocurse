@@ -83,9 +83,6 @@ function Start-ReplicationRun {
 
         [switch]$DryRun,
 
-        # If true, log every file copied to robocopy log; if false (default), only summary
-        [switch]$VerboseFileLogging,
-
         [scriptblock]$OnProgress,
         [scriptblock]$OnChunkComplete,
         [scriptblock]$OnProfileComplete
@@ -125,9 +122,6 @@ function Start-ReplicationRun {
         Write-RobocurseLog -Message "DRY-RUN MODE: No files will be copied (robocopy /L)" `
             -Level 'Warning' -Component 'Orchestrator'
     }
-
-    # Set verbose file logging mode for Start-ChunkJob to use
-    $script:VerboseFileLoggingMode = $VerboseFileLogging.IsPresent
 
     # Validate robocopy is available before starting
     $robocopyCheck = Test-RobocopyAvailable
@@ -992,8 +986,7 @@ function Start-ChunkJob {
     $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath `
         -ThreadsPerJob $script:DefaultThreadsPerJob `
         -RobocopyOptions $effectiveOptions `
-        -DryRun:$script:DryRunMode `
-        -VerboseFileLogging:$script:VerboseFileLoggingMode
+        -DryRun:$script:DryRunMode
 
     return $job
 }
@@ -1025,6 +1018,35 @@ function Invoke-ReplicationTick {
 
     if ($state.PauseRequested) {
         return  # Don't start new jobs, but let running ones complete
+    }
+
+    # Update BytesComplete from active jobs for real-time progress
+    # This runs in the background thread and updates the shared C# state object
+    if (-not $state) {
+        Write-RobocurseLog "Invoke-ReplicationTick: OrchestrationState is null" -Level 'Error' -Component 'Orchestrator'
+        return
+    }
+
+    $bytesFromCompleted = $state.CompletedChunkBytes
+    $bytesFromActive = 0
+    $activeCount = $state.ActiveJobs.Count
+    foreach ($kvp in $state.ActiveJobs.ToArray()) {
+        try {
+            $job = $kvp.Value
+            $progress = Get-RobocopyProgress -Job $job
+            if ($progress -and $progress.BytesCopied -gt 0) {
+                $bytesFromActive += $progress.BytesCopied
+                Write-RobocurseLog "Progress poll: Chunk=$($job.Chunk.ChunkId) BytesCopied=$($progress.BytesCopied)" -Level 'Debug' -Component 'Progress'
+            }
+        }
+        catch {
+            Write-RobocurseLog "Progress poll failed: $_" -Level 'Debug' -Component 'Progress'
+        }
+    }
+    $state.BytesComplete = $bytesFromCompleted + $bytesFromActive
+
+    if ($activeCount -gt 0) {
+        Write-RobocurseLog "BytesComplete update: completed=$bytesFromCompleted + active=$bytesFromActive = $($state.BytesComplete) (ActiveJobs=$activeCount)" -Level 'Debug' -Component 'Progress'
     }
 
     # Check completed jobs - snapshot keys first for safe enumeration
@@ -1667,6 +1689,25 @@ function Stop-AllJobs {
             }
         }
     }
+
+    # Clean up network drive mappings
+    if ($state.CurrentNetworkMappings -and $state.CurrentNetworkMappings.Count -gt 0) {
+        Write-RobocurseLog -Message "Cleaning up network mappings after stop ($($state.CurrentNetworkMappings.Count) mapping(s))" `
+            -Level 'Info' -Component 'NetworkMapping'
+        try {
+            Dismount-NetworkPaths -Mappings $state.CurrentNetworkMappings
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to cleanup network mappings: $($_.Exception.Message)" `
+                -Level 'Warning' -Component 'NetworkMapping'
+        }
+        finally {
+            $state.CurrentNetworkMappings = $null
+            $state.NetworkMappedSource = $null
+            $state.NetworkMappedDest = $null
+        }
+    }
+    $state.NetworkCredential = $null
 
     Write-SiemEvent -EventType 'SessionEnd' -Data @{
         reason = 'Stopped by user'

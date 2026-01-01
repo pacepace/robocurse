@@ -119,6 +119,10 @@ function New-DirectoryTree {
     }
 
     $lineCount = 0
+    $matchedLines = 0
+    # Track the current directory context - robocopy outputs files as relative to the last "New Dir"
+    $currentDir = $normalizedRoot
+
     foreach ($line in $output) {
         $lineCount++
 
@@ -127,19 +131,26 @@ function New-DirectoryTree {
             continue
         }
 
-        # Parse "New File [size] [relativePath]" format
-        if ($line -match 'New File\s+(\d+)\s+(.+)$') {
-            $fileSize = [int64]$matches[1]
-            $relativePath = $matches[2].Trim()
-
-            # Get the directory containing this file
-            $dirRelPath = Split-Path -Path $relativePath -Parent
-            if ([string]::IsNullOrEmpty($dirRelPath)) {
-                # File is directly in root
-                $dirFullPath = $normalizedRoot
-            } else {
-                $dirFullPath = Join-Path $normalizedRoot $dirRelPath
+        # Parse "New Dir [count] [absolutePath]" format FIRST
+        # NOTE: robocopy outputs ABSOLUTE paths for directories (e.g., "D:\subdir\")
+        # This MUST be parsed before files because it sets the current directory context
+        if ($line -match 'New Dir\s+\d+\s+(.+)$') {
+            $dirPath = $matches[1].Trim().TrimEnd('\')
+            # Update current directory context for subsequent file entries
+            $currentDir = $dirPath
+            # Skip if this is the root directory itself (already have root node)
+            if ($dirPath -ne $normalizedRoot -and -not [string]::IsNullOrEmpty($dirPath)) {
+                # Path is already absolute from robocopy - use directly
+                Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirPath -RootNode $root | Out-Null
             }
+            $matchedLines++
+        }
+        # Parse "New File [size] [filename]" format
+        # NOTE: robocopy outputs just the FILENAME (not full path) - file is in $currentDir
+        elseif ($line -match 'New File\s+(\d+)\s+(.+)$') {
+            $fileSize = [int64]$matches[1]
+            # File is in the current directory context (set by last New Dir)
+            $dirFullPath = $currentDir
 
             # Ensure parent node exists (create intermediate nodes if needed)
             $parentNode = Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirFullPath -RootNode $root
@@ -147,41 +158,47 @@ function New-DirectoryTree {
             # Add file to parent's direct counts
             $parentNode.DirectSize += $fileSize
             $parentNode.DirectFileCount++
+            $matchedLines++
         }
-        # Parse "New Dir [count] [absolutePath]" format
-        # NOTE: robocopy outputs ABSOLUTE paths for directories (e.g., "W:\subdir\")
-        elseif ($line -match 'New Dir\s+\d+\s+(.+)$') {
-            $dirPath = $matches[1].Trim().TrimEnd('\')
-            # Skip if this is the root directory itself (already have root node)
-            if ($dirPath -ne $normalizedRoot -and -not [string]::IsNullOrEmpty($dirPath)) {
-                # Path is already absolute from robocopy - use directly
-                Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirPath -RootNode $root | Out-Null
-            }
-        }
-        # Fallback: old format "[size] [path]" (for compatibility)
+        # Fallback: old format "[size] [path]" (for compatibility with different robocopy versions)
+        # This format has directory info embedded in file paths (e.g., "subdir\file.txt")
         elseif ($line -match '^\s+(\d+)\s+(.+)$') {
             $size = [int64]$matches[1]
             $pathValue = $matches[2].Trim()
 
             if ($pathValue.EndsWith('\')) {
-                # It's a directory - path is absolute from robocopy
+                # It's a directory - path may be absolute or relative
                 $dirPath = $pathValue.TrimEnd('\')
-                if ($dirPath -ne $normalizedRoot -and -not [string]::IsNullOrEmpty($dirPath)) {
-                    Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirPath -RootNode $root | Out-Null
+                $isAbsolute = $dirPath -match '^([A-Za-z]:|\\\\)'
+                if ($isAbsolute) {
+                    $currentDir = $dirPath
+                } else {
+                    $currentDir = Join-Path $normalizedRoot $dirPath
+                }
+                if ($currentDir -ne $normalizedRoot -and -not [string]::IsNullOrEmpty($currentDir)) {
+                    Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $currentDir -RootNode $root | Out-Null
                 }
             } else {
-                # It's a file - path is relative from robocopy
+                # It's a file - path may contain directory components (e.g., "subdir\file.txt")
+                # Parse directory from the path and join with root
                 $dirRelPath = Split-Path -Path $pathValue -Parent
                 if ([string]::IsNullOrEmpty($dirRelPath)) {
+                    # File is directly in root
                     $dirFullPath = $normalizedRoot
                 } else {
-                    $dirFullPath = Join-Path $normalizedRoot $dirRelPath
+                    # Determine if path is absolute
+                    $isAbsolute = $dirRelPath -match '^([A-Za-z]:|\\\\)'
+                    if ($isAbsolute) {
+                        $dirFullPath = $dirRelPath.TrimEnd('\')
+                    } else {
+                        $dirFullPath = Join-Path $normalizedRoot $dirRelPath
+                    }
                 }
-
                 $parentNode = Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirFullPath -RootNode $root
                 $parentNode.DirectSize += $size
                 $parentNode.DirectFileCount++
             }
+            $matchedLines++
         }
 
         # Progress update every 1000 lines during parsing
@@ -366,7 +383,11 @@ function Invoke-RobocopyList {
     }
 
     # Quote paths properly for command line (handles paths with spaces)
-    $quotedSource = "`"$Source`""
+    # IMPORTANT: Trailing backslash before closing quote (e.g., "D:\") is interpreted as
+    # an escaped quote on the command line, corrupting the argument string.
+    # Remove trailing backslash from source path to avoid this issue.
+    $safeSource = $Source.TrimEnd('\')
+    $quotedSource = "`"$safeSource`""
     $quotedDest = "`"$nullDest`""
     # /NODCOPY improves performance by not copying directory attributes (see Microsoft KB)
     $psi.Arguments = "$quotedSource $quotedDest /L /E /NJH /NJS /BYTES /R:0 /W:0 /NODCOPY"

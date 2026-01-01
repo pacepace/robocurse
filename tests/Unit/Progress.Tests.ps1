@@ -45,29 +45,28 @@ InModuleScope 'Robocurse' {
             }
 
             It "Should calculate progress percentage correctly" {
-                $script:OrchestrationState.TotalChunks = 100
-                $script:OrchestrationState.IncrementCompletedCount()
-                $script:OrchestrationState.IncrementCompletedCount()
-                # Completed 2 out of 100 = 2%
+                # ProfileProgress is now based on bytes, not chunks
+                $script:OrchestrationState.TotalBytes = 10000000  # 10 MB
+                $script:OrchestrationState.BytesComplete = 200000  # 0.2 MB = 2%
 
                 $status = Get-OrchestrationStatus
 
                 $status.ProfileProgress | Should -Be 2
             }
 
-            It "Should clamp progress to 100 when completed exceeds total" {
-                $script:OrchestrationState.TotalChunks = 10
-                for ($i = 0; $i -lt 15; $i++) {
-                    $script:OrchestrationState.IncrementCompletedCount()
-                }
+            It "Should clamp progress to 100 when bytes exceed total" {
+                # ProfileProgress is now based on bytes, not chunks
+                $script:OrchestrationState.TotalBytes = 1000
+                $script:OrchestrationState.BytesComplete = 1500  # More than total
 
                 $status = Get-OrchestrationStatus
 
                 $status.ProfileProgress | Should -BeLessOrEqual 100
             }
 
-            It "Should return zero progress when no chunks" {
-                $script:OrchestrationState.TotalChunks = 0
+            It "Should return zero progress when no bytes" {
+                # ProfileProgress is now based on bytes, not chunks
+                $script:OrchestrationState.TotalBytes = 0
 
                 $status = Get-OrchestrationStatus
 

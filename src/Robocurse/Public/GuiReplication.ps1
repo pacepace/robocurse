@@ -326,16 +326,7 @@ function Complete-GuiReplication {
                 Write-GuiLog "Generated failed files summary: $failedFilesSummaryPath"
             }
             else {
-                # Re-read config to get current verbose logging setting
-                $currentConfig = Get-RobocurseConfig -Path $script:ConfigPath
-                $verboseEnabled = $currentConfig.GlobalSettings.VerboseFileLogging -eq $true
-                Write-GuiLog "Verbose logging enabled: $verboseEnabled (from config: $($script:ConfigPath))"
-                if (-not $verboseEnabled) {
-                    Write-GuiLog "No error entries found in logs. Enable 'Log individual file operations' in Settings for detailed failed file reporting."
-                }
-                else {
-                    Write-GuiLog "No error entries found in logs (verbose logging is enabled but no ERROR lines in chunk logs)"
-                }
+                Write-GuiLog "No error entries found in chunk logs"
             }
         }
         else {

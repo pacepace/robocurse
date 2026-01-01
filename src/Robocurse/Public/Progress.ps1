@@ -78,10 +78,10 @@ function Get-OrchestrationStatus {
 
     $currentProfileName = if ($state.CurrentProfile) { $state.CurrentProfile.Name } else { "" }
 
-    # Clamp progress to 0-100 range to handle edge cases where CompletedCount > TotalChunks
-    # (can happen if files are added during scan or other race conditions)
-    $profileProgress = if ($state.TotalChunks -gt 0) {
-        [math]::Min(100, [math]::Max(0, [math]::Round(($state.CompletedCount / $state.TotalChunks) * 100, 1)))
+    # Calculate profile progress from bytes (not chunks) for smooth progress updates
+    # BytesComplete includes both completed chunks and in-progress bytes from active jobs
+    $profileProgress = if ($state.TotalBytes -gt 0) {
+        [math]::Min(100, [math]::Max(0, [math]::Round(($state.BytesComplete / $state.TotalBytes) * 100, 1)))
     } else { 0 }
 
     # Calculate overall progress across all profiles (also clamped)

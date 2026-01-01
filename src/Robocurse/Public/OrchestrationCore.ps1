@@ -693,6 +693,10 @@ function Initialize-OrchestrationState {
         throw "Failed to initialize OrchestrationState type. Check logs for compilation errors."
     }
 
+    # Initialize Job Object for automatic child process cleanup
+    # This ensures robocopy processes are killed when the parent exits (even on crash)
+    Initialize-RobocopyJobObject | Out-Null
+
     # Reset the existing state object (don't create a new one - that breaks cross-thread sharing)
     $script:OrchestrationState.Reset()
 
@@ -710,6 +714,13 @@ function Initialize-OrchestrationState {
     if ($orphansCleared -gt 0) {
         Write-RobocurseLog -Message "Cleaned up $orphansCleared orphaned VSS snapshot(s) from previous run" `
             -Level 'Info' -Component 'VSS'
+    }
+
+    # Clean up any orphaned network mappings from crashed previous runs
+    $mappingsCleared = Clear-OrphanNetworkMappings
+    if ($mappingsCleared -gt 0) {
+        Write-RobocurseLog -Message "Cleaned up $mappingsCleared orphaned network mapping(s) from previous run" `
+            -Level 'Info' -Component 'NetworkMapping'
     }
 
     Write-RobocurseLog -Message "Orchestration state initialized: $($script:OrchestrationState.SessionId)" `

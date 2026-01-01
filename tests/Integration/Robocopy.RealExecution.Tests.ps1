@@ -72,8 +72,9 @@ InModuleScope 'Robocurse' {
                 $logPath = Join-Path $script:LogDir "test1.log"
                 $job = Start-RobocopyJob -Chunk $chunk -LogPath $logPath -RobocopyOptions $script:TestOptions
 
-                $job | Should -Not -BeNullOrEmpty
-                $job.Process | Should -Not -BeNullOrEmpty
+                # Use boolean check to avoid Pester stringifying Process object (throws if exited)
+                ($null -ne $job) | Should -Be $true -Because "Start-RobocopyJob should return a job object"
+                ($null -ne $job.Process) | Should -Be $true -Because "Job should have a Process property"
 
                 # Wait for completion
                 $result = Wait-RobocopyJob -Job $job -TimeoutSeconds 30
@@ -280,6 +281,160 @@ InModuleScope 'Robocurse' {
                 Test-Path (Join-Path $script:DestDir "include.txt") | Should -Be $true
                 Test-Path (Join-Path $script:DestDir "also.txt") | Should -Be $true
                 Test-Path (Join-Path $script:DestDir "exclude.tmp") | Should -Be $false
+            }
+        }
+
+        Context "Chunking Algorithm End-to-End Verification" {
+            # CRITICAL: This test verifies that the chunking algorithm + robocopy = all files copied
+            # If this fails, files are being missed or duplicated
+
+            BeforeEach {
+                # Clean source and dest
+                Get-ChildItem -Path $script:SourceDir -Recurse -ErrorAction SilentlyContinue |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                Get-ChildItem -Path $script:DestDir -Recurse -ErrorAction SilentlyContinue |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            It "Should copy ALL files when directory is chunked into subdirectories" {
+                # Create structure with files at root AND in subdirectories
+                # This tests the files-only chunk (/LEV:1) + subdirectory chunks scenario
+
+                # Root level files
+                "root1" | Set-Content -Path (Join-Path $script:SourceDir "root1.txt")
+                "root2" | Set-Content -Path (Join-Path $script:SourceDir "root2.txt")
+
+                # Subdirectory 1
+                $sub1 = Join-Path $script:SourceDir "SubDir1"
+                New-Item -Path $sub1 -ItemType Directory -Force | Out-Null
+                "sub1-file1" | Set-Content -Path (Join-Path $sub1 "file1.txt")
+                "sub1-file2" | Set-Content -Path (Join-Path $sub1 "file2.txt")
+
+                # Subdirectory 2
+                $sub2 = Join-Path $script:SourceDir "SubDir2"
+                New-Item -Path $sub2 -ItemType Directory -Force | Out-Null
+                "sub2-file1" | Set-Content -Path (Join-Path $sub2 "file1.txt")
+
+                # Nested subdirectory
+                $nested = Join-Path $sub1 "Nested"
+                New-Item -Path $nested -ItemType Directory -Force | Out-Null
+                "nested" | Set-Content -Path (Join-Path $nested "deep.txt")
+
+                # Count source files
+                $sourceFiles = Get-ChildItem -Path $script:SourceDir -Recurse -File
+                $sourceFileCount = $sourceFiles.Count
+
+                # Build directory tree and create chunks
+                $tree = New-DirectoryTree -RootPath $script:SourceDir
+                $chunks = @(New-SmartChunks -Path $script:SourceDir -DestinationRoot $script:DestDir -TreeNode $tree)
+
+                # Execute each chunk with real robocopy
+                foreach ($chunk in $chunks) {
+                    $logPath = Join-Path $script:LogDir "chunk_$($chunk.ChunkId).log"
+                    $job = Start-RobocopyJob -Chunk $chunk -LogPath $logPath -RobocopyOptions $script:TestOptions
+                    $result = Wait-RobocopyJob -Job $job -TimeoutSeconds 30
+                    $result.ExitCode | Should -BeLessOrEqual 3 -Because "Chunk $($chunk.ChunkId) ($($chunk.SourcePath)) should succeed"
+                }
+
+                # Verify ALL files from source exist in destination
+                $destFiles = Get-ChildItem -Path $script:DestDir -Recurse -File
+                $destFileCount = $destFiles.Count
+
+                $destFileCount | Should -Be $sourceFileCount -Because "All $sourceFileCount source files should be copied to destination"
+
+                # Verify specific files
+                Test-Path (Join-Path $script:DestDir "root1.txt") | Should -Be $true -Because "Root level files must be copied"
+                Test-Path (Join-Path $script:DestDir "root2.txt") | Should -Be $true -Because "Root level files must be copied"
+                Test-Path (Join-Path $script:DestDir "SubDir1\file1.txt") | Should -Be $true -Because "Subdirectory files must be copied"
+                Test-Path (Join-Path $script:DestDir "SubDir1\file2.txt") | Should -Be $true -Because "Subdirectory files must be copied"
+                Test-Path (Join-Path $script:DestDir "SubDir2\file1.txt") | Should -Be $true -Because "Subdirectory files must be copied"
+                Test-Path (Join-Path $script:DestDir "SubDir1\Nested\deep.txt") | Should -Be $true -Because "Nested files must be copied"
+            }
+        }
+
+        Context "Real-Time Progress Tracking" {
+            # CRITICAL: Tests that progress updates during copy (not just 0 -> 100% jump)
+            # This validates the poll-time line parsing in Get-RobocopyProgress
+
+            BeforeEach {
+                # Clean up any lingering event handlers from other tests
+                # This is necessary because Pester runs all tests in the same session
+                Get-EventSubscriber -ErrorAction SilentlyContinue | ForEach-Object {
+                    Unregister-Event -SourceIdentifier $_.SourceIdentifier -ErrorAction SilentlyContinue
+                }
+                Get-Job | Where-Object { $_.State -eq 'Running' -or $_.Name -like '*Event*' } | ForEach-Object {
+                    Remove-Job -Job $_ -Force -ErrorAction SilentlyContinue
+                }
+
+                # Clean source and dest
+                Get-ChildItem -Path $script:SourceDir -Recurse -ErrorAction SilentlyContinue |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+                Get-ChildItem -Path $script:DestDir -Recurse -ErrorAction SilentlyContinue |
+                    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            }
+
+            It "Should track progress from stdout buffer and count bytes and files correctly" {
+                # IMPORTANT: This test verifies that ProgressBuffer captures SOME progress for
+                # real-time UI updates. It does NOT test final byte counts accuracy.
+                #
+                # ProgressBuffer is for real-time progress bars during copy operations.
+                # FINAL STATS must come from log file parsing (ConvertFrom-RobocopyLog) because:
+                # 1. Robocopy buffers stdout, so OutputDataReceived events are batched
+                # 2. Events run on thread pool and may not all fire before we read
+                # 3. The log file is flushed synchronously when robocopy exits
+                #
+                # DO NOT add assertions expecting ProgressBuffer to match total file size.
+                # That will cause flaky tests due to inherent race conditions.
+
+                $fileSize = 2MB
+                $fileCount = 20
+                $totalSize = $fileSize * $fileCount
+
+                for ($i = 1; $i -le $fileCount; $i++) {
+                    $testFile = Join-Path $script:SourceDir "progress_test_$i.bin"
+                    $bytes = New-Object byte[] $fileSize
+                    # Fill with random data to prevent compression
+                    (New-Object Random).NextBytes($bytes)
+                    [System.IO.File]::WriteAllBytes($testFile, $bytes)
+                }
+
+                # Start robocopy job with single thread for predictable "New File" output order
+                $chunk = & $script:NewTestChunk $script:SourceDir $script:DestDir
+                $logPath = Join-Path $script:LogDir "progress_test.log"
+                $job = Start-RobocopyJob -Chunk $chunk -LogPath $logPath -RobocopyOptions $script:TestOptions -ThreadsPerJob 1
+
+                # Poll for progress while job is running (best effort to catch intermediate states)
+                # Note: Due to stdout buffering, we may not see intermediate progress
+                $maxProgressWhileRunning = 0
+                $pollCount = 0
+
+                while (-not $job.Process.HasExited -and $pollCount -lt 500) {
+                    $progress = Get-RobocopyProgress -Job $job
+                    if ($progress.BytesCopied -gt $maxProgressWhileRunning) {
+                        $maxProgressWhileRunning = $progress.BytesCopied
+                    }
+                    $pollCount++
+                    Start-Sleep -Milliseconds 10
+                }
+
+                # Wait for completion - this waits for OutputDataReceived events to finish
+                $result = Wait-RobocopyJob -Job $job -TimeoutSeconds 120
+                $result.ExitCode | Should -BeLessOrEqual 3 -Because "Copy should succeed"
+
+                # Get progress from ProgressBuffer (for real-time UI, not final stats)
+                $finalProgress = Get-RobocopyProgress -Job $job
+
+                # Debug info
+                $debugInfo = "PollCount=$pollCount, MaxDuringCopy=$maxProgressWhileRunning, FinalBytes=$($finalProgress.BytesCopied), FilesCopied=$($finalProgress.FilesCopied), TotalSize=$totalSize"
+
+                # Verify ProgressBuffer captured SOME progress (proves the mechanism works)
+                # We only check for non-zero values - exact counts come from log file parsing
+                $finalProgress.BytesCopied | Should -BeGreaterThan 0 -Because "ProgressBuffer should capture some bytes. $debugInfo"
+                $finalProgress.FilesCopied | Should -BeGreaterThan 0 -Because "ProgressBuffer should capture some files. $debugInfo"
+
+                # Verify final stats from log file (the authoritative source)
+                $result.Stats.BytesCopied | Should -BeGreaterOrEqual $totalSize -Because "Log file should show all bytes copied"
+                $result.Stats.FilesCopied | Should -Be $fileCount -Because "Log file should show all files copied"
             }
         }
     }

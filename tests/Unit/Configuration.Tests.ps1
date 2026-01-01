@@ -44,12 +44,6 @@ Describe "Configuration Management" {
             $config.Email.Enabled | Should -Be $false
         }
 
-        It "Should have VerboseFileLogging disabled by default" {
-            $config = New-DefaultConfig
-
-            $config.GlobalSettings.VerboseFileLogging | Should -Be $false
-        }
-
         It "Should have empty SyncProfiles collection" {
             $config = New-DefaultConfig
 
@@ -579,34 +573,6 @@ Describe "Configuration Management" {
             $config.GlobalSettings.MaxConcurrentJobs | Should -Be 4
         }
 
-        It "Should convert verboseFileLogging setting" {
-            $rawGlobal = [PSCustomObject]@{
-                logging = [PSCustomObject]@{
-                    verboseFileLogging = $true
-                }
-            }
-            $config = New-DefaultConfig
-
-            ConvertFrom-GlobalSettings -RawGlobal $rawGlobal -Config $config
-
-            $config.GlobalSettings.VerboseFileLogging | Should -Be $true
-        }
-
-        It "Should default VerboseFileLogging to false when not specified" {
-            $rawGlobal = [PSCustomObject]@{
-                logging = [PSCustomObject]@{
-                    operationalLog = [PSCustomObject]@{
-                        path = "C:\Logs\robocurse.log"
-                    }
-                }
-            }
-            $config = New-DefaultConfig
-
-            ConvertFrom-GlobalSettings -RawGlobal $rawGlobal -Config $config
-
-            $config.GlobalSettings.VerboseFileLogging | Should -Be $false
-        }
-
         It "Should have correct function signature" {
             $cmd = Get-Command ConvertFrom-GlobalSettings
 
@@ -774,15 +740,6 @@ Describe "Configuration Management" {
             $result.global.performance.throttleNetworkMbps | Should -Be 100
             $result.global.email.enabled | Should -Be $true
             $result.global.email.smtp.server | Should -Be "smtp.test.com"
-        }
-
-        It "Should include verboseFileLogging in friendly format" {
-            $config = New-DefaultConfig
-            $config.GlobalSettings.VerboseFileLogging = $true
-
-            $result = ConvertTo-FriendlyConfig -Config $config
-
-            $result.global.logging.verboseFileLogging | Should -Be $true
         }
 
         It "Should round-trip config without data loss" {

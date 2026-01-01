@@ -1040,5 +1040,190 @@ InModuleScope 'Robocurse' {
                 $root.TotalSize | Should -Be 600MB  # 100 + 200 + 300
             }
         }
+
+        Context "Chunk Correctness - No Overlap and Complete Coverage" {
+            # CRITICAL: These tests verify that chunks don't overlap (copy files twice)
+            # and don't have gaps (miss files). Failures here indicate data integrity issues.
+
+            It "Should NOT create overlapping chunks (no path is parent of another non-files-only chunk)" {
+                # Setup: Root with children that get recursively chunked
+                $root = [DirectoryNode]::new("C:\Data")
+                $root.DirectSize = 500MB
+                $root.DirectFileCount = 50
+
+                $child1 = [DirectoryNode]::new("C:\Data\Projects")
+                $child1.DirectSize = 8GB
+                $child1.DirectFileCount = 10000
+                $child1.TotalSize = 8GB
+                $child1.TotalFileCount = 10000
+                $root.Children["Projects"] = $child1
+
+                $child2 = [DirectoryNode]::new("C:\Data\Archive")
+                $child2.DirectSize = 5GB
+                $child2.DirectFileCount = 5000
+                $child2.TotalSize = 5GB
+                $child2.TotalFileCount = 5000
+                $root.Children["Archive"] = $child2
+
+                Update-TreeTotals -Node $root
+
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Data" -DestinationRoot "D:\Backup" -TreeNode $root -MaxSizeBytes 10GB)
+
+                # Verify: No regular chunk's path should be a parent of another chunk's path
+                # (files-only chunks are OK to share a path because they use /LEV:1)
+                $regularChunks = @($chunks | Where-Object { -not $_.IsFilesOnly })
+
+                for ($i = 0; $i -lt $regularChunks.Count; $i++) {
+                    for ($j = 0; $j -lt $regularChunks.Count; $j++) {
+                        if ($i -ne $j) {
+                            $pathA = $regularChunks[$i].SourcePath
+                            $pathB = $regularChunks[$j].SourcePath
+                            # Check if pathA is a parent of pathB (would cause overlap)
+                            $pathANorm = $pathA.TrimEnd('\') + '\'
+                            $isParent = $pathB.StartsWith($pathANorm, [StringComparison]::OrdinalIgnoreCase)
+                            $isParent | Should -Be $false -Because "Chunk $pathA should not be parent of chunk $pathB (would copy files twice)"
+                        }
+                    }
+                }
+            }
+
+            It "Should create files-only chunk when parent is subdivided (prevents missing files)" {
+                # When a directory is split into children, files at the root level need their own chunk
+                $root = [DirectoryNode]::new("C:\Data")
+                $root.DirectSize = 1GB  # Files directly in C:\Data
+                $root.DirectFileCount = 100
+
+                $child = [DirectoryNode]::new("C:\Data\SubDir")
+                $child.DirectSize = 5GB
+                $child.DirectFileCount = 5000
+                $child.TotalSize = 5GB
+                $child.TotalFileCount = 5000
+                $root.Children["SubDir"] = $child
+
+                Update-TreeTotals -Node $root
+
+                Mock Test-Path { $true }
+
+                # Force subdivision by making root exceed threshold
+                $chunks = @(Get-DirectoryChunks -Path "C:\Data" -DestinationRoot "D:\Backup" -TreeNode $root -MaxSizeBytes 4GB)
+
+                # Should have: 1 files-only chunk for C:\Data root files, 1 regular chunk for SubDir
+                $filesOnlyChunks = @($chunks | Where-Object { $_.IsFilesOnly -eq $true })
+                $regularChunks = @($chunks | Where-Object { $_.IsFilesOnly -ne $true })
+
+                $filesOnlyChunks.Count | Should -Be 1 -Because "Root has files that need a files-only chunk"
+                $filesOnlyChunks[0].SourcePath | Should -Be "C:\Data"
+                $filesOnlyChunks[0].RobocopyArgs | Should -Contain "/LEV:1" -Because "Files-only chunks must use /LEV:1 to avoid recursing"
+
+                $regularChunks.Count | Should -Be 1
+                $regularChunks[0].SourcePath | Should -Be "C:\Data\SubDir"
+            }
+
+            It "Should have total estimated size equal to source total (no gaps)" {
+                $root = [DirectoryNode]::new("C:\Source")
+                $root.DirectSize = 2GB
+                $root.DirectFileCount = 200
+
+                $sub1 = [DirectoryNode]::new("C:\Source\A")
+                $sub1.DirectSize = 3GB
+                $sub1.DirectFileCount = 300
+                $sub1.TotalSize = 3GB
+                $sub1.TotalFileCount = 300
+                $root.Children["A"] = $sub1
+
+                $sub2 = [DirectoryNode]::new("C:\Source\B")
+                $sub2.DirectSize = 4GB
+                $sub2.DirectFileCount = 400
+                $sub2.TotalSize = 4GB
+                $sub2.TotalFileCount = 400
+                $root.Children["B"] = $sub2
+
+                Update-TreeTotals -Node $root
+
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Source" -DestinationRoot "D:\Dest" -TreeNode $root -MaxSizeBytes 5GB)
+
+                $totalChunkSize = ($chunks | Measure-Object -Property EstimatedSize -Sum).Sum
+                $totalChunkFiles = ($chunks | Measure-Object -Property EstimatedFiles -Sum).Sum
+
+                $totalChunkSize | Should -Be $root.TotalSize -Because "Sum of chunk sizes must equal source total (no gaps)"
+                $totalChunkFiles | Should -Be $root.TotalFileCount -Because "Sum of chunk files must equal source total (no gaps)"
+            }
+
+            It "Should handle deep nesting without overlap or gaps" {
+                # Create: Root -> L1 -> L2 -> L3, each level has files
+                $root = [DirectoryNode]::new("C:\Deep")
+                $root.DirectSize = 100MB
+                $root.DirectFileCount = 10
+
+                $l1 = [DirectoryNode]::new("C:\Deep\L1")
+                $l1.DirectSize = 200MB
+                $l1.DirectFileCount = 20
+
+                $l2 = [DirectoryNode]::new("C:\Deep\L1\L2")
+                $l2.DirectSize = 300MB
+                $l2.DirectFileCount = 30
+
+                $l3 = [DirectoryNode]::new("C:\Deep\L1\L2\L3")
+                $l3.DirectSize = 15GB  # Large enough to be its own chunk
+                $l3.DirectFileCount = 15000
+                $l3.TotalSize = 15GB
+                $l3.TotalFileCount = 15000
+
+                $l2.Children["L3"] = $l3
+                $l1.Children["L2"] = $l2
+                $root.Children["L1"] = $l1
+
+                Update-TreeTotals -Node $root
+
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Deep" -DestinationRoot "D:\Backup" -TreeNode $root -MaxSizeBytes 10GB)
+
+                # Verify no regular chunk overlap
+                $regularChunks = @($chunks | Where-Object { -not $_.IsFilesOnly })
+                for ($i = 0; $i -lt $regularChunks.Count; $i++) {
+                    for ($j = 0; $j -lt $regularChunks.Count; $j++) {
+                        if ($i -ne $j) {
+                            $pathA = $regularChunks[$i].SourcePath.TrimEnd('\') + '\'
+                            $pathB = $regularChunks[$j].SourcePath
+                            $pathB.StartsWith($pathA, [StringComparison]::OrdinalIgnoreCase) | Should -Be $false
+                        }
+                    }
+                }
+
+                # Verify total coverage
+                $totalChunkSize = ($chunks | Measure-Object -Property EstimatedSize -Sum).Sum
+                $totalChunkSize | Should -Be $root.TotalSize
+            }
+
+            It "Should NOT have duplicate source paths (each path appears at most once per type)" {
+                $root = [DirectoryNode]::new("C:\Data")
+                $root.DirectSize = 1GB
+                $root.DirectFileCount = 100
+
+                $child = [DirectoryNode]::new("C:\Data\Sub")
+                $child.DirectSize = 2GB
+                $child.DirectFileCount = 200
+                $child.TotalSize = 2GB
+                $child.TotalFileCount = 200
+                $root.Children["Sub"] = $child
+
+                Update-TreeTotals -Node $root
+
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Data" -DestinationRoot "D:\Backup" -TreeNode $root -MaxSizeBytes 1GB)
+
+                # Group by source path and check for duplicates within same IsFilesOnly category
+                $grouped = $chunks | Group-Object -Property SourcePath, IsFilesOnly
+                foreach ($group in $grouped) {
+                    $group.Count | Should -Be 1 -Because "Path $($group.Name) should not appear multiple times with same IsFilesOnly value"
+                }
+            }
+        }
     }
 }

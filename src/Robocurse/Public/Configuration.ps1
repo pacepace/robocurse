@@ -79,7 +79,6 @@ function New-DefaultConfig {
             LogCompressAfterDays = $script:LogCompressAfterDays
             LogRetentionDays = $script:LogDeleteAfterDays
             MismatchSeverity = $script:DefaultMismatchSeverity  # "Warning", "Error", or "Success"
-            VerboseFileLogging = $false  # If true, log every file copied; if false, only log summary
             RedactPaths = $false  # If true, redact file paths in logs for security/privacy
             LogLevel = "Info"  # Minimum log level: Debug, Info, Warning, Error
             RedactServerNames = @()  # Array of server names to specifically redact from logs
@@ -250,10 +249,6 @@ function ConvertFrom-GlobalSettings {
             if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
                 $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays
             }
-        }
-        # Verbose file logging - log every file name if true (default: false for smaller logs)
-        if ($null -ne $RawGlobal.logging.verboseFileLogging) {
-            $Config.GlobalSettings.VerboseFileLogging = [bool]$RawGlobal.logging.verboseFileLogging
         }
         # Path redaction - redact file paths in logs for security/privacy
         if ($null -ne $RawGlobal.logging.redactPaths) {
@@ -506,7 +501,6 @@ function ConvertTo-FriendlyConfig {
                         maxAgeDays = $Config.GlobalSettings.LogRetentionDays
                     }
                 }
-                verboseFileLogging = $Config.GlobalSettings.VerboseFileLogging
                 redactPaths = $Config.GlobalSettings.RedactPaths
                 redactServerNames = @($Config.GlobalSettings.RedactServerNames)
                 logLevel = $Config.GlobalSettings.LogLevel
