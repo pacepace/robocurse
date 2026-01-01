@@ -175,14 +175,13 @@ function New-ModuleModeBackgroundScript {
             # Re-read config to get fresh profile data with all properties intact
             # (PSCustomObject properties don't survive runspace boundaries - see CLAUDE.md)
             `$bgConfig = Get-RobocurseConfig -Path `$ConfigPath
-            `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
 
             # Look up profiles by name from freshly-loaded config
             `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
             Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
 
             # Start replication with -SkipInitialization since UI thread already initialized
-            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$ConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$ConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
 
             # Run the orchestration loop until complete
             # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
@@ -261,14 +260,13 @@ function New-ScriptModeBackgroundScript {
             Write-Host "[BACKGROUND] Starting replication run"
             # Re-read config to get fresh profile data (see CLAUDE.md for pattern)
             `$bgConfig = Get-RobocurseConfig -Path `$GuiConfigPath
-            `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
 
             # Look up profiles by name from freshly-loaded config
             `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
             Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
 
             # Start replication with -SkipInitialization since UI thread already initialized
-            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$GuiConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$GuiConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
 
             # Run the orchestration loop until complete
             # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)

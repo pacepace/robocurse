@@ -254,8 +254,6 @@ Describe "Profile Schedule Schema Integration" {
                 }
                 UseVss = $false
                 ScanMode = "Smart"
-                ChunkMaxSizeGB = 50
-                ChunkMaxFiles = 100000
                 ChunkMaxDepth = 10
                 RobocopyOptions = @{}
                 Enabled = $true

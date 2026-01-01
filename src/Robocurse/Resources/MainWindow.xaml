@@ -558,8 +558,12 @@
                                  ToolTip="List of configured sync profiles">
                             <ListBox.ItemTemplate>
                                 <DataTemplate>
-                                    <CheckBox IsChecked="{Binding Enabled}" Content="{Binding Name}"
-                                              Style="{StaticResource DarkCheckBox}"/>
+                                    <StackPanel Orientation="Horizontal">
+                                        <CheckBox IsChecked="{Binding Enabled}" VerticalAlignment="Center"
+                                                  Style="{StaticResource DarkCheckBox}"/>
+                                        <TextBlock Text="{Binding Name}" Margin="5,0,0,0" VerticalAlignment="Center"
+                                                   Foreground="#E0E0E0" Cursor="Hand"/>
+                                    </StackPanel>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
                         </ListBox>
@@ -610,28 +614,21 @@
                                 <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
                                         Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                                <!-- Chunking - after Destination -->
-                                <Label Grid.Row="3" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                <!-- Scan Mode + MaxDepth - after Destination -->
+                                <Label Grid.Row="3" Grid.Column="0" Content="Scan:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                                 <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,8">
-                                    <TextBox x:Name="txtMaxSize" Width="40" Style="{StaticResource DarkTextBox}" Text="10"
-                                             ToolTip="Max size (GB)"/>
-                                    <Label Content="GB" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-                                    <TextBox x:Name="txtMaxFiles" Width="50" Style="{StaticResource DarkTextBox}" Text="50000" Margin="10,0,0,0"
-                                             ToolTip="Max files"/>
-                                    <Label Content="files" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="cmbScanMode" Width="80" Style="{StaticResource DarkComboBox}"
+                                              ToolTip="Smart: unlimited depth (recommended). Flat: stops at max depth.">
+                                        <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
+                                        <ComboBoxItem Content="Flat" Style="{StaticResource DarkComboBoxItem}"/>
+                                    </ComboBox>
                                     <TextBox x:Name="txtMaxDepth" Width="30" Style="{StaticResource DarkTextBox}" Text="5" Margin="10,0,0,0"
-                                             ToolTip="Max depth"/>
+                                             ToolTip="Max depth (Flat mode only)"/>
                                     <Label Content="depth" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
                                 </StackPanel>
 
-                                <!-- Scan + Validate on same row -->
-                                <Label Grid.Row="4" Grid.Column="0" Content="Scan:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                                <ComboBox Grid.Row="4" Grid.Column="1" x:Name="cmbScanMode" Width="80" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="0,0,0,8"
-                                          Style="{StaticResource DarkComboBox}"
-                                          ToolTip="Scan mode: Smart or Quick">
-                                    <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
-                                    <ComboBoxItem Content="Quick" Style="{StaticResource DarkComboBoxItem}"/>
-                                </ComboBox>
+                                <!-- Schedule + Validate buttons -->
+                                <Label Grid.Row="4" Grid.Column="0" Content="" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                                 <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,8">
                                     <Button x:Name="btnProfileSchedule" Content="Schedule" Style="{StaticResource ScheduleButton}"
                                             VerticalAlignment="Center" Margin="0,0,8,0"

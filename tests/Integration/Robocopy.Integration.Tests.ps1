@@ -45,7 +45,7 @@ BeforeAll {
     . "$PSScriptRoot\Fixtures\TestDataGenerator.ps1"
     Initialize-RobocurseForTesting
 
-    # Helper to wait for robocopy job
+    # Helper to wait for robocopy job with proper cleanup
     function Wait-RobocopyComplete {
         param($Job, [int]$TimeoutSeconds = 60)
 
@@ -53,7 +53,41 @@ BeforeAll {
         while (-not $Job.Process.HasExited -and $stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
             Start-Sleep -Milliseconds 100
         }
-        return $Job.Process.HasExited
+        $completed = $Job.Process.HasExited
+
+        # Wait for async OutputDataReceived events to finish processing
+        # Events run on thread pool and may still be queued after HasExited becomes true
+        # This matches the stabilization logic in Wait-RobocopyJob (Robocopy.ps1)
+        if ($Job.ProgressBuffer) {
+            try {
+                $lastCount = -1
+                $stableIterations = 0
+                for ($i = 0; $i -lt 50; $i++) {
+                    $currentCount = $Job.ProgressBuffer.LineCount
+                    if ($currentCount -eq $lastCount) {
+                        $stableIterations++
+                        if ($stableIterations -ge 3) {
+                            break  # LineCount stable for 3 iterations, events are done
+                        }
+                    } else {
+                        $stableIterations = 0
+                    }
+                    $lastCount = $currentCount
+                    Start-Sleep -Milliseconds 20
+                }
+            } catch { }
+        }
+
+        # Clean up event subscription to prevent orphaned subscriptions
+        # (but don't dispose process - tests need to access ExitCode after)
+        if ($Job.OutputEvent) {
+            try {
+                Unregister-Event -SourceIdentifier $Job.OutputEvent.Name -ErrorAction SilentlyContinue
+                Remove-Job -Id $Job.OutputEvent.Id -Force -ErrorAction SilentlyContinue
+            } catch { }
+        }
+
+        return $completed
     }
 }
 

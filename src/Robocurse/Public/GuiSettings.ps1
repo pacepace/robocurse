@@ -291,12 +291,6 @@ function Import-SettingsToForm {
         $script:MinLogLevel = $logLevel
     }
 
-    if ($script:Controls['chkSettingsVerboseLogging']) {
-        $verboseLogging = if ($null -ne $script:Config.GlobalSettings.VerboseFileLogging) { [bool]$script:Config.GlobalSettings.VerboseFileLogging } else { $false }
-        Write-RobocurseLog -Message "Loading VerboseFileLogging from config: $($script:Config.GlobalSettings.VerboseFileLogging) -> $verboseLogging" -Level 'Debug' -Component 'Settings'
-        $script:Controls.chkSettingsVerboseLogging.IsChecked = $verboseLogging
-    }
-
     # SIEM settings (not yet in config structure - use placeholder defaults)
     if ($script:Controls['chkSettingsSiem']) {
         $script:Controls.chkSettingsSiem.IsChecked = $false
@@ -410,11 +404,6 @@ function Save-SettingsFromForm {
             $script:Config.GlobalSettings.LogLevel = $logLevel
             # Also update the runtime MinLogLevel
             $script:MinLogLevel = $logLevel
-        }
-
-        if ($script:Controls['chkSettingsVerboseLogging']) {
-            $script:Config.GlobalSettings.VerboseFileLogging = [bool]$script:Controls.chkSettingsVerboseLogging.IsChecked
-            Write-RobocurseLog -Message "Saving VerboseFileLogging: $($script:Config.GlobalSettings.VerboseFileLogging)" -Level 'Debug' -Component 'Settings'
         }
 
         # SIEM settings (placeholder - not yet in config structure)

@@ -83,9 +83,6 @@ function Start-ReplicationRun {
 
         [switch]$DryRun,
 
-        # If true, log every file copied to robocopy log; if false (default), only summary
-        [switch]$VerboseFileLogging,
-
         [scriptblock]$OnProgress,
         [scriptblock]$OnChunkComplete,
         [scriptblock]$OnProfileComplete
@@ -125,9 +122,6 @@ function Start-ReplicationRun {
         Write-RobocurseLog -Message "DRY-RUN MODE: No files will be copied (robocopy /L)" `
             -Level 'Warning' -Component 'Orchestrator'
     }
-
-    # Set verbose file logging mode for Start-ChunkJob to use
-    $script:VerboseFileLoggingMode = $VerboseFileLogging.IsPresent
 
     # Validate robocopy is available before starting
     $robocopyCheck = Test-RobocopyAvailable
@@ -546,6 +540,10 @@ function Start-ProfileReplication {
     <#
     .SYNOPSIS
         Starts replication for a single profile
+    .DESCRIPTION
+        Starts replication for a single profile. Includes duplicate run prevention -
+        if the same profile is already running, returns an error instead of starting
+        a concurrent run that could cause conflicts.
     .PARAMETER Profile
         Profile object from config
     .PARAMETER MaxConcurrentJobs
@@ -558,6 +556,24 @@ function Start-ProfileReplication {
 
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs
     )
+
+    # =====================================================================================
+    # DUPLICATE RUN PREVENTION
+    # =====================================================================================
+    # Check if this profile is already running. This prevents issues like:
+    # - Drive letter conflicts when both runs try to mount the same UNC path
+    # - Robocopy conflicts when both runs try to write to the same destination
+    # - Checkpoint corruption from concurrent writes
+    # =====================================================================================
+    if (-not (Register-RunningProfile -ProfileName $Profile.Name)) {
+        $errorMsg = "Profile '$($Profile.Name)' is already running. Cannot start duplicate run."
+        Write-RobocurseLog -Message $errorMsg -Level 'Error' -Component 'Orchestrator'
+        $script:OrchestrationState.EnqueueError($errorMsg)
+        $script:CurrentPreflightError = $errorMsg
+        # Skip to completion handler which will move to next profile
+        Complete-CurrentProfile
+        return
+    }
 
     $state = $script:OrchestrationState
     $state.CurrentProfile = $Profile
@@ -837,11 +853,13 @@ function Start-ProfileReplication {
         return
     }
 
-    # Scan source directory (using VSS path if available)
+    # Build directory tree with single-pass enumeration (PERFORMANCE FIX)
+    # Previously used Get-DirectoryProfile here, then re-enumerated in chunking (O(N^2) robocopy calls)
+    # Now we enumerate once and pass the tree to chunking for O(1) size lookups
     $state.Phase = "Scanning"
     $state.ScanProgress = 0
-    $state.CurrentActivity = "Scanning source directory..."
-    $scanResult = Get-DirectoryProfile -Path $effectiveSource -State $state
+    $state.CurrentActivity = "Building directory tree..."
+    $directoryTree = New-DirectoryTree -RootPath $effectiveSource -State $state
 
     # Check for stop request after directory scan
     if ($state.StopRequested) {
@@ -849,15 +867,13 @@ function Start-ProfileReplication {
         return
     }
 
-    # Generate chunks based on scan mode
+    # Generate chunks based on scan mode using the pre-built tree
     $state.ScanProgress = 0
     $state.CurrentActivity = "Creating chunks..."
-    # Convert ChunkMaxSizeGB to bytes
-    $maxChunkBytes = if ($Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB * 1GB } else { $script:DefaultMaxChunkSizeBytes }
-    $maxFiles = if ($Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
+    # MaxDepth is only used by Flat mode
     $maxDepth = if ($Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
-    Write-RobocurseLog -Message "Chunk settings: MaxSize=$([math]::Round($maxChunkBytes/1GB, 2))GB, MaxFiles=$maxFiles, MaxDepth=$maxDepth, Mode=$($Profile.ScanMode)" `
+    Write-RobocurseLog -Message "Chunk settings: Mode=$($Profile.ScanMode), MaxDepth=$maxDepth (Flat only)" `
         -Level 'Debug' -Component 'Orchestrator'
 
     # Use network-mapped destination if available
@@ -868,27 +884,24 @@ function Start-ProfileReplication {
             New-FlatChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
-                -State $state
+                -MaxDepth $maxDepth `
+                -State $state `
+                -TreeNode $directoryTree
         }
         'Smart' {
             New-SmartChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
-                -MaxDepth $maxDepth `
-                -State $state
+                -State $state `
+                -TreeNode $directoryTree
         }
         default {
+            # Default to Smart mode (unlimited depth)
             New-SmartChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
-                -MaxDepth $maxDepth `
-                -State $state
+                -State $state `
+                -TreeNode $directoryTree
         }
     }
 
@@ -905,13 +918,13 @@ function Start-ProfileReplication {
     }
 
     $state.TotalChunks = $chunks.Count
-    $state.TotalBytes = $scanResult.TotalSize
+    $state.TotalBytes = $directoryTree.TotalSize
     $state.CompletedCount = 0
     $state.BytesComplete = 0
     $state.Phase = "Replicating"
     $state.CurrentActivity = ""  # Clear activity when replicating starts
 
-    Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($scanResult.TotalSize/1GB, 2)) GB" `
+    Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($directoryTree.TotalSize/1GB, 2)) GB" `
         -Level 'Debug' -Component 'Orchestrator'
 }
 
@@ -995,8 +1008,7 @@ function Start-ChunkJob {
     $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath `
         -ThreadsPerJob $script:DefaultThreadsPerJob `
         -RobocopyOptions $effectiveOptions `
-        -DryRun:$script:DryRunMode `
-        -VerboseFileLogging:$script:VerboseFileLoggingMode
+        -DryRun:$script:DryRunMode
 
     return $job
 }
@@ -1028,6 +1040,35 @@ function Invoke-ReplicationTick {
 
     if ($state.PauseRequested) {
         return  # Don't start new jobs, but let running ones complete
+    }
+
+    # Update BytesComplete from active jobs for real-time progress
+    # This runs in the background thread and updates the shared C# state object
+    if (-not $state) {
+        Write-RobocurseLog "Invoke-ReplicationTick: OrchestrationState is null" -Level 'Error' -Component 'Orchestrator'
+        return
+    }
+
+    $bytesFromCompleted = $state.CompletedChunkBytes
+    $bytesFromActive = 0
+    $activeCount = $state.ActiveJobs.Count
+    foreach ($kvp in $state.ActiveJobs.ToArray()) {
+        try {
+            $job = $kvp.Value
+            $progress = Get-RobocopyProgress -Job $job
+            if ($progress -and $progress.BytesCopied -gt 0) {
+                $bytesFromActive += $progress.BytesCopied
+                Write-RobocurseLog "Progress poll: Chunk=$($job.Chunk.ChunkId) BytesCopied=$($progress.BytesCopied)" -Level 'Debug' -Component 'Progress'
+            }
+        }
+        catch {
+            Write-RobocurseLog "Progress poll failed: $_" -Level 'Debug' -Component 'Progress'
+        }
+    }
+    $state.BytesComplete = $bytesFromCompleted + $bytesFromActive
+
+    if ($activeCount -gt 0) {
+        Write-RobocurseLog "BytesComplete update: completed=$bytesFromCompleted + active=$bytesFromActive = $($state.BytesComplete) (ActiveJobs=$activeCount)" -Level 'Debug' -Component 'Progress'
     }
 
     # Check completed jobs - snapshot keys first for safe enumeration
@@ -1231,25 +1272,20 @@ function Complete-RobocopyJob {
 
     $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode -MismatchSeverity $mismatchSeverity
 
-    # Get captured stdout (was started async in Start-RobocopyJob)
-    # This avoids file flush race conditions in Session 0 scheduled tasks
-    $capturedOutput = $null
-    if ($Job.StdoutTask) {
+    # Clean up the event subscription to prevent memory leaks
+    # Note: ProgressBuffer is used for real-time progress during the job (Get-RobocopyProgress),
+    # but for final stats we always read from the log file which is reliably flushed when robocopy exits.
+    # The stdout capture has race conditions - final stats lines may not be processed before we read.
+    if ($Job.OutputEvent) {
         try {
-            $capturedOutput = $Job.StdoutTask.GetAwaiter().GetResult()
-        }
-        catch {
-            Write-RobocurseLog "Failed to get captured stdout for chunk $($Job.Chunk.ChunkId): $_" -Level 'Warning' -Component 'Orchestrator'
-        }
+            Unregister-Event -SourceIdentifier $Job.OutputEvent.Name -ErrorAction SilentlyContinue
+            Remove-Job -Id $Job.OutputEvent.Id -Force -ErrorAction SilentlyContinue
+        } catch { }
     }
 
-    # Parse stats from captured stdout (avoids file flush race), fallback to log file
-    $stats = if ($capturedOutput) {
-        ConvertFrom-RobocopyLog -Content $capturedOutput -LogPath $Job.LogPath
-    }
-    else {
-        ConvertFrom-RobocopyLog -LogPath $Job.LogPath
-    }
+    # Parse final stats from log file (authoritative source - robocopy flushes before exit)
+    # Do NOT use captured stdout here - race condition with OutputDataReceived event processing
+    $stats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
 
     $duration = [datetime]::Now - $Job.StartTime
 
@@ -1542,6 +1578,9 @@ function Complete-CurrentProfile {
     }
     $state.NetworkCredential = $null
 
+    # Unregister the profile as running (release the mutex)
+    Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
+
     # Invoke callback
     if ($script:OnProfileComplete) {
         & $script:OnProfileComplete $state.CurrentProfile
@@ -1674,6 +1713,30 @@ function Stop-AllJobs {
                 $state.CurrentVssSnapshot = $null
             }
         }
+    }
+
+    # Clean up network drive mappings
+    if ($state.CurrentNetworkMappings -and $state.CurrentNetworkMappings.Count -gt 0) {
+        Write-RobocurseLog -Message "Cleaning up network mappings after stop ($($state.CurrentNetworkMappings.Count) mapping(s))" `
+            -Level 'Info' -Component 'NetworkMapping'
+        try {
+            Dismount-NetworkPaths -Mappings $state.CurrentNetworkMappings
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to cleanup network mappings: $($_.Exception.Message)" `
+                -Level 'Warning' -Component 'NetworkMapping'
+        }
+        finally {
+            $state.CurrentNetworkMappings = $null
+            $state.NetworkMappedSource = $null
+            $state.NetworkMappedDest = $null
+        }
+    }
+    $state.NetworkCredential = $null
+
+    # Unregister the current profile as running (release the mutex)
+    if ($state.CurrentProfile) {
+        Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
     }
 
     Write-SiemEvent -EventType 'SessionEnd' -Data @{

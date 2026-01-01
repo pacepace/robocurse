@@ -304,11 +304,13 @@ function Test-SafeRobocopyArgument {
     }
 
     # Check for dangerous patterns that could enable command injection
-    # These patterns should never appear in legitimate paths or exclude patterns
+    # Note: & is NOT blocked because:
+    # 1. It's a valid Windows filename character (AT&T, R&D, Ben & Jerry's)
+    # 2. We use Start-Process, not Invoke-Expression, so shell metacharacters aren't interpreted
     $dangerousPatterns = @(
         '[\x00-\x1F]',           # Control characters (null, newline, etc.)
-        '[;&|]',                  # Command separators
-        '[<>]',                   # Shell redirectors
+        '[;<>]',                  # Semicolon (rare), shell redirectors (< > invalid in paths)
+        '\|',                     # Pipe (invalid in Windows paths anyway)
         '`',                      # Backtick (PowerShell escape/execution)
         '\$\(',                   # Command substitution
         '\$\{',                   # Variable expansion with braces

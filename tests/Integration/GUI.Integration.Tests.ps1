@@ -60,8 +60,6 @@ InModuleScope 'Robocurse' {
                         Enabled = $true
                         UseVSS = $false
                         ScanMode = "Smart"
-                        ChunkMaxSizeGB = 10
-                        ChunkMaxFiles = 50000
                         ChunkMaxDepth = 5
                     }
                 )
@@ -218,8 +216,6 @@ InModuleScope 'Robocurse' {
                     Enabled = $true
                     UseVSS = $false
                     ScanMode = "Smart"
-                    ChunkMaxSizeGB = 10
-                    ChunkMaxFiles = 50000
                     ChunkMaxDepth = 5
                 }
             }
@@ -388,9 +384,7 @@ InModuleScope 'Robocurse' {
                     Destination = $script:DestDir
                     Enabled = $true
                     UseVSS = $false
-                    ScanMode = "Quick"
-                    ChunkMaxSizeGB = 10
-                    ChunkMaxFiles = 50000
+                    ScanMode = "Flat"
                     ChunkMaxDepth = 5
                 }
 
@@ -421,9 +415,7 @@ InModuleScope 'Robocurse' {
                     Destination = $script:DestDir
                     Enabled = $true
                     UseVSS = $false
-                    ScanMode = "Quick"
-                    ChunkMaxSizeGB = 10
-                    ChunkMaxFiles = 50000
+                    ScanMode = "Flat"
                     ChunkMaxDepth = 5
                 }
 

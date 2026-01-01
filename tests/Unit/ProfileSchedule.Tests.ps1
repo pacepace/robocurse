@@ -39,6 +39,26 @@ Initialize-OrchestrationStateType | Out-Null
 InModuleScope 'Robocurse' {
     Describe "Profile Scheduling" {
         BeforeAll {
+            # Ensure stub functions exist - they may have been removed by integration tests
+            # when running the full test suite
+            if (Get-Module ScheduledTasks -ErrorAction SilentlyContinue) {
+                Remove-Module ScheduledTasks -Force -ErrorAction SilentlyContinue
+            }
+            # Recreate stubs if they don't exist
+            if (-not (Get-Item -Path "function:global:New-ScheduledTaskAction" -ErrorAction SilentlyContinue)) {
+                function global:New-ScheduledTaskAction { param($Execute, $Argument, $WorkingDirectory) }
+                function global:New-ScheduledTaskTrigger { param([switch]$Daily, [switch]$Weekly, [switch]$Once, $At, $DaysOfWeek, $RepetitionInterval, $RepetitionDuration) }
+                function global:New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) }
+                function global:New-ScheduledTaskSettingsSet { param([switch]$AllowStartIfOnBatteries, [switch]$DontStopIfGoingOnBatteries, [switch]$StartWhenAvailable, [switch]$RunOnlyIfNetworkAvailable, $MultipleInstances, $ExecutionTimeLimit, $Priority) }
+                function global:New-ScheduledTask { param($Action, $Trigger, $Settings, $Principal, $Description) }
+                function global:Register-ScheduledTask { param([Parameter(ValueFromPipeline)]$InputObject, $TaskName, $Action, $Trigger, $Principal, $Settings, $Description, [switch]$Force, $User, $Password, $RunLevel) }
+                function global:Unregister-ScheduledTask { param($TaskName, [switch]$Confirm) }
+                function global:Get-ScheduledTask { param($TaskName) }
+                function global:Get-ScheduledTaskInfo { param($TaskName) }
+                function global:Enable-ScheduledTask { param($TaskName) }
+                function global:Disable-ScheduledTask { param($TaskName) }
+            }
+
             # Create temp config and script files
             $script:tempConfigPath = Join-Path $TestDrive "test-config.json"
             $script:tempScriptPath = Join-Path $TestDrive "Robocurse.ps1"

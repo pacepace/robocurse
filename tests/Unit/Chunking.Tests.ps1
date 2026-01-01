@@ -48,8 +48,17 @@ InModuleScope 'Robocurse' {
             It "Should throw when MaxDepth is out of range (too low)" {
                 $testDir = New-Item -ItemType Directory -Path "$TestDrive/testdir4" -Force
                 {
-                    Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" -MaxDepth -1
+                    # -2 is invalid (below -1), -1 is valid (unlimited for Smart mode)
+                    Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" -MaxDepth -2
                 } | Should -Throw
+            }
+
+            It "Should accept MaxDepth of -1 for unlimited recursion (Smart mode)" {
+                $testDir = New-Item -ItemType Directory -Path "$TestDrive/testdir-unlimited" -Force
+                {
+                    # -1 is valid for unlimited depth
+                    Get-DirectoryChunks -Path $testDir.FullName -DestinationRoot "D:\Backup" -MaxDepth -1
+                } | Should -Not -Throw
             }
 
             It "Should throw when MaxSizeBytes is less than or equal to MinSizeBytes" {
@@ -557,14 +566,14 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = @(New-FlatChunks -Path "C:\TestFlat" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 10GB)
+                $chunks = @(New-FlatChunks -Path "C:\TestFlat" -DestinationRoot "D:\Backup")
 
                 @($chunks).Count | Should -Be 1
                 $chunks[0].SourcePath | Should -Be "C:\TestFlat"
                 $chunks[0].DestinationPath | Should -Be "D:\Backup"
             }
 
-            It "Should use provided MaxChunkSizeBytes parameter" {
+            It "Should use provided MaxDepth parameter" {
                 Mock Test-Path { $true }
                 Mock Get-DirectoryProfile {
                     [PSCustomObject]@{
@@ -578,52 +587,39 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-DirectoryChildren { @() }
 
-                $chunks = @(New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 20GB)
+                # Flat mode with MaxDepth=0 means top-level only
+                $chunks = @(New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxDepth 0)
 
                 @($chunks).Count | Should -Be 1
                 $chunks[0].EstimatedSize | Should -Be 5GB
-            }
-
-            It "Should use provided MaxFiles parameter" {
-                Mock Test-Path { $true }
-                Mock Get-DirectoryProfile {
-                    [PSCustomObject]@{
-                        Path = $Path
-                        TotalSize = 1GB
-                        FileCount = 5000
-                        DirCount = 0
-                        AvgFileSize = 200KB
-                        LastScanned = Get-Date
-                    }
-                }
-                Mock Get-DirectoryChildren { @() }
-
-                $chunks = @(New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxFiles 10000)
-
-                @($chunks).Count | Should -Be 1
             }
         }
 
         Context "New-SmartChunks" {
             It "Should create chunks recursively" {
                 Mock Test-Path { $true }
+                # Use values relative to actual defaults so test adapts when defaults change
+                $maxSize = $script:DefaultMaxChunkSizeBytes
+                $maxFiles = $script:DefaultMaxFilesPerChunk
                 Mock Get-DirectoryProfile {
                     param($Path)
                     if ($Path -eq "C:\TestSmart") {
+                        # Exceeds thresholds to trigger splitting (2x defaults)
                         [PSCustomObject]@{
                             Path = $Path
-                            TotalSize = 50GB
-                            FileCount = 100000
+                            TotalSize = $maxSize * 2
+                            FileCount = $maxFiles * 2
                             DirCount = 2
                             AvgFileSize = 500KB
                             LastScanned = Get-Date
                         }
                     }
                     else {
+                        # Child directories are under thresholds (20% of defaults)
                         [PSCustomObject]@{
                             Path = $Path
-                            TotalSize = 5GB
-                            FileCount = 10000
+                            TotalSize = [int64]($maxSize * 0.2)
+                            FileCount = [int]($maxFiles * 0.2)
                             DirCount = 0
                             AvgFileSize = 500KB
                             LastScanned = Get-Date
@@ -639,55 +635,71 @@ InModuleScope 'Robocurse' {
                 }
                 Mock Get-FilesAtLevel { @() }
 
-                $chunks = @(New-SmartChunks -Path "C:\TestSmart" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 10GB)
+                # Smart mode uses unlimited depth (-1) automatically
+                $chunks = @(New-SmartChunks -Path "C:\TestSmart" -DestinationRoot "D:\Backup")
 
                 @($chunks).Count | Should -Be 2
                 $chunks[0].SourcePath | Should -BeLike "*Child*"
                 $chunks[1].SourcePath | Should -BeLike "*Child*"
             }
 
-            It "Should respect MaxDepth parameter" {
+            It "Should use unlimited depth by default" {
                 Mock Test-Path { $true }
+                # Create a deep structure: Root -> Level1 -> Level2 -> Level3 (leaf)
                 Mock Get-DirectoryProfile {
-                    [PSCustomObject]@{
-                        Path = $Path
-                        TotalSize = 100GB
-                        FileCount = 500000
-                        DirCount = 1
-                        AvgFileSize = 200KB
-                        LastScanned = Get-Date
+                    param($Path)
+                    switch -Wildcard ($Path) {
+                        "*Level3" {
+                            [PSCustomObject]@{
+                                Path = $Path
+                                TotalSize = 5GB
+                                FileCount = 10000
+                                DirCount = 0
+                                AvgFileSize = 500KB
+                                LastScanned = Get-Date
+                            }
+                        }
+                        default {
+                            [PSCustomObject]@{
+                                Path = $Path
+                                TotalSize = 100GB
+                                FileCount = 500000
+                                DirCount = 1
+                                AvgFileSize = 200KB
+                                LastScanned = Get-Date
+                            }
+                        }
                     }
                 }
                 Mock Get-DirectoryChildren {
                     param($Path)
-                    @("$Path\Child")
+                    switch -Wildcard ($Path) {
+                        "*Level3" { @() }
+                        "*Level2" { @("$Path\Level3") }
+                        "*Level1" { @("$Path\Level2") }
+                        default { @("$Path\Level1") }
+                    }
                 }
                 Mock Get-FilesAtLevel { @() }
 
-                $chunks = @(New-SmartChunks -Path "C:\Deep" -DestinationRoot "D:\Backup" -MaxDepth 0 -MaxChunkSizeBytes 10GB)
+                # Smart mode should recurse all the way to Level3 (unlimited depth)
+                $chunks = @(New-SmartChunks -Path "C:\Deep" -DestinationRoot "D:\Backup")
 
                 @($chunks).Count | Should -Be 1
-                $chunks[0].SourcePath | Should -Be "C:\Deep"
+                $chunks[0].SourcePath | Should -BeLike "*Level3"
             }
 
-            It "Should use provided MaxChunkSizeBytes parameter" {
-                Mock Test-Path { $true }
-                Mock Get-DirectoryProfile {
-                    [PSCustomObject]@{
-                        Path = $Path
-                        TotalSize = 15GB
-                        FileCount = 30000
-                        DirCount = 0
-                        AvgFileSize = 500KB
-                        LastScanned = Get-Date
-                    }
-                }
-                Mock Get-DirectoryChildren { @() }
-
-                $chunks = @(New-SmartChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -MaxChunkSizeBytes 20GB)
-
-                @($chunks).Count | Should -Be 1
-                $chunks[0].EstimatedSize | Should -Be 15GB
+            It "Should only accept Path, DestinationRoot, State, and TreeNode parameters" {
+                # New-SmartChunks is fully automatic with no tuning parameters
+                $cmd = Get-Command New-SmartChunks
+                $paramNames = $cmd.Parameters.Keys | Where-Object { $_ -notmatch '^(Verbose|Debug|ErrorAction|WarningAction|InformationAction|ErrorVariable|WarningVariable|InformationVariable|OutVariable|OutBuffer|PipelineVariable)$' }
+                $paramNames | Should -Contain 'Path'
+                $paramNames | Should -Contain 'DestinationRoot'
+                $paramNames | Should -Contain 'State'
+                $paramNames | Should -Contain 'TreeNode'
+                $paramNames | Should -Not -Contain 'MaxChunkSizeBytes'
+                $paramNames | Should -Not -Contain 'MaxFiles'
+                $paramNames | Should -Not -Contain 'MaxDepth'
             }
 
             It "Should use default parameters when not specified" {
@@ -837,6 +849,385 @@ InModuleScope 'Robocurse' {
                     -MaxSizeBytes 1GB -MaxFiles 10000 -MinSizeBytes 100MB)
 
                 @($chunks).Count | Should -Be 2  # Two subdirectory chunks
+            }
+        }
+
+        Context "Get-DirectoryChunks with TreeNode Parameter" {
+            It "Should use TreeNode data instead of calling Get-DirectoryProfile" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 2GB
+                $tree.DirectFileCount = 500
+                $tree.TotalSize = 2GB
+                $tree.TotalFileCount = 500
+
+                # Get-DirectoryProfile should NOT be called when TreeNode is provided
+                Mock Get-DirectoryProfile { throw "Get-DirectoryProfile should not be called when TreeNode is provided" }
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree)
+
+                @($chunks).Count | Should -Be 1
+                $chunks[0].EstimatedSize | Should -Be 2GB
+                $chunks[0].EstimatedFiles | Should -Be 500
+            }
+
+            It "Should use tree children for recursion instead of Get-DirectoryChildren" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 0
+                $tree.DirectFileCount = 0
+
+                $child1 = [DirectoryNode]::new("C:\Test\Child1")
+                $child1.DirectSize = 3GB
+                $child1.DirectFileCount = 1000
+                $child1.TotalSize = 3GB
+                $child1.TotalFileCount = 1000
+                $tree.Children["Child1"] = $child1
+
+                $child2 = [DirectoryNode]::new("C:\Test\Child2")
+                $child2.DirectSize = 4GB
+                $child2.DirectFileCount = 2000
+                $child2.TotalSize = 4GB
+                $child2.TotalFileCount = 2000
+                $tree.Children["Child2"] = $child2
+
+                Update-TreeTotals -Node $tree
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Get-DirectoryChildren { throw "Should not be called" }
+                Mock Test-Path { $true }
+
+                # With 10GB max, both children fit in one chunk each
+                $chunks = @(Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree -MaxSizeBytes 10GB)
+
+                # Tree is 7GB total, which fits in one 10GB chunk
+                @($chunks).Count | Should -Be 1
+            }
+
+            It "Should produce chunks with total size matching tree total" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 1GB
+                $tree.DirectFileCount = 100
+
+                $child1 = [DirectoryNode]::new("C:\Test\Small")
+                $child1.DirectSize = 2GB
+                $child1.DirectFileCount = 200
+                $child1.TotalSize = 2GB
+                $child1.TotalFileCount = 200
+                $tree.Children["Small"] = $child1
+
+                $child2 = [DirectoryNode]::new("C:\Test\Large")
+                $child2.DirectSize = 15GB  # Exceeds 10GB chunk size
+                $child2.DirectFileCount = 1500
+                $child2.TotalSize = 15GB
+                $child2.TotalFileCount = 1500
+                $tree.Children["Large"] = $child2
+
+                Update-TreeTotals -Node $tree
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Test-Path { $true }
+                Mock Get-DirectoryChildren { throw "Should not be called" }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree -MaxSizeBytes 10GB)
+
+                # Verify total size matches tree
+                $chunkTotalSize = ($chunks | Measure-Object -Property EstimatedSize -Sum).Sum
+                $chunkTotalSize | Should -Be $tree.TotalSize
+            }
+
+            It "Should produce chunks with total file count matching tree total" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 500MB
+                $tree.DirectFileCount = 50
+
+                $child = [DirectoryNode]::new("C:\Test\Sub")
+                $child.DirectSize = 1GB
+                $child.DirectFileCount = 150
+                $child.TotalSize = 1GB
+                $child.TotalFileCount = 150
+                $tree.Children["Sub"] = $child
+
+                Update-TreeTotals -Node $tree
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree)
+
+                $chunkTotalFiles = ($chunks | Measure-Object -Property EstimatedFiles -Sum).Sum
+                $chunkTotalFiles | Should -Be $tree.TotalFileCount
+            }
+
+            It "Should handle tree with files at root level using DirectFileCount" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 2GB
+                $tree.DirectFileCount = 200
+
+                $child = [DirectoryNode]::new("C:\Test\Sub")
+                $child.DirectSize = 3GB
+                $child.DirectFileCount = 300
+                $child.TotalSize = 3GB
+                $child.TotalFileCount = 300
+                $tree.Children["Sub"] = $child
+
+                Update-TreeTotals -Node $tree
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Get-FilesAtLevel { throw "Should not be called when using tree" }
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree -MaxSizeBytes 10GB)
+
+                # Total should still match
+                $chunkTotalSize = ($chunks | Measure-Object -Property EstimatedSize -Sum).Sum
+                $chunkTotalSize | Should -Be $tree.TotalSize
+            }
+
+            It "New-SmartChunks should pass TreeNode to Get-DirectoryChunks" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 500MB
+                $tree.DirectFileCount = 50
+                $tree.TotalSize = 500MB
+                $tree.TotalFileCount = 50
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Test-Path { $true }
+
+                $chunks = @(New-SmartChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree)
+
+                @($chunks).Count | Should -Be 1
+                $chunks[0].EstimatedSize | Should -Be 500MB
+            }
+
+            It "New-FlatChunks should pass TreeNode to Get-DirectoryChunks" {
+                $tree = [DirectoryNode]::new("C:\Test")
+                $tree.DirectSize = 500MB
+                $tree.DirectFileCount = 50
+                $tree.TotalSize = 500MB
+                $tree.TotalFileCount = 50
+
+                Mock Get-DirectoryProfile { throw "Should not be called" }
+                Mock Test-Path { $true }
+
+                $chunks = @(New-FlatChunks -Path "C:\Test" -DestinationRoot "D:\Backup" -TreeNode $tree)
+
+                @($chunks).Count | Should -Be 1
+            }
+
+            It "Should handle deeply nested tree without calling Get-DirectoryProfile" {
+                $root = [DirectoryNode]::new("C:\Root")
+                $root.DirectSize = 100MB
+                $root.DirectFileCount = 10
+
+                $l1 = [DirectoryNode]::new("C:\Root\L1")
+                $l1.DirectSize = 200MB
+                $l1.DirectFileCount = 20
+
+                $l2 = [DirectoryNode]::new("C:\Root\L1\L2")
+                $l2.DirectSize = 300MB
+                $l2.DirectFileCount = 30
+                $l2.TotalSize = 300MB
+                $l2.TotalFileCount = 30
+
+                $l1.Children["L2"] = $l2
+                $root.Children["L1"] = $l1
+
+                Update-TreeTotals -Node $root
+
+                Mock Get-DirectoryProfile { throw "Should never be called with TreeNode" }
+                Mock Get-DirectoryChildren { throw "Should never be called with TreeNode" }
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Root" -DestinationRoot "D:\Backup" -TreeNode $root -MaxDepth 5)
+
+                $chunkTotalSize = ($chunks | Measure-Object -Property EstimatedSize -Sum).Sum
+                $chunkTotalSize | Should -Be $root.TotalSize
+                $root.TotalSize | Should -Be 600MB  # 100 + 200 + 300
+            }
+        }
+
+        Context "Chunk Correctness - No Overlap and Complete Coverage" {
+            # CRITICAL: These tests verify that chunks don't overlap (copy files twice)
+            # and don't have gaps (miss files). Failures here indicate data integrity issues.
+
+            It "Should NOT create overlapping chunks (no path is parent of another non-files-only chunk)" {
+                # Setup: Root with children that get recursively chunked
+                $root = [DirectoryNode]::new("C:\Data")
+                $root.DirectSize = 500MB
+                $root.DirectFileCount = 50
+
+                $child1 = [DirectoryNode]::new("C:\Data\Projects")
+                $child1.DirectSize = 8GB
+                $child1.DirectFileCount = 10000
+                $child1.TotalSize = 8GB
+                $child1.TotalFileCount = 10000
+                $root.Children["Projects"] = $child1
+
+                $child2 = [DirectoryNode]::new("C:\Data\Archive")
+                $child2.DirectSize = 5GB
+                $child2.DirectFileCount = 5000
+                $child2.TotalSize = 5GB
+                $child2.TotalFileCount = 5000
+                $root.Children["Archive"] = $child2
+
+                Update-TreeTotals -Node $root
+
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Data" -DestinationRoot "D:\Backup" -TreeNode $root -MaxSizeBytes 10GB)
+
+                # Verify: No regular chunk's path should be a parent of another chunk's path
+                # (files-only chunks are OK to share a path because they use /LEV:1)
+                $regularChunks = @($chunks | Where-Object { -not $_.IsFilesOnly })
+
+                for ($i = 0; $i -lt $regularChunks.Count; $i++) {
+                    for ($j = 0; $j -lt $regularChunks.Count; $j++) {
+                        if ($i -ne $j) {
+                            $pathA = $regularChunks[$i].SourcePath
+                            $pathB = $regularChunks[$j].SourcePath
+                            # Check if pathA is a parent of pathB (would cause overlap)
+                            $pathANorm = $pathA.TrimEnd('\') + '\'
+                            $isParent = $pathB.StartsWith($pathANorm, [StringComparison]::OrdinalIgnoreCase)
+                            $isParent | Should -Be $false -Because "Chunk $pathA should not be parent of chunk $pathB (would copy files twice)"
+                        }
+                    }
+                }
+            }
+
+            It "Should create files-only chunk when parent is subdivided (prevents missing files)" {
+                # When a directory is split into children, files at the root level need their own chunk
+                $root = [DirectoryNode]::new("C:\Data")
+                $root.DirectSize = 1GB  # Files directly in C:\Data
+                $root.DirectFileCount = 100
+
+                $child = [DirectoryNode]::new("C:\Data\SubDir")
+                $child.DirectSize = 5GB
+                $child.DirectFileCount = 5000
+                $child.TotalSize = 5GB
+                $child.TotalFileCount = 5000
+                $root.Children["SubDir"] = $child
+
+                Update-TreeTotals -Node $root
+
+                Mock Test-Path { $true }
+
+                # Force subdivision by making root exceed threshold
+                $chunks = @(Get-DirectoryChunks -Path "C:\Data" -DestinationRoot "D:\Backup" -TreeNode $root -MaxSizeBytes 4GB)
+
+                # Should have: 1 files-only chunk for C:\Data root files, 1 regular chunk for SubDir
+                $filesOnlyChunks = @($chunks | Where-Object { $_.IsFilesOnly -eq $true })
+                $regularChunks = @($chunks | Where-Object { $_.IsFilesOnly -ne $true })
+
+                $filesOnlyChunks.Count | Should -Be 1 -Because "Root has files that need a files-only chunk"
+                $filesOnlyChunks[0].SourcePath | Should -Be "C:\Data"
+                $filesOnlyChunks[0].RobocopyArgs | Should -Contain "/LEV:1" -Because "Files-only chunks must use /LEV:1 to avoid recursing"
+
+                $regularChunks.Count | Should -Be 1
+                $regularChunks[0].SourcePath | Should -Be "C:\Data\SubDir"
+            }
+
+            It "Should have total estimated size equal to source total (no gaps)" {
+                $root = [DirectoryNode]::new("C:\Source")
+                $root.DirectSize = 2GB
+                $root.DirectFileCount = 200
+
+                $sub1 = [DirectoryNode]::new("C:\Source\A")
+                $sub1.DirectSize = 3GB
+                $sub1.DirectFileCount = 300
+                $sub1.TotalSize = 3GB
+                $sub1.TotalFileCount = 300
+                $root.Children["A"] = $sub1
+
+                $sub2 = [DirectoryNode]::new("C:\Source\B")
+                $sub2.DirectSize = 4GB
+                $sub2.DirectFileCount = 400
+                $sub2.TotalSize = 4GB
+                $sub2.TotalFileCount = 400
+                $root.Children["B"] = $sub2
+
+                Update-TreeTotals -Node $root
+
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Source" -DestinationRoot "D:\Dest" -TreeNode $root -MaxSizeBytes 5GB)
+
+                $totalChunkSize = ($chunks | Measure-Object -Property EstimatedSize -Sum).Sum
+                $totalChunkFiles = ($chunks | Measure-Object -Property EstimatedFiles -Sum).Sum
+
+                $totalChunkSize | Should -Be $root.TotalSize -Because "Sum of chunk sizes must equal source total (no gaps)"
+                $totalChunkFiles | Should -Be $root.TotalFileCount -Because "Sum of chunk files must equal source total (no gaps)"
+            }
+
+            It "Should handle deep nesting without overlap or gaps" {
+                # Create: Root -> L1 -> L2 -> L3, each level has files
+                $root = [DirectoryNode]::new("C:\Deep")
+                $root.DirectSize = 100MB
+                $root.DirectFileCount = 10
+
+                $l1 = [DirectoryNode]::new("C:\Deep\L1")
+                $l1.DirectSize = 200MB
+                $l1.DirectFileCount = 20
+
+                $l2 = [DirectoryNode]::new("C:\Deep\L1\L2")
+                $l2.DirectSize = 300MB
+                $l2.DirectFileCount = 30
+
+                $l3 = [DirectoryNode]::new("C:\Deep\L1\L2\L3")
+                $l3.DirectSize = 15GB  # Large enough to be its own chunk
+                $l3.DirectFileCount = 15000
+                $l3.TotalSize = 15GB
+                $l3.TotalFileCount = 15000
+
+                $l2.Children["L3"] = $l3
+                $l1.Children["L2"] = $l2
+                $root.Children["L1"] = $l1
+
+                Update-TreeTotals -Node $root
+
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Deep" -DestinationRoot "D:\Backup" -TreeNode $root -MaxSizeBytes 10GB)
+
+                # Verify no regular chunk overlap
+                $regularChunks = @($chunks | Where-Object { -not $_.IsFilesOnly })
+                for ($i = 0; $i -lt $regularChunks.Count; $i++) {
+                    for ($j = 0; $j -lt $regularChunks.Count; $j++) {
+                        if ($i -ne $j) {
+                            $pathA = $regularChunks[$i].SourcePath.TrimEnd('\') + '\'
+                            $pathB = $regularChunks[$j].SourcePath
+                            $pathB.StartsWith($pathA, [StringComparison]::OrdinalIgnoreCase) | Should -Be $false
+                        }
+                    }
+                }
+
+                # Verify total coverage
+                $totalChunkSize = ($chunks | Measure-Object -Property EstimatedSize -Sum).Sum
+                $totalChunkSize | Should -Be $root.TotalSize
+            }
+
+            It "Should NOT have duplicate source paths (each path appears at most once per type)" {
+                $root = [DirectoryNode]::new("C:\Data")
+                $root.DirectSize = 1GB
+                $root.DirectFileCount = 100
+
+                $child = [DirectoryNode]::new("C:\Data\Sub")
+                $child.DirectSize = 2GB
+                $child.DirectFileCount = 200
+                $child.TotalSize = 2GB
+                $child.TotalFileCount = 200
+                $root.Children["Sub"] = $child
+
+                Update-TreeTotals -Node $root
+
+                Mock Test-Path { $true }
+
+                $chunks = @(Get-DirectoryChunks -Path "C:\Data" -DestinationRoot "D:\Backup" -TreeNode $root -MaxSizeBytes 1GB)
+
+                # Group by source path and check for duplicates within same IsFilesOnly category
+                $grouped = $chunks | Group-Object -Property SourcePath, IsFilesOnly
+                foreach ($group in $grouped) {
+                    $group.Count | Should -Be 1 -Because "Path $($group.Name) should not appear multiple times with same IsFilesOnly value"
+                }
             }
         }
     }

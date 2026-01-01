@@ -109,12 +109,13 @@ InModuleScope 'Robocurse' {
                 # Note: txtLog and svLog removed - now in separate LogWindow.xaml
                 # btnLogs replaced by navigation rail buttons (btnNavProfiles, btnNavSettings, btnNavProgress, btnNavLogs)
                 # btnSchedule replaced by btnProfileSchedule (per-profile scheduling)
+                # txtMaxSize and txtMaxFiles removed - chunking is directory-based, not size/file-count based
                 $requiredControls = @(
                     'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
                     'txtProfileName', 'txtSource', 'txtDest',
                     'btnBrowseSource', 'btnBrowseDest',
                     'chkUseVss', 'cmbScanMode',
-                    'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+                    'txtMaxDepth',
                     'sldWorkers', 'txtWorkerCount',
                     'btnRunAll', 'btnRunSelected', 'btnStop', 'btnProfileSchedule',
                     'dgChunks', 'pbProfile', 'pbOverall',
@@ -200,8 +201,6 @@ InModuleScope 'Robocurse' {
                     Enabled = $true
                     UseVSS = $false
                     ScanMode = "Smart"
-                    ChunkMaxSizeGB = 10
-                    ChunkMaxFiles = 50000
                     ChunkMaxDepth = 5
                 }
             }
@@ -214,31 +213,26 @@ InModuleScope 'Robocurse' {
                     Enabled = $true
                     UseVSS = $false
                     ScanMode = "Smart"
-                    ChunkMaxSizeGB = 10
-                    ChunkMaxFiles = 50000
                     ChunkMaxDepth = 5
                 }
 
                 $newProfile.Name | Should -Be "New Profile"
                 $newProfile.Enabled | Should -Be $true
                 $newProfile.ScanMode | Should -Be "Smart"
-                $newProfile.ChunkMaxSizeGB | Should -Be 10
+                $newProfile.ChunkMaxDepth | Should -Be 5
             }
 
             It "Should validate numeric chunk settings" {
-                # Test valid values
-                $script:TestProfile.ChunkMaxSizeGB = 20
-                $script:TestProfile.ChunkMaxSizeGB | Should -Be 20
-
-                $script:TestProfile.ChunkMaxFiles = 100000
-                $script:TestProfile.ChunkMaxFiles | Should -Be 100000
-
+                # Test ChunkMaxDepth (only chunk setting remaining)
                 $script:TestProfile.ChunkMaxDepth = 8
                 $script:TestProfile.ChunkMaxDepth | Should -Be 8
+
+                $script:TestProfile.ChunkMaxDepth = 0
+                $script:TestProfile.ChunkMaxDepth | Should -Be 0
             }
 
             It "Should handle scan mode values" {
-                $validModes = @("Smart", "Quick")
+                $validModes = @("Smart", "Flat")
 
                 foreach ($mode in $validModes) {
                     $script:TestProfile.ScanMode = $mode
@@ -422,8 +416,6 @@ InModuleScope 'Robocurse' {
                     Enabled = $true
                     UseVSS = $false
                     ScanMode = "Smart"
-                    ChunkMaxSizeGB = 15
-                    ChunkMaxFiles = 75000
                     ChunkMaxDepth = 6
                 }
 
@@ -688,19 +680,19 @@ InModuleScope 'Robocurse' {
         Context "Scan Mode ComboBox Index Tests" {
             It "Should map Smart to index 0" {
                 $scanMode = "Smart"
-                $index = if ($scanMode -eq "Quick") { 1 } else { 0 }
+                $index = if ($scanMode -eq "Flat") { 1 } else { 0 }
                 $index | Should -Be 0
             }
 
-            It "Should map Quick to index 1" {
-                $scanMode = "Quick"
-                $index = if ($scanMode -eq "Quick") { 1 } else { 0 }
+            It "Should map Flat to index 1" {
+                $scanMode = "Flat"
+                $index = if ($scanMode -eq "Flat") { 1 } else { 0 }
                 $index | Should -Be 1
             }
 
             It "Should default to Smart (index 0) for invalid value" {
                 $scanMode = "Unknown"
-                $index = if ($scanMode -eq "Quick") { 1 } else { 0 }
+                $index = if ($scanMode -eq "Flat") { 1 } else { 0 }
                 $index | Should -Be 0
             }
         }
@@ -744,12 +736,13 @@ InModuleScope 'Robocurse' {
                 $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
                 $script:TestWindow | Should -Not -BeNullOrEmpty
 
+                # txtMaxSize and txtMaxFiles removed - chunking is directory-based, not size/file-count based
                 $requiredControls = @(
                     'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
                     'txtProfileName', 'txtSource', 'txtDest',
                     'btnBrowseSource', 'btnBrowseDest',
                     'chkUseVss', 'cmbScanMode',
-                    'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+                    'txtMaxDepth',
                     'sldWorkers', 'txtWorkerCount',
                     'btnRunAll', 'btnRunSelected', 'btnStop', 'btnProfileSchedule',
                     'dgChunks', 'pbProfile', 'pbOverall',
@@ -864,7 +857,7 @@ InModuleScope 'Robocurse' {
                 $pbOverall.Value | Should -Be 0
             }
 
-            It "Should have scan mode combo box with Smart and Quick options" {
+            It "Should have scan mode combo box with Smart and Flat options" {
                 $script:TestWindow = Initialize-RobocurseGui -ConfigPath $script:GuiTestConfigPath
                 $cmbScanMode = $script:TestWindow.FindName('cmbScanMode')
 

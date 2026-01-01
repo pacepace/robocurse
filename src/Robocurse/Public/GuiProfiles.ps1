@@ -132,21 +132,22 @@ function Import-ProfileToForm {
     # Refresh snapshot lists for this profile
     Update-ProfileSnapshotLists
 
-    # Set scan mode
+    # Set scan mode (Smart = 0, Flat = 1)
     $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
-    $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Quick") { 1 } else { 0 }
+    $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Flat") { 1 } else { 0 }
 
-    # Load chunk settings with defaults from module constants
-    $maxSize = if ($null -ne $Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB } else { $script:DefaultMaxChunkSizeBytes / 1GB }
-    $maxFiles = if ($null -ne $Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
+    # Load MaxDepth setting (only used in Flat mode)
     $maxDepth = if ($null -ne $Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
     # Debug: log what we're loading
-    Write-GuiLog "Loading profile '$($Profile.Name)': ChunkMaxSizeGB=$($Profile.ChunkMaxSizeGB) (display: $maxSize), ChunkMaxFiles=$($Profile.ChunkMaxFiles), ChunkMaxDepth=$($Profile.ChunkMaxDepth)"
+    Write-GuiLog "Loading profile '$($Profile.Name)': ScanMode=$scanMode, ChunkMaxDepth=$maxDepth"
 
-    $script:Controls.txtMaxSize.Text = $maxSize.ToString()
-    $script:Controls.txtMaxFiles.Text = $maxFiles.ToString()
     $script:Controls.txtMaxDepth.Text = $maxDepth.ToString()
+
+    # Enable/disable MaxDepth based on scan mode
+    $isFlat = $scanMode -eq "Flat"
+    $script:Controls.txtMaxDepth.IsEnabled = $isFlat
+    $script:Controls.txtMaxDepth.Opacity = if ($isFlat) { 1.0 } else { 0.5 }
 }
 
 function Save-ProfileFromForm {
@@ -227,36 +228,10 @@ function Save-ProfileFromForm {
         Write-GuiLog "Input corrected: $fieldName '$originalValue' -> '$correctedValue'"
     }
 
-    # ChunkMaxSizeGB: valid range 1-1000 GB
-    try {
-        $value = [int]$script:Controls.txtMaxSize.Text
-        $selected.ChunkMaxSizeGB = [Math]::Max(1, [Math]::Min(1000, $value))
-        if ($value -ne $selected.ChunkMaxSizeGB) {
-            & $showInputCorrected $script:Controls.txtMaxSize $value $selected.ChunkMaxSizeGB "Max Size (GB)"
-        }
-    } catch {
-        $originalText = $script:Controls.txtMaxSize.Text
-        $selected.ChunkMaxSizeGB = 10
-        & $showInputCorrected $script:Controls.txtMaxSize $originalText 10 "Max Size (GB)"
-    }
-
-    # ChunkMaxFiles: valid range 1000-10000000
-    try {
-        $value = [int]$script:Controls.txtMaxFiles.Text
-        $selected.ChunkMaxFiles = [Math]::Max(1000, [Math]::Min(10000000, $value))
-        if ($value -ne $selected.ChunkMaxFiles) {
-            & $showInputCorrected $script:Controls.txtMaxFiles $value $selected.ChunkMaxFiles "Max Files"
-        }
-    } catch {
-        $originalText = $script:Controls.txtMaxFiles.Text
-        $selected.ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
-        & $showInputCorrected $script:Controls.txtMaxFiles $originalText $script:DefaultMaxFilesPerChunk "Max Files"
-    }
-
-    # ChunkMaxDepth: valid range 1-20
+    # ChunkMaxDepth: valid range 0-20 (0 = top-level only in Flat mode)
     try {
         $value = [int]$script:Controls.txtMaxDepth.Text
-        $selected.ChunkMaxDepth = [Math]::Max(1, [Math]::Min(20, $value))
+        $selected.ChunkMaxDepth = [Math]::Max(0, [Math]::Min(20, $value))
         if ($value -ne $selected.ChunkMaxDepth) {
             & $showInputCorrected $script:Controls.txtMaxDepth $value $selected.ChunkMaxDepth "Max Depth"
         }
@@ -291,9 +266,16 @@ function Add-NewProfile {
         Enabled = $true
         UseVSS = $false
         ScanMode = "Smart"
-        ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
-        ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
         ChunkMaxDepth = $script:DefaultMaxChunkDepth
+        Schedule = [PSCustomObject]@{
+            Enabled = $false
+            Frequency = "Daily"
+            Time = "02:00"
+            Interval = 1
+            DayOfWeek = "Sunday"
+            DayOfMonth = 1
+        }
+        RobocopyOptions = @{}
         SourceSnapshot = [PSCustomObject]@{
             PersistentEnabled = $false
             RetentionCount = 3

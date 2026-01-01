@@ -15,23 +15,48 @@ function Test-ProfileValidation {
         6. Chunk estimate to verify source can be profiled
     .PARAMETER Profile
         The sync profile to validate (PSCustomObject with Name, Source, Destination, UseVSS properties)
+    .PARAMETER ProgressCallback
+        Optional scriptblock to call with progress updates. Receives (stepName, stepNumber, totalSteps)
     .OUTPUTS
         Array of validation result objects with CheckName, Status, Message, Severity properties
     .EXAMPLE
         $results = Test-ProfileValidation -Profile $profile
         $results | Where-Object { $_.Status -eq 'Fail' }
+    .EXAMPLE
+        $results = Test-ProfileValidation -Profile $profile -ProgressCallback {
+            param($step, $current, $total)
+            Write-Host "[$current/$total] $step"
+        }
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [PSCustomObject]$Profile
+        [PSCustomObject]$Profile,
+
+        [scriptblock]$ProgressCallback
     )
 
     $results = @()
+    $totalSteps = 6
+    $progressState = @{ CurrentStep = 0 }
+
+    # Helper to report progress
+    $reportProgress = {
+        param($stepName)
+        $progressState.CurrentStep++
+        if ($ProgressCallback) {
+            try {
+                & $ProgressCallback $stepName $progressState.CurrentStep $totalSteps
+            } catch {
+                # Ignore callback errors
+            }
+        }
+    }.GetNewClosure()
 
     Write-RobocurseLog "Starting validation for profile: $($Profile.Name)" -Level 'Info' -Component 'Validation'
 
     # Check 1: Robocopy available
+    & $reportProgress "Checking robocopy availability..."
     try {
         $robocopyCheck = Test-RobocopyAvailable
         if ($robocopyCheck.Success) {
@@ -61,6 +86,7 @@ function Test-ProfileValidation {
     }
 
     # Check 2: Source path accessible
+    & $reportProgress "Checking source path..."
     try {
         if ([string]::IsNullOrWhiteSpace($Profile.Source)) {
             $results += [PSCustomObject]@{
@@ -97,6 +123,7 @@ function Test-ProfileValidation {
     }
 
     # Check 3: Destination path or parent exists
+    & $reportProgress "Checking destination path..."
     try {
         if ([string]::IsNullOrWhiteSpace($Profile.Destination)) {
             $results += [PSCustomObject]@{
@@ -145,6 +172,7 @@ function Test-ProfileValidation {
     }
 
     # Check 4: Disk space on destination (if accessible)
+    & $reportProgress "Checking disk space..."
     try {
         $destPathToCheck = if (Test-Path -Path $Profile.Destination -PathType Container) {
             $Profile.Destination
@@ -211,6 +239,7 @@ function Test-ProfileValidation {
     }
 
     # Check 5: VSS support if UseVSS is enabled
+    & $reportProgress "Checking VSS support..."
     if ($Profile.UseVSS) {
         try {
             if (-not [string]::IsNullOrWhiteSpace($Profile.Source) -and (Test-Path -Path $Profile.Source)) {
@@ -285,33 +314,24 @@ function Test-ProfileValidation {
         }
     }
 
-    # Check 6: Source can be profiled (chunk estimate)
+    # Check 6: Source is readable (quick access check, no full enumeration)
+    & $reportProgress "Checking source access..."
     try {
         if (-not [string]::IsNullOrWhiteSpace($Profile.Source) -and (Test-Path -Path $Profile.Source)) {
-            Write-RobocurseLog "Profiling source directory: $($Profile.Source)" -Level 'Debug' -Component 'Validation'
-            $dirProfile = Get-DirectoryProfile -Path $Profile.Source -UseCache $true
-            if ($dirProfile) {
-                $sizeGB = [math]::Round($dirProfile.TotalSize / 1GB, 2)
-                $fileCount = $dirProfile.FileCount
-                $results += [PSCustomObject]@{
-                    CheckName = "Source Profile"
-                    Status = "Pass"
-                    Message = "Source contains ${sizeGB} GB ($fileCount files)"
-                    Severity = "Success"
-                }
-            }
-            else {
-                $results += [PSCustomObject]@{
-                    CheckName = "Source Profile"
-                    Status = "Warning"
-                    Message = "Unable to profile source directory"
-                    Severity = "Warning"
-                }
+            Write-RobocurseLog "Checking source directory access: $($Profile.Source)" -Level 'Debug' -Component 'Validation'
+            # Quick check - just verify we can list the directory (first item only)
+            $canRead = $null -ne (Get-ChildItem -Path $Profile.Source -ErrorAction Stop | Select-Object -First 1)
+            # Even empty directories pass - we just verified access
+            $results += [PSCustomObject]@{
+                CheckName = "Source Access"
+                Status = "Pass"
+                Message = "Source directory is readable"
+                Severity = "Success"
             }
         }
         else {
             $results += [PSCustomObject]@{
-                CheckName = "Source Profile"
+                CheckName = "Source Access"
                 Status = "Info"
                 Message = "Skipped - source path not accessible"
                 Severity = "Info"
@@ -320,9 +340,9 @@ function Test-ProfileValidation {
     }
     catch {
         $results += [PSCustomObject]@{
-            CheckName = "Source Profile"
+            CheckName = "Source Access"
             Status = "Warning"
-            Message = "Error profiling source: $($_.Exception.Message)"
+            Message = "Cannot read source directory: $($_.Exception.Message)"
             Severity = "Warning"
         }
     }
@@ -359,7 +379,31 @@ function Show-ValidationDialog {
     try {
         # Run validation if results not provided
         if (-not $Results) {
-            $Results = Test-ProfileValidation -Profile $Profile
+            # Show progress in main window status bar while validating
+            $originalStatus = $null
+            if ($script:Controls -and $script:Controls['txtStatus']) {
+                $originalStatus = $script:Controls.txtStatus.Text
+                $script:Controls.txtStatus.Text = "Validating profile..."
+                # Force UI update
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+
+            # Progress callback to update status during validation
+            $progressCallback = {
+                param($stepName, $currentStep, $totalSteps)
+                if ($script:Controls -and $script:Controls['txtStatus']) {
+                    $script:Controls.txtStatus.Text = "Validating [$currentStep/$totalSteps]: $stepName"
+                    # Force UI update to show progress
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+            }
+
+            $Results = Test-ProfileValidation -Profile $Profile -ProgressCallback $progressCallback
+
+            # Restore original status
+            if ($script:Controls -and $script:Controls['txtStatus'] -and $originalStatus) {
+                $script:Controls.txtStatus.Text = $originalStatus
+            }
         }
 
         # Load XAML from resource file

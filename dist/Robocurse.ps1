@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Built: 2025-12-27 01:28:56
+    Version: dev.a723d7f - Built: 2026-01-01 19:01:50
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -75,24 +75,27 @@ param(
 # Capture script path at initialization for use by functions
 $script:RobocurseScriptPath = $PSCommandPath
 
+# Version injected at build time
+$script:RobocurseVersion = 'dev.a723d7f'
+
 #region ==================== CONSTANTS ====================
 # Chunking defaults
-# Maximum size for a single chunk. Larger directories will be split into smaller chunks.
-# 10GB is chosen to balance parallelism vs. overhead - large enough to avoid excessive splitting,
-# small enough to allow meaningful parallel processing.
-$script:DefaultMaxChunkSizeBytes = 10GB
-
-# Maximum number of files in a single chunk before splitting.
-# 50,000 files is chosen to prevent robocopy from being overwhelmed by file enumeration
-# while still processing meaningful batches.
-$script:DefaultMaxFilesPerChunk = 50000
-
-# Maximum directory depth to traverse when creating chunks.
-# Depth of 5 prevents excessive recursion while allowing reasonable directory structure analysis.
+# Maximum directory depth to traverse when creating chunks (used by Flat mode only).
+# Smart mode uses unlimited depth (-1). Flat mode uses this as the default.
 $script:DefaultMaxChunkDepth = 5
 
-# Minimum size threshold for creating a separate chunk.
-# 100MB ensures we don't create chunks for trivial directories, reducing overhead.
+# Internal chunking thresholds (not user-configurable).
+# These define when Smart mode decides a directory is "too large" and should be split.
+# Maximum chunk size in bytes - directories larger than this trigger recursive splitting.
+# 50GB balances parallelism with efficiency - robocopy handles large chunks well with /J.
+$script:DefaultMaxChunkSizeBytes = 50GB
+
+# Maximum files per chunk - directories with more files trigger recursive splitting.
+# 200,000 files is safe for 64-bit robocopy (issues start at millions, not hundreds of thousands).
+$script:DefaultMaxFilesPerChunk = 200000
+
+# Minimum chunk size in bytes - directories smaller than this won't be split further.
+# 100MB prevents creating tiny chunks that add orchestration overhead.
 $script:DefaultMinChunkSizeBytes = 100MB
 
 # Retry policy
@@ -533,11 +536,13 @@ function Test-SafeRobocopyArgument {
     }
 
     # Check for dangerous patterns that could enable command injection
-    # These patterns should never appear in legitimate paths or exclude patterns
+    # Note: & is NOT blocked because:
+    # 1. It's a valid Windows filename character (AT&T, R&D, Ben & Jerry's)
+    # 2. We use Start-Process, not Invoke-Expression, so shell metacharacters aren't interpreted
     $dangerousPatterns = @(
         '[\x00-\x1F]',           # Control characters (null, newline, etc.)
-        '[;&|]',                  # Command separators
-        '[<>]',                   # Shell redirectors
+        '[;<>]',                  # Semicolon (rare), shell redirectors (< > invalid in paths)
+        '\|',                     # Pipe (invalid in Windows paths anyway)
         '`',                      # Backtick (PowerShell escape/execution)
         '\$\(',                   # Command substitution
         '\$\{',                   # Variable expansion with braces
@@ -1217,7 +1222,6 @@ function New-DefaultConfig {
             LogCompressAfterDays = $script:LogCompressAfterDays
             LogRetentionDays = $script:LogDeleteAfterDays
             MismatchSeverity = $script:DefaultMismatchSeverity  # "Warning", "Error", or "Success"
-            VerboseFileLogging = $false  # If true, log every file copied; if false, only log summary
             RedactPaths = $false  # If true, redact file paths in logs for security/privacy
             LogLevel = "Info"  # Minimum log level: Debug, Info, Warning, Error
             RedactServerNames = @()  # Array of server names to specifically redact from logs
@@ -1313,13 +1317,7 @@ function ConvertTo-ChunkSettingsInternal {
     )
 
     if ($RawChunking) {
-        # Use $null -ne checks instead of truthiness to handle 0 and low values correctly
-        if ($null -ne $RawChunking.maxChunkSizeGB) {
-            $Profile.ChunkMaxSizeGB = $RawChunking.maxChunkSizeGB
-        }
-        if ($null -ne $RawChunking.maxFiles) {
-            $Profile.ChunkMaxFiles = $RawChunking.maxFiles
-        }
+        # Note: maxChunkSizeGB and maxFiles no longer used - chunking is directory-based
         # Note: parallelChunks from config is intentionally not mapped.
         # Parallelism is controlled by MaxConcurrentJobs at the orchestration level.
         if ($null -ne $RawChunking.maxDepthToScan) {
@@ -1394,10 +1392,6 @@ function ConvertFrom-GlobalSettings {
             if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
                 $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays
             }
-        }
-        # Verbose file logging - log every file name if true (default: false for smaller logs)
-        if ($null -ne $RawGlobal.logging.verboseFileLogging) {
-            $Config.GlobalSettings.VerboseFileLogging = [bool]$RawGlobal.logging.verboseFileLogging
         }
         # Path redaction - redact file paths in logs for security/privacy
         if ($null -ne $RawGlobal.logging.redactPaths) {
@@ -1493,13 +1487,8 @@ function ConvertFrom-FriendlyConfig {
         foreach ($profileName in $profileNames) {
             $rawProfile = $RawConfig.profiles.$profileName
 
-            # Skip disabled profiles
-            if ($null -ne $rawProfile.enabled -and $rawProfile.enabled -eq $false) {
-                Write-Verbose "Skipping disabled profile: $profileName"
-                continue
-            }
-
-            # Build sync profile
+            # Build sync profile (load ALL profiles, including disabled ones)
+            # The Enabled flag controls whether the profile runs, not whether it's loaded
             $syncProfile = [PSCustomObject]@{
                 Name = $profileName
                 Description = if ($rawProfile.description) { $rawProfile.description } else { "" }
@@ -1507,11 +1496,9 @@ function ConvertFrom-FriendlyConfig {
                 Destination = ""
                 UseVss = $false
                 ScanMode = "Smart"
-                ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
-                ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
                 ChunkMaxDepth = $script:DefaultMaxChunkDepth
                 RobocopyOptions = @{}
-                Enabled = $true
+                Enabled = if ($null -ne $rawProfile.enabled) { $rawProfile.enabled } else { $true }
                 SourceSnapshot = [PSCustomObject]@{
                     PersistentEnabled = $false    # Create persistent snapshot on source before backup
                     RetentionCount = 3            # How many snapshots to keep on source volume
@@ -1657,7 +1644,6 @@ function ConvertTo-FriendlyConfig {
                         maxAgeDays = $Config.GlobalSettings.LogRetentionDays
                     }
                 }
-                verboseFileLogging = $Config.GlobalSettings.VerboseFileLogging
                 redactPaths = $Config.GlobalSettings.RedactPaths
                 redactServerNames = @($Config.GlobalSettings.RedactServerNames)
                 logLevel = $Config.GlobalSettings.LogLevel
@@ -1689,8 +1675,6 @@ function ConvertTo-FriendlyConfig {
                 path = $profile.Destination
             }
             chunking = [ordered]@{
-                maxChunkSizeGB = $profile.ChunkMaxSizeGB
-                maxFiles = $profile.ChunkMaxFiles
                 maxDepthToScan = $profile.ChunkMaxDepth
                 strategy = switch ($profile.ScanMode) {
                     'Smart' { 'auto' }
@@ -2064,29 +2048,8 @@ function Test-RobocurseConfig {
                 }
             }
 
-            # Validate chunk configuration if present
-            if ($propertyNames -contains 'ChunkMaxFiles') {
-                $maxFiles = $profile.ChunkMaxFiles
-                if ($null -ne $maxFiles -and ($maxFiles -lt 1 -or $maxFiles -gt 10000000)) {
-                    $errors += "$profilePrefix.ChunkMaxFiles must be between 1 and 10000000 (current: $maxFiles)"
-                }
-            }
-
-            if ($propertyNames -contains 'ChunkMaxSizeGB') {
-                $maxSizeGB = $profile.ChunkMaxSizeGB
-                if ($null -ne $maxSizeGB -and ($maxSizeGB -lt 0.001 -or $maxSizeGB -gt 1024)) {
-                    $errors += "$profilePrefix.ChunkMaxSizeGB must be between 0.001 and 1024 (current: $maxSizeGB)"
-                }
-            }
-
-            # Validate that ChunkMaxSizeGB > ChunkMinSizeGB if both are specified
-            if (($propertyNames -contains 'ChunkMaxSizeGB') -and ($propertyNames -contains 'ChunkMinSizeGB')) {
-                $maxSizeGB = $profile.ChunkMaxSizeGB
-                $minSizeGB = $profile.ChunkMinSizeGB
-                if ($null -ne $maxSizeGB -and $null -ne $minSizeGB -and $maxSizeGB -le $minSizeGB) {
-                    $errors += "$profilePrefix.ChunkMaxSizeGB ($maxSizeGB) must be greater than ChunkMinSizeGB ($minSizeGB)"
-                }
-            }
+            # ChunkMaxDepth validation is done in GUI (0-20 range)
+            # ChunkMaxSizeGB and ChunkMaxFiles are no longer used
         }
     }
 
@@ -3102,6 +3065,276 @@ $script:ProfileCacheHits = 0
 $script:ProfileCacheMisses = 0
 $script:ProfileCacheEvictions = 0
 
+# DirectoryNode class for single-pass tree building
+# Used to avoid re-enumerating overlapping directory trees during chunking
+class DirectoryNode {
+    [string]$Path
+    [int64]$DirectSize        # Size of files directly in this directory
+    [int]$DirectFileCount     # Files directly in this directory
+    [int64]$TotalSize         # Aggregated size including all descendants
+    [int]$TotalFileCount      # Aggregated file count including all descendants
+    [System.Collections.Generic.Dictionary[string, DirectoryNode]]$Children
+
+    DirectoryNode([string]$path) {
+        $this.Path = $path
+        $this.DirectSize = 0
+        $this.DirectFileCount = 0
+        $this.TotalSize = 0
+        $this.TotalFileCount = 0
+        $this.Children = [System.Collections.Generic.Dictionary[string, DirectoryNode]]::new(
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+    }
+}
+
+function Update-TreeTotals {
+    <#
+    .SYNOPSIS
+        Recursively aggregates sizes from leaves up to root
+    .DESCRIPTION
+        Performs bottom-up traversal to sum DirectSize and DirectFileCount
+        from all descendants into TotalSize and TotalFileCount.
+    .PARAMETER Node
+        The DirectoryNode to update (and all its descendants)
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [DirectoryNode]$Node
+    )
+
+    # Recursively update all children first (bottom-up)
+    foreach ($child in $Node.Children.Values) {
+        Update-TreeTotals -Node $child
+    }
+
+    # Start with direct values
+    $Node.TotalSize = $Node.DirectSize
+    $Node.TotalFileCount = $Node.DirectFileCount
+
+    # Add all children's totals
+    foreach ($child in $Node.Children.Values) {
+        $Node.TotalSize += $child.TotalSize
+        $Node.TotalFileCount += $child.TotalFileCount
+    }
+}
+
+function New-DirectoryTree {
+    <#
+    .SYNOPSIS
+        Creates an in-memory directory tree from a single robocopy enumeration
+    .DESCRIPTION
+        Runs robocopy /L ONCE on the root path and parses the output to build
+        a tree structure with sizes at each node. This avoids the performance
+        problem of re-enumerating overlapping subtrees during chunking.
+
+        The tree is then used for O(1) size lookups during chunk decisions.
+    .PARAMETER RootPath
+        The root directory path to enumerate
+    .PARAMETER State
+        Optional OrchestrationState for progress updates during enumeration
+    .OUTPUTS
+        DirectoryNode representing the root with all descendants populated
+    .EXAMPLE
+        $tree = New-DirectoryTree -RootPath "C:\Data"
+        $tree.TotalSize  # Total size of entire tree
+        $tree.Children["Subdir"].TotalSize  # Size of specific subdirectory
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$RootPath,
+
+        [object]$State = $null
+    )
+
+    # Normalize root path (remove trailing slash for consistent matching)
+    $normalizedRoot = $RootPath.TrimEnd('\')
+
+    # Run robocopy ONCE to enumerate entire tree
+    if ($State) {
+        $State.CurrentActivity = "Starting directory enumeration..."
+    }
+
+    $output = Invoke-RobocopyList -Source $RootPath -State $State
+
+    # Create root node
+    $root = [DirectoryNode]::new($normalizedRoot)
+
+    # Dictionary for fast node lookup by path
+    $nodeMap = [System.Collections.Generic.Dictionary[string, DirectoryNode]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    $nodeMap[$normalizedRoot] = $root
+
+    if ($State) {
+        $State.CurrentActivity = "Building directory tree..."
+        $State.ScanProgress = $output.Count
+    }
+
+    $lineCount = 0
+    $matchedLines = 0
+    # Track the current directory context - robocopy outputs files as relative to the last "New Dir"
+    $currentDir = $normalizedRoot
+
+    foreach ($line in $output) {
+        $lineCount++
+
+        # Skip empty lines
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            continue
+        }
+
+        # Parse "New Dir [count] [absolutePath]" format FIRST
+        # NOTE: robocopy outputs ABSOLUTE paths for directories (e.g., "D:\subdir\")
+        # This MUST be parsed before files because it sets the current directory context
+        if ($line -match 'New Dir\s+\d+\s+(.+)$') {
+            $dirPath = $matches[1].Trim().TrimEnd('\')
+            # Update current directory context for subsequent file entries
+            $currentDir = $dirPath
+            # Skip if this is the root directory itself (already have root node)
+            if ($dirPath -ne $normalizedRoot -and -not [string]::IsNullOrEmpty($dirPath)) {
+                # Path is already absolute from robocopy - use directly
+                Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirPath -RootNode $root | Out-Null
+            }
+            $matchedLines++
+        }
+        # Parse "New File [size] [filename]" format
+        # NOTE: robocopy outputs just the FILENAME (not full path) - file is in $currentDir
+        elseif ($line -match 'New File\s+(\d+)\s+(.+)$') {
+            $fileSize = [int64]$matches[1]
+            # File is in the current directory context (set by last New Dir)
+            $dirFullPath = $currentDir
+
+            # Ensure parent node exists (create intermediate nodes if needed)
+            $parentNode = Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirFullPath -RootNode $root
+
+            # Add file to parent's direct counts
+            $parentNode.DirectSize += $fileSize
+            $parentNode.DirectFileCount++
+            $matchedLines++
+        }
+        # Fallback: old format "[size] [path]" (for compatibility with different robocopy versions)
+        # This format has directory info embedded in file paths (e.g., "subdir\file.txt")
+        elseif ($line -match '^\s+(\d+)\s+(.+)$') {
+            $size = [int64]$matches[1]
+            $pathValue = $matches[2].Trim()
+
+            if ($pathValue.EndsWith('\')) {
+                # It's a directory - path may be absolute or relative
+                $dirPath = $pathValue.TrimEnd('\')
+                $isAbsolute = $dirPath -match '^([A-Za-z]:|\\\\)'
+                if ($isAbsolute) {
+                    $currentDir = $dirPath
+                } else {
+                    $currentDir = Join-Path $normalizedRoot $dirPath
+                }
+                if ($currentDir -ne $normalizedRoot -and -not [string]::IsNullOrEmpty($currentDir)) {
+                    Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $currentDir -RootNode $root | Out-Null
+                }
+            } else {
+                # It's a file - path may contain directory components (e.g., "subdir\file.txt")
+                # Parse directory from the path and join with root
+                $dirRelPath = Split-Path -Path $pathValue -Parent
+                if ([string]::IsNullOrEmpty($dirRelPath)) {
+                    # File is directly in root
+                    $dirFullPath = $normalizedRoot
+                } else {
+                    # Determine if path is absolute
+                    $isAbsolute = $dirRelPath -match '^([A-Za-z]:|\\\\)'
+                    if ($isAbsolute) {
+                        $dirFullPath = $dirRelPath.TrimEnd('\')
+                    } else {
+                        $dirFullPath = Join-Path $normalizedRoot $dirRelPath
+                    }
+                }
+                $parentNode = Get-OrCreateNode -NodeMap $nodeMap -RootPath $normalizedRoot -FullPath $dirFullPath -RootNode $root
+                $parentNode.DirectSize += $size
+                $parentNode.DirectFileCount++
+            }
+            $matchedLines++
+        }
+
+        # Progress update every 1000 lines during parsing
+        if ($State -and ($lineCount % 1000 -eq 0)) {
+            $State.CurrentActivity = "Building tree..."
+            $State.ScanProgress = $lineCount
+        }
+    }
+
+    # Aggregate sizes from leaves up to root
+    if ($State) {
+        $State.CurrentActivity = "Calculating directory sizes..."
+    }
+
+    Update-TreeTotals -Node $root
+
+    Write-RobocurseLog "Built directory tree: $($nodeMap.Count) nodes, $($root.TotalFileCount) files, $([math]::Round($root.TotalSize / 1GB, 2)) GB" -Level 'Debug' -Component 'Profiling'
+
+    return $root
+}
+
+function Get-OrCreateNode {
+    <#
+    .SYNOPSIS
+        Gets an existing node or creates it (and any intermediate parents)
+    .DESCRIPTION
+        Helper function for New-DirectoryTree that ensures a node exists
+        for the given path, creating intermediate parent nodes as needed.
+    .PARAMETER NodeMap
+        Dictionary mapping paths to DirectoryNode instances for O(1) lookup
+    .PARAMETER RootPath
+        The root path of the tree being built (for determining parent boundaries)
+    .PARAMETER FullPath
+        The full path of the node to get or create
+    .PARAMETER RootNode
+        The root DirectoryNode to attach top-level children to
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Collections.Generic.Dictionary[string, DirectoryNode]]$NodeMap,
+
+        [Parameter(Mandatory)]
+        [string]$RootPath,
+
+        [Parameter(Mandatory)]
+        [string]$FullPath,
+
+        [Parameter(Mandatory)]
+        [DirectoryNode]$RootNode
+    )
+
+    $normalizedPath = $FullPath.TrimEnd('\')
+
+    # Check if node already exists
+    if ($NodeMap.ContainsKey($normalizedPath)) {
+        return $NodeMap[$normalizedPath]
+    }
+
+    # Need to create this node and possibly parents
+    # Get parent path
+    $parentPath = Split-Path -Path $normalizedPath -Parent
+
+    if ([string]::IsNullOrEmpty($parentPath) -or $parentPath -eq $RootPath) {
+        # Parent is root
+        $parentNode = $RootNode
+    } else {
+        # Recursively ensure parent exists
+        $parentNode = Get-OrCreateNode -NodeMap $NodeMap -RootPath $RootPath -FullPath $parentPath -RootNode $RootNode
+    }
+
+    # Create this node
+    $newNode = [DirectoryNode]::new($normalizedPath)
+    $NodeMap[$normalizedPath] = $newNode
+
+    # Add to parent's children
+    $childName = Split-Path -Path $normalizedPath -Leaf
+    $parentNode.Children[$childName] = $newNode
+
+    return $newNode
+}
+
 function Get-ProfileCacheStatistics {
     <#
     .SYNOPSIS
@@ -3168,28 +3401,103 @@ function Reset-ProfileCacheStatistics {
 function Invoke-RobocopyList {
     <#
     .SYNOPSIS
-        Runs robocopy in list-only mode (wrapper for testing/mocking)
+        Runs robocopy in list-only mode with streaming progress updates
+    .DESCRIPTION
+        Uses ProcessStartInfo pattern from Robocopy.ps1:376-393 to capture stdout
+        and reads line-by-line to provide live progress updates during enumeration.
+        This prevents the GUI from appearing frozen on large network shares.
     .PARAMETER Source
         Source path to list
+    .PARAMETER State
+        Optional OrchestrationState object for progress updates
     .OUTPUTS
         Array of output lines from robocopy
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [string]$Source
+        [string]$Source,
+
+        # Optional OrchestrationState for progress updates during enumeration
+        [object]$State = $null
     )
 
-    # Wrapper so we can mock this in tests
     # Use a non-existent temp path as destination - robocopy /L lists without creating it
     # Note: \\?\NULL doesn't work on all Windows versions, and src=dest doesn't list files
     $nullDest = Join-Path $env:TEMP "robocurse-null-$(Get-Random)"
-    $output = & robocopy $Source $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
-    # Ensure we always return an array (robocopy can return empty/null for root drives)
-    if ($null -eq $output) {
+
+    # Reuse ProcessStartInfo pattern from Start-RobocopyJob (Robocopy.ps1:376-393)
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+
+    # Use validated robocopy path if available (set by Test-RobocopyAvailable in Robocopy.ps1)
+    if ($script:RobocopyPath) {
+        $psi.FileName = $script:RobocopyPath
+    } else {
+        $psi.FileName = "robocopy.exe"
+    }
+
+    # Quote paths properly for command line (handles paths with spaces)
+    # IMPORTANT: Trailing backslash before closing quote (e.g., "D:\") is interpreted as
+    # an escaped quote on the command line, corrupting the argument string.
+    # Remove trailing backslash from source path to avoid this issue.
+    $safeSource = $Source.TrimEnd('\')
+    $quotedSource = "`"$safeSource`""
+    $quotedDest = "`"$nullDest`""
+    # /NODCOPY improves performance by not copying directory attributes (see Microsoft KB)
+    $psi.Arguments = "$quotedSource $quotedDest /L /E /NJH /NJS /BYTES /R:0 /W:0 /NODCOPY"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    # Don't redirect stderr to avoid deadlock (see Robocopy.ps1:391-392)
+    $psi.RedirectStandardError = $false
+
+    $process = $null
+    $output = [System.Collections.ArrayList]::new()
+
+    try {
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $lineCount = 0
+
+        # Read line by line with progress updates (instead of ReadToEndAsync)
+        # This allows the GUI to show live progress during enumeration
+        while ($null -ne ($line = $process.StandardOutput.ReadLine())) {
+            $output.Add($line) | Out-Null
+            $lineCount++
+
+            # Update progress every 100 lines for responsive feedback
+            # Set ScanProgress for the progress bar area, keep CurrentActivity simple for chunks list
+            if ($State -and ($lineCount % 100 -eq 0)) {
+                $State.CurrentActivity = "Enumerating..."
+                $State.ScanProgress = $lineCount
+            }
+        }
+
+        $process.WaitForExit()
+
+        # Final count update
+        if ($State) {
+            $State.CurrentActivity = "Processing..."
+            $State.ScanProgress = $lineCount
+        }
+
+        Write-RobocurseLog "Enumerated $lineCount items from: $Source" -Level 'Debug' -Component 'Profiling'
+
+        return $output.ToArray()
+    }
+    catch {
+        Write-RobocurseLog "Error during robocopy enumeration of '$Source': $_" -Level 'Warning' -Component 'Profiling'
+        # Return whatever we collected so far, or empty array
+        if ($output.Count -gt 0) {
+            return $output.ToArray()
+        }
         return @()
     }
-    return @($output)
+    finally {
+        # Always dispose process handle to prevent handle leaks
+        if ($process) {
+            try { $process.Dispose() } catch { }
+        }
+    }
 }
 
 function ConvertFrom-RobocopyListOutput {
@@ -3324,11 +3632,11 @@ function Get-DirectoryProfile {
         }
     }
 
-    # Run robocopy list
+    # Run robocopy list with streaming progress
     Write-RobocurseLog "Profiling directory: $Path" -Level 'Debug' -Component 'Profiling'
 
     try {
-        $output = Invoke-RobocopyList -Source $Path
+        $output = Invoke-RobocopyList -Source $Path -State $State
 
         # Parse the output (pass State for progress counter updates)
         $parseResult = ConvertFrom-RobocopyListOutput -Output $output -State $State
@@ -3648,7 +3956,8 @@ function Get-DirectoryProfilesParallel {
                 # Run robocopy in list mode
                 # Use random temp path as destination - \\?\NULL breaks on some Windows versions
                 $nullDest = Join-Path $env:TEMP "robocurse-null-$(Get-Random)"
-                $output = & robocopy $Path $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 2>&1
+                # /NODCOPY improves performance by not copying directory attributes
+                $output = & robocopy $Path $nullDest /L /E /NJH /NJS /BYTES /R:0 /W:0 /NODCOPY 2>&1
 
                 $totalSize = 0
                 $fileCount = 0
@@ -3824,6 +4133,10 @@ function Get-DirectoryChunks {
         minimum chunk sizes to avoid overhead. Handles both directory-based chunks and files-only
         chunks for optimal parallelization. This is the core chunking algorithm for the replication
         orchestrator.
+
+        PERFORMANCE: When a TreeNode is provided, uses pre-built tree data for O(1) size lookups
+        instead of calling Get-DirectoryProfile repeatedly. This avoids re-enumerating overlapping
+        subtrees which was the main performance bottleneck.
     .PARAMETER Path
         Root path to chunk
     .PARAMETER DestinationRoot
@@ -3840,6 +4153,9 @@ function Get-DirectoryChunks {
         Minimum size to create a chunk (default: 100MB)
     .PARAMETER CurrentDepth
         Current recursion depth (internal use)
+    .PARAMETER TreeNode
+        Pre-built DirectoryNode from New-DirectoryTree. When provided, uses tree data
+        for O(1) size lookups instead of calling Get-DirectoryProfile (major performance improvement).
     .OUTPUTS
         Array of chunk objects
     #>
@@ -3862,7 +4178,7 @@ function Get-DirectoryChunks {
         [ValidateRange(1, 10000000)]
         [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
 
-        [ValidateRange(0, 20)]
+        [ValidateRange(-1, 20)]
         [int]$MaxDepth = $script:DefaultMaxChunkDepth,
 
         [ValidateRange(1KB, 1TB)]
@@ -3872,11 +4188,15 @@ function Get-DirectoryChunks {
         [int]$CurrentDepth = 0,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-built directory tree node for O(1) size lookups (avoids repeated enumeration)
+        [object]$TreeNode = $null
     )
 
     # Validate path exists (inside function body so mocks can intercept)
-    if (-not (Test-Path -Path $Path -PathType Container)) {
+    # Skip validation if we have a TreeNode (tree was already built from valid enumeration)
+    if (-not $TreeNode -and -not (Test-Path -Path $Path -PathType Container)) {
         throw "Path '$Path' does not exist or is not a directory"
     }
 
@@ -3892,68 +4212,131 @@ function Get-DirectoryChunks {
 
     Write-RobocurseLog "Analyzing directory at depth $CurrentDepth : $Path" -Level 'Debug' -Component 'Chunking'
 
-    # Get profile for this directory
-    $profile = Get-DirectoryProfile -Path $Path -UseCache $true -State $State
+    # Get size and file count - either from tree (O(1)) or profile (I/O)
+    if ($TreeNode) {
+        # Use pre-built tree data - no I/O needed!
+        $totalSize = $TreeNode.TotalSize
+        $fileCount = $TreeNode.TotalFileCount
+        $profile = [PSCustomObject]@{
+            TotalSize = $totalSize
+            FileCount = $fileCount
+            DirCount = $TreeNode.Children.Count
+            AvgFileSize = if ($fileCount -gt 0) { [math]::Round($totalSize / $fileCount, 0) } else { 0 }
+            LastScanned = Get-Date
+        }
+    } else {
+        # Fallback to old behavior (for backward compatibility)
+        $profile = Get-DirectoryProfile -Path $Path -UseCache $true -State $State
+        $totalSize = $profile.TotalSize
+        $fileCount = $profile.FileCount
+    }
 
     # Check if this directory is small enough to be a chunk
-    if ($profile.TotalSize -le $MaxSizeBytes -and $profile.FileCount -le $MaxFiles) {
-        Write-RobocurseLog "Directory fits in single chunk: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level 'Debug' -Component 'Chunking'
+    if ($totalSize -le $MaxSizeBytes -and $fileCount -le $MaxFiles) {
+        Write-RobocurseLog "Directory fits in single chunk: $Path (Size: $totalSize, Files: $fileCount)" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }
 
     # Check if we've hit max depth - must accept as chunk even if large
-    if ($CurrentDepth -ge $MaxDepth) {
-        Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $($profile.TotalSize), Files: $($profile.FileCount))" -Level 'Warning' -Component 'Chunking'
+    # MaxDepth = -1 means unlimited (Smart mode), so skip this check
+    if ($MaxDepth -ge 0 -and $CurrentDepth -ge $MaxDepth) {
+        Write-RobocurseLog "Directory exceeds thresholds but at max depth: $Path (Size: $totalSize, Files: $fileCount)" -Level 'Warning' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }
 
     # Check if directory is above MinSizeBytes - if not, accept as single chunk to reduce overhead
     # This prevents creating many tiny chunks which add more overhead than benefit
-    if ($profile.TotalSize -lt $MinSizeBytes) {
-        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $($profile.TotalSize))" -Level 'Debug' -Component 'Chunking'
+    if ($totalSize -lt $MinSizeBytes) {
+        Write-RobocurseLog "Directory below minimum chunk size ($MinSizeBytes bytes), accepting as single chunk: $Path (Size: $totalSize)" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }
 
     # Directory is too big - recurse into children
-    $children = Get-DirectoryChildren -Path $Path
+    # Get children from tree if available, otherwise from filesystem
+    if ($TreeNode) {
+        # Use tree data exclusively - no filesystem fallback
+        $childNodes = $TreeNode.Children.Values
+        $childCount = $TreeNode.Children.Count
+    } else {
+        # Fallback to filesystem (backward compatibility)
+        $children = Get-DirectoryChildren -Path $Path
+        $childCount = $children.Count
+        $childNodes = $null
+    }
 
-    if ($children.Count -eq 0) {
+    if ($childCount -eq 0) {
         # No subdirs but too many files - must accept as large chunk
-        Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level 'Warning' -Component 'Chunking'
+        Write-RobocurseLog "No subdirectories to split, accepting large directory: $Path" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
         return @(New-Chunk -SourcePath $Path -DestinationPath $destPath -Profile $profile -IsFilesOnly $false -State $State)
     }
 
     # Recurse into each child
     # Use List<> instead of array concatenation for O(N) instead of O(N²) performance
-    Write-RobocurseLog "Directory too large, recursing into $($children.Count) children: $Path" -Level 'Debug' -Component 'Chunking'
+    Write-RobocurseLog "Directory too large, recursing into $childCount children: $Path" -Level 'Debug' -Component 'Chunking'
     $chunkList = [System.Collections.Generic.List[PSCustomObject]]::new()
-    foreach ($child in $children) {
-        $childChunks = Get-DirectoryChunks `
-            -Path $child `
-            -DestinationRoot $DestinationRoot `
-            -SourceRoot $SourceRoot `
-            -MaxSizeBytes $MaxSizeBytes `
-            -MaxFiles $MaxFiles `
-            -MaxDepth $MaxDepth `
-            -MinSizeBytes $MinSizeBytes `
-            -CurrentDepth ($CurrentDepth + 1) `
-            -State $State
 
-        foreach ($chunk in $childChunks) {
-            $chunkList.Add($chunk)
+    if ($childNodes) {
+        # Use tree nodes - no I/O for child enumeration!
+        foreach ($childNode in $childNodes) {
+            $childChunks = Get-DirectoryChunks `
+                -Path $childNode.Path `
+                -DestinationRoot $DestinationRoot `
+                -SourceRoot $SourceRoot `
+                -MaxSizeBytes $MaxSizeBytes `
+                -MaxFiles $MaxFiles `
+                -MaxDepth $MaxDepth `
+                -MinSizeBytes $MinSizeBytes `
+                -CurrentDepth ($CurrentDepth + 1) `
+                -State $State `
+                -TreeNode $childNode
+
+            foreach ($chunk in $childChunks) {
+                $chunkList.Add($chunk)
+            }
+        }
+    } else {
+        # Fallback to old behavior
+        foreach ($child in $children) {
+            $childChunks = Get-DirectoryChunks `
+                -Path $child `
+                -DestinationRoot $DestinationRoot `
+                -SourceRoot $SourceRoot `
+                -MaxSizeBytes $MaxSizeBytes `
+                -MaxFiles $MaxFiles `
+                -MaxDepth $MaxDepth `
+                -MinSizeBytes $MinSizeBytes `
+                -CurrentDepth ($CurrentDepth + 1) `
+                -State $State
+
+            foreach ($chunk in $childChunks) {
+                $chunkList.Add($chunk)
+            }
         }
     }
 
     # Handle files at this level (not in any subdir)
-    $filesAtLevel = Get-FilesAtLevel -Path $Path
-    if ($filesAtLevel.Count -gt 0) {
-        Write-RobocurseLog "Found $($filesAtLevel.Count) files at level: $Path" -Level 'Debug' -Component 'Chunking'
+    # Check if there are direct files using tree data or filesystem
+    $hasFilesAtLevel = if ($TreeNode) {
+        $TreeNode.DirectFileCount -gt 0
+    } else {
+        (Get-FilesAtLevel -Path $Path).Count -gt 0
+    }
+
+    if ($hasFilesAtLevel) {
+        $directFileCount = if ($TreeNode) { $TreeNode.DirectFileCount } else { (Get-FilesAtLevel -Path $Path).Count }
+        Write-RobocurseLog "Found $directFileCount files at level: $Path" -Level 'Debug' -Component 'Chunking'
         $destPath = Convert-ToDestinationPath -SourcePath $Path -SourceRoot $SourceRoot -DestRoot $DestinationRoot
-        $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath -State $State))
+
+        # Pass tree data to avoid filesystem I/O when using tree
+        if ($TreeNode) {
+            $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath -State $State -DirectSize $TreeNode.DirectSize -DirectFileCount $TreeNode.DirectFileCount))
+        } else {
+            $chunkList.Add((New-FilesOnlyChunk -SourcePath $Path -DestinationPath $destPath -State $State))
+        }
     }
 
     return $chunkList.ToArray()
@@ -4063,6 +4446,10 @@ function New-FilesOnlyChunk {
         Source directory path
     .PARAMETER DestinationPath
         Destination directory path
+    .PARAMETER DirectSize
+        Optional pre-calculated size of files at this level (from tree data)
+    .PARAMETER DirectFileCount
+        Optional pre-calculated file count at this level (from tree data)
     .OUTPUTS
         Chunk object
     #>
@@ -4075,20 +4462,30 @@ function New-FilesOnlyChunk {
         [string]$DestinationPath,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-calculated values from tree (avoids filesystem I/O)
+        [int64]$DirectSize = -1,
+        [int]$DirectFileCount = -1
     )
 
-    # Create a minimal profile for files at this level
-    # We don't need exact size since this is just for files at one level
-    $filesAtLevel = Get-FilesAtLevel -Path $SourcePath
-    $totalSize = ($filesAtLevel | Measure-Object -Property Length -Sum).Sum
-    if ($null -eq $totalSize) { $totalSize = 0 }
+    # Use pre-calculated values if provided, otherwise hit filesystem
+    if ($DirectSize -ge 0 -and $DirectFileCount -ge 0) {
+        $totalSize = $DirectSize
+        $fileCount = $DirectFileCount
+    } else {
+        # Fallback to filesystem enumeration
+        $filesAtLevel = Get-FilesAtLevel -Path $SourcePath
+        $totalSize = ($filesAtLevel | Measure-Object -Property Length -Sum).Sum
+        if ($null -eq $totalSize) { $totalSize = 0 }
+        $fileCount = $filesAtLevel.Count
+    }
 
     $profile = [PSCustomObject]@{
         TotalSize = $totalSize
-        FileCount = $filesAtLevel.Count
+        FileCount = $fileCount
         DirCount = 0
-        AvgFileSize = if ($filesAtLevel.Count -gt 0) { $totalSize / $filesAtLevel.Count } else { 0 }
+        AvgFileSize = if ($fileCount -gt 0) { $totalSize / $fileCount } else { 0 }
         LastScanned = Get-Date
     }
 
@@ -4097,7 +4494,7 @@ function New-FilesOnlyChunk {
     # Add robocopy args to copy only files at this level
     $chunk.RobocopyArgs = @("/LEV:1")
 
-    Write-RobocurseLog "Created files-only chunk #$($chunk.ChunkId): $SourcePath (Files: $($filesAtLevel.Count))" -Level 'Debug' -Component 'Chunking'
+    Write-RobocurseLog "Created files-only chunk #$($chunk.ChunkId): $SourcePath (Files: $fileCount)" -Level 'Debug' -Component 'Chunking'
 
     return $chunk
 }
@@ -4105,18 +4502,17 @@ function New-FilesOnlyChunk {
 function New-FlatChunks {
     <#
     .SYNOPSIS
-        Creates chunks using flat (non-recursive) scanning strategy
+        Creates chunks using flat scanning strategy with configurable depth
     .DESCRIPTION
-        Generates chunks without recursing into subdirectories.
-        This is a fast scanning mode that treats each top-level directory as a chunk.
+        Generates chunks by recursing to a specified depth. Each directory at that
+        depth becomes one chunk. Use MaxDepth=0 for top-level only, or higher values
+        for more granular chunking with predictable boundaries.
     .PARAMETER Path
         Root path to chunk
     .PARAMETER DestinationRoot
         Destination root path
-    .PARAMETER MaxChunkSizeBytes
-        Maximum size per chunk (default: 10GB)
-    .PARAMETER MaxFiles
-        Maximum files per chunk (default: 50000)
+    .PARAMETER MaxDepth
+        Maximum recursion depth (0-20, default from profile)
     .OUTPUTS
         Array of chunk objects
     #>
@@ -4128,41 +4524,37 @@ function New-FlatChunks {
         [Parameter(Mandatory)]
         [string]$DestinationRoot,
 
-        [int64]$MaxChunkSizeBytes = $script:DefaultMaxChunkSizeBytes,
-        [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
+        [ValidateRange(0, 20)]
+        [int]$MaxDepth = $script:DefaultMaxChunkDepth,
 
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-built directory tree for O(1) size lookups (optional, built if not provided)
+        [DirectoryNode]$TreeNode = $null
     )
 
-    # Flat mode: MaxDepth = 0 (no recursion into subdirectories)
+    # Flat mode: use specified depth limit
     return Get-DirectoryChunks `
         -Path $Path `
         -DestinationRoot $DestinationRoot `
-        -MaxSizeBytes $MaxChunkSizeBytes `
-        -MaxFiles $MaxFiles `
-        -MaxDepth 0 `
-        -State $State
+        -MaxDepth $MaxDepth `
+        -State $State `
+        -TreeNode $TreeNode
 }
 
 function New-SmartChunks {
     <#
     .SYNOPSIS
-        Creates chunks using smart (recursive) scanning strategy
+        Creates chunks using smart (unlimited depth) scanning strategy
     .DESCRIPTION
-        Generates chunks by recursively analyzing the directory tree and
-        splitting based on size and file count thresholds.
-        This is the recommended mode for most use cases.
+        Generates chunks by recursively analyzing the directory tree with no depth limit.
+        Continues recursing until each chunk fits within thresholds or no more subdirectories
+        exist. This is the recommended mode for optimal chunk balancing.
     .PARAMETER Path
         Root path to chunk
     .PARAMETER DestinationRoot
         Destination root path
-    .PARAMETER MaxChunkSizeBytes
-        Maximum size per chunk (default: 10GB)
-    .PARAMETER MaxFiles
-        Maximum files per chunk (default: 50000)
-    .PARAMETER MaxDepth
-        Maximum recursion depth (default: 5)
     .OUTPUTS
         Array of chunk objects
     #>
@@ -4174,22 +4566,20 @@ function New-SmartChunks {
         [Parameter(Mandatory)]
         [string]$DestinationRoot,
 
-        [int64]$MaxChunkSizeBytes = $script:DefaultMaxChunkSizeBytes,
-        [int]$MaxFiles = $script:DefaultMaxFilesPerChunk,
-        [int]$MaxDepth = $script:DefaultMaxChunkDepth,
-
         # Optional OrchestrationState for progress counter updates (pass from caller in background runspace)
-        [object]$State = $null
+        [object]$State = $null,
+
+        # Pre-built directory tree for O(1) size lookups (optional, built if not provided)
+        [DirectoryNode]$TreeNode = $null
     )
 
-    # Smart mode: recursive chunking with configurable depth
+    # Smart mode: unlimited depth (-1) for optimal chunk balancing
     return Get-DirectoryChunks `
         -Path $Path `
         -DestinationRoot $DestinationRoot `
-        -MaxSizeBytes $MaxChunkSizeBytes `
-        -MaxFiles $MaxFiles `
-        -MaxDepth $MaxDepth `
-        -State $State
+        -MaxDepth -1 `
+        -State $State `
+        -TreeNode $TreeNode
 }
 
 function Get-NormalizedPath {
@@ -4313,6 +4703,435 @@ function Convert-ToDestinationPath {
 
 # Script-level bandwidth limit (set from config during replication start)
 $script:BandwidthLimitMbps = 0
+
+# Script variable to track if RobocopyProgressBuffer type has been initialized
+$script:RobocopyProgressBufferTypeInitialized = $false
+
+# Script variable to track if ProcessJobObject type has been initialized
+$script:ProcessJobObjectTypeInitialized = $false
+
+# Script variable to hold the Job Object handle (kills all children on parent exit)
+$script:RobocopyJobObject = $null
+
+function Initialize-RobocopyProgressBufferType {
+    <#
+    .SYNOPSIS
+        Lazy-loads the C# RobocopyProgressBuffer type for streaming stdout capture
+    .DESCRIPTION
+        Compiles and loads the C# RobocopyProgressBuffer class only when first needed.
+        This class provides thread-safe storage for robocopy output lines and progress
+        counters, enabling real-time progress updates during file copy operations.
+
+        The type is only compiled once per PowerShell session. Subsequent calls
+        return immediately if the type already exists.
+    .OUTPUTS
+        $true if type is available, $false on compilation failure
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Fast path: already initialized this session
+    if ($script:RobocopyProgressBufferTypeInitialized) {
+        return $true
+    }
+
+    # Check if type exists from a previous session/import
+    if (([System.Management.Automation.PSTypeName]'Robocurse.RobocopyProgressBuffer').Type) {
+        $script:RobocopyProgressBufferTypeInitialized = $true
+        return $true
+    }
+
+    # Compile the C# type
+    try {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Concurrent;
+using System.Threading;
+
+namespace Robocurse
+{
+    /// <summary>
+    /// Thread-safe buffer for streaming robocopy stdout capture.
+    /// Used for real-time progress updates during file copy operations.
+    /// Event handler runs on thread pool - all operations must be thread-safe.
+    /// </summary>
+    public class RobocopyProgressBuffer
+    {
+        /// <summary>Lines captured from stdout - use Enqueue/TryDequeue for thread safety</summary>
+        public ConcurrentQueue<string> Lines { get; private set; }
+
+        /// <summary>Bytes from files that have completed (reached 100%)</summary>
+        private long _completedFilesBytes;
+        public long CompletedFilesBytes
+        {
+            get { return Interlocked.Read(ref _completedFilesBytes); }
+        }
+
+        /// <summary>Add bytes from a completed file to the total</summary>
+        public long AddCompletedBytes(long bytes)
+        {
+            return Interlocked.Add(ref _completedFilesBytes, bytes);
+        }
+
+        /// <summary>Size of the file currently being copied</summary>
+        private long _currentFileSize;
+        public long CurrentFileSize
+        {
+            get { return Interlocked.Read(ref _currentFileSize); }
+            set { Interlocked.Exchange(ref _currentFileSize, value); }
+        }
+
+        /// <summary>Bytes copied of the current file (calculated from percentage)</summary>
+        private long _currentFileBytes;
+        public long CurrentFileBytes
+        {
+            get { return Interlocked.Read(ref _currentFileBytes); }
+            set { Interlocked.Exchange(ref _currentFileBytes, value); }
+        }
+
+        /// <summary>Total bytes copied = completed files + current file progress</summary>
+        public long BytesCopied
+        {
+            get { return Interlocked.Read(ref _completedFilesBytes) + Interlocked.Read(ref _currentFileBytes); }
+        }
+
+        /// <summary>Count of files that have completed copying</summary>
+        private int _filesCopied;
+        public int FilesCopied
+        {
+            get { return Interlocked.CompareExchange(ref _filesCopied, 0, 0); }
+            set { Interlocked.Exchange(ref _filesCopied, value); }
+        }
+
+        /// <summary>Atomically increment files copied counter</summary>
+        public int IncrementFiles()
+        {
+            return Interlocked.Increment(ref _filesCopied);
+        }
+
+        /// <summary>Current file being copied (for progress display)</summary>
+        private string _currentFile = "";
+        private readonly object _fileLock = new object();
+        public string CurrentFile
+        {
+            get { lock (_fileLock) { return _currentFile; } }
+            set { lock (_fileLock) { _currentFile = value ?? ""; } }
+        }
+
+        /// <summary>Timestamp of last progress update</summary>
+        private long _lastUpdateTicks;
+        public DateTime LastUpdate
+        {
+            get { return new DateTime(Interlocked.Read(ref _lastUpdateTicks)); }
+            set { Interlocked.Exchange(ref _lastUpdateTicks, value.Ticks); }
+        }
+
+        /// <summary>Create a new progress buffer with empty collections</summary>
+        public RobocopyProgressBuffer()
+        {
+            Lines = new ConcurrentQueue<string>();
+            _completedFilesBytes = 0;
+            _currentFileSize = 0;
+            _currentFileBytes = 0;
+            _filesCopied = 0;
+            _currentFile = "";
+            _lastUpdateTicks = DateTime.Now.Ticks;
+        }
+
+        /// <summary>Get all buffered lines as array (for final parsing)</summary>
+        public string[] GetAllLines()
+        {
+            return Lines.ToArray();
+        }
+
+        /// <summary>Get count of buffered lines</summary>
+        public int LineCount
+        {
+            get { return Lines.Count; }
+        }
+    }
+}
+'@ -ErrorAction Stop
+
+        $script:RobocopyProgressBufferTypeInitialized = $true
+        Write-Verbose "RobocopyProgressBuffer C# type compiled and initialized"
+        return $true
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to compile RobocopyProgressBuffer type: $($_.Exception.Message)" `
+            -Level 'Error' -Component 'Robocopy'
+        return $false
+    }
+}
+
+function Initialize-ProcessJobObjectType {
+    <#
+    .SYNOPSIS
+        Lazy-loads the C# ProcessJobObject type for child process cleanup
+    .DESCRIPTION
+        Compiles and loads a C# class that wraps Windows Job Objects.
+        When processes are assigned to this job, they are automatically
+        terminated when the parent process exits (even on crash).
+
+        This ensures robocopy child processes don't become orphaned.
+    .OUTPUTS
+        $true if type is available, $false on compilation failure
+    #>
+    [CmdletBinding()]
+    param()
+
+    # Fast path: already initialized this session
+    if ($script:ProcessJobObjectTypeInitialized) {
+        return $true
+    }
+
+    # Check if type exists from a previous session/import
+    if (([System.Management.Automation.PSTypeName]'Robocurse.ProcessJobObject').Type) {
+        $script:ProcessJobObjectTypeInitialized = $true
+        return $true
+    }
+
+    # Compile the C# type with P/Invoke for Windows Job Object APIs
+    try {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+namespace Robocurse
+{
+    /// <summary>
+    /// Windows Job Object wrapper that automatically kills child processes on parent exit.
+    /// When processes are assigned to this job with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    /// they are automatically terminated when the job handle is closed (including on crash).
+    /// </summary>
+    public class ProcessJobObject : IDisposable
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(IntPtr hJob, int JobObjectInfoClass, IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
+        // Job object info class for extended limit information
+        private const int JobObjectExtendedLimitInformation = 9;
+
+        // Limit flag to kill all processes when job handle is closed
+        private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IO_COUNTERS
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        private IntPtr _jobHandle;
+        private bool _disposed;
+        private readonly object _lock = new object();
+
+        /// <summary>Creates a new Job Object configured to kill children on close</summary>
+        public ProcessJobObject()
+        {
+            _jobHandle = CreateJobObject(IntPtr.Zero, null);
+            if (_jobHandle == IntPtr.Zero)
+            {
+                throw new InvalidOperationException("Failed to create job object. Error: " + Marshal.GetLastWin32Error());
+            }
+
+            // Configure job to kill all processes when handle is closed
+            var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+            {
+                BasicLimitInformation = new JOBOBJECT_BASIC_LIMIT_INFORMATION
+                {
+                    LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                }
+            };
+
+            int infoSize = Marshal.SizeOf(typeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION));
+            IntPtr infoPtr = Marshal.AllocHGlobal(infoSize);
+            try
+            {
+                Marshal.StructureToPtr(info, infoPtr, false);
+                if (!SetInformationJobObject(_jobHandle, JobObjectExtendedLimitInformation, infoPtr, (uint)infoSize))
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    CloseHandle(_jobHandle);
+                    _jobHandle = IntPtr.Zero;
+                    throw new InvalidOperationException("Failed to set job object information. Error: " + error);
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(infoPtr);
+            }
+        }
+
+        /// <summary>Assigns a process to this job object</summary>
+        public bool AssignProcess(Process process)
+        {
+            if (process == null) return false;
+            lock (_lock)
+            {
+                if (_disposed || _jobHandle == IntPtr.Zero) return false;
+                try
+                {
+                    return AssignProcessToJobObject(_jobHandle, process.Handle);
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        /// <summary>Assigns a process to this job object by handle</summary>
+        public bool AssignProcess(IntPtr processHandle)
+        {
+            if (processHandle == IntPtr.Zero) return false;
+            lock (_lock)
+            {
+                if (_disposed || _jobHandle == IntPtr.Zero) return false;
+                return AssignProcessToJobObject(_jobHandle, processHandle);
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_lock)
+            {
+                if (!_disposed && _jobHandle != IntPtr.Zero)
+                {
+                    CloseHandle(_jobHandle);
+                    _jobHandle = IntPtr.Zero;
+                }
+                _disposed = true;
+            }
+        }
+    }
+}
+'@ -ErrorAction Stop
+
+        $script:ProcessJobObjectTypeInitialized = $true
+        Write-Verbose "ProcessJobObject C# type compiled and initialized"
+        return $true
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to compile ProcessJobObject type: $($_.Exception.Message)" `
+            -Level 'Warning' -Component 'Robocopy'
+        return $false
+    }
+}
+
+function Initialize-RobocopyJobObject {
+    <#
+    .SYNOPSIS
+        Creates the Job Object for robocopy child process management
+    .DESCRIPTION
+        Initializes a Windows Job Object that will automatically kill all
+        assigned robocopy processes when the parent process exits.
+        Call this once at application startup.
+    .OUTPUTS
+        $true if Job Object created successfully, $false otherwise
+    #>
+    [CmdletBinding()]
+    param()
+
+    if ($script:RobocopyJobObject) {
+        return $true  # Already initialized
+    }
+
+    if (-not (Initialize-ProcessJobObjectType)) {
+        Write-RobocurseLog -Message "Job Object type not available - child processes may become orphaned on crash" `
+            -Level 'Warning' -Component 'Robocopy'
+        return $false
+    }
+
+    try {
+        $script:RobocopyJobObject = [Robocurse.ProcessJobObject]::new()
+        Write-RobocurseLog -Message "Robocopy Job Object initialized - child processes will be cleaned up on exit" `
+            -Level 'Debug' -Component 'Robocopy'
+        return $true
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to create Job Object: $($_.Exception.Message)" `
+            -Level 'Warning' -Component 'Robocopy'
+        return $false
+    }
+}
+
+function Add-ProcessToJobObject {
+    <#
+    .SYNOPSIS
+        Assigns a process to the robocopy Job Object
+    .DESCRIPTION
+        Adds a process to the Job Object so it will be automatically
+        terminated when the parent process exits.
+    .PARAMETER Process
+        The System.Diagnostics.Process to assign
+    .OUTPUTS
+        $true if assigned successfully, $false otherwise
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [System.Diagnostics.Process]$Process
+    )
+
+    if (-not $script:RobocopyJobObject) {
+        # Job Object not initialized - try to initialize it now
+        if (-not (Initialize-RobocopyJobObject)) {
+            return $false
+        }
+    }
+
+    try {
+        $result = $script:RobocopyJobObject.AssignProcess($Process)
+        if ($result) {
+            Write-Verbose "Assigned process $($Process.Id) to Job Object"
+        }
+        return $result
+    }
+    catch {
+        Write-Verbose "Failed to assign process to Job Object: $($_.Exception.Message)"
+        return $false
+    }
+}
 
 function Get-BandwidthThrottleIPG {
     <#
@@ -4482,10 +5301,7 @@ function New-RobocopyArguments {
         [AllowEmptyCollection()]
         [string[]]$ChunkArgs,
 
-        [switch]$DryRun,
-
-        # If false (default), adds /NFL /NDL to suppress per-file logging for smaller log files
-        [switch]$VerboseFileLogging
+        [switch]$DryRun
     )
 
     # Handle null ChunkArgs (PS 5.1 unwraps empty arrays to null)
@@ -4537,18 +5353,16 @@ function New-RobocopyArguments {
 
     # Threading, retry, and logging (always applied)
     $argList.Add("/MT:$ThreadsPerJob")
+    $argList.Add("/J")  # Unbuffered I/O - prevents memory exhaustion on large files
     $argList.Add("/R:$retryCount")
     $argList.Add("/W:$retryWait")
     $argList.Add("/LOG:$(Format-QuotedPath -Path $safeLogPath)")
     $argList.Add("/TEE")
-    $argList.Add("/NP")
+    # Note: /NP removed to enable percentage progress output for real-time monitoring
 
-    # Suppress per-file logging unless verbose mode is enabled
-    # /NFL = No File List, /NDL = No Directory List
-    if (-not $VerboseFileLogging) {
-        $argList.Add("/NFL")
-        $argList.Add("/NDL")
-    }
+    # /NDL = No Directory List (reduce log noise)
+    # Note: /NFL removed - file output is required for real-time BytesCopied progress tracking
+    $argList.Add("/NDL")
     $argList.Add("/BYTES")
 
     # Junction handling
@@ -4659,10 +5473,7 @@ function Start-RobocopyJob {
 
         [hashtable]$RobocopyOptions = @{},
 
-        [switch]$DryRun,
-
-        # If true, log every file copied; if false (default), only log summary
-        [switch]$VerboseFileLogging
+        [switch]$DryRun
     )
 
     # Validate Chunk properties
@@ -4682,8 +5493,15 @@ function Start-RobocopyJob {
         -ThreadsPerJob $ThreadsPerJob `
         -RobocopyOptions $RobocopyOptions `
         -ChunkArgs $chunkArgs `
-        -DryRun:$DryRun `
-        -VerboseFileLogging:$VerboseFileLogging
+        -DryRun:$DryRun
+
+    # Initialize the progress buffer type (lazy load C# class)
+    if (-not (Initialize-RobocopyProgressBufferType)) {
+        throw "Failed to initialize RobocopyProgressBuffer type. Check logs for compilation errors."
+    }
+
+    # Create thread-safe progress buffer for streaming stdout capture
+    $progressBuffer = [Robocurse.RobocopyProgressBuffer]::new()
 
     # Create process start info
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -4707,12 +5525,63 @@ function Start-RobocopyJob {
     Write-RobocurseLog -Message "Robocopy args: $($argList -join ' ')" -Level 'Debug' -Component 'Robocopy'
     Write-Host "[ROBOCOPY CMD] $($psi.FileName) $($psi.Arguments)"
 
-    # Start the process
-    $process = [System.Diagnostics.Process]::Start($psi)
+    # Create and configure the process object
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+    # Enable events for async output capture
+    $process.EnableRaisingEvents = $true
 
-    # Start async stdout read immediately to prevent buffer overflow
-    # Both Wait-RobocopyJob and Complete-RobocopyJob will use this
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    # Set up streaming output handler for real-time progress
+    # Event handler runs on thread pool - keep it fast, use thread-safe operations only
+    # Note: We use Register-ObjectEvent instead of add_OutputDataReceived/.GetNewClosure()
+    # because .GetNewClosure() + delegate crashes PowerShell when called from async I/O thread
+    $outputEvent = Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action {
+        param($sender, $eventArgs)
+        if ($null -ne $eventArgs.Data) {
+            $line = $eventArgs.Data
+            $buffer = $Event.MessageData
+
+            # Add to buffer for final parsing (ConcurrentQueue.Enqueue is thread-safe)
+            $buffer.Lines.Enqueue($line)
+
+            # Parse line and update progress counters in real-time
+            # Pattern: "New File|Newer|Older|Changed" followed by size and path
+            if ($line -match '^\s*(New File|Newer|Older|Changed)\s+(\d+)\s+(.+)$') {
+                # A new file is starting - finalize previous file and start tracking new one
+                $prevSize = $buffer.CurrentFileSize
+                if ($prevSize -gt 0) {
+                    # Previous file completed (reached 100%), add its bytes to total
+                    $buffer.AddCompletedBytes($prevSize)
+                    $buffer.IncrementFiles()
+                }
+                # Start tracking new file
+                $buffer.CurrentFileSize = [long]$Matches[2]
+                $buffer.CurrentFileBytes = 0
+                $buffer.CurrentFile = $Matches[3]
+            }
+            # Pattern: Progress percentage (e.g., "  5.0%", " 50.0%", "100%")
+            elseif ($line -match '^\s*(\d+(?:\.\d+)?)\s*%') {
+                $percentage = [double]$Matches[1]
+                $currentSize = $buffer.CurrentFileSize
+                if ($currentSize -gt 0) {
+                    $buffer.CurrentFileBytes = [long]($currentSize * $percentage / 100)
+                }
+            }
+
+            # Update timestamp
+            $buffer.LastUpdate = [datetime]::Now
+        }
+    } -MessageData $progressBuffer
+
+    # Start the process
+    $process.Start() | Out-Null
+
+    # Assign to Job Object for automatic cleanup on parent exit
+    # This ensures robocopy processes don't become orphaned if the GUI is closed or crashes
+    Add-ProcessToJobObject -Process $process | Out-Null
+
+    # Begin async output reading (triggers OutputDataReceived events)
+    $process.BeginOutputReadLine()
 
     return [PSCustomObject]@{
         Process = $process
@@ -4720,7 +5589,8 @@ function Start-RobocopyJob {
         StartTime = [datetime]::Now
         LogPath = $LogPath
         DryRun = $DryRun.IsPresent
-        StdoutTask = $stdoutTask
+        ProgressBuffer = $progressBuffer
+        OutputEvent = $outputEvent  # Keep reference for cleanup
     }
 }
 
@@ -5004,10 +5874,49 @@ function ConvertFrom-RobocopyLog {
             }
         }
         else {
-            # During progress polling (reading from file), missing stats is expected - job still running
-            # During final parsing (content provided), missing stats is unexpected - warn about it
-            $logLevel = if ($isProgressPolling) { 'Debug' } else { 'Warning' }
-            Write-RobocurseLog -Message "No stats lines found in robocopy log (found $($statsLines.Count), need 3). Log path: $LogPath" -Level $logLevel -Component 'Robocopy'
+            # No final summary table yet - job is still in progress
+            # Parse file listing lines to calculate incremental BytesCopied
+            # Pattern: "New File|Newer|Older|Changed" followed by size and path
+            [int64]$bytesCopied = 0
+            [int]$filesCopied = 0
+            [string]$currentFile = ""
+            [int64]$currentFileSize = 0
+            [int64]$currentFileBytes = 0
+
+            foreach ($line in $lines) {
+                # Pattern: "New File [size] [path]" - announces a new file about to be copied
+                if ($line -match '^\s*(New File|Newer|Older|Changed)\s+(\d+)\s+(.+)$') {
+                    # Finalize previous file (add its full size - it completed before this line appeared)
+                    if ($currentFileSize -gt 0) {
+                        $bytesCopied += $currentFileSize
+                        $filesCopied++
+                    }
+                    # Start tracking new file
+                    $currentFile = $Matches[3]
+                    $currentFileSize = [int64]$Matches[2]
+                    $currentFileBytes = 0
+                }
+                # Pattern: Progress percentage (e.g., "  5.0%", " 50.0%", "100%")
+                elseif ($line -match '^\s*(\d+(?:\.\d+)?)\s*%') {
+                    $percentage = [double]$Matches[1]
+                    if ($currentFileSize -gt 0) {
+                        $currentFileBytes = [int64]($currentFileSize * $percentage / 100)
+                    }
+                }
+            }
+
+            # Add current file's partial progress
+            $bytesCopied += $currentFileBytes
+
+            # Update result with incremental progress
+            $result.BytesCopied = $bytesCopied
+            $result.FilesCopied = $filesCopied
+            $result.CurrentFile = $currentFile
+
+            # During progress polling, missing final stats is expected
+            if (-not $isProgressPolling) {
+                Write-RobocurseLog -Message "No stats lines found in robocopy log (found $($statsLines.Count), need 3). Log path: $LogPath" -Level 'Warning' -Component 'Robocopy'
+            }
         }
 
         # Parse Speed line - look for numeric pattern followed by common speed units
@@ -5085,10 +5994,14 @@ function Get-RobocopyProgress {
     <#
     .SYNOPSIS
         Gets current progress from a running robocopy job
+    .DESCRIPTION
+        Returns real-time progress from the streaming stdout buffer.
+        The ProgressBuffer C# class tracks bytes in real-time as OutputDataReceived
+        events fire, providing smooth progress updates.
     .PARAMETER Job
         Job object from Start-RobocopyJob
     .OUTPUTS
-        PSCustomObject with CurrentFile, BytesCopied, FilesCopied, etc.
+        PSCustomObject with CurrentFile, BytesCopied, FilesCopied, IsComplete, LastUpdate
     #>
     [CmdletBinding()]
     param(
@@ -5096,14 +6009,30 @@ function Get-RobocopyProgress {
         [PSCustomObject]$Job
     )
 
-    # Use ConvertFrom-RobocopyLog with tail parsing to get current status
-    return ConvertFrom-RobocopyLog -LogPath $Job.LogPath -TailLines 100
+    # Use the ProgressBuffer which tracks bytes in real-time from stdout events
+    $buffer = $Job.ProgressBuffer
+    if (-not $buffer) {
+        # Fallback to log file if no buffer (shouldn't happen with current implementation)
+        return ConvertFrom-RobocopyLog -LogPath $Job.LogPath -TailLines 100
+    }
+
+    return [PSCustomObject]@{
+        BytesCopied = $buffer.BytesCopied
+        FilesCopied = $buffer.FilesCopied
+        CurrentFile = $buffer.CurrentFile
+        LastUpdate = $buffer.LastUpdate
+        ParseSuccess = $true
+    }
 }
 
 function Wait-RobocopyJob {
     <#
     .SYNOPSIS
         Waits for a robocopy job to complete
+    .DESCRIPTION
+        Waits for the robocopy process to exit and collects final statistics.
+        Uses the streaming progress buffer to get captured output, avoiding
+        file system race conditions that occur in Session 0 scheduled tasks.
     .PARAMETER Job
         Job object from Start-RobocopyJob
     .PARAMETER TimeoutSeconds
@@ -5122,9 +6051,6 @@ function Wait-RobocopyJob {
     # Wait for process to complete with proper resource cleanup
     $capturedOutput = $null
     try {
-        # Use stdout task from Start-RobocopyJob (already reading async)
-        $stdoutTask = $Job.StdoutTask
-
         if ($TimeoutSeconds -gt 0) {
             $completed = $Job.Process.WaitForExit($TimeoutSeconds * 1000)
             if (-not $completed) {
@@ -5136,11 +6062,6 @@ function Wait-RobocopyJob {
             $Job.Process.WaitForExit()
         }
 
-        # Get captured stdout - synchronous after process exit
-        $capturedOutput = if ($stdoutTask) {
-            $stdoutTask.GetAwaiter().GetResult()
-        } else { $null }
-
         # Calculate duration
         $duration = [datetime]::Now - $Job.StartTime
 
@@ -5148,15 +6069,10 @@ function Wait-RobocopyJob {
         $exitCode = $Job.Process.ExitCode
         $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode
 
-        # Parse final statistics from captured stdout (avoids file flush race condition)
-        # Fall back to log file if stdout capture failed
-        $finalStats = if ($capturedOutput) {
-            ConvertFrom-RobocopyLog -Content $capturedOutput -LogPath $Job.LogPath
-        }
-        else {
-            Write-RobocurseLog -Message "No stdout captured, falling back to log file: $($Job.LogPath)" -Level 'Warning' -Component 'Robocopy'
-            ConvertFrom-RobocopyLog -LogPath $Job.LogPath
-        }
+        # Parse final stats from log file (authoritative source - robocopy flushes before exit)
+        # Note: ProgressBuffer is for real-time progress during the job (Get-RobocopyProgress).
+        # Do NOT use captured stdout for final stats - race condition with OutputDataReceived events.
+        $finalStats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
 
         return [PSCustomObject]@{
             ExitCode = $exitCode
@@ -5166,6 +6082,37 @@ function Wait-RobocopyJob {
         }
     }
     finally {
+        # Wait for async OutputDataReceived events to finish processing
+        # Events run on thread pool and may still be queued after WaitForExit()
+        if ($Job.ProgressBuffer) {
+            try {
+                $lastCount = -1
+                $stableIterations = 0
+                for ($i = 0; $i -lt 50; $i++) {
+                    $currentCount = $Job.ProgressBuffer.LineCount
+                    if ($currentCount -eq $lastCount) {
+                        $stableIterations++
+                        if ($stableIterations -ge 3) {
+                            break  # LineCount stable for 3 iterations, events are done
+                        }
+                    } else {
+                        $stableIterations = 0
+                    }
+                    $lastCount = $currentCount
+                    Start-Sleep -Milliseconds 20
+                }
+            } catch { }
+        }
+
+        # Clean up event subscription to prevent orphaned subscriptions
+        # Must happen before process disposal
+        if ($Job.OutputEvent) {
+            try {
+                Unregister-Event -SourceIdentifier $Job.OutputEvent.Name -ErrorAction SilentlyContinue
+                Remove-Job -Id $Job.OutputEvent.Id -Force -ErrorAction SilentlyContinue
+            } catch { }
+        }
+
         # Always dispose process handle to prevent handle leaks
         # Critical for long-running operations with many jobs
         try { $Job.Process.Dispose() } catch { }
@@ -5943,6 +6890,11 @@ function Test-ChunkAlreadyCompleted {
 $script:OrchestrationTypeInitialized = $false
 $script:OrchestrationState = $null
 
+# Running profile tracking - prevents the same profile from being run twice simultaneously
+# Uses named mutexes which work across processes and are auto-released on crash
+# Key: profile name, Value: mutex object (must be held to keep the lock)
+$script:RunningProfileMutexes = [System.Collections.Concurrent.ConcurrentDictionary[string, System.Threading.Mutex]]::new()
+
 function Initialize-OrchestrationStateType {
     <#
     .SYNOPSIS
@@ -6626,6 +7578,10 @@ function Initialize-OrchestrationState {
         throw "Failed to initialize OrchestrationState type. Check logs for compilation errors."
     }
 
+    # Initialize Job Object for automatic child process cleanup
+    # This ensures robocopy processes are killed when the parent exits (even on crash)
+    Initialize-RobocopyJobObject | Out-Null
+
     # Reset the existing state object (don't create a new one - that breaks cross-thread sharing)
     $script:OrchestrationState.Reset()
 
@@ -6643,6 +7599,13 @@ function Initialize-OrchestrationState {
     if ($orphansCleared -gt 0) {
         Write-RobocurseLog -Message "Cleaned up $orphansCleared orphaned VSS snapshot(s) from previous run" `
             -Level 'Info' -Component 'VSS'
+    }
+
+    # Clean up any orphaned network mappings from crashed previous runs
+    $mappingsCleared = Clear-OrphanNetworkMappings
+    if ($mappingsCleared -gt 0) {
+        Write-RobocurseLog -Message "Cleaned up $mappingsCleared orphaned network mapping(s) from previous run" `
+            -Level 'Info' -Component 'NetworkMapping'
     }
 
     Write-RobocurseLog -Message "Orchestration state initialized: $($script:OrchestrationState.SessionId)" `
@@ -6664,6 +7627,275 @@ function Get-OrchestrationState {
 
     return $script:OrchestrationState
 }
+
+#region Running Profile Tracking
+
+function Get-ProfileMutexName {
+    <#
+    .SYNOPSIS
+        Gets the named mutex name for a profile
+    .DESCRIPTION
+        Creates a consistent, safe mutex name for a profile.
+        Uses Global\ prefix so mutex is visible across all sessions.
+    .PARAMETER ProfileName
+        Name of the profile
+    .OUTPUTS
+        Mutex name string
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    # Sanitize profile name for use in mutex name (replace invalid characters)
+    $safeName = $ProfileName -replace '[\\/:*?"<>|]', '_'
+    return "Global\RobocurseProfile_$safeName"
+}
+
+function Test-ProfileRunning {
+    <#
+    .SYNOPSIS
+        Checks if a profile is currently running
+    .DESCRIPTION
+        Uses named mutex to determine if a profile with the given name
+        is already running in ANY process. This works across processes
+        and handles crashes (mutex auto-released when process dies).
+    .PARAMETER ProfileName
+        Name of the profile to check
+    .OUTPUTS
+        $true if the profile is currently running, $false otherwise
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    # First check our local dictionary (we might already own it)
+    if ($script:RunningProfileMutexes.ContainsKey($ProfileName)) {
+        return $true
+    }
+
+    # Try to acquire the mutex with zero timeout to test if it's held
+    $mutexName = Get-ProfileMutexName -ProfileName $ProfileName
+    $mutex = $null
+    $acquired = $false
+
+    try {
+        $createdNew = $false
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName, [ref]$createdNew)
+
+        # Try to acquire with 0 timeout (immediate check)
+        $acquired = $mutex.WaitOne(0)
+
+        if ($acquired) {
+            # We acquired it, so profile was NOT running. Release immediately.
+            $mutex.ReleaseMutex()
+            return $false
+        }
+        else {
+            # Couldn't acquire, profile IS running
+            return $true
+        }
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # Previous owner crashed - mutex is now ours, so profile was NOT running
+        # Release it since we're just testing
+        if ($mutex) {
+            try { $mutex.ReleaseMutex() } catch { }
+        }
+        return $false
+    }
+    finally {
+        if ($mutex) {
+            $mutex.Dispose()
+        }
+    }
+}
+
+function Register-RunningProfile {
+    <#
+    .SYNOPSIS
+        Registers a profile as running by acquiring a named mutex
+    .DESCRIPTION
+        Acquires a system-wide named mutex for this profile. This prevents
+        duplicate runs across:
+        - Multiple PowerShell sessions
+        - Multiple scheduled task instances
+        - GUI and CLI running simultaneously
+
+        The mutex is automatically released by Windows if the process crashes.
+    .PARAMETER ProfileName
+        Name of the profile to register
+    .OUTPUTS
+        $true if registration succeeded (profile was not running),
+        $false if profile was already running
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    # Check if we already own this mutex
+    if ($script:RunningProfileMutexes.ContainsKey($ProfileName)) {
+        Write-RobocurseLog -Message "Profile '$ProfileName' mutex already owned by this process" `
+            -Level 'Debug' -Component 'ProfileTracking'
+        return $true
+    }
+
+    $mutexName = Get-ProfileMutexName -ProfileName $ProfileName
+    $mutex = $null
+    $acquired = $false
+
+    try {
+        $createdNew = $false
+        $mutex = [System.Threading.Mutex]::new($false, $mutexName, [ref]$createdNew)
+
+        # Try to acquire with 0 timeout (don't wait)
+        $acquired = $mutex.WaitOne(0)
+
+        if ($acquired) {
+            # Store the mutex so we keep ownership and can release it later
+            if ($script:RunningProfileMutexes.TryAdd($ProfileName, $mutex)) {
+                Write-RobocurseLog -Message "Profile '$ProfileName' registered as running (mutex acquired)" `
+                    -Level 'Debug' -Component 'ProfileTracking'
+                return $true
+            }
+            else {
+                # Race condition - another thread in this process added it
+                $mutex.ReleaseMutex()
+                $mutex.Dispose()
+                return $true
+            }
+        }
+        else {
+            # Couldn't acquire - another process holds it
+            Write-RobocurseLog -Message "Profile '$ProfileName' is already running in another process" `
+                -Level 'Warning' -Component 'ProfileTracking'
+            $mutex.Dispose()
+            return $false
+        }
+    }
+    catch [System.Threading.AbandonedMutexException] {
+        # Previous owner crashed - we now own the mutex
+        if ($script:RunningProfileMutexes.TryAdd($ProfileName, $mutex)) {
+            Write-RobocurseLog -Message "Profile '$ProfileName' registered (recovered abandoned mutex from crashed process)" `
+                -Level 'Warning' -Component 'ProfileTracking'
+            return $true
+        }
+        else {
+            try { $mutex.ReleaseMutex() } catch { }
+            $mutex.Dispose()
+            return $true
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to acquire profile mutex for '$ProfileName': $($_.Exception.Message)" `
+            -Level 'Error' -Component 'ProfileTracking'
+        if ($mutex) { $mutex.Dispose() }
+        return $false
+    }
+}
+
+function Unregister-RunningProfile {
+    <#
+    .SYNOPSIS
+        Unregisters a profile by releasing its mutex
+    .DESCRIPTION
+        Releases the named mutex for a profile, allowing other processes
+        to run it. Called when a profile completes or is stopped.
+    .PARAMETER ProfileName
+        Name of the profile to unregister
+    .OUTPUTS
+        $true if profile was unregistered, $false if it wasn't registered
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    $mutex = $null
+    $removed = $script:RunningProfileMutexes.TryRemove($ProfileName, [ref]$mutex)
+
+    if ($removed -and $mutex) {
+        try {
+            $mutex.ReleaseMutex()
+            Write-RobocurseLog -Message "Profile '$ProfileName' unregistered (mutex released)" `
+                -Level 'Debug' -Component 'ProfileTracking'
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to release mutex for '$ProfileName': $($_.Exception.Message)" `
+                -Level 'Warning' -Component 'ProfileTracking'
+        }
+        finally {
+            $mutex.Dispose()
+        }
+        return $true
+    }
+
+    return $false
+}
+
+function Get-RunningProfiles {
+    <#
+    .SYNOPSIS
+        Returns list of profiles registered as running in this process
+    .DESCRIPTION
+        Returns profiles that THIS process has registered as running.
+        Does not detect profiles running in other processes (use Test-ProfileRunning for that).
+    .OUTPUTS
+        Array of profile name strings
+    #>
+    [CmdletBinding()]
+    param()
+
+    return @($script:RunningProfileMutexes.Keys)
+}
+
+function Clear-RunningProfiles {
+    <#
+    .SYNOPSIS
+        Releases all profile mutexes held by this process
+    .DESCRIPTION
+        Releases all profile mutexes and clears the dictionary.
+        Used during initialization or for cleanup after abnormal termination.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $count = $script:RunningProfileMutexes.Count
+    if ($count -eq 0) {
+        return
+    }
+
+    foreach ($kvp in $script:RunningProfileMutexes.ToArray()) {
+        $profileName = $kvp.Key
+        $mutex = $kvp.Value
+
+        try {
+            $mutex.ReleaseMutex()
+        }
+        catch {
+            # Ignore release errors during cleanup
+        }
+        finally {
+            try { $mutex.Dispose() } catch { }
+        }
+
+        $script:RunningProfileMutexes.TryRemove($profileName, [ref]$null) | Out-Null
+    }
+
+    Write-RobocurseLog -Message "Cleared $count running profile registration(s)" `
+        -Level 'Debug' -Component 'ProfileTracking'
+}
+
+#endregion Running Profile Tracking
 
 #endregion
 
@@ -7141,6 +8373,232 @@ function Test-NetworkCredentialExists {
 # Reference: https://duffney.io (scheduled task network access patterns)
 # =====================================================================================
 
+# Tracking file for network mappings - enables cleanup after crash
+$script:NetworkMappingTrackingFile = $null  # Initialized when needed
+
+# Named mutex for thread-safe drive letter allocation
+# Prevents race condition when multiple jobs start simultaneously
+$script:DriveLetterMutexName = "Global\RobocurseDriveLetterAllocation"
+$script:DriveLetterMutex = $null
+
+# Reserved drive letters (letters we've allocated but New-PSDrive hasn't completed yet)
+# This handles the window between checking available letters and completing the mount
+$script:ReservedDriveLetters = [System.Collections.Generic.HashSet[string]]::new()
+
+function Initialize-NetworkMappingTracking {
+    <#
+    .SYNOPSIS
+        Initializes the network mapping tracking file path
+    .DESCRIPTION
+        Sets up the tracking file path in the logs directory.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not $script:LogPath) {
+        # Use default if logging not initialized
+        $script:LogPath = ".\Logs"
+    }
+
+    $script:NetworkMappingTrackingFile = Join-Path $script:LogPath "robocurse-mappings-active.json"
+}
+
+function Add-NetworkMappingTracking {
+    <#
+    .SYNOPSIS
+        Adds a network mapping to the tracking file for crash recovery
+    .PARAMETER Mapping
+        The mapping object from Mount-SingleNetworkPath
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Mapping
+    )
+
+    if (-not $script:NetworkMappingTrackingFile) {
+        Initialize-NetworkMappingTracking
+    }
+
+    $trackedMappings = @()
+
+    if (Test-Path $script:NetworkMappingTrackingFile) {
+        try {
+            $content = Get-Content $script:NetworkMappingTrackingFile -Raw | ConvertFrom-Json
+            $trackedMappings = @($content)
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to read mapping tracking file, starting fresh: $($_.Exception.Message)" `
+                -Level 'Warning' -Component 'NetworkMapping'
+        }
+    }
+
+    $trackedMappings += @{
+        DriveLetter = $Mapping.DriveLetter
+        Root = $Mapping.Root
+        OriginalPath = $Mapping.OriginalPath
+        MappedPath = $Mapping.MappedPath
+        CreatedAt = [datetime]::Now.ToString('o')
+    }
+
+    # Ensure directory exists
+    $trackingDir = Split-Path $script:NetworkMappingTrackingFile -Parent
+    if (-not (Test-Path $trackingDir)) {
+        New-Item -Path $trackingDir -ItemType Directory -Force | Out-Null
+    }
+
+    $trackedMappings | ConvertTo-Json -Depth 5 | Set-Content $script:NetworkMappingTrackingFile -Encoding UTF8
+
+    Write-RobocurseLog -Message "Added mapping to tracking: $($Mapping.DriveLetter) -> $($Mapping.Root)" `
+        -Level 'Debug' -Component 'NetworkMapping'
+}
+
+function Remove-NetworkMappingTracking {
+    <#
+    .SYNOPSIS
+        Removes a network mapping from the tracking file
+    .PARAMETER DriveLetter
+        The drive letter to remove (e.g., "Y:" or "Y")
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$DriveLetter
+    )
+
+    if (-not $script:NetworkMappingTrackingFile -or -not (Test-Path $script:NetworkMappingTrackingFile)) {
+        return
+    }
+
+    $letter = $DriveLetter.TrimEnd(':')
+
+    try {
+        # Read and parse JSON separately to avoid pipeline issues with array wrapping
+        $rawContent = Get-Content $script:NetworkMappingTrackingFile -Raw
+        $parsed = ConvertFrom-Json $rawContent
+        $trackedMappings = @($parsed)
+
+        $remainingMappings = @($trackedMappings | Where-Object { $_.DriveLetter -ne "$letter`:" -and $_.DriveLetter -ne $letter })
+
+        if ($remainingMappings.Count -eq 0) {
+            Remove-Item $script:NetworkMappingTrackingFile -Force -ErrorAction SilentlyContinue
+            Write-RobocurseLog -Message "All mappings removed, deleted tracking file" `
+                -Level 'Debug' -Component 'NetworkMapping'
+        }
+        else {
+            # Use -InputObject to preserve array structure (piping unrolls arrays)
+            ConvertTo-Json -InputObject $remainingMappings -Depth 5 | Set-Content $script:NetworkMappingTrackingFile -Encoding UTF8
+        }
+
+        Write-RobocurseLog -Message "Removed mapping from tracking: $letter" `
+            -Level 'Debug' -Component 'NetworkMapping'
+    }
+    catch {
+        Write-RobocurseLog -Message "Failed to update mapping tracking: $($_.Exception.Message)" `
+            -Level 'Warning' -Component 'NetworkMapping'
+    }
+}
+
+function Clear-OrphanNetworkMappings {
+    <#
+    .SYNOPSIS
+        Cleans up network drive mappings that may have been left behind from crashed runs
+    .DESCRIPTION
+        Reads the network mapping tracking file and removes any mappings that are still present.
+        This should be called at startup to clean up after unexpected terminations.
+
+        Only mappings tracked by Robocurse are removed - other user-created mappings are left alone.
+    .OUTPUTS
+        Number of mappings cleaned up
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
+    if (-not $script:NetworkMappingTrackingFile) {
+        Initialize-NetworkMappingTracking
+    }
+
+    if (-not (Test-Path $script:NetworkMappingTrackingFile)) {
+        return 0
+    }
+
+    $cleaned = 0
+    $failedMappings = @()
+
+    try {
+        $content = Get-Content $script:NetworkMappingTrackingFile -Raw -ErrorAction Stop
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            # Empty file - just clean it up
+            Remove-Item $script:NetworkMappingTrackingFile -Force -ErrorAction SilentlyContinue
+            return 0
+        }
+
+        $trackedMappings = $content | ConvertFrom-Json
+        $trackedMappings = @($trackedMappings | Where-Object { $null -ne $_ })
+
+        foreach ($mapping in $trackedMappings) {
+            if (-not $mapping -or -not $mapping.DriveLetter) {
+                continue  # Skip invalid entries
+            }
+            $letter = $mapping.DriveLetter.TrimEnd(':')
+            $displayName = "$($mapping.DriveLetter) -> $($mapping.Root)"
+
+            if ($PSCmdlet.ShouldProcess($displayName, "Remove orphan network mapping")) {
+                try {
+                    # Check if drive is actually mapped
+                    $existingDrive = Get-PSDrive -Name $letter -ErrorAction SilentlyContinue
+
+                    if ($existingDrive) {
+                        # Verify it's the same mapping (not a different user mapping)
+                        if ($existingDrive.Root -eq $mapping.Root) {
+                            Remove-PSDrive -Name $letter -Force -ErrorAction Stop
+                            Write-RobocurseLog -Message "Cleaned up orphan network mapping: $displayName" `
+                                -Level 'Info' -Component 'NetworkMapping'
+                            $cleaned++
+                        }
+                        else {
+                            # Drive exists but points elsewhere - remove from tracking only
+                            Write-RobocurseLog -Message "Drive $letter exists but points to different location, removing from tracking" `
+                                -Level 'Debug' -Component 'NetworkMapping'
+                        }
+                    }
+                    else {
+                        # Drive not mapped - just clean up tracking
+                        Write-RobocurseLog -Message "Tracked mapping $letter no longer exists, cleaning up tracking" `
+                            -Level 'Debug' -Component 'NetworkMapping'
+                    }
+                }
+                catch {
+                    Write-RobocurseLog -Message "Failed to cleanup orphan mapping $displayName`: $($_.Exception.Message)" `
+                        -Level 'Warning' -Component 'NetworkMapping'
+                    $failedMappings += $mapping
+                }
+            }
+        }
+
+        # Update tracking file
+        if ($PSCmdlet.ShouldProcess($script:NetworkMappingTrackingFile, "Update tracking file")) {
+            if ($failedMappings.Count -eq 0) {
+                Remove-Item $script:NetworkMappingTrackingFile -Force -ErrorAction SilentlyContinue
+                Write-RobocurseLog -Message "All orphan mappings cleaned - removed tracking file" `
+                    -Level 'Debug' -Component 'NetworkMapping'
+            }
+            elseif ($cleaned -gt 0) {
+                # Some succeeded, some failed - keep failed entries
+                $failedMappings | ConvertTo-Json -Depth 5 | Set-Content $script:NetworkMappingTrackingFile -Encoding UTF8
+                Write-RobocurseLog -Message "Updated tracking file: $($failedMappings.Count) mappings remain for retry" `
+                    -Level 'Warning' -Component 'NetworkMapping'
+            }
+        }
+    }
+    catch {
+        Write-RobocurseLog -Message "Error during orphan mapping cleanup: $($_.Exception.Message)" `
+            -Level 'Warning' -Component 'NetworkMapping'
+    }
+
+    return $cleaned
+}
+
 function Get-UncRoot {
     <#
     .SYNOPSIS
@@ -7162,10 +8620,38 @@ function Get-UncRoot {
     return $UncPath
 }
 
+function Get-NextAvailableDriveLetter {
+    <#
+    .SYNOPSIS
+        Gets the next available drive letter, excluding reserved letters
+    .DESCRIPTION
+        Returns the first available drive letter from Z down to D, excluding:
+        - Letters already in use by the system (Get-PSDrive)
+        - Letters reserved by other concurrent mount operations
+    .OUTPUTS
+        Single character (drive letter) or $null if none available
+    #>
+    [CmdletBinding()]
+    param()
+
+    $used = @((Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue).Name)
+    $reserved = @($script:ReservedDriveLetters)
+
+    # Combine used and reserved letters
+    $unavailable = $used + $reserved
+
+    $letter = [char[]](90..68) | Where-Object { [string]$_ -notin $unavailable } | Select-Object -First 1
+    return $letter
+}
+
 function Mount-SingleNetworkPath {
     <#
     .SYNOPSIS
         Mounts a single UNC path to an available drive letter
+    .DESCRIPTION
+        Thread-safe mounting of UNC paths to drive letters. Uses a named mutex
+        to prevent race conditions when multiple jobs start simultaneously.
+        Each call gets a unique drive letter even under concurrent access.
     .PARAMETER UncPath
         UNC path to mount
     .PARAMETER Credential
@@ -7185,34 +8671,115 @@ function Mount-SingleNetworkPath {
     $root = Get-UncRoot $UncPath
     $remainder = $UncPath.Substring($root.Length)
 
-    # Clean up stale mapping to same root (from crashed previous runs)
-    $existingDrive = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayRoot -eq $root }
-    if ($existingDrive) {
-        Write-RobocurseLog -Message "Removing stale mapping $($existingDrive.Name): to '$root'" -Level 'Debug' -Component 'NetworkMapping'
-        Remove-PSDrive -Name $existingDrive.Name -Force -ErrorAction SilentlyContinue
-    }
+    $letter = $null
+    $mutexAcquired = $false
+    $mutexOwned = $false
 
-    # Find available letter (Z down to D)
-    $used = @((Get-PSDrive -PSProvider FileSystem).Name)
-    $letter = [char[]](90..68) | Where-Object { [string]$_ -notin $used } | Select-Object -First 1
-    if (-not $letter) {
-        throw "No available drive letters for network mapping"
-    }
+    try {
+        # =====================================================================================
+        # THREAD-SAFE DRIVE LETTER ALLOCATION
+        # =====================================================================================
+        # Use a named mutex to ensure only one process/thread can allocate a drive letter
+        # at a time. This prevents race conditions where two concurrent jobs both try to
+        # use the same letter (e.g., both see Z is available, both try to mount to Z).
+        #
+        # The mutex is held from letter selection through New-PSDrive completion.
+        # =====================================================================================
 
-    # Mount with or without explicit credentials
-    # With credential: Required for Session 0 scheduled tasks (NTLM doesn't delegate in Session 0)
-    # Without credential: Works in interactive sessions where user credentials are available
-    #
-    # CRITICAL: -Persist is REQUIRED for robocopy.exe to see the drive!
-    # Without -Persist, New-PSDrive creates a PowerShell-only drive invisible to external processes.
-    if ($Credential) {
-        Write-RobocurseLog -Message "Mounting '$root' as $letter`: with explicit credentials (user: $($Credential.UserName))" -Level 'Debug' -Component 'NetworkMapping'
-        New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Credential $Credential -Scope Global -Persist -ErrorAction Stop | Out-Null
+        # Create or open the named mutex
+        $createdNew = $false
+        try {
+            $script:DriveLetterMutex = [System.Threading.Mutex]::new($false, $script:DriveLetterMutexName, [ref]$createdNew)
+        }
+        catch [System.Threading.WaitHandleCannotBeOpenedException] {
+            # Mutex doesn't exist yet, create it
+            $script:DriveLetterMutex = [System.Threading.Mutex]::new($false, $script:DriveLetterMutexName)
+        }
+
+        # Acquire the mutex (wait up to 30 seconds)
+        $mutexAcquired = $script:DriveLetterMutex.WaitOne(30000)
+        if (-not $mutexAcquired) {
+            throw "Timeout waiting for drive letter allocation mutex. Another Robocurse instance may be stuck."
+        }
+        $mutexOwned = $true
+
+        Write-RobocurseLog -Message "Acquired drive letter mutex for '$root'" -Level 'Debug' -Component 'NetworkMapping'
+
+        # Clean up stale mapping to same root (from crashed previous runs)
+        $existingDrive = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayRoot -eq $root }
+        if ($existingDrive) {
+            Write-RobocurseLog -Message "Removing stale mapping $($existingDrive.Name): to '$root'" -Level 'Debug' -Component 'NetworkMapping'
+            Remove-PSDrive -Name $existingDrive.Name -Force -ErrorAction SilentlyContinue
+            # Also remove from reserved if it was there
+            $script:ReservedDriveLetters.Remove([string]$existingDrive.Name) | Out-Null
+        }
+
+        # Find available letter (Z down to D), excluding reserved letters
+        $letter = Get-NextAvailableDriveLetter
+        if (-not $letter) {
+            throw "No available drive letters for network mapping"
+        }
+
+        # Reserve this letter immediately to prevent other threads from using it
+        $script:ReservedDriveLetters.Add([string]$letter) | Out-Null
+        Write-RobocurseLog -Message "Reserved drive letter $letter for '$root'" -Level 'Debug' -Component 'NetworkMapping'
+
+        # Mount with or without explicit credentials
+        # With credential: Required for Session 0 scheduled tasks (NTLM doesn't delegate in Session 0)
+        # Without credential: Works in interactive sessions where user credentials are available
+        #
+        # CRITICAL: -Persist is REQUIRED for robocopy.exe to see the drive!
+        # Without -Persist, New-PSDrive creates a PowerShell-only drive invisible to external processes.
+        if ($Credential) {
+            Write-RobocurseLog -Message "Mounting '$root' as $letter`: with explicit credentials (user: $($Credential.UserName))" -Level 'Debug' -Component 'NetworkMapping'
+            New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Credential $Credential -Scope Global -Persist -ErrorAction Stop | Out-Null
+        }
+        else {
+            Write-RobocurseLog -Message "Mounting '$root' as $letter`: (using session credentials)" -Level 'Debug' -Component 'NetworkMapping'
+            New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Scope Global -Persist -ErrorAction Stop | Out-Null
+        }
+
+        # Mount succeeded - remove from reserved (it's now a real mount)
+        $script:ReservedDriveLetters.Remove([string]$letter) | Out-Null
+
+        # Build result object and track BEFORE releasing mutex to prevent race on tracking file
+        $result = [PSCustomObject]@{
+            DriveLetter = [string]$letter
+            Root        = $root
+            OriginalPath = $UncPath
+            MappedPath  = "${letter}:$remainder"
+        }
+
+        # Track the mapping for crash recovery (inside mutex to prevent concurrent file writes)
+        Add-NetworkMappingTracking -Mapping $result
+
+        # Release mutex before verification (mount is complete, letter is allocated, tracking is done)
+        if ($mutexOwned) {
+            $script:DriveLetterMutex.ReleaseMutex()
+            $mutexOwned = $false
+            Write-RobocurseLog -Message "Released drive letter mutex after mounting $letter" -Level 'Debug' -Component 'NetworkMapping'
+        }
     }
-    else {
-        Write-RobocurseLog -Message "Mounting '$root' as $letter`: (using session credentials)" -Level 'Debug' -Component 'NetworkMapping'
-        New-PSDrive -Name $letter -PSProvider FileSystem -Root $root -Scope Global -Persist -ErrorAction Stop | Out-Null
+    catch {
+        # On failure, clean up reservation
+        if ($letter) {
+            $script:ReservedDriveLetters.Remove([string]$letter) | Out-Null
+        }
+
+        # Release mutex if we still hold it
+        if ($mutexOwned) {
+            try { $script:DriveLetterMutex.ReleaseMutex() } catch { }
+            $mutexOwned = $false
+        }
+
+        throw
+    }
+    finally {
+        # Ensure mutex is released (safety net)
+        if ($mutexOwned) {
+            try { $script:DriveLetterMutex.ReleaseMutex() } catch { }
+        }
     }
 
     # =====================================================================================
@@ -7234,15 +8801,11 @@ function Mount-SingleNetworkPath {
         # Mount appeared to work but drive isn't accessible - clean up and throw
         Write-RobocurseLog -Message "Mount verification FAILED for $drivePath`: $($_.Exception.Message)" -Level 'Error' -Component 'NetworkMapping'
         Remove-PSDrive -Name $letter -Force -ErrorAction SilentlyContinue
+        Remove-NetworkMappingTracking -DriveLetter $letter  # Clean up tracking entry
         throw "Network mount to '$root' created but drive $drivePath is not accessible: $($_.Exception.Message)"
     }
 
-    return [PSCustomObject]@{
-        DriveLetter = [string]$letter
-        Root        = $root
-        OriginalPath = $UncPath
-        MappedPath  = "${letter}:$remainder"
-    }
+    return $result
 }
 
 function Mount-NetworkPaths {
@@ -7331,6 +8894,9 @@ function Dismount-NetworkPaths {
         try {
             Remove-PSDrive -Name $mapping.DriveLetter -Force -ErrorAction Stop
             Write-RobocurseLog -Message "Unmapped $($mapping.DriveLetter): from '$($mapping.Root)'" -Level 'Debug' -Component 'NetworkMapping'
+
+            # Remove from tracking
+            Remove-NetworkMappingTracking -DriveLetter $mapping.DriveLetter
         }
         catch {
             Write-RobocurseLog -Message "Failed to unmount $($mapping.DriveLetter): $($_.Exception.Message)" -Level 'Warning' -Component 'NetworkMapping'
@@ -7426,9 +8992,6 @@ function Start-ReplicationRun {
 
         [switch]$DryRun,
 
-        # If true, log every file copied to robocopy log; if false (default), only summary
-        [switch]$VerboseFileLogging,
-
         [scriptblock]$OnProgress,
         [scriptblock]$OnChunkComplete,
         [scriptblock]$OnProfileComplete
@@ -7468,9 +9031,6 @@ function Start-ReplicationRun {
         Write-RobocurseLog -Message "DRY-RUN MODE: No files will be copied (robocopy /L)" `
             -Level 'Warning' -Component 'Orchestrator'
     }
-
-    # Set verbose file logging mode for Start-ChunkJob to use
-    $script:VerboseFileLoggingMode = $VerboseFileLogging.IsPresent
 
     # Validate robocopy is available before starting
     $robocopyCheck = Test-RobocopyAvailable
@@ -7889,6 +9449,10 @@ function Start-ProfileReplication {
     <#
     .SYNOPSIS
         Starts replication for a single profile
+    .DESCRIPTION
+        Starts replication for a single profile. Includes duplicate run prevention -
+        if the same profile is already running, returns an error instead of starting
+        a concurrent run that could cause conflicts.
     .PARAMETER Profile
         Profile object from config
     .PARAMETER MaxConcurrentJobs
@@ -7901,6 +9465,24 @@ function Start-ProfileReplication {
 
         [int]$MaxConcurrentJobs = $script:DefaultMaxConcurrentJobs
     )
+
+    # =====================================================================================
+    # DUPLICATE RUN PREVENTION
+    # =====================================================================================
+    # Check if this profile is already running. This prevents issues like:
+    # - Drive letter conflicts when both runs try to mount the same UNC path
+    # - Robocopy conflicts when both runs try to write to the same destination
+    # - Checkpoint corruption from concurrent writes
+    # =====================================================================================
+    if (-not (Register-RunningProfile -ProfileName $Profile.Name)) {
+        $errorMsg = "Profile '$($Profile.Name)' is already running. Cannot start duplicate run."
+        Write-RobocurseLog -Message $errorMsg -Level 'Error' -Component 'Orchestrator'
+        $script:OrchestrationState.EnqueueError($errorMsg)
+        $script:CurrentPreflightError = $errorMsg
+        # Skip to completion handler which will move to next profile
+        Complete-CurrentProfile
+        return
+    }
 
     $state = $script:OrchestrationState
     $state.CurrentProfile = $Profile
@@ -8180,11 +9762,13 @@ function Start-ProfileReplication {
         return
     }
 
-    # Scan source directory (using VSS path if available)
+    # Build directory tree with single-pass enumeration (PERFORMANCE FIX)
+    # Previously used Get-DirectoryProfile here, then re-enumerated in chunking (O(N^2) robocopy calls)
+    # Now we enumerate once and pass the tree to chunking for O(1) size lookups
     $state.Phase = "Scanning"
     $state.ScanProgress = 0
-    $state.CurrentActivity = "Scanning source directory..."
-    $scanResult = Get-DirectoryProfile -Path $effectiveSource -State $state
+    $state.CurrentActivity = "Building directory tree..."
+    $directoryTree = New-DirectoryTree -RootPath $effectiveSource -State $state
 
     # Check for stop request after directory scan
     if ($state.StopRequested) {
@@ -8192,15 +9776,13 @@ function Start-ProfileReplication {
         return
     }
 
-    # Generate chunks based on scan mode
+    # Generate chunks based on scan mode using the pre-built tree
     $state.ScanProgress = 0
     $state.CurrentActivity = "Creating chunks..."
-    # Convert ChunkMaxSizeGB to bytes
-    $maxChunkBytes = if ($Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB * 1GB } else { $script:DefaultMaxChunkSizeBytes }
-    $maxFiles = if ($Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
+    # MaxDepth is only used by Flat mode
     $maxDepth = if ($Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
-    Write-RobocurseLog -Message "Chunk settings: MaxSize=$([math]::Round($maxChunkBytes/1GB, 2))GB, MaxFiles=$maxFiles, MaxDepth=$maxDepth, Mode=$($Profile.ScanMode)" `
+    Write-RobocurseLog -Message "Chunk settings: Mode=$($Profile.ScanMode), MaxDepth=$maxDepth (Flat only)" `
         -Level 'Debug' -Component 'Orchestrator'
 
     # Use network-mapped destination if available
@@ -8211,27 +9793,24 @@ function Start-ProfileReplication {
             New-FlatChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
-                -State $state
+                -MaxDepth $maxDepth `
+                -State $state `
+                -TreeNode $directoryTree
         }
         'Smart' {
             New-SmartChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
-                -MaxDepth $maxDepth `
-                -State $state
+                -State $state `
+                -TreeNode $directoryTree
         }
         default {
+            # Default to Smart mode (unlimited depth)
             New-SmartChunks `
                 -Path $effectiveSource `
                 -DestinationRoot $effectiveDestination `
-                -MaxChunkSizeBytes $maxChunkBytes `
-                -MaxFiles $maxFiles `
-                -MaxDepth $maxDepth `
-                -State $state
+                -State $state `
+                -TreeNode $directoryTree
         }
     }
 
@@ -8248,13 +9827,13 @@ function Start-ProfileReplication {
     }
 
     $state.TotalChunks = $chunks.Count
-    $state.TotalBytes = $scanResult.TotalSize
+    $state.TotalBytes = $directoryTree.TotalSize
     $state.CompletedCount = 0
     $state.BytesComplete = 0
     $state.Phase = "Replicating"
     $state.CurrentActivity = ""  # Clear activity when replicating starts
 
-    Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($scanResult.TotalSize/1GB, 2)) GB" `
+    Write-RobocurseLog -Message "Profile scan complete: $($chunks.Count) chunks, $([math]::Round($directoryTree.TotalSize/1GB, 2)) GB" `
         -Level 'Debug' -Component 'Orchestrator'
 }
 
@@ -8338,8 +9917,7 @@ function Start-ChunkJob {
     $job = Start-RobocopyJob -Chunk $Chunk -LogPath $logPath `
         -ThreadsPerJob $script:DefaultThreadsPerJob `
         -RobocopyOptions $effectiveOptions `
-        -DryRun:$script:DryRunMode `
-        -VerboseFileLogging:$script:VerboseFileLoggingMode
+        -DryRun:$script:DryRunMode
 
     return $job
 }
@@ -8371,6 +9949,35 @@ function Invoke-ReplicationTick {
 
     if ($state.PauseRequested) {
         return  # Don't start new jobs, but let running ones complete
+    }
+
+    # Update BytesComplete from active jobs for real-time progress
+    # This runs in the background thread and updates the shared C# state object
+    if (-not $state) {
+        Write-RobocurseLog "Invoke-ReplicationTick: OrchestrationState is null" -Level 'Error' -Component 'Orchestrator'
+        return
+    }
+
+    $bytesFromCompleted = $state.CompletedChunkBytes
+    $bytesFromActive = 0
+    $activeCount = $state.ActiveJobs.Count
+    foreach ($kvp in $state.ActiveJobs.ToArray()) {
+        try {
+            $job = $kvp.Value
+            $progress = Get-RobocopyProgress -Job $job
+            if ($progress -and $progress.BytesCopied -gt 0) {
+                $bytesFromActive += $progress.BytesCopied
+                Write-RobocurseLog "Progress poll: Chunk=$($job.Chunk.ChunkId) BytesCopied=$($progress.BytesCopied)" -Level 'Debug' -Component 'Progress'
+            }
+        }
+        catch {
+            Write-RobocurseLog "Progress poll failed: $_" -Level 'Debug' -Component 'Progress'
+        }
+    }
+    $state.BytesComplete = $bytesFromCompleted + $bytesFromActive
+
+    if ($activeCount -gt 0) {
+        Write-RobocurseLog "BytesComplete update: completed=$bytesFromCompleted + active=$bytesFromActive = $($state.BytesComplete) (ActiveJobs=$activeCount)" -Level 'Debug' -Component 'Progress'
     }
 
     # Check completed jobs - snapshot keys first for safe enumeration
@@ -8574,25 +10181,20 @@ function Complete-RobocopyJob {
 
     $exitMeaning = Get-RobocopyExitMeaning -ExitCode $exitCode -MismatchSeverity $mismatchSeverity
 
-    # Get captured stdout (was started async in Start-RobocopyJob)
-    # This avoids file flush race conditions in Session 0 scheduled tasks
-    $capturedOutput = $null
-    if ($Job.StdoutTask) {
+    # Clean up the event subscription to prevent memory leaks
+    # Note: ProgressBuffer is used for real-time progress during the job (Get-RobocopyProgress),
+    # but for final stats we always read from the log file which is reliably flushed when robocopy exits.
+    # The stdout capture has race conditions - final stats lines may not be processed before we read.
+    if ($Job.OutputEvent) {
         try {
-            $capturedOutput = $Job.StdoutTask.GetAwaiter().GetResult()
-        }
-        catch {
-            Write-RobocurseLog "Failed to get captured stdout for chunk $($Job.Chunk.ChunkId): $_" -Level 'Warning' -Component 'Orchestrator'
-        }
+            Unregister-Event -SourceIdentifier $Job.OutputEvent.Name -ErrorAction SilentlyContinue
+            Remove-Job -Id $Job.OutputEvent.Id -Force -ErrorAction SilentlyContinue
+        } catch { }
     }
 
-    # Parse stats from captured stdout (avoids file flush race), fallback to log file
-    $stats = if ($capturedOutput) {
-        ConvertFrom-RobocopyLog -Content $capturedOutput -LogPath $Job.LogPath
-    }
-    else {
-        ConvertFrom-RobocopyLog -LogPath $Job.LogPath
-    }
+    # Parse final stats from log file (authoritative source - robocopy flushes before exit)
+    # Do NOT use captured stdout here - race condition with OutputDataReceived event processing
+    $stats = ConvertFrom-RobocopyLog -LogPath $Job.LogPath
 
     $duration = [datetime]::Now - $Job.StartTime
 
@@ -8885,6 +10487,9 @@ function Complete-CurrentProfile {
     }
     $state.NetworkCredential = $null
 
+    # Unregister the profile as running (release the mutex)
+    Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
+
     # Invoke callback
     if ($script:OnProfileComplete) {
         & $script:OnProfileComplete $state.CurrentProfile
@@ -9019,6 +10624,30 @@ function Stop-AllJobs {
         }
     }
 
+    # Clean up network drive mappings
+    if ($state.CurrentNetworkMappings -and $state.CurrentNetworkMappings.Count -gt 0) {
+        Write-RobocurseLog -Message "Cleaning up network mappings after stop ($($state.CurrentNetworkMappings.Count) mapping(s))" `
+            -Level 'Info' -Component 'NetworkMapping'
+        try {
+            Dismount-NetworkPaths -Mappings $state.CurrentNetworkMappings
+        }
+        catch {
+            Write-RobocurseLog -Message "Failed to cleanup network mappings: $($_.Exception.Message)" `
+                -Level 'Warning' -Component 'NetworkMapping'
+        }
+        finally {
+            $state.CurrentNetworkMappings = $null
+            $state.NetworkMappedSource = $null
+            $state.NetworkMappedDest = $null
+        }
+    }
+    $state.NetworkCredential = $null
+
+    # Unregister the current profile as running (release the mutex)
+    if ($state.CurrentProfile) {
+        Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
+    }
+
     Write-SiemEvent -EventType 'SessionEnd' -Data @{
         reason = 'Stopped by user'
         chunksCompleted = $state.CompletedCount
@@ -9151,10 +10780,10 @@ function Get-OrchestrationStatus {
 
     $currentProfileName = if ($state.CurrentProfile) { $state.CurrentProfile.Name } else { "" }
 
-    # Clamp progress to 0-100 range to handle edge cases where CompletedCount > TotalChunks
-    # (can happen if files are added during scan or other race conditions)
-    $profileProgress = if ($state.TotalChunks -gt 0) {
-        [math]::Min(100, [math]::Max(0, [math]::Round(($state.CompletedCount / $state.TotalChunks) * 100, 1)))
+    # Calculate profile progress from bytes (not chunks) for smooth progress updates
+    # BytesComplete includes both completed chunks and in-progress bytes from active jobs
+    $profileProgress = if ($state.TotalBytes -gt 0) {
+        [math]::Min(100, [math]::Max(0, [math]::Round(($state.BytesComplete / $state.TotalBytes) * 100, 1)))
     } else { 0 }
 
     # Calculate overall progress across all profiles (also clamped)
@@ -9180,6 +10809,7 @@ function Get-OrchestrationStatus {
         ETA = $eta
         ActiveJobs = $state.ActiveJobs.Count
         QueuedJobs = $state.ChunkQueue.Count
+        ScanProgress = $state.ScanProgress
     }
 }
 
@@ -16010,23 +17640,48 @@ function Test-ProfileValidation {
         6. Chunk estimate to verify source can be profiled
     .PARAMETER Profile
         The sync profile to validate (PSCustomObject with Name, Source, Destination, UseVSS properties)
+    .PARAMETER ProgressCallback
+        Optional scriptblock to call with progress updates. Receives (stepName, stepNumber, totalSteps)
     .OUTPUTS
         Array of validation result objects with CheckName, Status, Message, Severity properties
     .EXAMPLE
         $results = Test-ProfileValidation -Profile $profile
         $results | Where-Object { $_.Status -eq 'Fail' }
+    .EXAMPLE
+        $results = Test-ProfileValidation -Profile $profile -ProgressCallback {
+            param($step, $current, $total)
+            Write-Host "[$current/$total] $step"
+        }
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [PSCustomObject]$Profile
+        [PSCustomObject]$Profile,
+
+        [scriptblock]$ProgressCallback
     )
 
     $results = @()
+    $totalSteps = 6
+    $progressState = @{ CurrentStep = 0 }
+
+    # Helper to report progress
+    $reportProgress = {
+        param($stepName)
+        $progressState.CurrentStep++
+        if ($ProgressCallback) {
+            try {
+                & $ProgressCallback $stepName $progressState.CurrentStep $totalSteps
+            } catch {
+                # Ignore callback errors
+            }
+        }
+    }.GetNewClosure()
 
     Write-RobocurseLog "Starting validation for profile: $($Profile.Name)" -Level 'Info' -Component 'Validation'
 
     # Check 1: Robocopy available
+    & $reportProgress "Checking robocopy availability..."
     try {
         $robocopyCheck = Test-RobocopyAvailable
         if ($robocopyCheck.Success) {
@@ -16056,6 +17711,7 @@ function Test-ProfileValidation {
     }
 
     # Check 2: Source path accessible
+    & $reportProgress "Checking source path..."
     try {
         if ([string]::IsNullOrWhiteSpace($Profile.Source)) {
             $results += [PSCustomObject]@{
@@ -16092,6 +17748,7 @@ function Test-ProfileValidation {
     }
 
     # Check 3: Destination path or parent exists
+    & $reportProgress "Checking destination path..."
     try {
         if ([string]::IsNullOrWhiteSpace($Profile.Destination)) {
             $results += [PSCustomObject]@{
@@ -16140,6 +17797,7 @@ function Test-ProfileValidation {
     }
 
     # Check 4: Disk space on destination (if accessible)
+    & $reportProgress "Checking disk space..."
     try {
         $destPathToCheck = if (Test-Path -Path $Profile.Destination -PathType Container) {
             $Profile.Destination
@@ -16206,6 +17864,7 @@ function Test-ProfileValidation {
     }
 
     # Check 5: VSS support if UseVSS is enabled
+    & $reportProgress "Checking VSS support..."
     if ($Profile.UseVSS) {
         try {
             if (-not [string]::IsNullOrWhiteSpace($Profile.Source) -and (Test-Path -Path $Profile.Source)) {
@@ -16280,33 +17939,24 @@ function Test-ProfileValidation {
         }
     }
 
-    # Check 6: Source can be profiled (chunk estimate)
+    # Check 6: Source is readable (quick access check, no full enumeration)
+    & $reportProgress "Checking source access..."
     try {
         if (-not [string]::IsNullOrWhiteSpace($Profile.Source) -and (Test-Path -Path $Profile.Source)) {
-            Write-RobocurseLog "Profiling source directory: $($Profile.Source)" -Level 'Debug' -Component 'Validation'
-            $dirProfile = Get-DirectoryProfile -Path $Profile.Source -UseCache $true
-            if ($dirProfile) {
-                $sizeGB = [math]::Round($dirProfile.TotalSize / 1GB, 2)
-                $fileCount = $dirProfile.FileCount
-                $results += [PSCustomObject]@{
-                    CheckName = "Source Profile"
-                    Status = "Pass"
-                    Message = "Source contains ${sizeGB} GB ($fileCount files)"
-                    Severity = "Success"
-                }
-            }
-            else {
-                $results += [PSCustomObject]@{
-                    CheckName = "Source Profile"
-                    Status = "Warning"
-                    Message = "Unable to profile source directory"
-                    Severity = "Warning"
-                }
+            Write-RobocurseLog "Checking source directory access: $($Profile.Source)" -Level 'Debug' -Component 'Validation'
+            # Quick check - just verify we can list the directory (first item only)
+            $canRead = $null -ne (Get-ChildItem -Path $Profile.Source -ErrorAction Stop | Select-Object -First 1)
+            # Even empty directories pass - we just verified access
+            $results += [PSCustomObject]@{
+                CheckName = "Source Access"
+                Status = "Pass"
+                Message = "Source directory is readable"
+                Severity = "Success"
             }
         }
         else {
             $results += [PSCustomObject]@{
-                CheckName = "Source Profile"
+                CheckName = "Source Access"
                 Status = "Info"
                 Message = "Skipped - source path not accessible"
                 Severity = "Info"
@@ -16315,9 +17965,9 @@ function Test-ProfileValidation {
     }
     catch {
         $results += [PSCustomObject]@{
-            CheckName = "Source Profile"
+            CheckName = "Source Access"
             Status = "Warning"
-            Message = "Error profiling source: $($_.Exception.Message)"
+            Message = "Cannot read source directory: $($_.Exception.Message)"
             Severity = "Warning"
         }
     }
@@ -16354,7 +18004,31 @@ function Show-ValidationDialog {
     try {
         # Run validation if results not provided
         if (-not $Results) {
-            $Results = Test-ProfileValidation -Profile $Profile
+            # Show progress in main window status bar while validating
+            $originalStatus = $null
+            if ($script:Controls -and $script:Controls['txtStatus']) {
+                $originalStatus = $script:Controls.txtStatus.Text
+                $script:Controls.txtStatus.Text = "Validating profile..."
+                # Force UI update
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+
+            # Progress callback to update status during validation
+            $progressCallback = {
+                param($stepName, $currentStep, $totalSteps)
+                if ($script:Controls -and $script:Controls['txtStatus']) {
+                    $script:Controls.txtStatus.Text = "Validating [$currentStep/$totalSteps]: $stepName"
+                    # Force UI update to show progress
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+            }
+
+            $Results = Test-ProfileValidation -Profile $Profile -ProgressCallback $progressCallback
+
+            # Restore original status
+            if ($script:Controls -and $script:Controls['txtStatus'] -and $originalStatus) {
+                $script:Controls.txtStatus.Text = $originalStatus
+            }
         }
 
         # Load XAML from resource file
@@ -16898,12 +18572,6 @@ function Import-SettingsToForm {
         $script:MinLogLevel = $logLevel
     }
 
-    if ($script:Controls['chkSettingsVerboseLogging']) {
-        $verboseLogging = if ($null -ne $script:Config.GlobalSettings.VerboseFileLogging) { [bool]$script:Config.GlobalSettings.VerboseFileLogging } else { $false }
-        Write-RobocurseLog -Message "Loading VerboseFileLogging from config: $($script:Config.GlobalSettings.VerboseFileLogging) -> $verboseLogging" -Level 'Debug' -Component 'Settings'
-        $script:Controls.chkSettingsVerboseLogging.IsChecked = $verboseLogging
-    }
-
     # SIEM settings (not yet in config structure - use placeholder defaults)
     if ($script:Controls['chkSettingsSiem']) {
         $script:Controls.chkSettingsSiem.IsChecked = $false
@@ -17017,11 +18685,6 @@ function Save-SettingsFromForm {
             $script:Config.GlobalSettings.LogLevel = $logLevel
             # Also update the runtime MinLogLevel
             $script:MinLogLevel = $logLevel
-        }
-
-        if ($script:Controls['chkSettingsVerboseLogging']) {
-            $script:Config.GlobalSettings.VerboseFileLogging = [bool]$script:Controls.chkSettingsVerboseLogging.IsChecked
-            Write-RobocurseLog -Message "Saving VerboseFileLogging: $($script:Config.GlobalSettings.VerboseFileLogging)" -Level 'Debug' -Component 'Settings'
         }
 
         # SIEM settings (placeholder - not yet in config structure)
@@ -17318,21 +18981,22 @@ function Import-ProfileToForm {
     # Refresh snapshot lists for this profile
     Update-ProfileSnapshotLists
 
-    # Set scan mode
+    # Set scan mode (Smart = 0, Flat = 1)
     $scanMode = if ($Profile.ScanMode) { $Profile.ScanMode } else { "Smart" }
-    $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Quick") { 1 } else { 0 }
+    $script:Controls.cmbScanMode.SelectedIndex = if ($scanMode -eq "Flat") { 1 } else { 0 }
 
-    # Load chunk settings with defaults from module constants
-    $maxSize = if ($null -ne $Profile.ChunkMaxSizeGB) { $Profile.ChunkMaxSizeGB } else { $script:DefaultMaxChunkSizeBytes / 1GB }
-    $maxFiles = if ($null -ne $Profile.ChunkMaxFiles) { $Profile.ChunkMaxFiles } else { $script:DefaultMaxFilesPerChunk }
+    # Load MaxDepth setting (only used in Flat mode)
     $maxDepth = if ($null -ne $Profile.ChunkMaxDepth) { $Profile.ChunkMaxDepth } else { $script:DefaultMaxChunkDepth }
 
     # Debug: log what we're loading
-    Write-GuiLog "Loading profile '$($Profile.Name)': ChunkMaxSizeGB=$($Profile.ChunkMaxSizeGB) (display: $maxSize), ChunkMaxFiles=$($Profile.ChunkMaxFiles), ChunkMaxDepth=$($Profile.ChunkMaxDepth)"
+    Write-GuiLog "Loading profile '$($Profile.Name)': ScanMode=$scanMode, ChunkMaxDepth=$maxDepth"
 
-    $script:Controls.txtMaxSize.Text = $maxSize.ToString()
-    $script:Controls.txtMaxFiles.Text = $maxFiles.ToString()
     $script:Controls.txtMaxDepth.Text = $maxDepth.ToString()
+
+    # Enable/disable MaxDepth based on scan mode
+    $isFlat = $scanMode -eq "Flat"
+    $script:Controls.txtMaxDepth.IsEnabled = $isFlat
+    $script:Controls.txtMaxDepth.Opacity = if ($isFlat) { 1.0 } else { 0.5 }
 }
 
 function Save-ProfileFromForm {
@@ -17413,36 +19077,10 @@ function Save-ProfileFromForm {
         Write-GuiLog "Input corrected: $fieldName '$originalValue' -> '$correctedValue'"
     }
 
-    # ChunkMaxSizeGB: valid range 1-1000 GB
-    try {
-        $value = [int]$script:Controls.txtMaxSize.Text
-        $selected.ChunkMaxSizeGB = [Math]::Max(1, [Math]::Min(1000, $value))
-        if ($value -ne $selected.ChunkMaxSizeGB) {
-            & $showInputCorrected $script:Controls.txtMaxSize $value $selected.ChunkMaxSizeGB "Max Size (GB)"
-        }
-    } catch {
-        $originalText = $script:Controls.txtMaxSize.Text
-        $selected.ChunkMaxSizeGB = 10
-        & $showInputCorrected $script:Controls.txtMaxSize $originalText 10 "Max Size (GB)"
-    }
-
-    # ChunkMaxFiles: valid range 1000-10000000
-    try {
-        $value = [int]$script:Controls.txtMaxFiles.Text
-        $selected.ChunkMaxFiles = [Math]::Max(1000, [Math]::Min(10000000, $value))
-        if ($value -ne $selected.ChunkMaxFiles) {
-            & $showInputCorrected $script:Controls.txtMaxFiles $value $selected.ChunkMaxFiles "Max Files"
-        }
-    } catch {
-        $originalText = $script:Controls.txtMaxFiles.Text
-        $selected.ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
-        & $showInputCorrected $script:Controls.txtMaxFiles $originalText $script:DefaultMaxFilesPerChunk "Max Files"
-    }
-
-    # ChunkMaxDepth: valid range 1-20
+    # ChunkMaxDepth: valid range 0-20 (0 = top-level only in Flat mode)
     try {
         $value = [int]$script:Controls.txtMaxDepth.Text
-        $selected.ChunkMaxDepth = [Math]::Max(1, [Math]::Min(20, $value))
+        $selected.ChunkMaxDepth = [Math]::Max(0, [Math]::Min(20, $value))
         if ($value -ne $selected.ChunkMaxDepth) {
             & $showInputCorrected $script:Controls.txtMaxDepth $value $selected.ChunkMaxDepth "Max Depth"
         }
@@ -17477,9 +19115,16 @@ function Add-NewProfile {
         Enabled = $true
         UseVSS = $false
         ScanMode = "Smart"
-        ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
-        ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
         ChunkMaxDepth = $script:DefaultMaxChunkDepth
+        Schedule = [PSCustomObject]@{
+            Enabled = $false
+            Frequency = "Daily"
+            Time = "02:00"
+            Interval = 1
+            DayOfWeek = "Sunday"
+            DayOfMonth = 1
+        }
+        RobocopyOptions = @{}
         SourceSnapshot = [PSCustomObject]@{
             PersistentEnabled = $false
             RetentionCount = 3
@@ -19657,8 +21302,12 @@ function Show-ProfileScheduleDialog {
                     DayOfMonth = [int]$cmbDayOfMonth.SelectedItem.Content
                 }
 
-                # Update profile
-                $Profile.Schedule = $newSchedule
+                # Update profile - add Schedule property if missing (defensive for old profiles)
+                if (-not ($Profile.PSObject.Properties.Name -contains 'Schedule')) {
+                    $Profile | Add-Member -NotePropertyName 'Schedule' -NotePropertyValue $newSchedule
+                } else {
+                    $Profile.Schedule = $newSchedule
+                }
 
                 # Create or remove task
                 if ($chkEnabled.IsChecked) {
@@ -19760,6 +21409,82 @@ function Show-ProfileScheduleDialog {
             "Error", "OK", "Error"
         )
         return $false
+    }
+}
+
+function Show-ErrorPopup {
+    <#
+    .SYNOPSIS
+        Shows a popup dialog with recent errors from the current replication run
+    .DESCRIPTION
+        Displays errors stored in $script:ErrorHistoryBuffer in a styled dialog.
+        Allows user to view error details and clear the error history.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        # Load XAML
+        $xamlPath = Join-Path $PSScriptRoot "..\Resources\ErrorPopup.xaml"
+        if (-not (Test-Path $xamlPath)) {
+            # Try embedded XAML for monolith builds
+            if ($script:EmbeddedXaml -and $script:EmbeddedXaml['ErrorPopup.xaml']) {
+                $xaml = $script:EmbeddedXaml['ErrorPopup.xaml']
+            } else {
+                Write-GuiLog "ErrorPopup.xaml not found"
+                return
+            }
+        } else {
+            $xaml = Get-Content $xamlPath -Raw
+        }
+
+        # Parse XAML
+        $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
+        $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+
+        # Get controls
+        $lstErrors = $dialog.FindName('lstErrors')
+        $btnClear = $dialog.FindName('btnClear')
+        $btnClose = $dialog.FindName('btnClose')
+
+        # Populate error list from buffer
+        [System.Threading.Monitor]::Enter($script:ErrorHistoryBuffer)
+        try {
+            $errors = $script:ErrorHistoryBuffer.ToArray()
+        }
+        finally {
+            [System.Threading.Monitor]::Exit($script:ErrorHistoryBuffer)
+        }
+
+        $lstErrors.ItemsSource = $errors
+
+        # Close button
+        $btnClose.Add_Click({
+            $dialog.Close()
+        }.GetNewClosure())
+
+        # Clear button - clears errors and closes
+        $btnClear.Add_Click({
+            Clear-ErrorHistory
+            $dialog.Close()
+        }.GetNewClosure())
+
+        # Allow dragging the window
+        $dialog.Add_MouseLeftButtonDown({
+            param($sender, $e)
+            if ($e.LeftButton -eq [System.Windows.Input.MouseButtonState]::Pressed) {
+                $dialog.DragMove()
+            }
+        }.GetNewClosure())
+
+        # Set owner and show
+        if ($script:Window) {
+            $dialog.Owner = $script:Window
+        }
+        $dialog.ShowDialog() | Out-Null
+    }
+    catch {
+        Write-GuiLog "Error showing error popup: $($_.Exception.Message)"
     }
 }
 
@@ -20436,14 +22161,13 @@ function New-ModuleModeBackgroundScript {
             # Re-read config to get fresh profile data with all properties intact
             # (PSCustomObject properties don't survive runspace boundaries - see CLAUDE.md)
             `$bgConfig = Get-RobocurseConfig -Path `$ConfigPath
-            `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
 
             # Look up profiles by name from freshly-loaded config
             `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
             Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
 
             # Start replication with -SkipInitialization since UI thread already initialized
-            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$ConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$ConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
 
             # Run the orchestration loop until complete
             # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
@@ -20522,14 +22246,13 @@ function New-ScriptModeBackgroundScript {
             Write-Host "[BACKGROUND] Starting replication run"
             # Re-read config to get fresh profile data (see CLAUDE.md for pattern)
             `$bgConfig = Get-RobocurseConfig -Path `$GuiConfigPath
-            `$verboseLogging = [bool]`$bgConfig.GlobalSettings.VerboseFileLogging
 
             # Look up profiles by name from freshly-loaded config
             `$profiles = @(`$bgConfig.SyncProfiles | Where-Object { `$ProfileNames -contains `$_.Name })
             Write-Host "[BACKGROUND] Loaded `$(`$profiles.Count) profile(s) from config"
 
             # Start replication with -SkipInitialization since UI thread already initialized
-            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$GuiConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization -VerboseFileLogging:`$verboseLogging
+            Start-ReplicationRun -Profiles `$profiles -Config `$bgConfig -ConfigPath `$GuiConfigPath -MaxConcurrentJobs `$MaxWorkers -SkipInitialization
 
             # Run the orchestration loop until complete
             # Note: 250ms matches GuiProgressUpdateIntervalMs constant (hardcoded for runspace isolation)
@@ -20771,24 +22494,11 @@ function Start-GuiReplication {
         }
     }
 
-    # Create a snapshot of the config to prevent external modifications during replication
-    # This ensures the running replication uses the config state at the time of start
-    $script:ConfigSnapshotPath = $null
-    try {
-        $snapshotDir = if ($env:TEMP) { $env:TEMP } else { [System.IO.Path]::GetTempPath() }
-        $script:ConfigSnapshotPath = Join-Path $snapshotDir "Robocurse-ConfigSnapshot-$([Guid]::NewGuid().ToString('N')).json"
-        Copy-Item -Path $script:ConfigPath -Destination $script:ConfigSnapshotPath -Force
-    }
-    catch {
-        Write-GuiLog "Warning: Could not create config snapshot, using live config: $($_.Exception.Message)"
-        $script:ConfigSnapshotPath = $script:ConfigPath  # Fall back to original
-    }
-
-    # Create and start background runspace (using snapshot path but pre-resolved log root)
+    # Create and start background runspace (using original config path for immediate persistence)
     # Pass current log path so background writes to same log file
     $currentLogPath = $script:CurrentOperationalLogPath
     try {
-        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigSnapshotPath -LogRoot $logRoot -LogPath $currentLogPath
+        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigPath -LogRoot $logRoot -LogPath $currentLogPath
 
         $script:ReplicationHandle = $runspaceInfo.Handle
         $script:ReplicationPowerShell = $runspaceInfo.PowerShell
@@ -20960,16 +22670,7 @@ function Complete-GuiReplication {
                 Write-GuiLog "Generated failed files summary: $failedFilesSummaryPath"
             }
             else {
-                # Re-read config to get current verbose logging setting
-                $currentConfig = Get-RobocurseConfig -Path $script:ConfigPath
-                $verboseEnabled = $currentConfig.GlobalSettings.VerboseFileLogging -eq $true
-                Write-GuiLog "Verbose logging enabled: $verboseEnabled (from config: $($script:ConfigPath))"
-                if (-not $verboseEnabled) {
-                    Write-GuiLog "No error entries found in logs. Enable 'Log individual file operations' in Settings for detailed failed file reporting."
-                }
-                else {
-                    Write-GuiLog "No error entries found in logs (verbose logging is enabled but no ERROR lines in chunk logs)"
-                }
+                Write-GuiLog "No error entries found in chunk logs"
             }
         }
         else {
@@ -20978,34 +22679,6 @@ function Complete-GuiReplication {
     }
     catch {
         Write-GuiLog "Warning: Failed to generate failed files summary: $($_.Exception.Message)"
-    }
-
-    # Merge snapshot registry from temp config back to original config
-    # The background runspace wrote registry updates to the snapshot, not the original
-    try {
-        if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath) -and (Test-Path $script:ConfigSnapshotPath)) {
-            $snapshotConfig = Get-Content $script:ConfigSnapshotPath -Raw | ConvertFrom-Json
-            if ($snapshotConfig.snapshotRegistry) {
-                # Merge snapshot registry entries into the live config
-                $snapshotConfig.snapshotRegistry.PSObject.Properties | ForEach-Object {
-                    $volumeKey = $_.Name
-                    $snapshotIds = $_.Value
-                    if ($snapshotIds -and $snapshotIds.Count -gt 0) {
-                        $script:Config.SnapshotRegistry | Add-Member -NotePropertyName $volumeKey -NotePropertyValue $snapshotIds -Force
-                    }
-                }
-                # Save the merged config to the original path
-                $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
-                if ($saveResult.Success) {
-                    Write-GuiLog "Snapshot registry merged from background runspace"
-                } else {
-                    Write-GuiLog "Warning: Failed to save merged snapshot registry: $($saveResult.ErrorMessage)"
-                }
-            }
-        }
-    }
-    catch {
-        Write-GuiLog "Warning: Failed to merge snapshot registry: $($_.Exception.Message)"
     }
 
     # Send email notification using shared function
@@ -21044,19 +22717,6 @@ function Complete-GuiReplication {
     $dialogFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
     $dialogFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails -PreflightErrors $preflightErrors
-
-    # Clean up config snapshot if it was created
-    if ($script:ConfigSnapshotPath -and ($script:ConfigSnapshotPath -ne $script:ConfigPath)) {
-        try {
-            if (Test-Path $script:ConfigSnapshotPath) {
-                Remove-Item $script:ConfigSnapshotPath -Force -ErrorAction SilentlyContinue
-            }
-        }
-        catch {
-            # Non-critical - temp files will be cleaned up eventually
-        }
-        $script:ConfigSnapshotPath = $null
-    }
 }
 
 #endregion
@@ -21360,7 +23020,13 @@ function Update-GuiProgressText {
     } else {
         "Speed: -- MB/s"
     }
-    $chunksText = "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
+
+    # During scanning/preparing phases, show item count instead of chunk count
+    $chunksText = if ($Status.Phase -in @('Preparing', 'Scanning') -and $Status.ScanProgress -gt 0) {
+        "Items: $($Status.ScanProgress)"
+    } else {
+        "Chunks: $($Status.ChunksComplete)/$($Status.ChunksTotal)"
+    }
 
     # Build current state for comparison
     $currentState = @{
@@ -21455,7 +23121,7 @@ function Get-ChunkDisplayItems {
         })
     }
 
-    # Add active jobs (typically small - MaxConcurrentJobs)
+    # 1. RUNNING JOBS AT TOP (most important - actively copying)
     foreach ($kvp in $script:OrchestrationState.ActiveJobs.ToArray()) {
         $job = $kvp.Value
 
@@ -21489,7 +23155,32 @@ function Get-ChunkDisplayItems {
         })
     }
 
-    # Add failed chunks (show all - usually small or indicates problems)
+    # 2. PENDING CHUNKS (first N with summary)
+    $pendingSnapshot = $script:OrchestrationState.ChunkQueue.ToArray()
+    $pendingToShow = [Math]::Min($pendingSnapshot.Length, 10)
+    for ($i = 0; $i -lt $pendingToShow; $i++) {
+        $chunk = $pendingSnapshot[$i]
+        $chunkDisplayItems.Add([PSCustomObject]@{
+            ChunkId = $chunk.ChunkId
+            SourcePath = $chunk.SourcePath
+            Status = "Pending"
+            Progress = 0
+            ProgressScale = [double]0
+            Speed = "--"
+        })
+    }
+    if ($pendingSnapshot.Length -gt $pendingToShow) {
+        $chunkDisplayItems.Add([PSCustomObject]@{
+            ChunkId = "--"
+            SourcePath = "... and $($pendingSnapshot.Length - $pendingToShow) more pending"
+            Status = "Pending"
+            Progress = 0
+            ProgressScale = [double]0
+            Speed = "--"
+        })
+    }
+
+    # 3. FAILED CHUNKS (show all - usually small or indicates problems)
     foreach ($chunk in $script:OrchestrationState.FailedChunks.ToArray()) {
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = $chunk.ChunkId
@@ -21505,11 +23196,9 @@ function Get-ChunkDisplayItems {
         })
     }
 
-    # Add completed chunks - limit to last N to prevent UI lag
+    # 4. COMPLETED CHUNKS - show ALL (user requested full list)
     $completedSnapshot = $script:OrchestrationState.CompletedChunks.ToArray()
-    $startIndex = [Math]::Max(0, $completedSnapshot.Length - $MaxCompletedItems)
-    for ($i = $startIndex; $i -lt $completedSnapshot.Length; $i++) {
-        $chunk = $completedSnapshot[$i]
+    foreach ($chunk in $completedSnapshot) {
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = $chunk.ChunkId
             SourcePath = $chunk.SourcePath
@@ -21588,6 +23277,7 @@ function Update-GuiProgress {
     param()
 
     try {
+        # BytesComplete is updated by the background thread in Invoke-ReplicationTick
         $status = Get-OrchestrationStatus
 
         # Update progress text (always - lightweight)
@@ -21648,6 +23338,13 @@ function Update-GuiProgress {
                 $script:Controls.txtStatus.Text = $newText
                 $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::CornflowerBlue
                 $script:Window.UpdateLayout()
+            }
+            # Show replication progress during active copying
+            elseif ($script:OrchestrationState.Phase -eq 'Replicating') {
+                $completed = $script:OrchestrationState.CompletedCount
+                $total = $script:OrchestrationState.TotalChunks
+                $script:Controls.txtStatus.Text = "Replicating... ($completed/$total chunks)"
+                $script:Controls.txtStatus.Foreground = [System.Windows.Media.Brushes]::LimeGreen
             }
         }
 
@@ -22946,8 +24643,12 @@ function Initialize-RobocurseGui {
                                  ToolTip="List of configured sync profiles">
                             <ListBox.ItemTemplate>
                                 <DataTemplate>
-                                    <CheckBox IsChecked="{Binding Enabled}" Content="{Binding Name}"
-                                              Style="{StaticResource DarkCheckBox}"/>
+                                    <StackPanel Orientation="Horizontal">
+                                        <CheckBox IsChecked="{Binding Enabled}" VerticalAlignment="Center"
+                                                  Style="{StaticResource DarkCheckBox}"/>
+                                        <TextBlock Text="{Binding Name}" Margin="5,0,0,0" VerticalAlignment="Center"
+                                                   Foreground="#E0E0E0" Cursor="Hand"/>
+                                    </StackPanel>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
                         </ListBox>
@@ -22998,28 +24699,21 @@ function Initialize-RobocurseGui {
                                 <Button Grid.Row="2" Grid.Column="2" x:Name="btnBrowseDest" Content="Browse"
                                         Style="{StaticResource DarkButton}" VerticalAlignment="Center" Margin="0,0,0,8"/>
 
-                                <!-- Chunking - after Destination -->
-                                <Label Grid.Row="3" Grid.Column="0" Content="Chunking:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
+                                <!-- Scan Mode + MaxDepth - after Destination -->
+                                <Label Grid.Row="3" Grid.Column="0" Content="Scan:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                                 <StackPanel Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,8">
-                                    <TextBox x:Name="txtMaxSize" Width="40" Style="{StaticResource DarkTextBox}" Text="10"
-                                             ToolTip="Max size (GB)"/>
-                                    <Label Content="GB" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
-                                    <TextBox x:Name="txtMaxFiles" Width="50" Style="{StaticResource DarkTextBox}" Text="50000" Margin="10,0,0,0"
-                                             ToolTip="Max files"/>
-                                    <Label Content="files" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
+                                    <ComboBox x:Name="cmbScanMode" Width="80" Style="{StaticResource DarkComboBox}"
+                                              ToolTip="Smart: unlimited depth (recommended). Flat: stops at max depth.">
+                                        <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
+                                        <ComboBoxItem Content="Flat" Style="{StaticResource DarkComboBoxItem}"/>
+                                    </ComboBox>
                                     <TextBox x:Name="txtMaxDepth" Width="30" Style="{StaticResource DarkTextBox}" Text="5" Margin="10,0,0,0"
-                                             ToolTip="Max depth"/>
+                                             ToolTip="Max depth (Flat mode only)"/>
                                     <Label Content="depth" Style="{StaticResource DarkLabel}" VerticalAlignment="Center"/>
                                 </StackPanel>
 
-                                <!-- Scan + Validate on same row -->
-                                <Label Grid.Row="4" Grid.Column="0" Content="Scan:" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
-                                <ComboBox Grid.Row="4" Grid.Column="1" x:Name="cmbScanMode" Width="80" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="0,0,0,8"
-                                          Style="{StaticResource DarkComboBox}"
-                                          ToolTip="Scan mode: Smart or Quick">
-                                    <ComboBoxItem Content="Smart" IsSelected="True" Style="{StaticResource DarkComboBoxItem}"/>
-                                    <ComboBoxItem Content="Quick" Style="{StaticResource DarkComboBoxItem}"/>
-                                </ComboBox>
+                                <!-- Schedule + Validate buttons -->
+                                <Label Grid.Row="4" Grid.Column="0" Content="" Style="{StaticResource DarkLabel}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                                 <StackPanel Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,8">
                                     <Button x:Name="btnProfileSchedule" Content="Schedule" Style="{StaticResource ScheduleButton}"
                                             VerticalAlignment="Center" Margin="0,0,8,0"
@@ -23675,7 +25369,7 @@ function Initialize-RobocurseGui {
     @(
         'lstProfiles', 'btnAddProfile', 'btnRemoveProfile',
         'txtProfileName', 'txtSource', 'txtDest', 'btnBrowseSource', 'btnBrowseDest',
-        'chkUseVss', 'cmbScanMode', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth',
+        'chkUseVss', 'cmbScanMode', 'txtMaxDepth',
         'tabSnapshotConfig', 'chkSourcePersistentSnapshot', 'txtSourceRetentionCount',
         'chkDestPersistentSnapshot', 'txtDestRetentionCount',
         'tabProfileSnapshots', 'dgSourceSnapshots', 'dgDestSnapshots',
@@ -23782,6 +25476,10 @@ function Initialize-RobocurseGui {
     # Set active panel (from restored state or default to Profiles)
     $panelToActivate = if ($script:RestoredActivePanel) { $script:RestoredActivePanel } else { 'Profiles' }
     Set-ActivePanel -PanelName $panelToActivate
+
+    # Set window title with version
+    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
+    $script:Window.Title = "Robocurse $version - Replication Cursed Robo"
 
     Write-GuiLog "Robocurse GUI initialized"
 
@@ -23946,6 +25644,70 @@ function Initialize-EventHandlers {
             $selected = $script:Controls.lstProfiles.SelectedItem
             if ($selected) {
                 Import-ProfileToForm -Profile $selected
+            }
+        }
+    })
+
+    # Profile row click - clicking anywhere on the row (except checkbox) should:
+    # 1. Deselect all other checkboxes
+    # 2. Select this profile's checkbox
+    # 3. Switch to this profile
+    $script:Controls.lstProfiles.Add_PreviewMouseLeftButtonDown({
+        param($sender, $e)
+        Invoke-SafeEventHandler -HandlerName "ProfileRowClick" -ScriptBlock {
+            # Find the clicked element
+            $clickedElement = $e.OriginalSource
+
+            # Walk up the visual tree to check if we hit a CheckBox
+            $current = $clickedElement
+            $foundCheckBox = $false
+
+            while ($current -ne $null) {
+                if ($current -is [System.Windows.Controls.CheckBox]) {
+                    $foundCheckBox = $true
+                    break
+                }
+                # Stop at ListBoxItem level
+                if ($current -is [System.Windows.Controls.ListBoxItem]) {
+                    break
+                }
+                # Get visual parent
+                $current = [System.Windows.Media.VisualTreeHelper]::GetParent($current)
+            }
+
+            # Handle click anywhere on the row EXCEPT on the checkbox
+            if (-not $foundCheckBox) {
+                # Find the profile from the DataContext
+                $profile = $null
+                $current = $clickedElement
+                while ($current -ne $null) {
+                    if ($current.DataContext -and $current.DataContext.PSObject.Properties['Name']) {
+                        $profile = $current.DataContext
+                        break
+                    }
+                    $current = [System.Windows.Media.VisualTreeHelper]::GetParent($current)
+                }
+
+                if ($profile) {
+                    # Deselect all other profiles (set Enabled = false)
+                    foreach ($p in $script:Config.SyncProfiles) {
+                        if ($p -ne $profile) {
+                            $p.Enabled = $false
+                        }
+                    }
+
+                    # Select this profile (set Enabled = true)
+                    $profile.Enabled = $true
+
+                    # Select this item in the ListBox (triggers SelectionChanged)
+                    $script:Controls.lstProfiles.SelectedItem = $profile
+
+                    # Force refresh of the ListBox to update checkbox states
+                    $script:Controls.lstProfiles.Items.Refresh()
+
+                    # Save the config to persist the changes
+                    Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath | Out-Null
+                }
             }
         }
     })
@@ -24131,7 +25893,7 @@ function Initialize-EventHandlers {
     }
 
     # Form field changes - save to profile
-    @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
+    @('txtProfileName', 'txtSource', 'txtDest', 'txtMaxDepth') | ForEach-Object {
         $script:Controls[$_].Add_LostFocus({
             Invoke-SafeEventHandler -HandlerName "SaveProfile" -ScriptBlock { Save-ProfileFromForm }
         })
@@ -24139,7 +25901,7 @@ function Initialize-EventHandlers {
 
     # Numeric input validation - reject non-numeric characters in real-time
     # This provides immediate feedback before the user finishes typing
-    @('txtMaxSize', 'txtMaxFiles', 'txtMaxDepth') | ForEach-Object {
+    @('txtMaxDepth') | ForEach-Object {
         $control = $script:Controls[$_]
         if ($control) {
             $control.Add_PreviewTextInput({
@@ -24238,7 +26000,13 @@ function Initialize-EventHandlers {
         })
     }
     $script:Controls.cmbScanMode.Add_SelectionChanged({
-        Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock { Save-ProfileFromForm }
+        Invoke-SafeEventHandler -HandlerName "ScanMode" -ScriptBlock {
+            # Enable/disable MaxDepth based on scan mode (Flat needs it, Smart doesn't)
+            $isFlat = $script:Controls.cmbScanMode.Text -eq "Flat"
+            $script:Controls.txtMaxDepth.IsEnabled = $isFlat
+            $script:Controls.txtMaxDepth.Opacity = if ($isFlat) { 1.0 } else { 0.5 }
+            Save-ProfileFromForm
+        }
     })
 
     # Settings panel event handlers
@@ -24654,8 +26422,9 @@ function Show-RobocurseHelp {
     [CmdletBinding()]
     param()
 
+    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
     Write-Host @"
-ROBOCURSE - Chunked Robocopy Orchestrator with VSS Support
+ROBOCURSE $version - Chunked Robocopy Orchestrator with VSS Support
 
 USAGE:
     .\Robocurse.ps1 [options]
@@ -25126,14 +26895,19 @@ function Start-RobocurseMain {
             return 1
         }
 
-        # Update the profile's Schedule property
-        $profile.Schedule = [PSCustomObject]@{
+        # Update the profile's Schedule property - add if missing (defensive for old profiles)
+        $newSchedule = [PSCustomObject]@{
             Enabled = $true
             Frequency = $Frequency
             Time = $Time
             Interval = $Interval
             DayOfWeek = $DayOfWeek
             DayOfMonth = $DayOfMonth
+        }
+        if (-not ($profile.PSObject.Properties.Name -contains 'Schedule')) {
+            $profile | Add-Member -NotePropertyName 'Schedule' -NotePropertyValue $newSchedule
+        } else {
+            $profile.Schedule = $newSchedule
         }
 
         # Save the updated config

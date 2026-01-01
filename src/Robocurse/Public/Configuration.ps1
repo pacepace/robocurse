@@ -79,7 +79,6 @@ function New-DefaultConfig {
             LogCompressAfterDays = $script:LogCompressAfterDays
             LogRetentionDays = $script:LogDeleteAfterDays
             MismatchSeverity = $script:DefaultMismatchSeverity  # "Warning", "Error", or "Success"
-            VerboseFileLogging = $false  # If true, log every file copied; if false, only log summary
             RedactPaths = $false  # If true, redact file paths in logs for security/privacy
             LogLevel = "Info"  # Minimum log level: Debug, Info, Warning, Error
             RedactServerNames = @()  # Array of server names to specifically redact from logs
@@ -175,13 +174,7 @@ function ConvertTo-ChunkSettingsInternal {
     )
 
     if ($RawChunking) {
-        # Use $null -ne checks instead of truthiness to handle 0 and low values correctly
-        if ($null -ne $RawChunking.maxChunkSizeGB) {
-            $Profile.ChunkMaxSizeGB = $RawChunking.maxChunkSizeGB
-        }
-        if ($null -ne $RawChunking.maxFiles) {
-            $Profile.ChunkMaxFiles = $RawChunking.maxFiles
-        }
+        # Note: maxChunkSizeGB and maxFiles no longer used - chunking is directory-based
         # Note: parallelChunks from config is intentionally not mapped.
         # Parallelism is controlled by MaxConcurrentJobs at the orchestration level.
         if ($null -ne $RawChunking.maxDepthToScan) {
@@ -256,10 +249,6 @@ function ConvertFrom-GlobalSettings {
             if ($RawGlobal.logging.operationalLog.rotation -and $RawGlobal.logging.operationalLog.rotation.maxAgeDays) {
                 $Config.GlobalSettings.LogRetentionDays = $RawGlobal.logging.operationalLog.rotation.maxAgeDays
             }
-        }
-        # Verbose file logging - log every file name if true (default: false for smaller logs)
-        if ($null -ne $RawGlobal.logging.verboseFileLogging) {
-            $Config.GlobalSettings.VerboseFileLogging = [bool]$RawGlobal.logging.verboseFileLogging
         }
         # Path redaction - redact file paths in logs for security/privacy
         if ($null -ne $RawGlobal.logging.redactPaths) {
@@ -355,13 +344,8 @@ function ConvertFrom-FriendlyConfig {
         foreach ($profileName in $profileNames) {
             $rawProfile = $RawConfig.profiles.$profileName
 
-            # Skip disabled profiles
-            if ($null -ne $rawProfile.enabled -and $rawProfile.enabled -eq $false) {
-                Write-Verbose "Skipping disabled profile: $profileName"
-                continue
-            }
-
-            # Build sync profile
+            # Build sync profile (load ALL profiles, including disabled ones)
+            # The Enabled flag controls whether the profile runs, not whether it's loaded
             $syncProfile = [PSCustomObject]@{
                 Name = $profileName
                 Description = if ($rawProfile.description) { $rawProfile.description } else { "" }
@@ -369,11 +353,9 @@ function ConvertFrom-FriendlyConfig {
                 Destination = ""
                 UseVss = $false
                 ScanMode = "Smart"
-                ChunkMaxSizeGB = $script:DefaultMaxChunkSizeBytes / 1GB
-                ChunkMaxFiles = $script:DefaultMaxFilesPerChunk
                 ChunkMaxDepth = $script:DefaultMaxChunkDepth
                 RobocopyOptions = @{}
-                Enabled = $true
+                Enabled = if ($null -ne $rawProfile.enabled) { $rawProfile.enabled } else { $true }
                 SourceSnapshot = [PSCustomObject]@{
                     PersistentEnabled = $false    # Create persistent snapshot on source before backup
                     RetentionCount = 3            # How many snapshots to keep on source volume
@@ -519,7 +501,6 @@ function ConvertTo-FriendlyConfig {
                         maxAgeDays = $Config.GlobalSettings.LogRetentionDays
                     }
                 }
-                verboseFileLogging = $Config.GlobalSettings.VerboseFileLogging
                 redactPaths = $Config.GlobalSettings.RedactPaths
                 redactServerNames = @($Config.GlobalSettings.RedactServerNames)
                 logLevel = $Config.GlobalSettings.LogLevel
@@ -551,8 +532,6 @@ function ConvertTo-FriendlyConfig {
                 path = $profile.Destination
             }
             chunking = [ordered]@{
-                maxChunkSizeGB = $profile.ChunkMaxSizeGB
-                maxFiles = $profile.ChunkMaxFiles
                 maxDepthToScan = $profile.ChunkMaxDepth
                 strategy = switch ($profile.ScanMode) {
                     'Smart' { 'auto' }
@@ -926,29 +905,8 @@ function Test-RobocurseConfig {
                 }
             }
 
-            # Validate chunk configuration if present
-            if ($propertyNames -contains 'ChunkMaxFiles') {
-                $maxFiles = $profile.ChunkMaxFiles
-                if ($null -ne $maxFiles -and ($maxFiles -lt 1 -or $maxFiles -gt 10000000)) {
-                    $errors += "$profilePrefix.ChunkMaxFiles must be between 1 and 10000000 (current: $maxFiles)"
-                }
-            }
-
-            if ($propertyNames -contains 'ChunkMaxSizeGB') {
-                $maxSizeGB = $profile.ChunkMaxSizeGB
-                if ($null -ne $maxSizeGB -and ($maxSizeGB -lt 0.001 -or $maxSizeGB -gt 1024)) {
-                    $errors += "$profilePrefix.ChunkMaxSizeGB must be between 0.001 and 1024 (current: $maxSizeGB)"
-                }
-            }
-
-            # Validate that ChunkMaxSizeGB > ChunkMinSizeGB if both are specified
-            if (($propertyNames -contains 'ChunkMaxSizeGB') -and ($propertyNames -contains 'ChunkMinSizeGB')) {
-                $maxSizeGB = $profile.ChunkMaxSizeGB
-                $minSizeGB = $profile.ChunkMinSizeGB
-                if ($null -ne $maxSizeGB -and $null -ne $minSizeGB -and $maxSizeGB -le $minSizeGB) {
-                    $errors += "$profilePrefix.ChunkMaxSizeGB ($maxSizeGB) must be greater than ChunkMinSizeGB ($minSizeGB)"
-                }
-            }
+            # ChunkMaxDepth validation is done in GUI (0-20 range)
+            # ChunkMaxSizeGB and ChunkMaxFiles are no longer used
         }
     }
 
