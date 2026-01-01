@@ -154,7 +154,7 @@ function Start-GuiReplication {
     # Pass current log path so background writes to same log file
     $currentLogPath = $script:CurrentOperationalLogPath
     try {
-        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigPath -LogRoot $logRoot -LogPath $currentLogPath
+        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigPath -LogRoot $logRoot -SessionLogPath $currentLogPath
 
         $script:ReplicationHandle = $runspaceInfo.Handle
         $script:ReplicationPowerShell = $runspaceInfo.PowerShell
