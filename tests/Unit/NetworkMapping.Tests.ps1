@@ -177,17 +177,17 @@ InModuleScope 'Robocurse' {
                     )
                 } -ParameterFilter { $PSProvider -eq 'FileSystem' }
                 Mock New-PSDrive { }
-                Mock Remove-PSDrive { }
+                Mock Remove-SmbMapping { }
 
                 Mount-SingleNetworkPath -UncPath '\\192.168.1.1\share\subfolder'
 
-                Should -Invoke Remove-PSDrive -Times 1 -ParameterFilter { $Name -eq 'X' }
+                Should -Invoke Remove-SmbMapping -Times 1 -ParameterFilter { $LocalPath -eq 'X:' }
             }
         }
 
         Context "Dismount-NetworkPaths" {
             BeforeEach {
-                Mock Remove-PSDrive { }
+                Mock Remove-SmbMapping { }
             }
 
             It "Should remove all mapped drives" {
@@ -198,8 +198,8 @@ InModuleScope 'Robocurse' {
 
                 Dismount-NetworkPaths -Mappings $mappings
 
-                Should -Invoke Remove-PSDrive -Times 1 -ParameterFilter { $Name -eq 'Z' }
-                Should -Invoke Remove-PSDrive -Times 1 -ParameterFilter { $Name -eq 'Y' }
+                Should -Invoke Remove-SmbMapping -Times 1 -ParameterFilter { $LocalPath -eq 'Z:' }
+                Should -Invoke Remove-SmbMapping -Times 1 -ParameterFilter { $LocalPath -eq 'Y:' }
             }
 
             It "Should handle empty mappings gracefully" {
@@ -211,8 +211,9 @@ InModuleScope 'Robocurse' {
             }
 
             It "Should continue if one unmount fails" {
-                Mock Remove-PSDrive { throw "Drive in use" } -ParameterFilter { $Name -eq 'Z' }
-                Mock Remove-PSDrive { } -ParameterFilter { $Name -eq 'Y' }
+                # When Remove-SmbMapping throws, the helper falls back to Remove-PsDrive
+                Mock Remove-SmbMapping { throw "No mapping exists" }
+                Mock Remove-PsDrive { }
 
                 $mappings = @(
                     [PSCustomObject]@{ DriveLetter = 'Z'; Root = '\\server1\share' },
@@ -221,8 +222,8 @@ InModuleScope 'Robocurse' {
 
                 { Dismount-NetworkPaths -Mappings $mappings } | Should -Not -Throw
 
-                # Should still try to unmount Y after Z fails
-                Should -Invoke Remove-PSDrive -Times 1 -ParameterFilter { $Name -eq 'Y' }
+                # Should try to unmount both drives
+                Should -Invoke Remove-SmbMapping -Times 2
             }
         }
 
@@ -369,7 +370,7 @@ InModuleScope 'Robocurse' {
                 Mock Get-PSDrive {
                     [PSCustomObject]@{ Name = "Q"; Root = "\\server\share" }
                 } -ParameterFilter { $Name -eq 'Q' }
-                Mock Remove-PSDrive { }
+                Mock Remove-SmbMapping { }
 
                 $trackingData = @(
                     @{ DriveLetter = "Q:"; Root = "\\server\share"; OriginalPath = "\\server\share"; MappedPath = "Q:\" }
@@ -379,7 +380,7 @@ InModuleScope 'Robocurse' {
                 $result = Clear-OrphanNetworkMappings
 
                 $result | Should -Be 1
-                Should -Invoke Remove-PSDrive -Times 1 -ParameterFilter { $Name -eq 'Q' }
+                Should -Invoke Remove-SmbMapping -Times 1 -ParameterFilter { $LocalPath -eq 'Q:' }
             }
 
             It "Should not remove drive if it points to different location" {
