@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.ae7533a - Built: 2026-01-01 14:58:16
+    Version: dev.ee0e381 - Built: 2026-01-01 15:43:30
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.ae7533a'
+$script:RobocurseVersion = 'dev.ee0e381'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -23268,9 +23268,11 @@ function Get-ChunkDisplayItems {
                 if ($job.Chunk.EstimatedSize -gt 0 -and $progressData.BytesCopied -gt 0) {
                     $progress = [math]::Min(100, [math]::Round(($progressData.BytesCopied / $job.Chunk.EstimatedSize) * 100, 0))
                 }
-                # Use parsed speed if available
-                if ($progressData.Speed) {
-                    $speed = $progressData.Speed
+                # Calculate speed from bytes copied over elapsed time (average since chunk start)
+                $elapsedSeconds = ([datetime]::Now - $job.StartTime).TotalSeconds
+                if ($elapsedSeconds -gt 0 -and $progressData.BytesCopied -gt 0) {
+                    $bytesPerSecond = $progressData.BytesCopied / $elapsedSeconds
+                    $speed = "$(Format-FileSize $bytesPerSecond)/s"
                 }
             }
         }
