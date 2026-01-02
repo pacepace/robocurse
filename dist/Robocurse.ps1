@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.da42823 - Built: 2026-01-01 20:42:55
+    Version: dev.ee0e381 - Built: 2026-01-01 15:43:30
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.da42823'
+$script:RobocurseVersion = 'dev.ee0e381'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -22132,8 +22132,10 @@ function New-ReplicationRunspace {
         Path to config file (can be a snapshot for isolation from external changes)
     .PARAMETER LogRoot
         Absolute path to log root directory (pre-resolved from original config location)
-    .PARAMETER LogPath
-        Full path to the current session's log file (for sharing log session with GUI)
+    .PARAMETER SessionLogPath
+        Full path to the current session's log file (for sharing log session with GUI).
+        Named 'SessionLogPath' (not 'LogPath') to avoid scope collision with $script:LogPath
+        used by NetworkMapping.ps1 when running in script mode (dot-sourced).
     .OUTPUTS
         PSCustomObject with PowerShell, Handle, and Runspace properties
     #>
@@ -22149,7 +22151,7 @@ function New-ReplicationRunspace {
 
         [string]$LogRoot,
 
-        [string]$LogPath
+        [string]$SessionLogPath
     )
 
     # Determine how to load Robocurse in the background runspace
@@ -22220,7 +22222,7 @@ function New-ReplicationRunspace {
     # Pass pre-resolved log root (relative paths resolved from original config location)
     $powershell.AddArgument($LogRoot)
     # Pass the current log file path so background shares the same log session
-    $powershell.AddArgument($LogPath)
+    $powershell.AddArgument($SessionLogPath)
 
     $handle = $powershell.BeginInvoke()
 
@@ -22245,7 +22247,7 @@ function New-ModuleModeBackgroundScript {
     param()
 
     return @"
-        param(`$ModulePath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$ConfigPath, `$LogRoot, `$LogPath)
+        param(`$ModulePath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$ConfigPath, `$LogRoot, `$SessionLogPath)
 
         try {
             Write-Host "[BACKGROUND] Loading module from: `$ModulePath"
@@ -22261,9 +22263,9 @@ function New-ModuleModeBackgroundScript {
 
         # Share the GUI's log session instead of creating a new one
         # This ensures background logs appear in the same file as GUI logs
-        if (`$LogPath) {
-            Write-Host "[BACKGROUND] Using shared log path: `$LogPath"
-            Set-LogSessionPath -LogPath `$LogPath
+        if (`$SessionLogPath) {
+            Write-Host "[BACKGROUND] Using shared log path: `$SessionLogPath"
+            Set-LogSessionPath -LogPath `$SessionLogPath
         }
         else {
             # Fallback: Initialize new log session if no path provided
@@ -22329,7 +22331,7 @@ function New-ScriptModeBackgroundScript {
     param()
 
     return @"
-        param(`$ScriptPath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$GuiConfigPath, `$LogRoot, `$LogPath)
+        param(`$ScriptPath, `$SharedState, `$ProfileNames, `$MaxWorkers, `$GuiConfigPath, `$LogRoot, `$SessionLogPath)
 
         try {
             Write-Host "[BACKGROUND] Loading script from: `$ScriptPath"
@@ -22347,9 +22349,11 @@ function New-ScriptModeBackgroundScript {
 
         # Share the GUI's log session instead of creating a new one
         # This ensures background logs appear in the same file as GUI logs
-        if (`$LogPath) {
-            Write-Host "[BACKGROUND] Using shared log path: `$LogPath"
-            Set-LogSessionPath -LogPath `$LogPath
+        # NOTE: Named 'SessionLogPath' (not 'LogPath') to avoid scope collision with
+        # $script:LogPath used by NetworkMapping.ps1 when script is dot-sourced above
+        if (`$SessionLogPath) {
+            Write-Host "[BACKGROUND] Using shared log path: `$SessionLogPath"
+            Set-LogSessionPath -LogPath `$SessionLogPath
         }
         else {
             # Fallback: Initialize new log session if no path provided
@@ -22627,7 +22631,7 @@ function Start-GuiReplication {
     # Pass current log path so background writes to same log file
     $currentLogPath = $script:CurrentOperationalLogPath
     try {
-        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigPath -LogRoot $logRoot -LogPath $currentLogPath
+        $runspaceInfo = New-ReplicationRunspace -Profiles $profilesToRun -MaxWorkers $maxWorkers -ConfigPath $script:ConfigPath -LogRoot $logRoot -SessionLogPath $currentLogPath
 
         $script:ReplicationHandle = $runspaceInfo.Handle
         $script:ReplicationPowerShell = $runspaceInfo.PowerShell
@@ -23264,9 +23268,11 @@ function Get-ChunkDisplayItems {
                 if ($job.Chunk.EstimatedSize -gt 0 -and $progressData.BytesCopied -gt 0) {
                     $progress = [math]::Min(100, [math]::Round(($progressData.BytesCopied / $job.Chunk.EstimatedSize) * 100, 0))
                 }
-                # Use parsed speed if available
-                if ($progressData.Speed) {
-                    $speed = $progressData.Speed
+                # Calculate speed from bytes copied over elapsed time (average since chunk start)
+                $elapsedSeconds = ([datetime]::Now - $job.StartTime).TotalSeconds
+                if ($elapsedSeconds -gt 0 -and $progressData.BytesCopied -gt 0) {
+                    $bytesPerSecond = $progressData.BytesCopied / $elapsedSeconds
+                    $speed = "$(Format-FileSize $bytesPerSecond)/s"
                 }
             }
         }

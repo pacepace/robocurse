@@ -607,5 +607,43 @@ InModuleScope 'Robocurse' {
                 $script:ReservedDriveLetters.Count | Should -Be 0
             }
         }
+
+        Context "Background script scope collision prevention" {
+            # ENFORCEMENT TEST: Prevents regression of scope collision bug
+            # When the background script has a parameter named $LogPath and dot-sources
+            # Robocurse.ps1, it shadows $script:LogPath used by Initialize-NetworkMappingTracking,
+            # causing tracking file to be written inside a log FILE instead of a directory.
+            # See: https://github.com/pacepace/robocurse/issues/XXX
+
+            It "New-ModuleModeBackgroundScript should not use parameter named LogPath" {
+                $scriptContent = New-ModuleModeBackgroundScript
+                $ast = [System.Management.Automation.Language.Parser]::ParseInput($scriptContent, [ref]$null, [ref]$null)
+
+                $paramAst = $ast.Find({ param($node)
+                    $node -is [System.Management.Automation.Language.ParamBlockAst]
+                }, $true)
+
+                $hasLogPathParam = $paramAst.Parameters | Where-Object {
+                    $_.Name.VariablePath.UserPath -eq 'LogPath'
+                }
+
+                $hasLogPathParam | Should -BeNullOrEmpty -Because "LogPath parameter would shadow `$script:LogPath in NetworkMapping.ps1"
+            }
+
+            It "New-ScriptModeBackgroundScript should not use parameter named LogPath" {
+                $scriptContent = New-ScriptModeBackgroundScript
+                $ast = [System.Management.Automation.Language.Parser]::ParseInput($scriptContent, [ref]$null, [ref]$null)
+
+                $paramAst = $ast.Find({ param($node)
+                    $node -is [System.Management.Automation.Language.ParamBlockAst]
+                }, $true)
+
+                $hasLogPathParam = $paramAst.Parameters | Where-Object {
+                    $_.Name.VariablePath.UserPath -eq 'LogPath'
+                }
+
+                $hasLogPathParam | Should -BeNullOrEmpty -Because "LogPath parameter would shadow `$script:LogPath when script is dot-sourced"
+            }
+        }
     }
 }

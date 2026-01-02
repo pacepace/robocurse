@@ -411,9 +411,11 @@ function Get-ChunkDisplayItems {
                 if ($job.Chunk.EstimatedSize -gt 0 -and $progressData.BytesCopied -gt 0) {
                     $progress = [math]::Min(100, [math]::Round(($progressData.BytesCopied / $job.Chunk.EstimatedSize) * 100, 0))
                 }
-                # Use parsed speed if available
-                if ($progressData.Speed) {
-                    $speed = $progressData.Speed
+                # Calculate speed from bytes copied over elapsed time (average since chunk start)
+                $elapsedSeconds = ([datetime]::Now - $job.StartTime).TotalSeconds
+                if ($elapsedSeconds -gt 0 -and $progressData.BytesCopied -gt 0) {
+                    $bytesPerSecond = $progressData.BytesCopied / $elapsedSeconds
+                    $speed = "$(Format-FileSize $bytesPerSecond)/s"
                 }
             }
         }
