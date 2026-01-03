@@ -125,6 +125,10 @@ When creating scheduled tasks for profiles with network paths:
 
 **Flaky tests** can have many causes. One cause is timing - operations completing faster than expected (e.g., processes exiting quickly, copies finishing before progress capture). Don't assume all flaky tests are timing-related.
 
+## Implementation Approach
+
+Prefer architectural correctness over speed. When choosing between a quick workaround and a proper solution, implement the correct one. Ask: "Is the design incomplete, or is this truly a one-off fix?" If the design is incomplete, extend it properly.
+
 ## Security
 
 DEBUG logs contain full paths (project names, robocopy commands, VSS junctions). Keep secure or redact in production. SIEM logs (JSON Lines) have structured path data.

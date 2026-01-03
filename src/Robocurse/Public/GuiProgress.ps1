@@ -381,12 +381,12 @@ function Get-ChunkDisplayItems {
 
     $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # Show current activity during Preparing/Scanning phases (before chunks are available)
+    # Show current activity during Preparing/Scanning/Cleanup phases
     $currentActivity = $script:OrchestrationState.CurrentActivity
     $phase = $script:OrchestrationState.Phase
-    if ($currentActivity -and ($phase -eq 'Preparing' -or $phase -eq 'Scanning')) {
+    if ($currentActivity -and ($phase -in @('Preparing', 'Scanning', 'Cleanup'))) {
         $scanProgress = $script:OrchestrationState.ScanProgress
-        $displayStatus = if ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
+        $displayStatus = if ($phase -eq 'Cleanup') { 'Cleanup' } elseif ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = "--"
             SourcePath = $currentActivity
@@ -608,8 +608,8 @@ function Update-GuiProgress {
                 Update-ErrorIndicatorState
                 Update-ProfileErrorSummary
             }
-            # Show preparing/scanning activity in status bar when not replicating yet
-            elseif (($script:OrchestrationState.Phase -eq 'Preparing' -or $script:OrchestrationState.Phase -eq 'Scanning') -and $script:OrchestrationState.CurrentActivity) {
+            # Show preparing/scanning/cleanup activity in status bar
+            elseif ($script:OrchestrationState.Phase -in @('Preparing', 'Scanning', 'Cleanup') -and $script:OrchestrationState.CurrentActivity) {
                 $counter = $script:OrchestrationState.ScanProgress
                 $activity = $script:OrchestrationState.CurrentActivity
                 $newText = if ($counter -gt 0) { "$activity ($counter)" } else { $activity }

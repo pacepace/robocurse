@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.4794406 - Built: 2026-01-03 03:27:27
+    Version: dev.89d59b0 - Built: 2026-01-02 21:29:41
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.4794406'
+$script:RobocurseVersion = 'dev.89d59b0'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -229,7 +229,7 @@ $script:GuiProgressUpdateIntervalMs = 250
 $script:ProcessStopTimeoutMs = 5000
 #endregion
 
-#region ==================== UTILITY ====================
+#region ==================== PUBLIC\UTILITY ====================
 
 function Test-IsWindowsPlatform {
     <#
@@ -1141,7 +1141,7 @@ function Test-SafeConfigPath {
 
 #endregion
 
-#region ==================== CONFIGURATION ====================
+#region ==================== PUBLIC\CONFIGURATION ====================
 
 function Format-Json {
     <#
@@ -2109,7 +2109,7 @@ function Test-PathFormat {
 
 #endregion
 
-#region ==================== LOGGING ====================
+#region ==================== PUBLIC\LOGGING ====================
 
 # Script-scoped variables for current session state
 $script:CurrentSessionId = $null
@@ -3051,7 +3051,7 @@ function Get-LogPath {
 
 #endregion
 
-#region ==================== DIRECTORYPROFILING ====================
+#region ==================== PUBLIC\DIRECTORYPROFILING ====================
 
 # Script-level cache for directory profiles (thread-safe)
 # Uses OrdinalIgnoreCase comparer for Windows-style case-insensitive path matching
@@ -4117,7 +4117,7 @@ function Get-DirectoryProfilesParallel {
 
 #endregion
 
-#region ==================== CHUNKING ====================
+#region ==================== PUBLIC\CHUNKING ====================
 
 # Script-level counter for unique chunk IDs (plain integer, use [ref] when calling Interlocked)
 $script:ChunkIdCounter = 0
@@ -4699,7 +4699,7 @@ function Convert-ToDestinationPath {
 
 #endregion
 
-#region ==================== ROBOCOPY ====================
+#region ==================== PUBLIC\ROBOCOPY ====================
 
 # Script-level bandwidth limit (set from config during replication start)
 $script:BandwidthLimitMbps = 0
@@ -6570,7 +6570,7 @@ function New-FailedFilesSummary {
 
 #endregion
 
-#region ==================== CHECKPOINT ====================
+#region ==================== PUBLIC\CHECKPOINT ====================
 
 # Handles checkpoint/resume functionality for crash recovery
 
@@ -6877,7 +6877,7 @@ function Test-ChunkAlreadyCompleted {
 
 #endregion
 
-#region ==================== ORCHESTRATIONCORE ====================
+#region ==================== PUBLIC\ORCHESTRATIONCORE ====================
 
 # Core types, state management, and circuit breaker logic
 #
@@ -7899,7 +7899,7 @@ function Clear-RunningProfiles {
 
 #endregion
 
-#region ==================== HEALTHCHECK ====================
+#region ==================== PUBLIC\HEALTHCHECK ====================
 
 # Health monitoring endpoint for external monitoring systems
 #
@@ -8127,7 +8127,7 @@ function Remove-HealthCheckStatus {
 
 #endregion
 
-#region ==================== CREDENTIALSTORAGE ====================
+#region ==================== PUBLIC\CREDENTIALSTORAGE ====================
 
 # Secure storage for network share credentials using DPAPI (Export-Clixml)
 #
@@ -8346,7 +8346,7 @@ function Test-NetworkCredentialExists {
 
 #endregion
 
-#region ==================== NETWORKMAPPING ====================
+#region ==================== PUBLIC\NETWORKMAPPING ====================
 
 # Maps UNC paths to drive letters for reliable network access in Session 0 scheduled tasks
 #
@@ -9038,7 +9038,7 @@ function Dismount-NetworkPaths {
 
 #endregion
 
-#region ==================== JOBMANAGEMENT ====================
+#region ==================== PUBLIC\JOBMANAGEMENT ====================
 
 # Chunk job execution, retry logic, and profile management
 #
@@ -10576,6 +10576,9 @@ function Complete-CurrentProfile {
         durationMs = $profileDuration.TotalMilliseconds
     }
 
+    # Enter cleanup phase for VSS/network resource cleanup
+    $state.Phase = 'Cleanup'
+
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
@@ -10706,7 +10709,7 @@ function Stop-AllJobs {
     }
 
     $state.ActiveJobs.Clear()
-    $state.Phase = "Stopped"
+    $state.Phase = 'Cleanup'
 
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
@@ -10784,6 +10787,9 @@ function Stop-AllJobs {
     }
     $state.NetworkCredential = $null
 
+    # Cleanup complete, now set final stopped state
+    $state.Phase = 'Stopped'
+
     # Unregister the current profile as running (release the mutex)
     if ($state.CurrentProfile) {
         Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
@@ -10840,7 +10846,7 @@ function Request-Resume {
 
 #endregion
 
-#region ==================== PROGRESS ====================
+#region ==================== PUBLIC\PROGRESS ====================
 
 function Update-ProgressStats {
     <#
@@ -11029,7 +11035,7 @@ function Get-ETAEstimate {
 
 #endregion
 
-#region ==================== VSSCORE ====================
+#region ==================== PUBLIC\VSSCORE ====================
 
 # Shared infrastructure for both local and remote VSS operations
 
@@ -11947,7 +11953,7 @@ function Get-SnapshotSummaryForEmail {
 
 #endregion
 
-#region ==================== VSSLOCAL ====================
+#region ==================== PUBLIC\VSSLOCAL ====================
 
 # Local VSS snapshot and junction operations
 # Requires VssCore.ps1 to be loaded first (handled by Robocurse.psm1)
@@ -12958,7 +12964,7 @@ function Invoke-WithVssJunction {
 
 #endregion
 
-#region ==================== VSSREMOTE ====================
+#region ==================== PUBLIC\VSSREMOTE ====================
 
 # Remote VSS operations via UNC paths and CIM sessions
 # Requires VssCore.ps1 to be loaded first (handled by Robocurse.psm1)
@@ -14438,7 +14444,7 @@ function Clear-OrphanRemoteVssSnapshots {
 
 #endregion
 
-#region ==================== SNAPSHOTCLI ====================
+#region ==================== PUBLIC\SNAPSHOTCLI ====================
 
 # Command-line interface for VSS snapshot management
 
@@ -14864,7 +14870,7 @@ function Invoke-SnapshotScheduleCommand {
 
 #endregion
 
-#region ==================== EMAIL ====================
+#region ==================== PUBLIC\EMAIL ====================
 
 # Initialize Windows Credential Manager P/Invoke types (Windows only)
 $script:CredentialManagerTypeAdded = $false
@@ -16219,7 +16225,7 @@ function Send-ReplicationCompletionNotification {
 
 #endregion
 
-#region ==================== SCHEDULING ====================
+#region ==================== PUBLIC\SCHEDULING ====================
 
 function Get-UniqueTaskName {
     <#
@@ -16911,7 +16917,7 @@ function Test-RobocurseTaskExists {
 
 #endregion
 
-#region ==================== SNAPSHOTSCHEDULE ====================
+#region ==================== PUBLIC\SNAPSHOTSCHEDULE ====================
 
 # Manages Windows Task Scheduler tasks for automated snapshot creation
 
@@ -17296,7 +17302,7 @@ function Sync-SnapshotSchedules {
 
 #endregion
 
-#region ==================== PROFILESCHEDULE ====================
+#region ==================== PUBLIC\PROFILESCHEDULE ====================
 
 # Manages Windows Task Scheduler tasks for automated profile execution
 
@@ -17739,7 +17745,7 @@ function Sync-ProfileSchedules {
 
 #endregion
 
-#region ==================== GUIRESOURCES ====================
+#region ==================== PUBLIC\GUIRESOURCES ====================
 
 # XAML resources are stored in the Resources folder for maintainability.
 # The Get-XamlResource function loads them at runtime with fallback to embedded content.
@@ -17784,7 +17790,7 @@ function Get-XamlResource {
 
 #endregion
 
-#region ==================== GUIVALIDATION ====================
+#region ==================== PUBLIC\GUIVALIDATION ====================
 
 # Pre-flight validation UI for checking profile configuration before replication
 
@@ -18440,7 +18446,7 @@ function Show-ValidationDialog {
 
 #endregion
 
-#region ==================== GUISETTINGS ====================
+#region ==================== PUBLIC\GUISETTINGS ====================
 
 # Handles saving and restoring window position, size, worker count, and selected profile.
 
@@ -19008,7 +19014,7 @@ function Test-VolumeOverridesFormat {
 
 #endregion
 
-#region ==================== GUIPROFILES ====================
+#region ==================== PUBLIC\GUIPROFILES ====================
 
 # Handles profile CRUD operations and form synchronization.
 
@@ -19482,7 +19488,7 @@ function Invoke-DeleteProfileSnapshot {
 
 #endregion
 
-#region ==================== GUICHUNKACTIONS ====================
+#region ==================== PUBLIC\GUICHUNKACTIONS ====================
 
 # Context menu actions for failed chunks in the DataGrid
 
@@ -19674,7 +19680,7 @@ function Open-ChunkLog {
 
 #endregion
 
-#region ==================== GUIDIALOGS ====================
+#region ==================== PUBLIC\GUIDIALOGS ====================
 
 # Utility dialogs, completion dialog, and schedule configuration.
 
@@ -21701,7 +21707,7 @@ function Show-ErrorPopup {
 
 #endregion
 
-#region ==================== GUILOGWINDOW ====================
+#region ==================== PUBLIC\GUILOGWINDOW ====================
 
 # Separate popup window for log viewing.
 
@@ -22194,7 +22200,7 @@ function Close-LogWindow {
 
 #endregion
 
-#region ==================== GUIRUNSPACE ====================
+#region ==================== PUBLIC\GUIRUNSPACE ====================
 
 # Background PowerShell runspace creation and cleanup for replication.
 
@@ -22556,7 +22562,7 @@ function Close-ReplicationRunspace {
 
 #endregion
 
-#region ==================== GUIREPLICATION ====================
+#region ==================== PUBLIC\GUIREPLICATION ====================
 
 # High-level replication control: profile selection, start, and completion handling.
 # Background runspace management is in GuiRunspace.ps1.
@@ -22937,7 +22943,7 @@ function Complete-GuiReplication {
 
 #endregion
 
-#region ==================== GUIPROGRESS ====================
+#region ==================== PUBLIC\GUIPROGRESS ====================
 
 # Real-time progress updates with performance optimizations.
 
@@ -23321,12 +23327,12 @@ function Get-ChunkDisplayItems {
 
     $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # Show current activity during Preparing/Scanning phases (before chunks are available)
+    # Show current activity during Preparing/Scanning/Cleanup phases
     $currentActivity = $script:OrchestrationState.CurrentActivity
     $phase = $script:OrchestrationState.Phase
-    if ($currentActivity -and ($phase -eq 'Preparing' -or $phase -eq 'Scanning')) {
+    if ($currentActivity -and ($phase -in @('Preparing', 'Scanning', 'Cleanup'))) {
         $scanProgress = $script:OrchestrationState.ScanProgress
-        $displayStatus = if ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
+        $displayStatus = if ($phase -eq 'Cleanup') { 'Cleanup' } elseif ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = "--"
             SourcePath = $currentActivity
@@ -23548,8 +23554,8 @@ function Update-GuiProgress {
                 Update-ErrorIndicatorState
                 Update-ProfileErrorSummary
             }
-            # Show preparing/scanning activity in status bar when not replicating yet
-            elseif (($script:OrchestrationState.Phase -eq 'Preparing' -or $script:OrchestrationState.Phase -eq 'Scanning') -and $script:OrchestrationState.CurrentActivity) {
+            # Show preparing/scanning/cleanup activity in status bar
+            elseif ($script:OrchestrationState.Phase -in @('Preparing', 'Scanning', 'Cleanup') -and $script:OrchestrationState.CurrentActivity) {
                 $counter = $script:OrchestrationState.ScanProgress
                 $activity = $script:OrchestrationState.CurrentActivity
                 $newText = if ($counter -gt 0) { "$activity ($counter)" } else { $activity }
@@ -23718,7 +23724,7 @@ function Get-TimeAgoString {
 
 #endregion
 
-#region ==================== GUISNAPSHOTDIALOGS ====================
+#region ==================== PUBLIC\GUISNAPSHOTDIALOGS ====================
 
 # Handles create/delete snapshot dialogs
 
@@ -23979,7 +23985,7 @@ function Invoke-DeleteSelectedSnapshot {
 
 #endregion
 
-#region ==================== GUISNAPSHOTS ====================
+#region ==================== PUBLIC\GUISNAPSHOTS ====================
 
 # Handles the Snapshots panel in the GUI
 
@@ -24240,7 +24246,7 @@ function Get-SelectedSnapshot {
 
 #endregion
 
-#region ==================== GUIMAIN ====================
+#region ==================== PUBLIC\GUIMAIN ====================
 
 # Core window initialization, event wiring, and logging functions.
 
@@ -26630,7 +26636,7 @@ function Get-PanelForKey {
 
 #endregion
 
-#region ==================== MAIN ====================
+#region ==================== PUBLIC\MAIN ====================
 
 function Show-RobocurseHelp {
     <#
