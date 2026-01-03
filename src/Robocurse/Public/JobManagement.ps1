@@ -759,6 +759,7 @@ function Start-ProfileReplication {
                     # Check for stop request after remote VSS snapshot creation
                     if ($state.StopRequested) {
                         Write-RobocurseLog -Message "Stop requested after remote VSS snapshot, cleaning up" -Level 'Info' -Component 'Orchestrator'
+                        $state.CurrentActivity = "Removing VSS snapshot..."
                         Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName -Credential $networkCredential
                         $state.CurrentVssSnapshot = $null
                         return
@@ -782,7 +783,9 @@ function Start-ProfileReplication {
                         # Check for stop request after remote VSS junction creation
                         if ($state.StopRequested) {
                             Write-RobocurseLog -Message "Stop requested after remote VSS junction, cleaning up" -Level 'Info' -Component 'Orchestrator'
+                            $state.CurrentActivity = "Removing VSS junction..."
                             Remove-RemoteVssJunction -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath -ServerName $snapshot.ServerName -Credential $networkCredential
+                            $state.CurrentActivity = "Removing VSS snapshot..."
                             Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName -Credential $networkCredential
                             $state.CurrentVssJunction = $null
                             $state.CurrentVssSnapshot = $null
@@ -792,6 +795,7 @@ function Start-ProfileReplication {
                     else {
                         # Junction failed - clean up snapshot and continue without VSS
                         Write-RobocurseLog -Message "Failed to create remote VSS junction: $($junctionResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+                        $state.CurrentActivity = "Removing VSS snapshot..."
                         Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName -Credential $networkCredential
                         $state.CurrentVssSnapshot = $null
                     }
@@ -828,6 +832,7 @@ function Start-ProfileReplication {
                     # Check for stop request after local VSS snapshot creation
                     if ($state.StopRequested) {
                         Write-RobocurseLog -Message "Stop requested after local VSS snapshot, cleaning up" -Level 'Info' -Component 'Orchestrator'
+                        $state.CurrentActivity = "Removing VSS snapshot..."
                         Remove-VssSnapshot -ShadowId $snapshot.ShadowId
                         $state.CurrentVssSnapshot = $null
                         return
@@ -1533,6 +1538,7 @@ function Complete-CurrentProfile {
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
+        $state.CurrentActivity = "Removing VSS junction..."
         $removeJunctionResult = Remove-RemoteVssJunction `
             -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
             -ServerName $state.CurrentVssJunction.ServerName `
@@ -1545,6 +1551,7 @@ function Complete-CurrentProfile {
 
     # Clean up VSS snapshot (local or remote)
     if ($state.CurrentVssSnapshot) {
+        $state.CurrentActivity = "Removing VSS snapshot..."
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
             $removeResult = Remove-RemoteVssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId -ServerName $state.CurrentVssSnapshot.ServerName -Credential $state.NetworkCredential
@@ -1663,6 +1670,7 @@ function Stop-AllJobs {
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction after stop" -Level 'Info' -Component 'VSS'
+        $state.CurrentActivity = "Removing VSS junction..."
         try {
             $removeJunctionResult = Remove-RemoteVssJunction `
                 -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
@@ -1682,6 +1690,7 @@ function Stop-AllJobs {
 
     # Clean up VSS snapshot (local or remote)
     if ($state.CurrentVssSnapshot) {
+        $state.CurrentActivity = "Removing VSS snapshot..."
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot after stop: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
             try {

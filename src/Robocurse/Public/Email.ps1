@@ -646,6 +646,19 @@ $additionalErrors
     $filesSkippedStr = $FilesSkipped.ToString('N0')
     $filesFailedStr = $FilesFailed.ToString('N0')
 
+    # Calculate total files and success rate for summary
+    $totalFiles = $Results.TotalFilesCopied + $FilesSkipped + $FilesFailed
+    $totalFilesStr = $totalFiles.ToString('N0')
+    $successRate = if ($totalFiles -gt 0) {
+        [math]::Round(($Results.TotalFilesCopied + $FilesSkipped) / $totalFiles * 100, 1)
+    } else { 100 }
+
+    # Cap at 99.9% if any files failed - don't claim 100% with failures
+    if ($FilesFailed -gt 0 -and $successRate -ge 100) {
+        $successRate = 99.9
+    }
+    $successRateStr = "$successRate%"
+
     $html = @"
 <!DOCTYPE html>
 <html>
@@ -664,6 +677,14 @@ $additionalErrors
             <p>Replication completed at <strong>$completionTime</strong></p>
 
             <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="stat-label">Total Files</div>
+                    <div class="stat-value">$totalFilesStr</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">Success Rate</div>
+                    <div class="stat-value">$successRateStr</div>
+                </div>
                 <div class="stat-box">
                     <div class="stat-label">Duration</div>
                     <div class="stat-value">$durationStr</div>

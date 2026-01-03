@@ -249,6 +249,8 @@ function Show-CompletionDialog {
         Number of chunks that failed
     .PARAMETER ChunksWarning
         Number of chunks that completed with warnings (e.g., some files skipped)
+    .PARAMETER FilesCopied
+        Total number of files successfully copied
     .PARAMETER FilesFailed
         Total number of files that failed to copy (errors, locked, access denied)
     .PARAMETER FailedFilesSummaryPath
@@ -266,6 +268,7 @@ function Show-CompletionDialog {
         [int]$ChunksTotal = 0,
         [int]$ChunksFailed = 0,
         [int]$ChunksWarning = 0,
+        [long]$FilesCopied = 0,
         [long]$FilesSkipped = 0,
         [long]$FilesFailed = 0,
         [string]$FailedFilesSummaryPath = $null,
@@ -286,6 +289,8 @@ function Show-CompletionDialog {
         $iconText = $dialog.FindName("iconText")
         $txtTitle = $dialog.FindName("txtTitle")
         $txtSubtitle = $dialog.FindName("txtSubtitle")
+        $txtTotalFilesValue = $dialog.FindName("txtTotalFilesValue")
+        $txtSuccessPercentValue = $dialog.FindName("txtSuccessPercentValue")
         $txtChunksValue = $dialog.FindName("txtChunksValue")
         $txtTotalValue = $dialog.FindName("txtTotalValue")
         $txtFailedValue = $dialog.FindName("txtFailedValue")
@@ -299,12 +304,35 @@ function Show-CompletionDialog {
         $btnViewLogs = $dialog.FindName("btnViewLogs")
         $btnOk = $dialog.FindName("btnOk")
 
-        # Set values
+        # Calculate total files and success percentage
+        $totalFiles = $FilesCopied + $FilesSkipped + $FilesFailed
+        $successPercent = if ($totalFiles -gt 0) {
+            [math]::Round(($FilesCopied + $FilesSkipped) / $totalFiles * 100, 1)
+        } else { 100 }
+
+        # Cap at 99.9% if any files failed - don't claim 100% with failures
+        if ($FilesFailed -gt 0 -and $successPercent -ge 100) {
+            $successPercent = 99.9
+        }
+
+        # Set file summary values
+        $txtTotalFilesValue.Text = $totalFiles.ToString("N0")
+        $txtSuccessPercentValue.Text = "$successPercent%"
+
+        # Color success percentage based on value
+        if ($successPercent -lt 90) {
+            $txtSuccessPercentValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")  # Red
+        } elseif ($successPercent -lt 100) {
+            $txtSuccessPercentValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")  # Orange
+        }
+        # else stays green (#4CAF50) from XAML default
+
+        # Set chunk values
         $txtChunksValue.Text = $ChunksComplete.ToString()
         $txtTotalValue.Text = $ChunksTotal.ToString()
         $txtFailedValue.Text = $ChunksFailed.ToString()
-        $txtSkippedValue.Text = $FilesSkipped.ToString()
-        $txtFilesFailedValue.Text = $FilesFailed.ToString()
+        $txtSkippedValue.Text = $FilesSkipped.ToString("N0")
+        $txtFilesFailedValue.Text = $FilesFailed.ToString("N0")
 
         # Color files failed red if > 0
         if ($FilesFailed -gt 0) {
