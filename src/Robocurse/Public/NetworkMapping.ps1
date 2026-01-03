@@ -471,25 +471,28 @@ function Mount-SingleNetworkPath {
 
         Write-RobocurseLog -Message "Acquired drive letter mutex for '$root'" -Level 'Debug' -Component 'NetworkMapping'
 
-        # Clean up stale mapping to same root (from crashed previous runs)
-        $existingDrive = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayRoot -eq $root }
-        if ($existingDrive) {
+        # Clean up stale mapping(s) to same root (from crashed previous runs)
+        # Note: Use @() to ensure array even if single result, then iterate to handle multiple mappings
+        $existingDrives = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayRoot -eq $root })
+        foreach ($existingDrive in $existingDrives) {
             Write-RobocurseLog -Message "Removing stale PSDrive mapping $($existingDrive.Name): to '$root'" -Level 'Debug' -Component 'NetworkMapping'
             Remove-DriveMapping -DriveLetter $existingDrive.Name | Out-Null
-            # Also remove from reserved if it was there
             $script:ReservedDriveLetters.Remove([string]$existingDrive.Name) | Out-Null
         }
 
         # Also check for SMB-only remembered mappings to the same root
+        # Note: Use @() to ensure array even if single result, then iterate to handle multiple mappings
         try {
-            $existingSmbMapping = Get-SmbMapping -ErrorAction SilentlyContinue |
-                Where-Object { $_.RemotePath -eq $root }
-            if ($existingSmbMapping -and $existingSmbMapping.LocalPath) {
-                $smbLetter = $existingSmbMapping.LocalPath -replace ':$', ''
-                Write-RobocurseLog -Message "Removing stale SMB mapping $smbLetter`: to '$root'" -Level 'Debug' -Component 'NetworkMapping'
-                Remove-DriveMapping -DriveLetter $smbLetter | Out-Null
-                $script:ReservedDriveLetters.Remove($smbLetter) | Out-Null
+            $existingSmbMappings = @(Get-SmbMapping -ErrorAction SilentlyContinue |
+                Where-Object { $_.RemotePath -eq $root })
+            foreach ($existingSmbMapping in $existingSmbMappings) {
+                if ($existingSmbMapping.LocalPath) {
+                    $smbLetter = $existingSmbMapping.LocalPath -replace ':$', ''
+                    Write-RobocurseLog -Message "Removing stale SMB mapping $smbLetter`: to '$root'" -Level 'Debug' -Component 'NetworkMapping'
+                    Remove-DriveMapping -DriveLetter $smbLetter | Out-Null
+                    $script:ReservedDriveLetters.Remove($smbLetter) | Out-Null
+                }
             }
         } catch { }
 

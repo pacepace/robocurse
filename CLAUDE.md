@@ -51,9 +51,9 @@ Output files:
 - `$env:TEMP\pester-summary.txt` - pass/fail counts
 - `$env:TEMP\pester-failures.txt` - failed test names and errors
 
-**Reading test results from bash** (use single quotes so PowerShell expands $env:TEMP):
+**Reading test results from bash** (no quotes around $env:TEMP - this format auto-approves):
 ```bash
-powershell -NoProfile -Command 'Get-Content "$env:TEMP\pester-summary.txt"; Get-Content "$env:TEMP\pester-failures.txt"'
+powershell -NoProfile -Command 'Get-Content $env:TEMP\pester-summary.txt; Get-Content $env:TEMP\pester-failures.txt'
 ```
 
 **Skipped tests:**
@@ -120,6 +120,8 @@ When creating scheduled tasks for profiles with network paths:
 ## PowerShell Gotchas
 
 **DO NOT use `$IsWindows` as a variable name** - it's read-only in PS Core. Use `$RunningOnWindows` instead.
+
+**Flaky tests** can have many causes. One cause is timing - operations completing faster than expected (e.g., processes exiting quickly, copies finishing before progress capture). Don't assume all flaky tests are timing-related.
 
 ## Security
 
