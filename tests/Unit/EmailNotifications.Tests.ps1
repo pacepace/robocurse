@@ -528,6 +528,95 @@ InModuleScope 'Robocurse' {
             }
         }
 
+        Context "New-CompletionEmailBody Total Files and Success Rate" {
+            It "Includes Total Files in stats section" {
+                $results = [PSCustomObject]@{
+                    Duration = [timespan]::FromMinutes(5)
+                    TotalBytesCopied = 1000
+                    TotalFilesCopied = 100
+                    TotalErrors = 0
+                    Profiles = @()
+                    Errors = @()
+                }
+
+                $html = New-CompletionEmailBody -Results $results -Status 'Success' -FilesSkipped 20 -FilesFailed 5
+
+                $html | Should -Match 'Total Files'
+                # Total = 100 copied + 20 skipped + 5 failed = 125
+                $html | Should -Match '125'
+            }
+
+            It "Includes Success Rate in stats section" {
+                $results = [PSCustomObject]@{
+                    Duration = [timespan]::FromMinutes(5)
+                    TotalBytesCopied = 1000
+                    TotalFilesCopied = 80
+                    TotalErrors = 0
+                    Profiles = @()
+                    Errors = @()
+                }
+
+                $html = New-CompletionEmailBody -Results $results -Status 'Success' -FilesSkipped 10 -FilesFailed 10
+
+                $html | Should -Match 'Success Rate'
+                # Success = (80 copied + 10 skipped) / 100 total = 90%
+                $html | Should -Match '90%'
+            }
+
+            It "Shows 100% success rate when no files" {
+                $results = [PSCustomObject]@{
+                    Duration = [timespan]::FromMinutes(1)
+                    TotalBytesCopied = 0
+                    TotalFilesCopied = 0
+                    TotalErrors = 0
+                    Profiles = @()
+                    Errors = @()
+                }
+
+                $html = New-CompletionEmailBody -Results $results -Status 'Success' -FilesSkipped 0 -FilesFailed 0
+
+                $html | Should -Match 'Success Rate'
+                $html | Should -Match '100%'
+            }
+
+            It "Calculates correct success rate with only failures" {
+                $results = [PSCustomObject]@{
+                    Duration = [timespan]::FromMinutes(5)
+                    TotalBytesCopied = 0
+                    TotalFilesCopied = 0
+                    TotalErrors = 5
+                    Profiles = @()
+                    Errors = @()
+                }
+
+                $html = New-CompletionEmailBody -Results $results -Status 'Failed' -FilesSkipped 0 -FilesFailed 100
+
+                $html | Should -Match 'Success Rate'
+                # Success = 0 / 100 = 0%
+                $html | Should -Match '0%'
+            }
+
+            It "Caps success rate at 99.9% when files failed but rate rounds to 100%" {
+                # Simulate scenario: 21083 skipped, 1 failed = 99.995% which rounds to 100%
+                # But we cap at 99.9% when any failures exist
+                $results = [PSCustomObject]@{
+                    Duration = [timespan]::FromMinutes(5)
+                    TotalBytesCopied = 1000
+                    TotalFilesCopied = 0
+                    TotalErrors = 0
+                    Profiles = @()
+                    Errors = @()
+                }
+
+                $html = New-CompletionEmailBody -Results $results -Status 'Success' -FilesSkipped 21083 -FilesFailed 1
+
+                $html | Should -Match 'Success Rate'
+                # Should show 99.9%, not 100%
+                $html | Should -Match '99\.9%'
+                $html | Should -Not -Match '>100%<'
+            }
+        }
+
         Context "Send-CompletionEmail Attachments" {
             BeforeEach {
                 $script:mockConfig = [PSCustomObject]@{

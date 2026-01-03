@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.b9e91e4 - Built: 2026-01-02 00:37:45
+    Version: dev.b7500ae - Built: 2026-01-02 18:55:52
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.b9e91e4'
+$script:RobocurseVersion = 'dev.b7500ae'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -8820,25 +8820,28 @@ function Mount-SingleNetworkPath {
 
         Write-RobocurseLog -Message "Acquired drive letter mutex for '$root'" -Level 'Debug' -Component 'NetworkMapping'
 
-        # Clean up stale mapping to same root (from crashed previous runs)
-        $existingDrive = Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayRoot -eq $root }
-        if ($existingDrive) {
+        # Clean up stale mapping(s) to same root (from crashed previous runs)
+        # Note: Use @() to ensure array even if single result, then iterate to handle multiple mappings
+        $existingDrives = @(Get-PSDrive -PSProvider FileSystem -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayRoot -eq $root })
+        foreach ($existingDrive in $existingDrives) {
             Write-RobocurseLog -Message "Removing stale PSDrive mapping $($existingDrive.Name): to '$root'" -Level 'Debug' -Component 'NetworkMapping'
             Remove-DriveMapping -DriveLetter $existingDrive.Name | Out-Null
-            # Also remove from reserved if it was there
             $script:ReservedDriveLetters.Remove([string]$existingDrive.Name) | Out-Null
         }
 
         # Also check for SMB-only remembered mappings to the same root
+        # Note: Use @() to ensure array even if single result, then iterate to handle multiple mappings
         try {
-            $existingSmbMapping = Get-SmbMapping -ErrorAction SilentlyContinue |
-                Where-Object { $_.RemotePath -eq $root }
-            if ($existingSmbMapping -and $existingSmbMapping.LocalPath) {
-                $smbLetter = $existingSmbMapping.LocalPath -replace ':$', ''
-                Write-RobocurseLog -Message "Removing stale SMB mapping $smbLetter`: to '$root'" -Level 'Debug' -Component 'NetworkMapping'
-                Remove-DriveMapping -DriveLetter $smbLetter | Out-Null
-                $script:ReservedDriveLetters.Remove($smbLetter) | Out-Null
+            $existingSmbMappings = @(Get-SmbMapping -ErrorAction SilentlyContinue |
+                Where-Object { $_.RemotePath -eq $root })
+            foreach ($existingSmbMapping in $existingSmbMappings) {
+                if ($existingSmbMapping.LocalPath) {
+                    $smbLetter = $existingSmbMapping.LocalPath -replace ':$', ''
+                    Write-RobocurseLog -Message "Removing stale SMB mapping $smbLetter`: to '$root'" -Level 'Debug' -Component 'NetworkMapping'
+                    Remove-DriveMapping -DriveLetter $smbLetter | Out-Null
+                    $script:ReservedDriveLetters.Remove($smbLetter) | Out-Null
+                }
             }
         } catch { }
 
@@ -9797,6 +9800,7 @@ function Start-ProfileReplication {
                     # Check for stop request after remote VSS snapshot creation
                     if ($state.StopRequested) {
                         Write-RobocurseLog -Message "Stop requested after remote VSS snapshot, cleaning up" -Level 'Info' -Component 'Orchestrator'
+                        $state.CurrentActivity = "Removing VSS snapshot..."
                         Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName -Credential $networkCredential
                         $state.CurrentVssSnapshot = $null
                         return
@@ -9820,7 +9824,9 @@ function Start-ProfileReplication {
                         # Check for stop request after remote VSS junction creation
                         if ($state.StopRequested) {
                             Write-RobocurseLog -Message "Stop requested after remote VSS junction, cleaning up" -Level 'Info' -Component 'Orchestrator'
+                            $state.CurrentActivity = "Removing VSS junction..."
                             Remove-RemoteVssJunction -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath -ServerName $snapshot.ServerName -Credential $networkCredential
+                            $state.CurrentActivity = "Removing VSS snapshot..."
                             Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName -Credential $networkCredential
                             $state.CurrentVssJunction = $null
                             $state.CurrentVssSnapshot = $null
@@ -9830,6 +9836,7 @@ function Start-ProfileReplication {
                     else {
                         # Junction failed - clean up snapshot and continue without VSS
                         Write-RobocurseLog -Message "Failed to create remote VSS junction: $($junctionResult.ErrorMessage)" -Level 'Warning' -Component 'VSS'
+                        $state.CurrentActivity = "Removing VSS snapshot..."
                         Remove-RemoteVssSnapshot -ShadowId $snapshot.ShadowId -ServerName $snapshot.ServerName -Credential $networkCredential
                         $state.CurrentVssSnapshot = $null
                     }
@@ -9866,6 +9873,7 @@ function Start-ProfileReplication {
                     # Check for stop request after local VSS snapshot creation
                     if ($state.StopRequested) {
                         Write-RobocurseLog -Message "Stop requested after local VSS snapshot, cleaning up" -Level 'Info' -Component 'Orchestrator'
+                        $state.CurrentActivity = "Removing VSS snapshot..."
                         Remove-VssSnapshot -ShadowId $snapshot.ShadowId
                         $state.CurrentVssSnapshot = $null
                         return
@@ -10571,6 +10579,7 @@ function Complete-CurrentProfile {
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
+        $state.CurrentActivity = "Removing VSS junction..."
         $removeJunctionResult = Remove-RemoteVssJunction `
             -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
             -ServerName $state.CurrentVssJunction.ServerName `
@@ -10583,6 +10592,7 @@ function Complete-CurrentProfile {
 
     # Clean up VSS snapshot (local or remote)
     if ($state.CurrentVssSnapshot) {
+        $state.CurrentActivity = "Removing VSS snapshot..."
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
             $removeResult = Remove-RemoteVssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId -ServerName $state.CurrentVssSnapshot.ServerName -Credential $state.NetworkCredential
@@ -10701,6 +10711,7 @@ function Stop-AllJobs {
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction after stop" -Level 'Info' -Component 'VSS'
+        $state.CurrentActivity = "Removing VSS junction..."
         try {
             $removeJunctionResult = Remove-RemoteVssJunction `
                 -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
@@ -10720,6 +10731,7 @@ function Stop-AllJobs {
 
     # Clean up VSS snapshot (local or remote)
     if ($state.CurrentVssSnapshot) {
+        $state.CurrentActivity = "Removing VSS snapshot..."
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot after stop: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
             try {
@@ -15501,6 +15513,19 @@ $additionalErrors
     $filesSkippedStr = $FilesSkipped.ToString('N0')
     $filesFailedStr = $FilesFailed.ToString('N0')
 
+    # Calculate total files and success rate for summary
+    $totalFiles = $Results.TotalFilesCopied + $FilesSkipped + $FilesFailed
+    $totalFilesStr = $totalFiles.ToString('N0')
+    $successRate = if ($totalFiles -gt 0) {
+        [math]::Round(($Results.TotalFilesCopied + $FilesSkipped) / $totalFiles * 100, 1)
+    } else { 100 }
+
+    # Cap at 99.9% if any files failed - don't claim 100% with failures
+    if ($FilesFailed -gt 0 -and $successRate -ge 100) {
+        $successRate = 99.9
+    }
+    $successRateStr = "$successRate%"
+
     $html = @"
 <!DOCTYPE html>
 <html>
@@ -15519,6 +15544,14 @@ $additionalErrors
             <p>Replication completed at <strong>$completionTime</strong></p>
 
             <div class="stat-grid">
+                <div class="stat-box">
+                    <div class="stat-label">Total Files</div>
+                    <div class="stat-value">$totalFilesStr</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-label">Success Rate</div>
+                    <div class="stat-value">$successRateStr</div>
+                </div>
                 <div class="stat-box">
                     <div class="stat-label">Duration</div>
                     <div class="stat-value">$durationStr</div>
@@ -15570,7 +15603,7 @@ $(if ($hasExternal) { "            <p style='color: #FF9800;'><em>External snaps
 $errorsHtml
         </div>
         <div class="footer">
-            Generated by <a href="https://github.com/pacepace/robocurse" style="color: #666;">Robocurse</a> | Machine: $computerName$(if ($SessionId) { " | Run ID: $SessionId" })
+            <a href="https://github.com/pacepace/robocurse" style="color: #666;">Robocurse</a> $(if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev" }) | Machine: $computerName$(if ($SessionId) { " | Run ID: $SessionId" })
         </div>
     </div>
 </body>
@@ -15689,7 +15722,7 @@ Chunks Failed: $($Results.TotalErrors)
     # Footer
     $text += @"
 --
-Generated by Robocurse (https://github.com/pacepace/robocurse)
+Robocurse (https://github.com/pacepace/robocurse) $(if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev" })
 Machine: $computerName
 "@
     if ($SessionId) {
@@ -20061,6 +20094,8 @@ function Show-CompletionDialog {
         Number of chunks that failed
     .PARAMETER ChunksWarning
         Number of chunks that completed with warnings (e.g., some files skipped)
+    .PARAMETER FilesCopied
+        Total number of files successfully copied
     .PARAMETER FilesFailed
         Total number of files that failed to copy (errors, locked, access denied)
     .PARAMETER FailedFilesSummaryPath
@@ -20078,6 +20113,7 @@ function Show-CompletionDialog {
         [int]$ChunksTotal = 0,
         [int]$ChunksFailed = 0,
         [int]$ChunksWarning = 0,
+        [long]$FilesCopied = 0,
         [long]$FilesSkipped = 0,
         [long]$FilesFailed = 0,
         [string]$FailedFilesSummaryPath = $null,
@@ -20165,6 +20201,7 @@ function Show-CompletionDialog {
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -20186,8 +20223,28 @@ function Show-CompletionDialog {
             <!-- Separator -->
             <Border Grid.Row="1" Height="1" Background="#3E3E3E" Margin="0,0,0,16"/>
 
-            <!-- Stats panel -->
-            <Grid Grid.Row="2" Margin="0,0,0,12">
+            <!-- File summary stats (Total Files and Success %) -->
+            <Grid Grid.Row="2" Margin="0,0,0,16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Total files -->
+                <StackPanel Grid.Column="0" HorizontalAlignment="Center">
+                    <TextBlock x:Name="txtTotalFilesValue" Text="0" FontSize="28" FontWeight="Bold" Foreground="#0078D4" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Total Files" FontSize="11" Foreground="#808080" HorizontalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Success percentage -->
+                <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                    <TextBlock x:Name="txtSuccessPercentValue" Text="0%" FontSize="28" FontWeight="Bold" Foreground="#4CAF50" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Success Rate" FontSize="11" Foreground="#808080" HorizontalAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+
+            <!-- Chunk stats panel -->
+            <Grid Grid.Row="3" Margin="0,0,0,12">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="*"/>
@@ -20228,14 +20285,14 @@ function Show-CompletionDialog {
             </Grid>
 
             <!-- View Failed Files Link (hidden when no failed files) -->
-            <TextBlock x:Name="lnkFailedFiles" Grid.Row="3" Text="View failed files..."
+            <TextBlock x:Name="lnkFailedFiles" Grid.Row="4" Text="View failed files..."
                        FontSize="11" Foreground="#0078D4" Cursor="Hand"
                        HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,8,0,12"
                        Visibility="Collapsed" TextDecorations="Underline"
                        Background="Transparent"/>
 
             <!-- Error Details Panel (Collapsed by default) -->
-            <Border x:Name="pnlErrors" Grid.Row="2" Visibility="Collapsed" Background="#252525" CornerRadius="4"
+            <Border x:Name="pnlErrors" Grid.Row="3" Visibility="Collapsed" Background="#252525" CornerRadius="4"
                     BorderBrush="#FF6B6B" BorderThickness="1" Padding="12" Margin="0,0,0,16" MaxHeight="200">
                 <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <StackPanel>
@@ -20258,7 +20315,7 @@ function Show-CompletionDialog {
             </Border>
 
             <!-- OK Button with proper styling -->
-            <Button x:Name="btnOk" Grid.Row="4" Content="OK" Style="{StaticResource ModernButton}" HorizontalAlignment="Center"/>
+            <Button x:Name="btnOk" Grid.Row="5" Content="OK" Style="{StaticResource ModernButton}" HorizontalAlignment="Center"/>
         </Grid>
     </Border>
 </Window>
@@ -20273,6 +20330,8 @@ function Show-CompletionDialog {
         $iconText = $dialog.FindName("iconText")
         $txtTitle = $dialog.FindName("txtTitle")
         $txtSubtitle = $dialog.FindName("txtSubtitle")
+        $txtTotalFilesValue = $dialog.FindName("txtTotalFilesValue")
+        $txtSuccessPercentValue = $dialog.FindName("txtSuccessPercentValue")
         $txtChunksValue = $dialog.FindName("txtChunksValue")
         $txtTotalValue = $dialog.FindName("txtTotalValue")
         $txtFailedValue = $dialog.FindName("txtFailedValue")
@@ -20286,12 +20345,35 @@ function Show-CompletionDialog {
         $btnViewLogs = $dialog.FindName("btnViewLogs")
         $btnOk = $dialog.FindName("btnOk")
 
-        # Set values
+        # Calculate total files and success percentage
+        $totalFiles = $FilesCopied + $FilesSkipped + $FilesFailed
+        $successPercent = if ($totalFiles -gt 0) {
+            [math]::Round(($FilesCopied + $FilesSkipped) / $totalFiles * 100, 1)
+        } else { 100 }
+
+        # Cap at 99.9% if any files failed - don't claim 100% with failures
+        if ($FilesFailed -gt 0 -and $successPercent -ge 100) {
+            $successPercent = 99.9
+        }
+
+        # Set file summary values
+        $txtTotalFilesValue.Text = $totalFiles.ToString("N0")
+        $txtSuccessPercentValue.Text = "$successPercent%"
+
+        # Color success percentage based on value
+        if ($successPercent -lt 90) {
+            $txtSuccessPercentValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")  # Red
+        } elseif ($successPercent -lt 100) {
+            $txtSuccessPercentValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")  # Orange
+        }
+        # else stays green (#4CAF50) from XAML default
+
+        # Set chunk values
         $txtChunksValue.Text = $ChunksComplete.ToString()
         $txtTotalValue.Text = $ChunksTotal.ToString()
         $txtFailedValue.Text = $ChunksFailed.ToString()
-        $txtSkippedValue.Text = $FilesSkipped.ToString()
-        $txtFilesFailedValue.Text = $FilesFailed.ToString()
+        $txtSkippedValue.Text = $FilesSkipped.ToString("N0")
+        $txtFilesFailedValue.Text = $FilesFailed.ToString("N0")
 
         # Color files failed red if > 0
         if ($FilesFailed -gt 0) {
@@ -22847,9 +22929,10 @@ function Complete-GuiReplication {
     }
 
     # Show completion dialog (modal - blocks until user clicks OK)
+    $dialogFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
     $dialogFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
     $dialogFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
-    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails -PreflightErrors $preflightErrors
+    Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesCopied $dialogFilesCopied -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails -PreflightErrors $preflightErrors
 }
 
 #endregion
@@ -25616,7 +25699,7 @@ function Initialize-RobocurseGui {
     $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
     $script:Window.Title = "Robocurse $version - Replication Cursed Robo"
 
-    Write-GuiLog "Robocurse GUI initialized"
+    Write-GuiLog "Robocurse (https://github.com/pacepace/robocurse) $version initialized"
 
     return $script:Window
 }

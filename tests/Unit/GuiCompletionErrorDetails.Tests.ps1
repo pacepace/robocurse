@@ -291,6 +291,19 @@ InModuleScope 'Robocurse' {
             }
         }
 
+        Context "Show-CompletionDialog FilesCopied Parameter" {
+            It "Accepts FilesCopied parameter" {
+                $cmd = Get-Command Show-CompletionDialog -ErrorAction SilentlyContinue
+                $cmd.Parameters.Keys | Should -Contain 'FilesCopied'
+            }
+
+            It "FilesCopied is typed as long" {
+                $cmd = Get-Command Show-CompletionDialog -ErrorAction SilentlyContinue
+                $param = $cmd.Parameters['FilesCopied']
+                $param.ParameterType.Name | Should -Be 'Int64'
+            }
+        }
+
         Context "XAML CompletionDialog Skipped Controls" {
             BeforeAll {
                 $script:TestXamlContent = Get-XamlResource -ResourceName 'CompletionDialog.xaml'
@@ -316,6 +329,28 @@ InModuleScope 'Robocurse' {
                 # Count ColumnDefinition elements in stats grid
                 $matches = [regex]::Matches($script:TestXamlContent, '<ColumnDefinition')
                 $matches.Count | Should -BeGreaterOrEqual 5
+            }
+        }
+
+        Context "XAML CompletionDialog Total Files and Success Rate Controls" {
+            BeforeAll {
+                $script:TestXamlContent = Get-XamlResource -ResourceName 'CompletionDialog.xaml'
+            }
+
+            It "Should have txtTotalFilesValue TextBlock" {
+                $script:TestXamlContent | Should -Match 'x:Name="txtTotalFilesValue"'
+            }
+
+            It "Should have txtSuccessPercentValue TextBlock" {
+                $script:TestXamlContent | Should -Match 'x:Name="txtSuccessPercentValue"'
+            }
+
+            It "Should have Total Files label" {
+                $script:TestXamlContent | Should -Match 'Total Files'
+            }
+
+            It "Should have Success Rate label" {
+                $script:TestXamlContent | Should -Match 'Success Rate'
             }
         }
     }

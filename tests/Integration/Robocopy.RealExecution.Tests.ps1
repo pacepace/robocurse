@@ -385,9 +385,12 @@ InModuleScope 'Robocurse' {
                 #
                 # DO NOT add assertions expecting ProgressBuffer to match total file size.
                 # That will cause flaky tests due to inherent race conditions.
+                #
+                # Use enough data (150MB) so copy takes long enough for ProgressBuffer to
+                # capture some progress. Smaller sizes can finish before any events fire.
 
-                $fileSize = 2MB
-                $fileCount = 20
+                $fileSize = 5MB
+                $fileCount = 30
                 $totalSize = $fileSize * $fileCount
 
                 for ($i = 1; $i -le $fileCount; $i++) {
