@@ -185,7 +185,7 @@ function Initialize-RobocurseGui {
     $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
     $script:Window.Title = "Robocurse $version - Replication Cursed Robo"
 
-    Write-GuiLog "Robocurse GUI initialized"
+    Write-GuiLog "Robocurse (https://github.com/pacepace/robocurse) $version initialized"
 
     return $script:Window
 }

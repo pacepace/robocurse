@@ -103,6 +103,13 @@ Describe "Real Robocopy Integration Tests" -Skip:(-not $script:IsWindowsWithRobo
 
     Context "Basic File Copying" {
         BeforeEach {
+            # Ensure robocopy path is validated before each test
+            # This sets $script:RobocopyPath in the module so Start-RobocopyJob works
+            $robocopyCheck = Test-RobocopyAvailable
+            if (-not $robocopyCheck.Success) {
+                throw "Test-RobocopyAvailable failed in BeforeEach: $($robocopyCheck.ErrorMessage)"
+            }
+
             $script:SourceDir = Join-Path $TestDrive "source"
             $script:DestDir = Join-Path $TestDrive "dest"
             $script:LogDir = Join-Path $TestDrive "logs"
@@ -127,8 +134,11 @@ Describe "Real Robocopy Integration Tests" -Skip:(-not $script:IsWindowsWithRobo
 
             $job = Start-RobocopyJob -Chunk $chunk -LogPath $logPath -ThreadsPerJob 4
 
-            $job | Should -Not -BeNullOrEmpty
-            $job.Process | Should -Not -BeNullOrEmpty
+            # Validate job object - use direct null checks, NOT string interpolation
+            # String interpolation of $job can fail if Process exits quickly because
+            # accessing exited Process properties throws "Process has exited" exception
+            $null -eq $job | Should -Be $false -Because "Start-RobocopyJob should return job object"
+            $null -eq $job.Process | Should -Be $false -Because "job.Process should exist"
 
             # Wait for completion
             $completed = Wait-RobocopyComplete -Job $job
