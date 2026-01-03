@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.4794406 - Built: 2026-01-03 03:27:27
+    Version: dev.9220f14 - Built: 2026-01-02 19:54:53
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.4794406'
+$script:RobocurseVersion = 'dev.9220f14'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -10576,6 +10576,9 @@ function Complete-CurrentProfile {
         durationMs = $profileDuration.TotalMilliseconds
     }
 
+    # Enter cleanup phase for VSS/network resource cleanup
+    $state.Phase = 'Cleanup'
+
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
@@ -10706,7 +10709,7 @@ function Stop-AllJobs {
     }
 
     $state.ActiveJobs.Clear()
-    $state.Phase = "Stopped"
+    $state.Phase = 'Cleanup'
 
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
@@ -10783,6 +10786,9 @@ function Stop-AllJobs {
         }
     }
     $state.NetworkCredential = $null
+
+    # Cleanup complete, now set final stopped state
+    $state.Phase = 'Stopped'
 
     # Unregister the current profile as running (release the mutex)
     if ($state.CurrentProfile) {
@@ -23321,12 +23327,12 @@ function Get-ChunkDisplayItems {
 
     $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # Show current activity during Preparing/Scanning phases (before chunks are available)
+    # Show current activity during Preparing/Scanning/Cleanup phases
     $currentActivity = $script:OrchestrationState.CurrentActivity
     $phase = $script:OrchestrationState.Phase
-    if ($currentActivity -and ($phase -eq 'Preparing' -or $phase -eq 'Scanning')) {
+    if ($currentActivity -and ($phase -in @('Preparing', 'Scanning', 'Cleanup'))) {
         $scanProgress = $script:OrchestrationState.ScanProgress
-        $displayStatus = if ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
+        $displayStatus = if ($phase -eq 'Cleanup') { 'Cleanup' } elseif ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = "--"
             SourcePath = $currentActivity
@@ -23548,8 +23554,8 @@ function Update-GuiProgress {
                 Update-ErrorIndicatorState
                 Update-ProfileErrorSummary
             }
-            # Show preparing/scanning activity in status bar when not replicating yet
-            elseif (($script:OrchestrationState.Phase -eq 'Preparing' -or $script:OrchestrationState.Phase -eq 'Scanning') -and $script:OrchestrationState.CurrentActivity) {
+            # Show preparing/scanning/cleanup activity in status bar
+            elseif ($script:OrchestrationState.Phase -in @('Preparing', 'Scanning', 'Cleanup') -and $script:OrchestrationState.CurrentActivity) {
                 $counter = $script:OrchestrationState.ScanProgress
                 $activity = $script:OrchestrationState.CurrentActivity
                 $newText = if ($counter -gt 0) { "$activity ($counter)" } else { $activity }

@@ -1535,6 +1535,9 @@ function Complete-CurrentProfile {
         durationMs = $profileDuration.TotalMilliseconds
     }
 
+    # Enter cleanup phase for VSS/network resource cleanup
+    $state.Phase = 'Cleanup'
+
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
@@ -1665,7 +1668,7 @@ function Stop-AllJobs {
     }
 
     $state.ActiveJobs.Clear()
-    $state.Phase = "Stopped"
+    $state.Phase = 'Cleanup'
 
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
@@ -1742,6 +1745,9 @@ function Stop-AllJobs {
         }
     }
     $state.NetworkCredential = $null
+
+    # Cleanup complete, now set final stopped state
+    $state.Phase = 'Stopped'
 
     # Unregister the current profile as running (release the mutex)
     if ($state.CurrentProfile) {
