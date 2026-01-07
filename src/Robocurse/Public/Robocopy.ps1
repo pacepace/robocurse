@@ -1750,35 +1750,46 @@ function New-FailedFilesSummary {
         return $null
     }
 
-    # Common Windows error codes and their meanings
+    # Windows system error codes per Microsoft documentation
+    # https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-
     $errorDescriptions = @{
         2 = "File not found"
         3 = "Path not found"
+        4 = "Too many open files"
         5 = "Access denied"
         6 = "Invalid handle"
+        17 = "Cannot move to different drive"
         19 = "Media write-protected"
+        20 = "Device not found"
         21 = "Device not ready"
         29 = "Write fault"
         30 = "Read fault"
-        32 = "File in use by another process"
-        33 = "File locked"
+        31 = "General failure"
+        32 = "Sharing violation - file in use"
+        33 = "Lock violation - file locked"
         39 = "Disk full"
+        51 = "Network path unavailable"
+        53 = "Network path not found"
+        55 = "Network resource unavailable"
         80 = "File already exists"
+        82 = "Cannot create directory/file"
+        111 = "Filename too long"
         112 = "Disk full"
-        121 = "Timeout"
+        121 = "Semaphore timeout"
         122 = "Buffer too small"
-        123 = "Invalid filename"
+        123 = "Invalid filename syntax"
         183 = "File already exists"
-        206 = "Filename too long"
+        206 = "Filename/extension too long"
         1314 = "Privilege not held"
         1920 = "File encrypted (EFS)"
     }
 
     # Collect all ERROR entries from robocopy logs
-    # Robocopy ERROR lines have format: [timestamp] ERROR <code> (0x<hex>) <message>
-    # Example: 2024/01/15 10:30:45 ERROR 32 (0x00000020) Copying File D:\path\to\file.txt
-    # Example: ERROR 5 (0x00000005) Access is denied.
-    # The timestamp is optional, so match ERROR anywhere in the line
+    # Robocopy ERROR lines have format: [timestamp] ERROR <code> (0x<hex>) <operation> <path>
+    # Followed by indented line with actual Windows error message:
+    # Example:
+    #   ERROR 2 (0x00000002) Changing File Attributes Z:\path\file.docx
+    #      The system cannot find the file specified.
     # Robocopy retries files (R:3 = 3 retries), so deduplicate by file path
     $failedEntries = [System.Collections.Generic.List[string]]::new()
     $seenFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -1786,15 +1797,15 @@ function New-FailedFilesSummary {
     # Pattern to extract file path from error line for deduplication
     # Includes: "Copying File", "Creating Destination Directory", "Changing File Attributes"
     $filePathPattern = '(?:Copying File|Creating Destination Directory|Changing File Attributes)\s+(.+)$'
-    $currentChunk = ""
 
     foreach ($logFile in $chunkLogs) {
         try {
-            $logContent = Get-Content -Path $logFile.FullName -ErrorAction Stop
+            $logContent = @(Get-Content -Path $logFile.FullName -ErrorAction Stop)
             $chunkName = $logFile.BaseName
             $chunkHasErrors = $false
 
-            foreach ($line in $logContent) {
+            for ($i = 0; $i -lt $logContent.Count; $i++) {
+                $line = $logContent[$i]
                 if ($line -match $errorCodePattern) {
                     $cleanLine = $line.Trim()
                     $errorCode = [int]$matches[1]
@@ -1822,10 +1833,23 @@ function New-FailedFilesSummary {
                         $chunkHasErrors = $true
                     }
 
-                    # Add error description if known (on same line)
-                    $description = $errorDescriptions[$errorCode]
-                    if ($description) {
-                        $failedEntries.Add("$cleanLine [$description]")
+                    # Check next line for Windows error message (indented line after ERROR)
+                    # Robocopy outputs the actual error text on the following line
+                    $windowsErrorMsg = $null
+                    if ($i + 1 -lt $logContent.Count) {
+                        $nextLine = $logContent[$i + 1]
+                        # Windows error messages are indented and don't start with ERROR or timestamps
+                        if ($nextLine -match '^\s{2,}(.+)$' -and $nextLine -notmatch '\bERROR\b' -and $nextLine -notmatch '^\d{4}/\d{2}/\d{2}') {
+                            $windowsErrorMsg = $matches[1].Trim()
+                        }
+                    }
+
+                    # Use Windows error message if available, otherwise fall back to our mapping
+                    if ($windowsErrorMsg) {
+                        $failedEntries.Add("$cleanLine [$windowsErrorMsg]")
+                    }
+                    elseif ($errorDescriptions[$errorCode]) {
+                        $failedEntries.Add("$cleanLine [$($errorDescriptions[$errorCode])]")
                     }
                     else {
                         $failedEntries.Add($cleanLine)

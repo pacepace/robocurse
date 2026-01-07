@@ -313,6 +313,10 @@ InModuleScope 'Robocurse' {
                 $script:TestXamlContent | Should -Match 'x:Name="txtSkippedValue"'
             }
 
+            It "Should have txtFilesCopiedValue TextBlock" {
+                $script:TestXamlContent | Should -Match 'x:Name="txtFilesCopiedValue"'
+            }
+
             It "Should have txtFilesFailedValue TextBlock" {
                 $script:TestXamlContent | Should -Match 'x:Name="txtFilesFailedValue"'
             }
@@ -325,10 +329,10 @@ InModuleScope 'Robocurse' {
                 $script:TestXamlContent | Should -Match 'x:Name="lnkFailedFiles"[^>]*Visibility="Collapsed"'
             }
 
-            It "Should have 5 stat columns" {
+            It "Should have 6 stat columns" {
                 # Count ColumnDefinition elements in stats grid
                 $matches = [regex]::Matches($script:TestXamlContent, '<ColumnDefinition')
-                $matches.Count | Should -BeGreaterOrEqual 5
+                $matches.Count | Should -BeGreaterOrEqual 6
             }
         }
 

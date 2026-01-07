@@ -124,6 +124,7 @@
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
                 <!-- Chunks completed -->
@@ -144,14 +145,20 @@
                     <TextBlock Text="Chunks Failed" FontSize="10" Foreground="#808080" HorizontalAlignment="Center"/>
                 </StackPanel>
 
-                <!-- Skipped files -->
+                <!-- Files copied -->
                 <StackPanel Grid.Column="3" HorizontalAlignment="Center" Margin="8,0">
+                    <TextBlock x:Name="txtFilesCopiedValue" Text="0" FontSize="24" FontWeight="Bold" Foreground="#4CAF50" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Files Copied" FontSize="10" Foreground="#808080" HorizontalAlignment="Center"/>
+                </StackPanel>
+
+                <!-- Skipped files -->
+                <StackPanel Grid.Column="4" HorizontalAlignment="Center" Margin="8,0">
                     <TextBlock x:Name="txtSkippedValue" Text="0" FontSize="24" FontWeight="Bold" Foreground="#808080" HorizontalAlignment="Center"/>
                     <TextBlock Text="Skipped" FontSize="10" Foreground="#808080" HorizontalAlignment="Center"/>
                 </StackPanel>
 
                 <!-- Files failed to copy -->
-                <StackPanel Grid.Column="4" HorizontalAlignment="Center" Margin="8,0">
+                <StackPanel Grid.Column="5" HorizontalAlignment="Center" Margin="8,0">
                     <TextBlock x:Name="txtFilesFailedValue" Text="0" FontSize="24" FontWeight="Bold" Foreground="#808080" HorizontalAlignment="Center"/>
                     <TextBlock Text="Files Failed" FontSize="10" Foreground="#808080" HorizontalAlignment="Center"/>
                 </StackPanel>

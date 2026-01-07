@@ -294,6 +294,7 @@ function Show-CompletionDialog {
         $txtChunksValue = $dialog.FindName("txtChunksValue")
         $txtTotalValue = $dialog.FindName("txtTotalValue")
         $txtFailedValue = $dialog.FindName("txtFailedValue")
+        $txtFilesCopiedValue = $dialog.FindName("txtFilesCopiedValue")
         $txtSkippedValue = $dialog.FindName("txtSkippedValue")
         $txtFilesFailedValue = $dialog.FindName("txtFilesFailedValue")
         $lnkFailedFiles = $dialog.FindName("lnkFailedFiles")
@@ -331,6 +332,7 @@ function Show-CompletionDialog {
         $txtChunksValue.Text = $ChunksComplete.ToString()
         $txtTotalValue.Text = $ChunksTotal.ToString()
         $txtFailedValue.Text = $ChunksFailed.ToString()
+        $txtFilesCopiedValue.Text = $FilesCopied.ToString("N0")
         $txtSkippedValue.Text = $FilesSkipped.ToString("N0")
         $txtFilesFailedValue.Text = $FilesFailed.ToString("N0")
 
