@@ -170,6 +170,9 @@ function Invoke-HeadlessReplication {
     # Start replication with bandwidth throttling
     Start-ReplicationRun -Profiles $ProfilesToRun -Config $Config -ConfigPath $ConfigPath -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps -DryRun:$DryRun
 
+    # Set orchestration session ID for chunk log naming (GUID from OrchestrationState)
+    Set-OrchestrationSessionId -SessionId $script:OrchestrationState.SessionId
+
     # Track last progress output time for throttling
     $lastProgressOutput = [datetime]::MinValue
     $progressInterval = [timespan]::FromSeconds($script:HeadlessProgressIntervalSeconds)
@@ -264,19 +267,18 @@ function Invoke-HeadlessReplication {
         Write-Host ""
     }
 
-    # Generate failed files summary if there were failures
+    # Generate failed files summary if there were failures (filtered by session ID)
     $failedFilesSummaryPath = $null
     if ($status.FilesFailed -gt 0) {
         try {
-            $logRoot = if ($Config.GlobalSettings.LogPath) { $Config.GlobalSettings.LogPath } else { '.\Logs' }
-            if (-not [System.IO.Path]::IsPathRooted($logRoot)) {
-                $configDir = Split-Path -Parent $ConfigPath
-                $logRoot = [System.IO.Path]::GetFullPath((Join-Path $configDir $logRoot))
-            }
-            $dateFolderName = (Get-Date).ToString('yyyy-MM-dd')
-            $failedFilesSummaryPath = New-FailedFilesSummary -LogPath $logRoot -Date $dateFolderName
-            if ($failedFilesSummaryPath) {
-                Write-Host "  Failed files summary: $failedFilesSummaryPath"
+            $jobsPath = Get-LogPath -Type 'ChunkJob' -ChunkId 1  # Get any chunk path to derive Jobs folder
+            if ($jobsPath) {
+                $jobsFolder = Split-Path -Parent $jobsPath
+                $sessionId = $script:OrchestrationState.SessionId
+                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId
+                if ($failedFilesSummaryPath) {
+                    Write-Host "  Failed files summary: $failedFilesSummaryPath"
+                }
             }
         }
         catch {

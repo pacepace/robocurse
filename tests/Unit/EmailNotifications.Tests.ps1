@@ -458,7 +458,7 @@ InModuleScope 'Robocurse' {
                 $html | Should -Match 'TestProfile'
             }
 
-            It "Includes comma-separated profile names" {
+            It "Includes profile names as list items" {
                 $results = [PSCustomObject]@{
                     Duration = [timespan]::FromMinutes(5)
                     TotalBytesCopied = 1000
@@ -470,7 +470,10 @@ InModuleScope 'Robocurse' {
 
                 $html = New-CompletionEmailBody -Results $results -Status 'Success' -ProfileNames @('Profile1', 'Profile2', 'Profile3')
 
-                $html | Should -Match 'Profile1, Profile2, Profile3'
+                # Profile names should be in list items
+                $html | Should -Match '<li[^>]*>Profile1</li>'
+                $html | Should -Match '<li[^>]*>Profile2</li>'
+                $html | Should -Match '<li[^>]*>Profile3</li>'
             }
 
             It "Profile names appear in header div" {

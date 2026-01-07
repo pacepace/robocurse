@@ -1384,7 +1384,7 @@ InModuleScope 'Robocurse' {
             $jobsPath = Join-Path $datePath "Jobs"
             New-Item -Path $jobsPath -ItemType Directory -Force | Out-Null
 
-            $result = New-FailedFilesSummary -LogPath $testLogPath -Date $testDate
+            $result = New-FailedFilesSummary -JobsPath $jobsPath
 
             $result | Should -BeNullOrEmpty
         }
@@ -1392,9 +1392,11 @@ InModuleScope 'Robocurse' {
         It "Returns null when Jobs folder does not exist" {
             $testLogPath = Join-Path $TestDrive "Logs"
             $testDate = "2025-12-21"
+            $datePath = Join-Path $testLogPath $testDate
+            $jobsPath = Join-Path $datePath "Jobs"
             # Don't create Jobs folder
 
-            $result = New-FailedFilesSummary -LogPath $testLogPath -Date $testDate
+            $result = New-FailedFilesSummary -JobsPath $jobsPath
 
             $result | Should -BeNullOrEmpty
         }
@@ -1416,7 +1418,7 @@ InModuleScope 'Robocurse' {
             )
             $logContent | Out-File -FilePath (Join-Path $jobsPath "Chunk_001.log") -Encoding UTF8
 
-            $result = New-FailedFilesSummary -LogPath $testLogPath -Date $testDate
+            $result = New-FailedFilesSummary -JobsPath $jobsPath
 
             $result | Should -BeNullOrEmpty
         }
@@ -1439,7 +1441,7 @@ InModuleScope 'Robocurse' {
             )
             $logContent | Out-File -FilePath (Join-Path $jobsPath "Chunk_001.log") -Encoding UTF8
 
-            $result = New-FailedFilesSummary -LogPath $testLogPath -Date $testDate
+            $result = New-FailedFilesSummary -JobsPath $jobsPath
 
             $result | Should -Not -BeNullOrEmpty
             Test-Path $result | Should -BeTrue
@@ -1457,7 +1459,7 @@ InModuleScope 'Robocurse' {
             )
             $logContent | Out-File -FilePath (Join-Path $jobsPath "Chunk_001.log") -Encoding UTF8
 
-            $result = New-FailedFilesSummary -LogPath $testLogPath -Date $testDate
+            $result = New-FailedFilesSummary -JobsPath $jobsPath
 
             $result | Should -Not -BeNullOrEmpty
             $content = Get-Content $result -Raw
@@ -1477,7 +1479,7 @@ InModuleScope 'Robocurse' {
             )
             $logContent | Out-File -FilePath (Join-Path $jobsPath "Chunk_001.log") -Encoding UTF8
 
-            $result = New-FailedFilesSummary -LogPath $testLogPath -Date $testDate
+            $result = New-FailedFilesSummary -JobsPath $jobsPath
 
             $content = Get-Content $result -Raw
             $content | Should -Match "report.docx"
@@ -1495,7 +1497,7 @@ InModuleScope 'Robocurse' {
             )
             $logContent | Out-File -FilePath (Join-Path $jobsPath "Chunk_001.log") -Encoding UTF8
 
-            $result = New-FailedFilesSummary -LogPath $testLogPath -Date $testDate
+            $result = New-FailedFilesSummary -JobsPath $jobsPath
 
             $expectedPath = Join-Path $datePath "FailedFiles.txt"
             $result | Should -Be $expectedPath
@@ -1513,7 +1515,7 @@ InModuleScope 'Robocurse' {
             @("ERROR 5 (0x00000005) Copying File C:\Source\file2.txt") | Out-File -FilePath (Join-Path $jobsPath "Chunk_002.log") -Encoding UTF8
             @("ERROR 32 (0x00000020) Copying File C:\Source\file3.txt") | Out-File -FilePath (Join-Path $jobsPath "Chunk_003.log") -Encoding UTF8
 
-            $result = New-FailedFilesSummary -LogPath $testLogPath -Date $testDate
+            $result = New-FailedFilesSummary -JobsPath $jobsPath
 
             $content = Get-Content $result -Raw
             $content | Should -Match "file1.txt"
@@ -1530,10 +1532,78 @@ InModuleScope 'Robocurse' {
 
             @("ERROR 32 (0x00000020) Copying File C:\Source\file1.txt") | Out-File -FilePath (Join-Path $jobsPath "Chunk_001.log") -Encoding UTF8
 
-            $result = New-FailedFilesSummary -LogPath $testLogPath -Date $testDate
+            $result = New-FailedFilesSummary -JobsPath $jobsPath
 
             $content = Get-Content $result -Raw
             $content | Should -Match "=== Chunk_001 ==="
+        }
+
+        It "Filters by session ID when provided" {
+            $testLogPath = Join-Path $TestDrive "Logs"
+            $testDate = "2025-12-21"
+            $datePath = Join-Path $testLogPath $testDate
+            $jobsPath = Join-Path $datePath "Jobs"
+            New-Item -Path $jobsPath -ItemType Directory -Force | Out-Null
+
+            $sessionId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+            # Create chunk logs for THIS session (should be included)
+            @("ERROR 32 (0x00000020) Copying File C:\Source\current_file.txt") | Out-File -FilePath (Join-Path $jobsPath "${sessionId}_Chunk_001.log") -Encoding UTF8
+
+            # Create chunk logs for DIFFERENT session (should be excluded)
+            @("ERROR 5 (0x00000005) Copying File C:\Source\old_file.txt") | Out-File -FilePath (Join-Path $jobsPath "other-session-id_Chunk_001.log") -Encoding UTF8
+
+            # Create chunk logs WITHOUT session prefix (old format, should be excluded)
+            @("ERROR 33 (0x00000021) Copying File C:\Source\legacy_file.txt") | Out-File -FilePath (Join-Path $jobsPath "Chunk_001.log") -Encoding UTF8
+
+            $result = New-FailedFilesSummary -JobsPath $jobsPath -SessionId $sessionId
+
+            $content = Get-Content $result -Raw
+            $content | Should -Match "current_file.txt"
+            $content | Should -Not -Match "old_file.txt"
+            $content | Should -Not -Match "legacy_file.txt"
+        }
+
+        It "Includes session ID in output filename when provided" {
+            $testLogPath = Join-Path $TestDrive "Logs"
+            $testDate = "2025-12-21"
+            $datePath = Join-Path $testLogPath $testDate
+            $jobsPath = Join-Path $datePath "Jobs"
+            New-Item -Path $jobsPath -ItemType Directory -Force | Out-Null
+
+            $sessionId = "test-session-123"
+
+            @("ERROR 32 (0x00000020) Copying File C:\Source\file.txt") | Out-File -FilePath (Join-Path $jobsPath "${sessionId}_Chunk_001.log") -Encoding UTF8
+
+            $result = New-FailedFilesSummary -JobsPath $jobsPath -SessionId $sessionId
+
+            $expectedPath = Join-Path $datePath "FailedFiles_${sessionId}.txt"
+            $result | Should -Be $expectedPath
+        }
+
+        It "Deduplicates Changing File Attributes errors" {
+            $testLogPath = Join-Path $TestDrive "Logs"
+            $testDate = "2025-12-21"
+            $datePath = Join-Path $testLogPath $testDate
+            $jobsPath = Join-Path $datePath "Jobs"
+            New-Item -Path $jobsPath -ItemType Directory -Force | Out-Null
+
+            # Simulate robocopy retry errors with "Changing File Attributes"
+            $logContent = @(
+                "ERROR 32 (0x00000020) Changing File Attributes C:\Source\locked.txt"
+                "Waiting 10 seconds... Retrying..."
+                "ERROR 32 (0x00000020) Changing File Attributes C:\Source\locked.txt"
+                "Waiting 10 seconds... Retrying..."
+                "ERROR 32 (0x00000020) Changing File Attributes C:\Source\locked.txt"
+            )
+            $logContent | Out-File -FilePath (Join-Path $jobsPath "Chunk_001.log") -Encoding UTF8
+
+            $result = New-FailedFilesSummary -JobsPath $jobsPath
+
+            $content = Get-Content $result -Raw
+            # Count occurrences of the file path - should only appear once due to deduplication
+            $matches = [regex]::Matches($content, "locked\.txt")
+            $matches.Count | Should -Be 1
         }
     }
 }

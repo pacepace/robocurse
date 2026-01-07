@@ -437,5 +437,69 @@ InModuleScope 'Robocurse' {
                 $logRoot | Should -Be $expectedPath
             }
         }
+
+        Context "Set-OrchestrationSessionId" {
+            It "Should set the orchestration session ID" {
+                $testSessionId = "test-guid-12345"
+                Set-OrchestrationSessionId -SessionId $testSessionId
+
+                $script:CurrentOrchestrationSessionId | Should -Be $testSessionId
+            }
+
+            It "Should accept GUID format session IDs" {
+                $guidSessionId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                Set-OrchestrationSessionId -SessionId $guidSessionId
+
+                $script:CurrentOrchestrationSessionId | Should -Be $guidSessionId
+            }
+        }
+
+        Context "Get-LogPath with Session ID" {
+            BeforeEach {
+                $script:Session = Initialize-LogSession -LogRoot $script:TestLogRoot
+            }
+
+            It "Should include session ID in ChunkJob path when set" {
+                $testSessionId = "test-session-id"
+                Set-OrchestrationSessionId -SessionId $testSessionId
+
+                $chunkPath = Get-LogPath -Type 'ChunkJob' -ChunkId 1
+
+                $chunkPath | Should -Match "${testSessionId}_Chunk_001\.log$"
+            }
+
+            It "Should not include session prefix when session ID is not set" {
+                # Clear the session ID
+                $script:CurrentOrchestrationSessionId = $null
+
+                $chunkPath = Get-LogPath -Type 'ChunkJob' -ChunkId 5
+
+                $chunkPath | Should -Match "Chunk_005\.log$"
+                $chunkPath | Should -Not -Match "_Chunk_"
+            }
+
+            It "Should format chunk ID with leading zeros" {
+                $testSessionId = "session-xyz"
+                Set-OrchestrationSessionId -SessionId $testSessionId
+
+                $chunkPath1 = Get-LogPath -Type 'ChunkJob' -ChunkId 1
+                $chunkPath10 = Get-LogPath -Type 'ChunkJob' -ChunkId 10
+                $chunkPath100 = Get-LogPath -Type 'ChunkJob' -ChunkId 100
+
+                $chunkPath1 | Should -Match "Chunk_001\.log$"
+                $chunkPath10 | Should -Match "Chunk_010\.log$"
+                $chunkPath100 | Should -Match "Chunk_100\.log$"
+            }
+
+            It "Should place chunk logs in Jobs folder" {
+                $testSessionId = "session-abc"
+                Set-OrchestrationSessionId -SessionId $testSessionId
+
+                $chunkPath = Get-LogPath -Type 'ChunkJob' -ChunkId 1
+
+                $parentFolder = Split-Path -Leaf (Split-Path -Parent $chunkPath)
+                $parentFolder | Should -Be "Jobs"
+            }
+        }
     }
 }

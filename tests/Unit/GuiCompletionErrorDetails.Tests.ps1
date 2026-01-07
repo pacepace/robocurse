@@ -62,7 +62,7 @@ InModuleScope 'Robocurse' {
             }
 
             It "Should use SizeToContent for dialog" {
-                $script:TestXamlContent | Should -Match 'SizeToContent="Height"'
+                $script:TestXamlContent | Should -Match 'SizeToContent="WidthAndHeight"'
             }
 
             It "Should have MaxHeight set" {

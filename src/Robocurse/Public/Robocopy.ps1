@@ -1713,38 +1713,40 @@ function New-FailedFilesSummary {
     .SYNOPSIS
         Generates a summary file of all failed file operations from chunk logs
     .DESCRIPTION
-        Parses all chunk log files in the Jobs folder for the specified date and
-        extracts ERROR lines indicating files that failed to copy (locked, access denied,
-        in use, etc.). Creates a summary file that can be viewed by the user or attached to emails.
-    .PARAMETER LogPath
-        The base log path (e.g., C:\Logs\Robocurse)
-    .PARAMETER Date
-        The date folder name (e.g., "2025-12-21")
+        Parses chunk log files in the Jobs folder and extracts ERROR lines indicating
+        files that failed to copy (locked, access denied, in use, etc.). Creates a summary
+        file that can be viewed by the user or attached to emails. When SessionId is provided,
+        only logs from that session are included, preventing stale data from previous runs.
+    .PARAMETER JobsPath
+        The Jobs folder path containing chunk logs (e.g., C:\Logs\Robocurse\2025-12-21\Jobs)
+    .PARAMETER SessionId
+        Optional orchestration session ID (GUID) to filter chunk logs. When provided,
+        only logs matching {SessionId}_Chunk_*.log are processed.
     .OUTPUTS
         String path to the created summary file, or $null if no failed files found
     .EXAMPLE
-        $summaryPath = New-FailedFilesSummary -LogPath "C:\Logs" -Date "2025-12-21"
+        $summaryPath = New-FailedFilesSummary -JobsPath "C:\Logs\2025-12-21\Jobs" -SessionId "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
     #>
     [CmdletBinding()]
     [OutputType([string])]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$LogPath,
+        [string]$JobsPath,
 
-        [Parameter(Mandatory = $true)]
-        [string]$Date
+        [Parameter(Mandatory = $false)]
+        [string]$SessionId
     )
 
-    $datePath = Join-Path $LogPath $Date
-    $jobsFolder = Join-Path $datePath "Jobs"
-    if (-not (Test-Path $jobsFolder)) {
-        Write-RobocurseLog -Message "Jobs folder not found: $jobsFolder" -Level 'Debug' -Component 'FailedFiles'
+    if (-not (Test-Path $JobsPath)) {
+        Write-RobocurseLog -Message "Jobs folder not found: $JobsPath" -Level 'Debug' -Component 'FailedFiles'
         return $null
     }
 
-    $chunkLogs = Get-ChildItem -Path $jobsFolder -Filter "Chunk_*.log" -ErrorAction SilentlyContinue
+    # Filter by session ID if provided, otherwise get all chunk logs (backward compatible)
+    $pattern = if ($SessionId) { "${SessionId}_Chunk_*.log" } else { "*Chunk_*.log" }
+    $chunkLogs = Get-ChildItem -Path $JobsPath -Filter $pattern -ErrorAction SilentlyContinue
     if (-not $chunkLogs -or $chunkLogs.Count -eq 0) {
-        Write-RobocurseLog -Message "No chunk logs found in: $jobsFolder" -Level 'Debug' -Component 'FailedFiles'
+        Write-RobocurseLog -Message "No chunk logs found in: $JobsPath (pattern: $pattern)" -Level 'Debug' -Component 'FailedFiles'
         return $null
     }
 
@@ -1781,8 +1783,9 @@ function New-FailedFilesSummary {
     $failedEntries = [System.Collections.Generic.List[string]]::new()
     $seenFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $errorCodePattern = '\bERROR\s+(\d+)\s+'
-    # Pattern to extract file path from error line: "Copying File <path>" or "Creating Destination Directory <path>"
-    $filePathPattern = '(?:Copying File|Creating Destination Directory)\s+(.+)$'
+    # Pattern to extract file path from error line for deduplication
+    # Includes: "Copying File", "Creating Destination Directory", "Changing File Attributes"
+    $filePathPattern = '(?:Copying File|Creating Destination Directory|Changing File Attributes)\s+(.+)$'
     $currentChunk = ""
 
     foreach ($logFile in $chunkLogs) {
@@ -1840,8 +1843,10 @@ function New-FailedFilesSummary {
         return $null
     }
 
-    # Write the summary file
-    $summaryPath = Join-Path $datePath "FailedFiles.txt"
+    # Write the summary file (in parent of Jobs folder, with session ID if provided)
+    $datePath = Split-Path -Parent $JobsPath
+    $summaryFilename = if ($SessionId) { "FailedFiles_${SessionId}.txt" } else { "FailedFiles.txt" }
+    $summaryPath = Join-Path $datePath $summaryFilename
     try {
         # Count unique files (entries minus chunk headers and blank lines)
         $uniqueFileCount = ($failedEntries | Where-Object { $_ -and $_ -notmatch '^===' }).Count
