@@ -5,11 +5,11 @@
     "WindowHeight":  550,
     "WindowState":  "Normal",
     "WorkerCount":  4,
-    "SelectedProfile":  "TestProfile1",
+    "SelectedProfile":  null,
     "ActivePanel":  "Profiles",
     "LastRun":  {
                     "ChunksCompleted":  145,
-                    "Timestamp":  "2026-01-07T15:49:34.0319347-08:00",
+                    "Timestamp":  "2026-01-07T17:03:23.0555779-08:00",
                     "ProfilesRun":  [
                                         "IntegrationProfile"
                                     ],
@@ -19,5 +19,5 @@
                     "ChunksTotal":  150,
                     "ChunksFailed":  5
                 },
-    "SavedAt":  "2026-01-07T16:04:23.2649390-08:00"
+    "SavedAt":  "2026-01-07T17:03:23.0693931-08:00"
 }

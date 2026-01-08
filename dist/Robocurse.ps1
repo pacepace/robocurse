@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.8f0e17b - Built: 2026-01-07 16:04:06
+    Version: dev.5913fe1 - Built: 2026-01-07 16:48:39
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.8f0e17b'
+$script:RobocurseVersion = 'dev.5913fe1'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -10651,11 +10651,13 @@ function Complete-CurrentProfile {
 
     # Enter cleanup phase for VSS/network resource cleanup
     $state.Phase = 'Cleanup'
+    $state.ScanProgress = 0  # Reset progress for cleanup phase
 
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
         $state.CurrentActivity = "Removing VSS junction..."
+        $state.ScanProgress = 25
         $removeJunctionResult = Remove-RemoteVssJunction `
             -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
             -ServerName $state.CurrentVssJunction.ServerName `
@@ -10669,6 +10671,7 @@ function Complete-CurrentProfile {
     # Clean up VSS snapshot (local or remote)
     if ($state.CurrentVssSnapshot) {
         $state.CurrentActivity = "Removing VSS snapshot..."
+        $state.ScanProgress = 50
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
             $removeResult = Remove-RemoteVssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId -ServerName $state.CurrentVssSnapshot.ServerName -Credential $state.NetworkCredential
@@ -10702,6 +10705,10 @@ function Complete-CurrentProfile {
     }
     $state.NetworkCredential = $null
 
+    # Mark cleanup complete (CurrentActivity cleared when phase changes to Complete)
+    $state.ScanProgress = 100
+    $state.CurrentActivity = "Cleanup complete"
+
     # Unregister the profile as running (release the mutex)
     Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
 
@@ -10710,17 +10717,17 @@ function Complete-CurrentProfile {
         & $script:OnProfileComplete $state.CurrentProfile
     }
 
-    # Clear chunk collections for next profile (results already preserved in ProfileResults)
-    $state.ClearChunkCollections()
-
     # Move to next profile
     $state.ProfileIndex++
     if ($state.ProfileIndex -lt $state.Profiles.Count) {
+        # Clear chunk collections for next profile (results already preserved in ProfileResults)
+        $state.ClearChunkCollections()
         # Use MaxConcurrentJobs from current run (stored in script-scope during Start-ReplicationRun)
         $maxJobs = if ($script:CurrentMaxConcurrentJobs) { $script:CurrentMaxConcurrentJobs } else { $script:DefaultMaxConcurrentJobs }
         Start-ProfileReplication -Profile $state.Profiles[$state.ProfileIndex] -MaxConcurrentJobs $maxJobs
     }
     else {
+        # Last profile - keep chunks visible for final GUI update
         # All profiles complete
         $state.Phase = "Complete"
         # Guard against null StartTime (e.g., when Start-ProfileReplication called directly in tests)
@@ -10783,11 +10790,13 @@ function Stop-AllJobs {
 
     $state.ActiveJobs.Clear()
     $state.Phase = 'Cleanup'
+    $state.ScanProgress = 0  # Reset progress for cleanup phase
 
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction after stop" -Level 'Info' -Component 'VSS'
         $state.CurrentActivity = "Removing VSS junction..."
+        $state.ScanProgress = 25
         try {
             $removeJunctionResult = Remove-RemoteVssJunction `
                 -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
@@ -10808,6 +10817,7 @@ function Stop-AllJobs {
     # Clean up VSS snapshot (local or remote)
     if ($state.CurrentVssSnapshot) {
         $state.CurrentActivity = "Removing VSS snapshot..."
+        $state.ScanProgress = 50
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot after stop: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
             try {
@@ -10859,6 +10869,10 @@ function Stop-AllJobs {
         }
     }
     $state.NetworkCredential = $null
+
+    # Mark cleanup complete (CurrentActivity cleared when phase changes to Complete)
+    $state.ScanProgress = 100
+    $state.CurrentActivity = "Cleanup complete"
 
     # Cleanup complete, now set final stopped state
     $state.Phase = 'Stopped'
@@ -22788,6 +22802,7 @@ function Start-GuiReplication {
 
     $script:LastGuiUpdateState = $null
     $script:Controls.dgChunks.ItemsSource = $null
+    $script:CompletionInProgress = $false  # Reset completion guard for new run
 
     Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
 
@@ -22868,6 +22883,13 @@ function Complete-GuiReplication {
     #>
     [CmdletBinding()]
     param()
+
+    # Prevent re-entry (Update-GuiProgress below can trigger this function again)
+    if ($script:CompletionInProgress) { return }
+    $script:CompletionInProgress = $true
+
+    # Final progress update to show 100% cleanup state before stopping timer
+    Update-GuiProgress
 
     # Stop timer
     $script:ProgressTimer.Stop()
@@ -23056,6 +23078,9 @@ function Complete-GuiReplication {
     $dialogFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
     $dialogFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesCopied $dialogFilesCopied -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails -PreflightErrors $preflightErrors
+
+    # Reset re-entry guard for next run
+    $script:CompletionInProgress = $false
 }
 
 #endregion
@@ -23444,19 +23469,21 @@ function Get-ChunkDisplayItems {
 
     $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # Show current activity during Preparing/Scanning/Cleanup phases
+    # Show current activity during Preparing/Scanning/Cleanup phases (and Complete if cleanup just finished)
     $currentActivity = $script:OrchestrationState.CurrentActivity
     $phase = $script:OrchestrationState.Phase
-    if ($currentActivity -and ($phase -in @('Preparing', 'Scanning', 'Cleanup'))) {
-        # During Cleanup, don't show stale scan progress - show 0 or nothing
-        $displayProgress = if ($phase -eq 'Cleanup') { 0 } else { $script:OrchestrationState.ScanProgress }
-        $displayStatus = if ($phase -eq 'Cleanup') { 'Cleanup' } elseif ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
+    if ($currentActivity -and ($phase -in @('Preparing', 'Scanning', 'Cleanup', 'Complete'))) {
+        $scanProgress = $script:OrchestrationState.ScanProgress
+        # Determine display status - 'Cleanup' for both Cleanup and Complete phases (showing final cleanup state)
+        $displayStatus = if ($phase -in @('Cleanup', 'Complete')) { 'Cleanup' } elseif ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
+        # Show progress bar during Cleanup/Complete phase, not during Preparing/Scanning
+        $progressScale = if ($phase -in @('Cleanup', 'Complete')) { [double]($scanProgress / 100) } else { [double]0 }
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = "--"
             SourcePath = $currentActivity
             Status = $displayStatus
-            Progress = $displayProgress
-            ProgressScale = [double]0  # No bar during preparing/scanning/cleanup
+            Progress = $scanProgress
+            ProgressScale = $progressScale
             Speed = "--"
         })
     }
@@ -23674,8 +23701,7 @@ function Update-GuiProgress {
             }
             # Show preparing/scanning/cleanup activity in status bar
             elseif ($script:OrchestrationState.Phase -in @('Preparing', 'Scanning', 'Cleanup') -and $script:OrchestrationState.CurrentActivity) {
-                # During Cleanup, don't show stale scan counter - just show activity text
-                $counter = if ($script:OrchestrationState.Phase -eq 'Cleanup') { 0 } else { $script:OrchestrationState.ScanProgress }
+                $counter = $script:OrchestrationState.ScanProgress
                 $activity = $script:OrchestrationState.CurrentActivity
                 $newText = if ($counter -gt 0) { "$activity ($counter)" } else { $activity }
                 $script:Controls.txtStatus.Text = $newText
@@ -25764,6 +25790,12 @@ function Initialize-RobocurseGui {
         }
     })
 
+    # Log version first (before any profile loading)
+    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
+    $initMessage = "Robocurse (https://github.com/pacepace/robocurse) $version initialized"
+    Write-RobocurseLog -Message $initMessage -Level 'Info' -Component 'GUI'
+    Write-GuiLog $initMessage
+
     # Load config and populate UI
     $script:Config = Get-RobocurseConfig -Path $script:ConfigPath
     Update-ProfileList
@@ -25820,11 +25852,8 @@ function Initialize-RobocurseGui {
     $panelToActivate = if ($script:RestoredActivePanel) { $script:RestoredActivePanel } else { 'Profiles' }
     Set-ActivePanel -PanelName $panelToActivate
 
-    # Set window title with version
-    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
+    # Set window title with version (version already logged earlier)
     $script:Window.Title = "Robocurse $version - Replication Cursed Robo"
-
-    Write-GuiLog "Robocurse (https://github.com/pacepace/robocurse) $version initialized"
 
     return $script:Window
 }

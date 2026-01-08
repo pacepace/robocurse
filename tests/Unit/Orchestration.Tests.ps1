@@ -1131,19 +1131,38 @@ InModuleScope 'Robocurse' {
                 $pr.BytesCopied | Should -Be 3000000
             }
 
-            It "Should clear CompletedChunks after profile completes" {
+            It "Should keep CompletedChunks after last profile completes (for GUI display)" {
                 $script:OrchestrationState.CompletedChunks.Count | Should -Be 2
 
                 Complete-CurrentProfile
 
-                $script:OrchestrationState.CompletedChunks.Count | Should -Be 0
+                # Chunks are kept for last profile so GUI can display final state
+                $script:OrchestrationState.CompletedChunks.Count | Should -Be 2
             }
 
-            It "Should clear FailedChunks after profile completes" {
+            It "Should keep FailedChunks after last profile completes (for GUI display)" {
                 $script:OrchestrationState.FailedChunks.Count | Should -Be 1
 
                 Complete-CurrentProfile
 
+                # Chunks are kept for last profile so GUI can display final state
+                $script:OrchestrationState.FailedChunks.Count | Should -Be 1
+            }
+
+            It "Should clear chunks when moving to next profile" {
+                # Add a second profile so this isn't the last one
+                $script:OrchestrationState.Profiles = @(
+                    $script:OrchestrationState.CurrentProfile,
+                    [PSCustomObject]@{ Name = "SecondProfile"; Source = "C:\Source2"; Destination = "D:\Dest2" }
+                )
+
+                $script:OrchestrationState.CompletedChunks.Count | Should -Be 2
+                $script:OrchestrationState.FailedChunks.Count | Should -Be 1
+
+                Complete-CurrentProfile
+
+                # Chunks are cleared when moving to next profile
+                $script:OrchestrationState.CompletedChunks.Count | Should -Be 0
                 $script:OrchestrationState.FailedChunks.Count | Should -Be 0
             }
 
