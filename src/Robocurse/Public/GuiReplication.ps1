@@ -201,12 +201,9 @@ function Complete-GuiReplication {
     [CmdletBinding()]
     param()
 
-    # Prevent re-entry (Update-GuiProgress below can trigger this function again)
+    # Prevent re-entry (can be called multiple times as phase transitions)
     if ($script:CompletionInProgress) { return }
     $script:CompletionInProgress = $true
-
-    # Final progress update to show 100% cleanup state before stopping timer
-    Update-GuiProgress
 
     # Stop timer
     $script:ProgressTimer.Stop()
@@ -394,6 +391,7 @@ function Complete-GuiReplication {
     $dialogFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
     $dialogFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
     $dialogFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
+
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesCopied $dialogFilesCopied -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails -PreflightErrors $preflightErrors
 
     # Reset re-entry guard for next run

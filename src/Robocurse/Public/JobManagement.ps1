@@ -1104,6 +1104,9 @@ function Invoke-ReplicationTick {
                     $state.CompletedChunks.Enqueue($removedJob.Chunk)
                     # Track warning chunks separately for reporting
                     if ($result.ExitMeaning.Severity -eq 'Warning') {
+                        # Add exit code and error message for dialog display
+                        $removedJob.Chunk | Add-Member -NotePropertyName 'LastExitCode' -NotePropertyValue $result.ExitCode -Force
+                        $removedJob.Chunk | Add-Member -NotePropertyName 'LastErrorMessage' -NotePropertyValue $result.ExitMeaning.Message -Force
                         $state.WarningChunks.Enqueue($removedJob.Chunk)
                         # Enqueue warning for GUI display
                         $warningMsg = "Chunk $($removedJob.Chunk.ChunkId) completed with warnings: $($removedJob.Chunk.SourcePath) - $($result.ExitMeaning.Message) (Exit code: $($result.ExitCode))"

@@ -1297,16 +1297,28 @@ function Send-ReplicationCompletionNotification {
             SnapshotSummary = $snapshotSummary
         }
 
+        # Calculate success percentage for status determination
+        $emailFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
+        $emailFilesSkippedCalc = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
+        $emailFilesFailedCalc = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
+        $totalFiles = $emailFilesCopied + $emailFilesSkippedCalc + $emailFilesFailedCalc
+        $successPercent = if ($totalFiles -gt 0) {
+            [math]::Round(($emailFilesCopied + $emailFilesSkippedCalc) / $totalFiles * 100, 1)
+        } else { 100 }
+
         # Determine overall status
+        # Priority: PreflightErrors/Stopped > ChunksFailed > LowSuccessRate > Success
         $failedProfiles = @($profileResultsArray | Where-Object { $_.Status -eq 'Failed' })
         $emailStatus = if ($failedProfiles.Count -gt 0) {
             'Failed'  # Pre-flight failure (e.g., source path not accessible)
         } elseif ($OrchestrationState.Phase -eq 'Stopped') {
             'Failed'  # User stopped or critical failure
         } elseif ($totalFailed -gt 0) {
-            'Warning'  # Some chunk failures
+            'Failed'  # Chunks actually failed (errored out)
+        } elseif ($successPercent -lt 90) {
+            'Warning'  # Success rate below 90%
         } else {
-            'Success'
+            'Success'  # Chunks completed, success rate >= 90%
         }
 
         # Get values for email

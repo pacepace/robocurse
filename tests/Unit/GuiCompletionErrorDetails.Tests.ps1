@@ -37,29 +37,8 @@ InModuleScope 'Robocurse' {
                 $script:TestXamlContent = Get-XamlResource -ResourceName 'CompletionDialog.xaml'
             }
 
-            It "Should have pnlErrors border" {
-                $script:TestXamlContent | Should -Match 'x:Name="pnlErrors"'
-            }
-
-            It "Should have lstErrors StackPanel" {
-                $script:TestXamlContent | Should -Match 'x:Name="lstErrors"'
-            }
-
-            It "Should have txtMoreErrors TextBlock" {
-                $script:TestXamlContent | Should -Match 'x:Name="txtMoreErrors"'
-            }
-
-            It "Should have btnCopyErrors button" {
-                $script:TestXamlContent | Should -Match 'x:Name="btnCopyErrors"'
-            }
-
-            It "Should have btnViewLogs button" {
-                $script:TestXamlContent | Should -Match 'x:Name="btnViewLogs"'
-            }
-
-            It "Should have error panel collapsed by default" {
-                $script:TestXamlContent | Should -Match 'x:Name="pnlErrors"[^>]*Visibility="Collapsed"'
-            }
+            # Error panel was removed - completion dialog now just shows summary stats
+            # and "View failed files" link for details
 
             It "Should use SizeToContent for dialog" {
                 $script:TestXamlContent | Should -Match 'SizeToContent="WidthAndHeight"'

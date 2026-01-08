@@ -171,29 +171,6 @@
                        Visibility="Collapsed" TextDecorations="Underline"
                        Background="Transparent"/>
 
-            <!-- Error Details Panel (Collapsed by default) -->
-            <Border x:Name="pnlErrors" Grid.Row="3" Visibility="Collapsed" Background="#252525" CornerRadius="4"
-                    BorderBrush="#FF6B6B" BorderThickness="1" Padding="12" Margin="0,0,0,16" MaxHeight="200">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel>
-                        <TextBlock Text="Failed Chunks:" FontSize="12" FontWeight="SemiBold" Foreground="#FF6B6B" Margin="0,0,0,8"/>
-
-                        <!-- Error list container -->
-                        <StackPanel x:Name="lstErrors"/>
-
-                        <!-- More errors text -->
-                        <TextBlock x:Name="txtMoreErrors" Visibility="Collapsed" FontSize="11"
-                                   Foreground="#808080" Margin="0,4,0,0" FontStyle="Italic"/>
-
-                        <!-- Action buttons -->
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
-                            <Button x:Name="btnCopyErrors" Content="Copy Errors" Style="{StaticResource SecondaryButton}"/>
-                            <Button x:Name="btnViewLogs" Content="View Logs" Style="{StaticResource SecondaryButton}"/>
-                        </StackPanel>
-                    </StackPanel>
-                </ScrollViewer>
-            </Border>
-
             <!-- OK Button with proper styling -->
             <Button x:Name="btnOk" Grid.Row="5" Content="OK" Style="{StaticResource ModernButton}" HorizontalAlignment="Center"/>
         </Grid>

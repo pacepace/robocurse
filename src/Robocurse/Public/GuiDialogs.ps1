@@ -298,11 +298,6 @@ function Show-CompletionDialog {
         $txtSkippedValue = $dialog.FindName("txtSkippedValue")
         $txtFilesFailedValue = $dialog.FindName("txtFilesFailedValue")
         $lnkFailedFiles = $dialog.FindName("lnkFailedFiles")
-        $pnlErrors = $dialog.FindName("pnlErrors")
-        $lstErrors = $dialog.FindName("lstErrors")
-        $txtMoreErrors = $dialog.FindName("txtMoreErrors")
-        $btnCopyErrors = $dialog.FindName("btnCopyErrors")
-        $btnViewLogs = $dialog.FindName("btnViewLogs")
         $btnOk = $dialog.FindName("btnOk")
 
         # Calculate total files and success percentage
@@ -363,162 +358,34 @@ function Show-CompletionDialog {
         }
 
         # Adjust appearance based on results
+        # Priority: PreflightErrors > ChunksFailed > LowSuccessRate > Success
         if ($PreflightErrors.Count -gt 0) {
             # Pre-flight failure - show error state (red)
             $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
             $iconText.Text = [char]0x2716  # X mark
+            $iconText.Margin = "0,0,0,0"  # Reset margin
             $txtTitle.Text = "Replication Failed"
             $txtSubtitle.Text = "Pre-flight check failed - source not accessible"
             $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
-
-            # Show pre-flight errors in error panel
-            $pnlErrors.Visibility = 'Visible'
-            foreach ($err in $PreflightErrors) {
-                $errorItem = New-Object System.Windows.Controls.Border
-                $errorItem.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#1E1E1E")
-                $errorItem.CornerRadius = 3
-                $errorItem.Padding = 8
-                $errorItem.Margin = "0,0,0,6"
-
-                $errorText = New-Object System.Windows.Controls.TextBlock
-                $errorText.Text = $err
-                $errorText.FontSize = 11
-                $errorText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
-                $errorText.TextWrapping = 'Wrap'
-                $errorItem.Child = $errorText
-
-                $lstErrors.Children.Add($errorItem) | Out-Null
-            }
         }
         elseif ($ChunksFailed -gt 0) {
-            # Some failures - show error state (red/orange)
+            # Chunks actually failed (errored out) - show error state (red)
             $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
             $iconText.Text = [char]0x2716  # X mark
+            $iconText.Margin = "0,0,0,0"  # Reset margin
             $txtTitle.Text = "Replication Complete with Errors"
             $txtSubtitle.Text = "$ChunksFailed chunk(s) failed"
             $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
         }
-        elseif ($ChunksWarning -gt 0) {
-            # Some warnings but no failures - show warning state (orange)
+        elseif ($successPercent -lt 90) {
+            # Success rate below 90% - show warning state (orange)
+            # Having some failed files is normal, but too many is concerning
             $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
             $iconText.Text = [char]0x26A0  # Warning triangle
+            $iconText.Margin = "0,-4,0,0"  # Adjust for triangle baseline offset
             $txtTitle.Text = "Replication Complete with Warnings"
-            $txtSubtitle.Text = "$ChunksWarning chunk(s) had files that could not be copied"
+            $txtSubtitle.Text = "Success rate below 90% ($successPercent%)"
             $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
-
-            # Show warning details if we have warning chunk information
-            if ($WarningChunkDetails.Count -gt 0) {
-                $pnlErrors.Visibility = 'Visible'
-
-                # Display up to 10 warnings
-                $displayErrors = $WarningChunkDetails | Select-Object -First 10
-                foreach ($chunk in $displayErrors) {
-                    $errorItem = New-Object System.Windows.Controls.Border
-                    $errorItem.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#1E1E1E")
-                    $errorItem.CornerRadius = 3
-                    $errorItem.Padding = 8
-                    $errorItem.Margin = "0,0,0,6"
-
-                    $errorStack = New-Object System.Windows.Controls.StackPanel
-
-                    # Chunk ID and Source Path
-                    $headerText = New-Object System.Windows.Controls.TextBlock
-                    $headerText.Text = "Chunk $($chunk.ChunkId): $($chunk.SourcePath)"
-                    $headerText.FontSize = 11
-                    $headerText.FontWeight = 'SemiBold'
-                    $headerText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#E0E0E0")
-                    $headerText.TextWrapping = 'Wrap'
-                    $errorStack.Children.Add($headerText) | Out-Null
-
-                    # Exit Code
-                    $exitCode = if ($chunk.PSObject.Properties['LastExitCode']) { $chunk.LastExitCode } else { 'N/A' }
-                    $exitCodeText = New-Object System.Windows.Controls.TextBlock
-                    $exitCodeText.Text = "Exit Code: $exitCode"
-                    $exitCodeText.FontSize = 10
-                    $exitCodeText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#808080")
-                    $exitCodeText.Margin = "0,2,0,0"
-                    $errorStack.Children.Add($exitCodeText) | Out-Null
-
-                    # Error Message
-                    $errorMsg = if ($chunk.PSObject.Properties['LastErrorMessage']) { $chunk.LastErrorMessage } else { 'Unknown error' }
-                    $errorMsgText = New-Object System.Windows.Controls.TextBlock
-                    $errorMsgText.Text = "Error: $errorMsg"
-                    $errorMsgText.FontSize = 10
-                    $errorMsgText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF6B6B")
-                    $errorMsgText.TextWrapping = 'Wrap'
-                    $errorMsgText.Margin = "0,2,0,0"
-                    $errorStack.Children.Add($errorMsgText) | Out-Null
-
-                    $errorItem.Child = $errorStack
-                    $lstErrors.Children.Add($errorItem) | Out-Null
-                }
-
-                # Show "and X more..." if there are more than 10 warnings
-                if ($WarningChunkDetails.Count -gt 10) {
-                    $remaining = $WarningChunkDetails.Count - 10
-                    $txtMoreErrors.Text = "...and $remaining more warning(s)"
-                    $txtMoreErrors.Visibility = 'Visible'
-                }
-
-                # Copy Warnings button handler
-                $btnCopyErrors.Add_Click({
-                    try {
-                        # Build warning report
-                        $errorReport = "Robocurse Replication Warnings`n"
-                        $errorReport += "=" * 50 + "`n`n"
-
-                        foreach ($chunk in $WarningChunkDetails) {
-                            $errorReport += "Chunk $($chunk.ChunkId): $($chunk.SourcePath)`n"
-                            $exitCode = if ($chunk.PSObject.Properties['LastExitCode']) { $chunk.LastExitCode } else { 'N/A' }
-                            $errorReport += "Exit Code: $exitCode`n"
-                            $errorMsg = if ($chunk.PSObject.Properties['LastErrorMessage']) { $chunk.LastErrorMessage } else { 'Unknown error' }
-                            $errorReport += "Error: $errorMsg`n"
-                            $errorReport += "`n"
-                        }
-
-                        # Copy to clipboard
-                        [System.Windows.Clipboard]::SetText($errorReport)
-
-                        # Change button text temporarily
-                        $originalText = $btnCopyErrors.Content
-                        $btnCopyErrors.Content = "Copied!"
-
-                        # Use DispatcherTimer to reset after 2 seconds
-                        $resetTimer = New-Object System.Windows.Threading.DispatcherTimer
-                        $resetTimer.Interval = [TimeSpan]::FromSeconds(2)
-                        $resetTimer.Add_Tick({
-                            $btnCopyErrors.Content = $originalText
-                            $resetTimer.Stop()
-                        })
-                        $resetTimer.Start()
-                    }
-                    catch {
-                        Write-GuiLog "Error copying errors to clipboard: $($_.Exception.Message)"
-                    }
-                }.GetNewClosure())
-
-                # View Logs button handler
-                $btnViewLogs.Add_Click({
-                    try {
-                        # Get log path from config
-                        $logPath = if ($script:Config -and $script:Config.LogPath) {
-                            $script:Config.LogPath
-                        } else {
-                            Join-Path (Get-Location) "Logs"
-                        }
-
-                        # Open log directory in explorer
-                        if (Test-Path $logPath) {
-                            Start-Process explorer.exe -ArgumentList $logPath
-                        } else {
-                            Write-GuiLog "Log directory not found: $logPath"
-                        }
-                    }
-                    catch {
-                        Write-GuiLog "Error opening log directory: $($_.Exception.Message)"
-                    }
-                })
-            }
         }
         elseif ($ChunksComplete -eq 0 -and $ChunksTotal -eq 0) {
             # Nothing to do
@@ -526,9 +393,14 @@ function Show-CompletionDialog {
             $txtSubtitle.Text = "No chunks to process"
         }
         else {
-            # All success
+            # Success - chunks completed, success rate >= 90%
             $txtTitle.Text = "Replication Complete"
-            $txtSubtitle.Text = "All tasks finished successfully"
+            # Show info about files that couldn't be copied if any chunks had warnings
+            if ($ChunksWarning -gt 0) {
+                $txtSubtitle.Text = "$ChunksWarning chunk(s) had files that could not be copied"
+            } else {
+                $txtSubtitle.Text = "All tasks finished successfully"
+            }
         }
 
         # OK button handler
