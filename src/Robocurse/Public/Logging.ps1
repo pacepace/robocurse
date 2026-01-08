@@ -348,6 +348,7 @@ function Invoke-WithLogMutex {
 $script:CurrentOperationalLogPath = $null
 $script:CurrentSiemLogPath = $null
 $script:CurrentJobsPath = $null
+$script:CurrentOrchestrationSessionId = $null  # GUID from OrchestrationState for chunk log naming
 
 function Set-LogSessionPath {
     <#
@@ -388,6 +389,27 @@ function Set-LogSessionPath {
     if (-not (Test-Path $script:CurrentJobsPath)) {
         New-Item -ItemType Directory -Path $script:CurrentJobsPath -Force -ErrorAction SilentlyContinue | Out-Null
     }
+}
+
+function Set-OrchestrationSessionId {
+    <#
+    .SYNOPSIS
+        Sets the orchestration session ID for chunk log naming
+    .DESCRIPTION
+        Sets the GUID session ID from OrchestrationState that will be used as a prefix
+        for chunk log filenames. This ensures each run's logs are isolated and can be
+        filtered when generating the failed files summary.
+    .PARAMETER SessionId
+        The GUID session ID from OrchestrationState.SessionId
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SessionId
+    )
+
+    $script:CurrentOrchestrationSessionId = $SessionId
+    Write-Verbose "Orchestration session ID set: $SessionId"
 }
 
 function Initialize-LogSession {
@@ -932,7 +954,11 @@ function Get-LogPath {
                 throw "No log session initialized. Call Initialize-LogSession first."
             }
             $chunkIdFormatted = $ChunkId.ToString("000")
-            return Join-Path $script:CurrentJobsPath "Chunk_${chunkIdFormatted}.log"
+            # Include session ID prefix to isolate logs from different runs
+            $sessionPrefix = if ($script:CurrentOrchestrationSessionId) {
+                "$($script:CurrentOrchestrationSessionId)_"
+            } else { "" }
+            return Join-Path $script:CurrentJobsPath "${sessionPrefix}Chunk_${chunkIdFormatted}.log"
         }
     }
 }

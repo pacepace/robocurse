@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.3a0d349 - Built: 2026-01-03 05:35:21
+    Version: dev.7f5b7f4 - Built: 2026-01-07 18:30:44
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.3a0d349'
+$script:RobocurseVersion = 'dev.7f5b7f4'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -2460,6 +2460,7 @@ function Invoke-WithLogMutex {
 $script:CurrentOperationalLogPath = $null
 $script:CurrentSiemLogPath = $null
 $script:CurrentJobsPath = $null
+$script:CurrentOrchestrationSessionId = $null  # GUID from OrchestrationState for chunk log naming
 
 function Set-LogSessionPath {
     <#
@@ -2500,6 +2501,27 @@ function Set-LogSessionPath {
     if (-not (Test-Path $script:CurrentJobsPath)) {
         New-Item -ItemType Directory -Path $script:CurrentJobsPath -Force -ErrorAction SilentlyContinue | Out-Null
     }
+}
+
+function Set-OrchestrationSessionId {
+    <#
+    .SYNOPSIS
+        Sets the orchestration session ID for chunk log naming
+    .DESCRIPTION
+        Sets the GUID session ID from OrchestrationState that will be used as a prefix
+        for chunk log filenames. This ensures each run's logs are isolated and can be
+        filtered when generating the failed files summary.
+    .PARAMETER SessionId
+        The GUID session ID from OrchestrationState.SessionId
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$SessionId
+    )
+
+    $script:CurrentOrchestrationSessionId = $SessionId
+    Write-Verbose "Orchestration session ID set: $SessionId"
 }
 
 function Initialize-LogSession {
@@ -3044,7 +3066,11 @@ function Get-LogPath {
                 throw "No log session initialized. Call Initialize-LogSession first."
             }
             $chunkIdFormatted = $ChunkId.ToString("000")
-            return Join-Path $script:CurrentJobsPath "Chunk_${chunkIdFormatted}.log"
+            # Include session ID prefix to isolate logs from different runs
+            $sessionPrefix = if ($script:CurrentOrchestrationSessionId) {
+                "$($script:CurrentOrchestrationSessionId)_"
+            } else { "" }
+            return Join-Path $script:CurrentJobsPath "${sessionPrefix}Chunk_${chunkIdFormatted}.log"
         }
     }
 }
@@ -6415,85 +6441,104 @@ function New-FailedFilesSummary {
     .SYNOPSIS
         Generates a summary file of all failed file operations from chunk logs
     .DESCRIPTION
-        Parses all chunk log files in the Jobs folder for the specified date and
-        extracts ERROR lines indicating files that failed to copy (locked, access denied,
-        in use, etc.). Creates a summary file that can be viewed by the user or attached to emails.
-    .PARAMETER LogPath
-        The base log path (e.g., C:\Logs\Robocurse)
-    .PARAMETER Date
-        The date folder name (e.g., "2025-12-21")
+        Parses chunk log files in the Jobs folder and extracts ERROR lines indicating
+        files that failed to copy (locked, access denied, in use, etc.). Creates a summary
+        file that can be viewed by the user or attached to emails. When SessionId is provided,
+        only logs from that session are included, preventing stale data from previous runs.
+    .PARAMETER JobsPath
+        The Jobs folder path containing chunk logs (e.g., C:\Logs\Robocurse\2025-12-21\Jobs)
+    .PARAMETER SessionId
+        Optional orchestration session ID (GUID) to filter chunk logs. When provided,
+        only logs matching {SessionId}_Chunk_*.log are processed.
+    .PARAMETER ProfileNames
+        Optional array of profile names to display in the summary header.
     .OUTPUTS
         String path to the created summary file, or $null if no failed files found
     .EXAMPLE
-        $summaryPath = New-FailedFilesSummary -LogPath "C:\Logs" -Date "2025-12-21"
+        $summaryPath = New-FailedFilesSummary -JobsPath "C:\Logs\2025-12-21\Jobs" -SessionId "a1b2c3d4-e5f6-7890-abcd-ef1234567890" -ProfileNames @('Profile1', 'Profile2')
     #>
     [CmdletBinding()]
     [OutputType([string])]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$LogPath,
+        [string]$JobsPath,
 
-        [Parameter(Mandatory = $true)]
-        [string]$Date
+        [Parameter(Mandatory = $false)]
+        [string]$SessionId,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$ProfileNames = @()
     )
 
-    $datePath = Join-Path $LogPath $Date
-    $jobsFolder = Join-Path $datePath "Jobs"
-    if (-not (Test-Path $jobsFolder)) {
-        Write-RobocurseLog -Message "Jobs folder not found: $jobsFolder" -Level 'Debug' -Component 'FailedFiles'
+    if (-not (Test-Path $JobsPath)) {
+        Write-RobocurseLog -Message "Jobs folder not found: $JobsPath" -Level 'Debug' -Component 'FailedFiles'
         return $null
     }
 
-    $chunkLogs = Get-ChildItem -Path $jobsFolder -Filter "Chunk_*.log" -ErrorAction SilentlyContinue
+    # Filter by session ID if provided, otherwise get all chunk logs (backward compatible)
+    $pattern = if ($SessionId) { "${SessionId}_Chunk_*.log" } else { "*Chunk_*.log" }
+    $chunkLogs = Get-ChildItem -Path $JobsPath -Filter $pattern -ErrorAction SilentlyContinue
     if (-not $chunkLogs -or $chunkLogs.Count -eq 0) {
-        Write-RobocurseLog -Message "No chunk logs found in: $jobsFolder" -Level 'Debug' -Component 'FailedFiles'
+        Write-RobocurseLog -Message "No chunk logs found in: $JobsPath (pattern: $pattern)" -Level 'Debug' -Component 'FailedFiles'
         return $null
     }
 
-    # Common Windows error codes and their meanings
+    # Windows system error codes per Microsoft documentation
+    # https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-
     $errorDescriptions = @{
         2 = "File not found"
         3 = "Path not found"
+        4 = "Too many open files"
         5 = "Access denied"
         6 = "Invalid handle"
+        17 = "Cannot move to different drive"
         19 = "Media write-protected"
+        20 = "Device not found"
         21 = "Device not ready"
         29 = "Write fault"
         30 = "Read fault"
-        32 = "File in use by another process"
-        33 = "File locked"
+        31 = "General failure"
+        32 = "Sharing violation - file in use"
+        33 = "Lock violation - file locked"
         39 = "Disk full"
+        51 = "Network path unavailable"
+        53 = "Network path not found"
+        55 = "Network resource unavailable"
         80 = "File already exists"
+        82 = "Cannot create directory/file"
+        111 = "Filename too long"
         112 = "Disk full"
-        121 = "Timeout"
+        121 = "Semaphore timeout"
         122 = "Buffer too small"
-        123 = "Invalid filename"
+        123 = "Invalid filename syntax"
         183 = "File already exists"
-        206 = "Filename too long"
+        206 = "Filename/extension too long"
         1314 = "Privilege not held"
         1920 = "File encrypted (EFS)"
     }
 
     # Collect all ERROR entries from robocopy logs
-    # Robocopy ERROR lines have format: [timestamp] ERROR <code> (0x<hex>) <message>
-    # Example: 2024/01/15 10:30:45 ERROR 32 (0x00000020) Copying File D:\path\to\file.txt
-    # Example: ERROR 5 (0x00000005) Access is denied.
-    # The timestamp is optional, so match ERROR anywhere in the line
+    # Robocopy ERROR lines have format: [timestamp] ERROR <code> (0x<hex>) <operation> <path>
+    # Followed by indented line with actual Windows error message:
+    # Example:
+    #   ERROR 2 (0x00000002) Changing File Attributes Z:\path\file.docx
+    #      The system cannot find the file specified.
     # Robocopy retries files (R:3 = 3 retries), so deduplicate by file path
     $failedEntries = [System.Collections.Generic.List[string]]::new()
     $seenFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $errorCodePattern = '\bERROR\s+(\d+)\s+'
-    # Pattern to extract file path from error line: "Copying File <path>" or "Creating Destination Directory <path>"
-    $filePathPattern = '(?:Copying File|Creating Destination Directory)\s+(.+)$'
-    $currentChunk = ""
+    # Pattern to extract file path from error line for deduplication
+    # Includes: "Copying File", "Creating Destination Directory", "Changing File Attributes"
+    $filePathPattern = '(?:Copying File|Creating Destination Directory|Changing File Attributes)\s+(.+)$'
 
     foreach ($logFile in $chunkLogs) {
         try {
-            $logContent = Get-Content -Path $logFile.FullName -ErrorAction Stop
+            $logContent = @(Get-Content -Path $logFile.FullName -ErrorAction Stop)
             $chunkName = $logFile.BaseName
             $chunkHasErrors = $false
 
-            foreach ($line in $logContent) {
+            for ($i = 0; $i -lt $logContent.Count; $i++) {
+                $line = $logContent[$i]
                 if ($line -match $errorCodePattern) {
                     $cleanLine = $line.Trim()
                     $errorCode = [int]$matches[1]
@@ -6521,10 +6566,23 @@ function New-FailedFilesSummary {
                         $chunkHasErrors = $true
                     }
 
-                    # Add error description if known (on same line)
-                    $description = $errorDescriptions[$errorCode]
-                    if ($description) {
-                        $failedEntries.Add("$cleanLine [$description]")
+                    # Check next line for Windows error message (indented line after ERROR)
+                    # Robocopy outputs the actual error text on the following line
+                    $windowsErrorMsg = $null
+                    if ($i + 1 -lt $logContent.Count) {
+                        $nextLine = $logContent[$i + 1]
+                        # Windows error messages are indented and don't start with ERROR or timestamps
+                        if ($nextLine -match '^\s{2,}(.+)$' -and $nextLine -notmatch '\bERROR\b' -and $nextLine -notmatch '^\d{4}/\d{2}/\d{2}') {
+                            $windowsErrorMsg = $matches[1].Trim()
+                        }
+                    }
+
+                    # Use Windows error message if available, otherwise fall back to our mapping
+                    if ($windowsErrorMsg) {
+                        $failedEntries.Add("$cleanLine [$windowsErrorMsg]")
+                    }
+                    elseif ($errorDescriptions[$errorCode]) {
+                        $failedEntries.Add("$cleanLine [$($errorDescriptions[$errorCode])]")
                     }
                     else {
                         $failedEntries.Add($cleanLine)
@@ -6542,13 +6600,28 @@ function New-FailedFilesSummary {
         return $null
     }
 
-    # Write the summary file
-    $summaryPath = Join-Path $datePath "FailedFiles.txt"
+    # Write the summary file (in parent of Jobs folder, with session ID if provided)
+    $datePath = Split-Path -Parent $JobsPath
+    $summaryFilename = if ($SessionId) { "FailedFiles_${SessionId}.txt" } else { "FailedFiles.txt" }
+    $summaryPath = Join-Path $datePath $summaryFilename
     try {
         # Count unique files (entries minus chunk headers and blank lines)
         $uniqueFileCount = ($failedEntries | Where-Object { $_ -and $_ -notmatch '^===' }).Count
+
+        # Build profile names line if provided
+        $profileLine = if ($ProfileNames -and $ProfileNames.Count -gt 0) {
+            "Profiles: $($ProfileNames -join ', ')"
+        } else {
+            $null
+        }
+
         $header = @(
             "Robocurse Failed Files Summary"
+        )
+        if ($profileLine) {
+            $header += $profileLine
+        }
+        $header += @(
             "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
             "Total Failed Files: $uniqueFileCount"
             ""
@@ -10145,6 +10218,9 @@ function Invoke-ReplicationTick {
                     $state.CompletedChunks.Enqueue($removedJob.Chunk)
                     # Track warning chunks separately for reporting
                     if ($result.ExitMeaning.Severity -eq 'Warning') {
+                        # Add exit code and error message for dialog display
+                        $removedJob.Chunk | Add-Member -NotePropertyName 'LastExitCode' -NotePropertyValue $result.ExitCode -Force
+                        $removedJob.Chunk | Add-Member -NotePropertyName 'LastErrorMessage' -NotePropertyValue $result.ExitMeaning.Message -Force
                         $state.WarningChunks.Enqueue($removedJob.Chunk)
                         # Enqueue warning for GUI display
                         $warningMsg = "Chunk $($removedJob.Chunk.ChunkId) completed with warnings: $($removedJob.Chunk.SourcePath) - $($result.ExitMeaning.Message) (Exit code: $($result.ExitCode))"
@@ -10578,11 +10654,13 @@ function Complete-CurrentProfile {
 
     # Enter cleanup phase for VSS/network resource cleanup
     $state.Phase = 'Cleanup'
+    $state.ScanProgress = 0  # Reset progress for cleanup phase
 
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
         $state.CurrentActivity = "Removing VSS junction..."
+        $state.ScanProgress = 25
         $removeJunctionResult = Remove-RemoteVssJunction `
             -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
             -ServerName $state.CurrentVssJunction.ServerName `
@@ -10596,6 +10674,7 @@ function Complete-CurrentProfile {
     # Clean up VSS snapshot (local or remote)
     if ($state.CurrentVssSnapshot) {
         $state.CurrentActivity = "Removing VSS snapshot..."
+        $state.ScanProgress = 50
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
             $removeResult = Remove-RemoteVssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId -ServerName $state.CurrentVssSnapshot.ServerName -Credential $state.NetworkCredential
@@ -10629,6 +10708,10 @@ function Complete-CurrentProfile {
     }
     $state.NetworkCredential = $null
 
+    # Mark cleanup complete (CurrentActivity cleared when phase changes to Complete)
+    $state.ScanProgress = 100
+    $state.CurrentActivity = "Cleanup complete"
+
     # Unregister the profile as running (release the mutex)
     Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
 
@@ -10637,17 +10720,17 @@ function Complete-CurrentProfile {
         & $script:OnProfileComplete $state.CurrentProfile
     }
 
-    # Clear chunk collections for next profile (results already preserved in ProfileResults)
-    $state.ClearChunkCollections()
-
     # Move to next profile
     $state.ProfileIndex++
     if ($state.ProfileIndex -lt $state.Profiles.Count) {
+        # Clear chunk collections for next profile (results already preserved in ProfileResults)
+        $state.ClearChunkCollections()
         # Use MaxConcurrentJobs from current run (stored in script-scope during Start-ReplicationRun)
         $maxJobs = if ($script:CurrentMaxConcurrentJobs) { $script:CurrentMaxConcurrentJobs } else { $script:DefaultMaxConcurrentJobs }
         Start-ProfileReplication -Profile $state.Profiles[$state.ProfileIndex] -MaxConcurrentJobs $maxJobs
     }
     else {
+        # Last profile - keep chunks visible for final GUI update
         # All profiles complete
         $state.Phase = "Complete"
         # Guard against null StartTime (e.g., when Start-ProfileReplication called directly in tests)
@@ -10710,11 +10793,13 @@ function Stop-AllJobs {
 
     $state.ActiveJobs.Clear()
     $state.Phase = 'Cleanup'
+    $state.ScanProgress = 0  # Reset progress for cleanup phase
 
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction after stop" -Level 'Info' -Component 'VSS'
         $state.CurrentActivity = "Removing VSS junction..."
+        $state.ScanProgress = 25
         try {
             $removeJunctionResult = Remove-RemoteVssJunction `
                 -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
@@ -10735,6 +10820,7 @@ function Stop-AllJobs {
     # Clean up VSS snapshot (local or remote)
     if ($state.CurrentVssSnapshot) {
         $state.CurrentActivity = "Removing VSS snapshot..."
+        $state.ScanProgress = 50
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot after stop: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
             try {
@@ -10786,6 +10872,10 @@ function Stop-AllJobs {
         }
     }
     $state.NetworkCredential = $null
+
+    # Mark cleanup complete (CurrentActivity cleared when phase changes to Complete)
+    $state.ScanProgress = 100
+    $state.CurrentActivity = "Cleanup complete"
 
     # Cleanup complete, now set final stopped state
     $state.Phase = 'Stopped'
@@ -15507,10 +15597,17 @@ $additionalErrors
     # Use the template CSS and inject the status-specific header background color
     $cssWithStatusColor = $script:EmailCssTemplate + "`n.header { background: $statusColor; }"
 
-    # Build profile names line for header
+    # Build profile names list for header
     $profileNamesHtml = if ($ProfileNames -and $ProfileNames.Count -gt 0) {
-        $encodedNames = ($ProfileNames | ForEach-Object { [System.Net.WebUtility]::HtmlEncode($_) }) -join ', '
-        "<div style='font-size:14px;opacity:0.9;margin-top:4px;'>$encodedNames</div>"
+        $profileListItems = ($ProfileNames | ForEach-Object {
+            $encodedName = [System.Net.WebUtility]::HtmlEncode($_)
+            "<li style='margin:2px 0;'>$encodedName</li>"
+        }) -join "`n"
+        @"
+<ul style='font-size:13px;opacity:0.9;margin:8px 0 0 0;padding-left:20px;list-style-type:disc;text-align:left;'>
+$profileListItems
+</ul>
+"@
     } else {
         ""
     }
@@ -16163,16 +16260,28 @@ function Send-ReplicationCompletionNotification {
             SnapshotSummary = $snapshotSummary
         }
 
+        # Calculate success percentage for status determination
+        $emailFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
+        $emailFilesSkippedCalc = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
+        $emailFilesFailedCalc = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
+        $totalFiles = $emailFilesCopied + $emailFilesSkippedCalc + $emailFilesFailedCalc
+        $successPercent = if ($totalFiles -gt 0) {
+            [math]::Round(($emailFilesCopied + $emailFilesSkippedCalc) / $totalFiles * 100, 1)
+        } else { 100 }
+
         # Determine overall status
+        # Priority: PreflightErrors/Stopped > ChunksFailed > LowSuccessRate > Success
         $failedProfiles = @($profileResultsArray | Where-Object { $_.Status -eq 'Failed' })
         $emailStatus = if ($failedProfiles.Count -gt 0) {
             'Failed'  # Pre-flight failure (e.g., source path not accessible)
         } elseif ($OrchestrationState.Phase -eq 'Stopped') {
             'Failed'  # User stopped or critical failure
         } elseif ($totalFailed -gt 0) {
-            'Warning'  # Some chunk failures
+            'Failed'  # Chunks actually failed (errored out)
+        } elseif ($successPercent -lt 90) {
+            'Warning'  # Success rate below 90%
         } else {
-            'Success'
+            'Success'  # Chunks completed, success rate >= 90%
         }
 
         # Get values for email
@@ -16180,8 +16289,14 @@ function Send-ReplicationCompletionNotification {
         $emailFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
         $emailFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
 
+        # Extract profile names from results for header display
+        $emailProfileNames = @()
+        if ($profileResultsArray.Count -gt 0) {
+            $emailProfileNames = @($profileResultsArray | ForEach-Object { $_.Name })
+        }
+
         # Send the email
-        Write-RobocurseLog "Sending completion email (Status: $emailStatus, Files: $($status.FilesCopied), Skipped: $emailFilesSkipped, Failed: $emailFilesFailed)" -Level 'Info' -Component 'Email'
+        Write-RobocurseLog "Sending completion email (Status: $emailStatus, Files: $($status.FilesCopied), Skipped: $emailFilesSkipped, Failed: $emailFilesFailed, Profiles: $($emailProfileNames -join ', '))" -Level 'Info' -Component 'Email'
 
         $sendParams = @{
             Config = $Config.Email
@@ -16190,6 +16305,7 @@ function Send-ReplicationCompletionNotification {
             SessionId = $emailSessionId
             FilesSkipped = $emailFilesSkipped
             FilesFailed = $emailFilesFailed
+            ProfileNames = $emailProfileNames
         }
         if ($FailedFilesSummaryPath) {
             $sendParams['FailedFilesSummaryPath'] = $FailedFilesSummaryPath
@@ -20134,9 +20250,9 @@ function Show-CompletionDialog {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Replication Complete"
-        SizeToContent="Height"
+        SizeToContent="WidthAndHeight"
         MaxHeight="550"
-        Width="420"
+        MinWidth="420"
         WindowStartupLocation="CenterScreen"
         WindowStyle="None"
         AllowsTransparency="True"
@@ -20250,41 +20366,48 @@ function Show-CompletionDialog {
             </Grid>
 
             <!-- Chunk stats panel -->
-            <Grid Grid.Row="3" Margin="0,0,0,12">
+            <Grid Grid.Row="3" Margin="0,0,0,12" HorizontalAlignment="Center">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
 
                 <!-- Chunks completed -->
-                <StackPanel Grid.Column="0" HorizontalAlignment="Center">
+                <StackPanel Grid.Column="0" HorizontalAlignment="Center" Margin="8,0">
                     <TextBlock x:Name="txtChunksValue" Text="0" FontSize="24" FontWeight="Bold" Foreground="#4CAF50" HorizontalAlignment="Center"/>
                     <TextBlock Text="Completed" FontSize="10" Foreground="#808080" HorizontalAlignment="Center"/>
                 </StackPanel>
 
                 <!-- Total chunks -->
-                <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                <StackPanel Grid.Column="1" HorizontalAlignment="Center" Margin="8,0">
                     <TextBlock x:Name="txtTotalValue" Text="0" FontSize="24" FontWeight="Bold" Foreground="#0078D4" HorizontalAlignment="Center"/>
                     <TextBlock Text="Total" FontSize="10" Foreground="#808080" HorizontalAlignment="Center"/>
                 </StackPanel>
 
                 <!-- Failed chunks -->
-                <StackPanel Grid.Column="2" HorizontalAlignment="Center">
+                <StackPanel Grid.Column="2" HorizontalAlignment="Center" Margin="8,0">
                     <TextBlock x:Name="txtFailedValue" Text="0" FontSize="24" FontWeight="Bold" Foreground="#808080" HorizontalAlignment="Center"/>
                     <TextBlock Text="Chunks Failed" FontSize="10" Foreground="#808080" HorizontalAlignment="Center"/>
                 </StackPanel>
 
+                <!-- Files copied -->
+                <StackPanel Grid.Column="3" HorizontalAlignment="Center" Margin="8,0">
+                    <TextBlock x:Name="txtFilesCopiedValue" Text="0" FontSize="24" FontWeight="Bold" Foreground="#4CAF50" HorizontalAlignment="Center"/>
+                    <TextBlock Text="Files Copied" FontSize="10" Foreground="#808080" HorizontalAlignment="Center"/>
+                </StackPanel>
+
                 <!-- Skipped files -->
-                <StackPanel Grid.Column="3" HorizontalAlignment="Center">
+                <StackPanel Grid.Column="4" HorizontalAlignment="Center" Margin="8,0">
                     <TextBlock x:Name="txtSkippedValue" Text="0" FontSize="24" FontWeight="Bold" Foreground="#808080" HorizontalAlignment="Center"/>
                     <TextBlock Text="Skipped" FontSize="10" Foreground="#808080" HorizontalAlignment="Center"/>
                 </StackPanel>
 
                 <!-- Files failed to copy -->
-                <StackPanel Grid.Column="4" HorizontalAlignment="Center">
+                <StackPanel Grid.Column="5" HorizontalAlignment="Center" Margin="8,0">
                     <TextBlock x:Name="txtFilesFailedValue" Text="0" FontSize="24" FontWeight="Bold" Foreground="#808080" HorizontalAlignment="Center"/>
                     <TextBlock Text="Files Failed" FontSize="10" Foreground="#808080" HorizontalAlignment="Center"/>
                 </StackPanel>
@@ -20296,29 +20419,6 @@ function Show-CompletionDialog {
                        HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,8,0,12"
                        Visibility="Collapsed" TextDecorations="Underline"
                        Background="Transparent"/>
-
-            <!-- Error Details Panel (Collapsed by default) -->
-            <Border x:Name="pnlErrors" Grid.Row="3" Visibility="Collapsed" Background="#252525" CornerRadius="4"
-                    BorderBrush="#FF6B6B" BorderThickness="1" Padding="12" Margin="0,0,0,16" MaxHeight="200">
-                <ScrollViewer VerticalScrollBarVisibility="Auto">
-                    <StackPanel>
-                        <TextBlock Text="Failed Chunks:" FontSize="12" FontWeight="SemiBold" Foreground="#FF6B6B" Margin="0,0,0,8"/>
-
-                        <!-- Error list container -->
-                        <StackPanel x:Name="lstErrors"/>
-
-                        <!-- More errors text -->
-                        <TextBlock x:Name="txtMoreErrors" Visibility="Collapsed" FontSize="11"
-                                   Foreground="#808080" Margin="0,4,0,0" FontStyle="Italic"/>
-
-                        <!-- Action buttons -->
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
-                            <Button x:Name="btnCopyErrors" Content="Copy Errors" Style="{StaticResource SecondaryButton}"/>
-                            <Button x:Name="btnViewLogs" Content="View Logs" Style="{StaticResource SecondaryButton}"/>
-                        </StackPanel>
-                    </StackPanel>
-                </ScrollViewer>
-            </Border>
 
             <!-- OK Button with proper styling -->
             <Button x:Name="btnOk" Grid.Row="5" Content="OK" Style="{StaticResource ModernButton}" HorizontalAlignment="Center"/>
@@ -20341,14 +20441,10 @@ function Show-CompletionDialog {
         $txtChunksValue = $dialog.FindName("txtChunksValue")
         $txtTotalValue = $dialog.FindName("txtTotalValue")
         $txtFailedValue = $dialog.FindName("txtFailedValue")
+        $txtFilesCopiedValue = $dialog.FindName("txtFilesCopiedValue")
         $txtSkippedValue = $dialog.FindName("txtSkippedValue")
         $txtFilesFailedValue = $dialog.FindName("txtFilesFailedValue")
         $lnkFailedFiles = $dialog.FindName("lnkFailedFiles")
-        $pnlErrors = $dialog.FindName("pnlErrors")
-        $lstErrors = $dialog.FindName("lstErrors")
-        $txtMoreErrors = $dialog.FindName("txtMoreErrors")
-        $btnCopyErrors = $dialog.FindName("btnCopyErrors")
-        $btnViewLogs = $dialog.FindName("btnViewLogs")
         $btnOk = $dialog.FindName("btnOk")
 
         # Calculate total files and success percentage
@@ -20378,6 +20474,7 @@ function Show-CompletionDialog {
         $txtChunksValue.Text = $ChunksComplete.ToString()
         $txtTotalValue.Text = $ChunksTotal.ToString()
         $txtFailedValue.Text = $ChunksFailed.ToString()
+        $txtFilesCopiedValue.Text = $FilesCopied.ToString("N0")
         $txtSkippedValue.Text = $FilesSkipped.ToString("N0")
         $txtFilesFailedValue.Text = $FilesFailed.ToString("N0")
 
@@ -20408,162 +20505,34 @@ function Show-CompletionDialog {
         }
 
         # Adjust appearance based on results
+        # Priority: PreflightErrors > ChunksFailed > LowSuccessRate > Success
         if ($PreflightErrors.Count -gt 0) {
             # Pre-flight failure - show error state (red)
             $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
             $iconText.Text = [char]0x2716  # X mark
+            $iconText.Margin = "0,0,0,0"  # Reset margin
             $txtTitle.Text = "Replication Failed"
             $txtSubtitle.Text = "Pre-flight check failed - source not accessible"
             $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
-
-            # Show pre-flight errors in error panel
-            $pnlErrors.Visibility = 'Visible'
-            foreach ($err in $PreflightErrors) {
-                $errorItem = New-Object System.Windows.Controls.Border
-                $errorItem.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#1E1E1E")
-                $errorItem.CornerRadius = 3
-                $errorItem.Padding = 8
-                $errorItem.Margin = "0,0,0,6"
-
-                $errorText = New-Object System.Windows.Controls.TextBlock
-                $errorText.Text = $err
-                $errorText.FontSize = 11
-                $errorText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
-                $errorText.TextWrapping = 'Wrap'
-                $errorItem.Child = $errorText
-
-                $lstErrors.Children.Add($errorItem) | Out-Null
-            }
         }
         elseif ($ChunksFailed -gt 0) {
-            # Some failures - show error state (red/orange)
+            # Chunks actually failed (errored out) - show error state (red)
             $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
             $iconText.Text = [char]0x2716  # X mark
+            $iconText.Margin = "0,0,0,0"  # Reset margin
             $txtTitle.Text = "Replication Complete with Errors"
             $txtSubtitle.Text = "$ChunksFailed chunk(s) failed"
             $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#F44336")
         }
-        elseif ($ChunksWarning -gt 0) {
-            # Some warnings but no failures - show warning state (orange)
+        elseif ($successPercent -lt 90) {
+            # Success rate below 90% - show warning state (orange)
+            # Having some failed files is normal, but too many is concerning
             $iconBorder.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
             $iconText.Text = [char]0x26A0  # Warning triangle
+            $iconText.Margin = "0,-4,0,0"  # Adjust for triangle baseline offset
             $txtTitle.Text = "Replication Complete with Warnings"
-            $txtSubtitle.Text = "$ChunksWarning chunk(s) had files that could not be copied"
+            $txtSubtitle.Text = "Success rate below 90% ($successPercent%)"
             $txtFailedValue.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF9800")
-
-            # Show warning details if we have warning chunk information
-            if ($WarningChunkDetails.Count -gt 0) {
-                $pnlErrors.Visibility = 'Visible'
-
-                # Display up to 10 warnings
-                $displayErrors = $WarningChunkDetails | Select-Object -First 10
-                foreach ($chunk in $displayErrors) {
-                    $errorItem = New-Object System.Windows.Controls.Border
-                    $errorItem.Background = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#1E1E1E")
-                    $errorItem.CornerRadius = 3
-                    $errorItem.Padding = 8
-                    $errorItem.Margin = "0,0,0,6"
-
-                    $errorStack = New-Object System.Windows.Controls.StackPanel
-
-                    # Chunk ID and Source Path
-                    $headerText = New-Object System.Windows.Controls.TextBlock
-                    $headerText.Text = "Chunk $($chunk.ChunkId): $($chunk.SourcePath)"
-                    $headerText.FontSize = 11
-                    $headerText.FontWeight = 'SemiBold'
-                    $headerText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#E0E0E0")
-                    $headerText.TextWrapping = 'Wrap'
-                    $errorStack.Children.Add($headerText) | Out-Null
-
-                    # Exit Code
-                    $exitCode = if ($chunk.PSObject.Properties['LastExitCode']) { $chunk.LastExitCode } else { 'N/A' }
-                    $exitCodeText = New-Object System.Windows.Controls.TextBlock
-                    $exitCodeText.Text = "Exit Code: $exitCode"
-                    $exitCodeText.FontSize = 10
-                    $exitCodeText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#808080")
-                    $exitCodeText.Margin = "0,2,0,0"
-                    $errorStack.Children.Add($exitCodeText) | Out-Null
-
-                    # Error Message
-                    $errorMsg = if ($chunk.PSObject.Properties['LastErrorMessage']) { $chunk.LastErrorMessage } else { 'Unknown error' }
-                    $errorMsgText = New-Object System.Windows.Controls.TextBlock
-                    $errorMsgText.Text = "Error: $errorMsg"
-                    $errorMsgText.FontSize = 10
-                    $errorMsgText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFrom("#FF6B6B")
-                    $errorMsgText.TextWrapping = 'Wrap'
-                    $errorMsgText.Margin = "0,2,0,0"
-                    $errorStack.Children.Add($errorMsgText) | Out-Null
-
-                    $errorItem.Child = $errorStack
-                    $lstErrors.Children.Add($errorItem) | Out-Null
-                }
-
-                # Show "and X more..." if there are more than 10 warnings
-                if ($WarningChunkDetails.Count -gt 10) {
-                    $remaining = $WarningChunkDetails.Count - 10
-                    $txtMoreErrors.Text = "...and $remaining more warning(s)"
-                    $txtMoreErrors.Visibility = 'Visible'
-                }
-
-                # Copy Warnings button handler
-                $btnCopyErrors.Add_Click({
-                    try {
-                        # Build warning report
-                        $errorReport = "Robocurse Replication Warnings`n"
-                        $errorReport += "=" * 50 + "`n`n"
-
-                        foreach ($chunk in $WarningChunkDetails) {
-                            $errorReport += "Chunk $($chunk.ChunkId): $($chunk.SourcePath)`n"
-                            $exitCode = if ($chunk.PSObject.Properties['LastExitCode']) { $chunk.LastExitCode } else { 'N/A' }
-                            $errorReport += "Exit Code: $exitCode`n"
-                            $errorMsg = if ($chunk.PSObject.Properties['LastErrorMessage']) { $chunk.LastErrorMessage } else { 'Unknown error' }
-                            $errorReport += "Error: $errorMsg`n"
-                            $errorReport += "`n"
-                        }
-
-                        # Copy to clipboard
-                        [System.Windows.Clipboard]::SetText($errorReport)
-
-                        # Change button text temporarily
-                        $originalText = $btnCopyErrors.Content
-                        $btnCopyErrors.Content = "Copied!"
-
-                        # Use DispatcherTimer to reset after 2 seconds
-                        $resetTimer = New-Object System.Windows.Threading.DispatcherTimer
-                        $resetTimer.Interval = [TimeSpan]::FromSeconds(2)
-                        $resetTimer.Add_Tick({
-                            $btnCopyErrors.Content = $originalText
-                            $resetTimer.Stop()
-                        })
-                        $resetTimer.Start()
-                    }
-                    catch {
-                        Write-GuiLog "Error copying errors to clipboard: $($_.Exception.Message)"
-                    }
-                }.GetNewClosure())
-
-                # View Logs button handler
-                $btnViewLogs.Add_Click({
-                    try {
-                        # Get log path from config
-                        $logPath = if ($script:Config -and $script:Config.LogPath) {
-                            $script:Config.LogPath
-                        } else {
-                            Join-Path (Get-Location) "Logs"
-                        }
-
-                        # Open log directory in explorer
-                        if (Test-Path $logPath) {
-                            Start-Process explorer.exe -ArgumentList $logPath
-                        } else {
-                            Write-GuiLog "Log directory not found: $logPath"
-                        }
-                    }
-                    catch {
-                        Write-GuiLog "Error opening log directory: $($_.Exception.Message)"
-                    }
-                })
-            }
         }
         elseif ($ChunksComplete -eq 0 -and $ChunksTotal -eq 0) {
             # Nothing to do
@@ -20571,9 +20540,14 @@ function Show-CompletionDialog {
             $txtSubtitle.Text = "No chunks to process"
         }
         else {
-            # All success
+            # Success - chunks completed, success rate >= 90%
             $txtTitle.Text = "Replication Complete"
-            $txtSubtitle.Text = "All tasks finished successfully"
+            # Show info about files that couldn't be copied if any chunks had warnings
+            if ($ChunksWarning -gt 0) {
+                $txtSubtitle.Text = "$ChunksWarning chunk(s) had files that could not be copied"
+            } else {
+                $txtSubtitle.Text = "All tasks finished successfully"
+            }
         }
 
         # OK button handler
@@ -22370,6 +22344,10 @@ function New-ModuleModeBackgroundScript {
         # Use the shared C# OrchestrationState instance (thread-safe by design)
         `$script:OrchestrationState = `$SharedState
 
+        # Set orchestration session ID for chunk log naming (GUID from SharedState)
+        Set-OrchestrationSessionId -SessionId `$SharedState.SessionId
+        Write-Host "[BACKGROUND] Session ID set: `$(`$SharedState.SessionId)"
+
         # Clear callbacks - GUI mode uses timer-based polling, not callbacks
         `$script:OnProgress = `$null
         `$script:OnChunkComplete = `$null
@@ -22457,6 +22435,10 @@ function New-ScriptModeBackgroundScript {
 
         # Use the shared C# OrchestrationState instance (thread-safe by design)
         `$script:OrchestrationState = `$SharedState
+
+        # Set orchestration session ID for chunk log naming (GUID from SharedState)
+        Set-OrchestrationSessionId -SessionId `$SharedState.SessionId
+        Write-Host "[BACKGROUND] Session ID set: `$(`$SharedState.SessionId)"
 
         # Clear callbacks - GUI mode uses timer-based polling, not callbacks
         `$script:OnProgress = `$null
@@ -22684,6 +22666,7 @@ function Start-GuiReplication {
 
     $script:LastGuiUpdateState = $null
     $script:Controls.dgChunks.ItemsSource = $null
+    $script:CompletionInProgress = $false  # Reset completion guard for new run
 
     Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
 
@@ -22705,14 +22688,27 @@ function Start-GuiReplication {
         $logRoot = [System.IO.Path]::GetFullPath((Join-Path $configDir $logRoot))
     }
 
-    # Initialize log session so GUI and background share the same log file
-    if (-not $script:CurrentOperationalLogPath) {
-        try {
-            Initialize-LogSession -LogRoot $logRoot
-        }
-        catch {
-            Write-GuiLog "Warning: Could not initialize log session: $($_.Exception.Message)"
-        }
+    # Initialize fresh log session for each run (ensures correct date folder and session ID)
+    # This MUST happen on every run - not just when path is null - to handle GUI left open across days
+    try {
+        Initialize-LogSession -LogRoot $logRoot
+        # Set the orchestration session ID for chunk log naming (GUID from OrchestrationState)
+        Set-OrchestrationSessionId -SessionId $script:OrchestrationState.SessionId
+    }
+    catch {
+        [System.Windows.MessageBox]::Show(
+            "Failed to initialize logging: $($_.Exception.Message)",
+            "Logging Error",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Error
+        )
+        # Reset UI state and abort
+        $script:Controls.btnRunAll.IsEnabled = $true
+        $script:Controls.btnRunSelected.IsEnabled = $true
+        $script:Controls.btnStop.IsEnabled = $false
+        $script:Controls.txtStatus.Text = "Ready"
+        $script:ProgressTimer.Stop()
+        return
     }
 
     # Create and start background runspace (using original config path for immediate persistence)
@@ -22751,6 +22747,10 @@ function Complete-GuiReplication {
     #>
     [CmdletBinding()]
     param()
+
+    # Prevent re-entry (can be called multiple times as phase transitions)
+    if ($script:CompletionInProgress) { return }
+    $script:CompletionInProgress = $true
 
     # Stop timer
     $script:ProgressTimer.Stop()
@@ -22873,25 +22873,25 @@ function Complete-GuiReplication {
         Write-GuiLog "Warning: Failed to save last run summary: $_"
     }
 
-    # Generate failed files summary
-    # Calculate log root the same way the background runspace does
+    # Generate failed files summary using session ID to filter only current run's logs
     $failedFilesSummaryPath = $null
     try {
         if ($status.FilesFailed -gt 0) {
-            # Get log root from config, same logic as GuiRunspace.ps1
-            $logRoot = if ($script:Config.GlobalSettings.LogPath) { $script:Config.GlobalSettings.LogPath } else { '.\Logs' }
-            if (-not [System.IO.Path]::IsPathRooted($logRoot)) {
-                $configDir = Split-Path -Parent $script:ConfigPath
-                $logRoot = [System.IO.Path]::GetFullPath((Join-Path $configDir $logRoot))
-            }
-            $dateFolderName = (Get-Date).ToString('yyyy-MM-dd')
-            Write-GuiLog "Failed files check: FilesFailed=$($status.FilesFailed), LogRoot=$logRoot, Date=$dateFolderName"
-            $failedFilesSummaryPath = New-FailedFilesSummary -LogPath $logRoot -Date $dateFolderName
-            if ($failedFilesSummaryPath) {
-                Write-GuiLog "Generated failed files summary: $failedFilesSummaryPath"
+            $jobsPath = Get-LogPath -Type 'ChunkJob' -ChunkId 1  # Get any chunk path to derive Jobs folder
+            if ($jobsPath) {
+                $jobsFolder = Split-Path -Parent $jobsPath
+                $sessionId = $script:OrchestrationState.SessionId
+                Write-GuiLog "Failed files check: FilesFailed=$($status.FilesFailed), JobsPath=$jobsFolder, SessionId=$sessionId"
+                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId -ProfileNames $profileNames
+                if ($failedFilesSummaryPath) {
+                    Write-GuiLog "Generated failed files summary: $failedFilesSummaryPath"
+                }
+                else {
+                    Write-GuiLog "No error entries found in chunk logs for session $sessionId"
+                }
             }
             else {
-                Write-GuiLog "No error entries found in chunk logs"
+                Write-GuiLog "Warning: Could not determine Jobs folder path"
             }
         }
         else {
@@ -22938,7 +22938,11 @@ function Complete-GuiReplication {
     $dialogFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
     $dialogFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
     $dialogFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
+
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesCopied $dialogFilesCopied -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails -PreflightErrors $preflightErrors
+
+    # Reset re-entry guard for next run
+    $script:CompletionInProgress = $false
 }
 
 #endregion
@@ -23327,18 +23331,21 @@ function Get-ChunkDisplayItems {
 
     $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # Show current activity during Preparing/Scanning/Cleanup phases
+    # Show current activity during Preparing/Scanning/Cleanup phases (and Complete if cleanup just finished)
     $currentActivity = $script:OrchestrationState.CurrentActivity
     $phase = $script:OrchestrationState.Phase
-    if ($currentActivity -and ($phase -in @('Preparing', 'Scanning', 'Cleanup'))) {
+    if ($currentActivity -and ($phase -in @('Preparing', 'Scanning', 'Cleanup', 'Complete'))) {
         $scanProgress = $script:OrchestrationState.ScanProgress
-        $displayStatus = if ($phase -eq 'Cleanup') { 'Cleanup' } elseif ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
+        # Determine display status - 'Cleanup' for both Cleanup and Complete phases (showing final cleanup state)
+        $displayStatus = if ($phase -in @('Cleanup', 'Complete')) { 'Cleanup' } elseif ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
+        # Show progress bar during Cleanup/Complete phase, not during Preparing/Scanning
+        $progressScale = if ($phase -in @('Cleanup', 'Complete')) { [double]($scanProgress / 100) } else { [double]0 }
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = "--"
             SourcePath = $currentActivity
             Status = $displayStatus
             Progress = $scanProgress
-            ProgressScale = [double]0  # No bar during preparing/scanning
+            ProgressScale = $progressScale
             Speed = "--"
         })
     }
@@ -25645,6 +25652,12 @@ function Initialize-RobocurseGui {
         }
     })
 
+    # Log version first (before any profile loading)
+    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
+    $initMessage = "Robocurse (https://github.com/pacepace/robocurse) $version initialized"
+    Write-RobocurseLog -Message $initMessage -Level 'Info' -Component 'GUI'
+    Write-GuiLog $initMessage
+
     # Load config and populate UI
     $script:Config = Get-RobocurseConfig -Path $script:ConfigPath
     Update-ProfileList
@@ -25701,11 +25714,8 @@ function Initialize-RobocurseGui {
     $panelToActivate = if ($script:RestoredActivePanel) { $script:RestoredActivePanel } else { 'Profiles' }
     Set-ActivePanel -PanelName $panelToActivate
 
-    # Set window title with version
-    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
+    # Set window title with version (version already logged earlier)
     $script:Window.Title = "Robocurse $version - Replication Cursed Robo"
-
-    Write-GuiLog "Robocurse (https://github.com/pacepace/robocurse) $version initialized"
 
     return $script:Window
 }
@@ -26808,6 +26818,9 @@ function Invoke-HeadlessReplication {
     # Start replication with bandwidth throttling
     Start-ReplicationRun -Profiles $ProfilesToRun -Config $Config -ConfigPath $ConfigPath -MaxConcurrentJobs $MaxConcurrentJobs -BandwidthLimitMbps $BandwidthLimitMbps -DryRun:$DryRun
 
+    # Set orchestration session ID for chunk log naming (GUID from OrchestrationState)
+    Set-OrchestrationSessionId -SessionId $script:OrchestrationState.SessionId
+
     # Track last progress output time for throttling
     $lastProgressOutput = [datetime]::MinValue
     $progressInterval = [timespan]::FromSeconds($script:HeadlessProgressIntervalSeconds)
@@ -26902,19 +26915,19 @@ function Invoke-HeadlessReplication {
         Write-Host ""
     }
 
-    # Generate failed files summary if there were failures
+    # Generate failed files summary if there were failures (filtered by session ID)
     $failedFilesSummaryPath = $null
     if ($status.FilesFailed -gt 0) {
         try {
-            $logRoot = if ($Config.GlobalSettings.LogPath) { $Config.GlobalSettings.LogPath } else { '.\Logs' }
-            if (-not [System.IO.Path]::IsPathRooted($logRoot)) {
-                $configDir = Split-Path -Parent $ConfigPath
-                $logRoot = [System.IO.Path]::GetFullPath((Join-Path $configDir $logRoot))
-            }
-            $dateFolderName = (Get-Date).ToString('yyyy-MM-dd')
-            $failedFilesSummaryPath = New-FailedFilesSummary -LogPath $logRoot -Date $dateFolderName
-            if ($failedFilesSummaryPath) {
-                Write-Host "  Failed files summary: $failedFilesSummaryPath"
+            $jobsPath = Get-LogPath -Type 'ChunkJob' -ChunkId 1  # Get any chunk path to derive Jobs folder
+            if ($jobsPath) {
+                $jobsFolder = Split-Path -Parent $jobsPath
+                $sessionId = $script:OrchestrationState.SessionId
+                $summaryProfileNames = @($profileResultsArray | ForEach-Object { $_.Name })
+                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId -ProfileNames $summaryProfileNames
+                if ($failedFilesSummaryPath) {
+                    Write-Host "  Failed files summary: $failedFilesSummaryPath"
+                }
             }
         }
         catch {

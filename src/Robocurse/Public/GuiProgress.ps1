@@ -381,18 +381,21 @@ function Get-ChunkDisplayItems {
 
     $chunkDisplayItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # Show current activity during Preparing/Scanning/Cleanup phases
+    # Show current activity during Preparing/Scanning/Cleanup phases (and Complete if cleanup just finished)
     $currentActivity = $script:OrchestrationState.CurrentActivity
     $phase = $script:OrchestrationState.Phase
-    if ($currentActivity -and ($phase -in @('Preparing', 'Scanning', 'Cleanup'))) {
+    if ($currentActivity -and ($phase -in @('Preparing', 'Scanning', 'Cleanup', 'Complete'))) {
         $scanProgress = $script:OrchestrationState.ScanProgress
-        $displayStatus = if ($phase -eq 'Cleanup') { 'Cleanup' } elseif ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
+        # Determine display status - 'Cleanup' for both Cleanup and Complete phases (showing final cleanup state)
+        $displayStatus = if ($phase -in @('Cleanup', 'Complete')) { 'Cleanup' } elseif ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
+        # Show progress bar during Cleanup/Complete phase, not during Preparing/Scanning
+        $progressScale = if ($phase -in @('Cleanup', 'Complete')) { [double]($scanProgress / 100) } else { [double]0 }
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = "--"
             SourcePath = $currentActivity
             Status = $displayStatus
             Progress = $scanProgress
-            ProgressScale = [double]0  # No bar during preparing/scanning
+            ProgressScale = $progressScale
             Speed = "--"
         })
     }

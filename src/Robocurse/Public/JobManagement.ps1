@@ -1104,6 +1104,9 @@ function Invoke-ReplicationTick {
                     $state.CompletedChunks.Enqueue($removedJob.Chunk)
                     # Track warning chunks separately for reporting
                     if ($result.ExitMeaning.Severity -eq 'Warning') {
+                        # Add exit code and error message for dialog display
+                        $removedJob.Chunk | Add-Member -NotePropertyName 'LastExitCode' -NotePropertyValue $result.ExitCode -Force
+                        $removedJob.Chunk | Add-Member -NotePropertyName 'LastErrorMessage' -NotePropertyValue $result.ExitMeaning.Message -Force
                         $state.WarningChunks.Enqueue($removedJob.Chunk)
                         # Enqueue warning for GUI display
                         $warningMsg = "Chunk $($removedJob.Chunk.ChunkId) completed with warnings: $($removedJob.Chunk.SourcePath) - $($result.ExitMeaning.Message) (Exit code: $($result.ExitCode))"
@@ -1537,11 +1540,13 @@ function Complete-CurrentProfile {
 
     # Enter cleanup phase for VSS/network resource cleanup
     $state.Phase = 'Cleanup'
+    $state.ScanProgress = 0  # Reset progress for cleanup phase
 
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction" -Level 'Info' -Component 'VSS'
         $state.CurrentActivity = "Removing VSS junction..."
+        $state.ScanProgress = 25
         $removeJunctionResult = Remove-RemoteVssJunction `
             -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
             -ServerName $state.CurrentVssJunction.ServerName `
@@ -1555,6 +1560,7 @@ function Complete-CurrentProfile {
     # Clean up VSS snapshot (local or remote)
     if ($state.CurrentVssSnapshot) {
         $state.CurrentActivity = "Removing VSS snapshot..."
+        $state.ScanProgress = 50
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
             $removeResult = Remove-RemoteVssSnapshot -ShadowId $state.CurrentVssSnapshot.ShadowId -ServerName $state.CurrentVssSnapshot.ServerName -Credential $state.NetworkCredential
@@ -1588,6 +1594,10 @@ function Complete-CurrentProfile {
     }
     $state.NetworkCredential = $null
 
+    # Mark cleanup complete (CurrentActivity cleared when phase changes to Complete)
+    $state.ScanProgress = 100
+    $state.CurrentActivity = "Cleanup complete"
+
     # Unregister the profile as running (release the mutex)
     Unregister-RunningProfile -ProfileName $state.CurrentProfile.Name | Out-Null
 
@@ -1596,17 +1606,17 @@ function Complete-CurrentProfile {
         & $script:OnProfileComplete $state.CurrentProfile
     }
 
-    # Clear chunk collections for next profile (results already preserved in ProfileResults)
-    $state.ClearChunkCollections()
-
     # Move to next profile
     $state.ProfileIndex++
     if ($state.ProfileIndex -lt $state.Profiles.Count) {
+        # Clear chunk collections for next profile (results already preserved in ProfileResults)
+        $state.ClearChunkCollections()
         # Use MaxConcurrentJobs from current run (stored in script-scope during Start-ReplicationRun)
         $maxJobs = if ($script:CurrentMaxConcurrentJobs) { $script:CurrentMaxConcurrentJobs } else { $script:DefaultMaxConcurrentJobs }
         Start-ProfileReplication -Profile $state.Profiles[$state.ProfileIndex] -MaxConcurrentJobs $maxJobs
     }
     else {
+        # Last profile - keep chunks visible for final GUI update
         # All profiles complete
         $state.Phase = "Complete"
         # Guard against null StartTime (e.g., when Start-ProfileReplication called directly in tests)
@@ -1669,11 +1679,13 @@ function Stop-AllJobs {
 
     $state.ActiveJobs.Clear()
     $state.Phase = 'Cleanup'
+    $state.ScanProgress = 0  # Reset progress for cleanup phase
 
     # Clean up remote VSS junction first (if any)
     if ($state.CurrentVssJunction) {
         Write-RobocurseLog -Message "Cleaning up remote VSS junction after stop" -Level 'Info' -Component 'VSS'
         $state.CurrentActivity = "Removing VSS junction..."
+        $state.ScanProgress = 25
         try {
             $removeJunctionResult = Remove-RemoteVssJunction `
                 -JunctionLocalPath $state.CurrentVssJunction.JunctionLocalPath `
@@ -1694,6 +1706,7 @@ function Stop-AllJobs {
     # Clean up VSS snapshot (local or remote)
     if ($state.CurrentVssSnapshot) {
         $state.CurrentActivity = "Removing VSS snapshot..."
+        $state.ScanProgress = 50
         if ($state.CurrentVssSnapshot.IsRemote) {
             Write-RobocurseLog -Message "Cleaning up remote VSS snapshot after stop: $($state.CurrentVssSnapshot.ShadowId)" -Level 'Info' -Component 'VSS'
             try {
@@ -1745,6 +1758,10 @@ function Stop-AllJobs {
         }
     }
     $state.NetworkCredential = $null
+
+    # Mark cleanup complete (CurrentActivity cleared when phase changes to Complete)
+    $state.ScanProgress = 100
+    $state.CurrentActivity = "Cleanup complete"
 
     # Cleanup complete, now set final stopped state
     $state.Phase = 'Stopped'
