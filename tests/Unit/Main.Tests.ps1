@@ -324,6 +324,14 @@ InModuleScope 'Robocurse' {
             Mock Write-SiemEvent { }
             Mock Start-ReplicationRun { }
             Mock Invoke-ReplicationTick { }
+            Mock Set-OrchestrationSessionId { }
+            Mock Get-LogPath {
+                param($Type, $ChunkId)
+                if ($Type -eq 'ChunkJob') {
+                    return "C:\Logs\2025-12-25\Jobs\test-session_Chunk_001.log"
+                }
+                return $null
+            }
             Mock Get-OrchestrationStatus {
                 return [PSCustomObject]@{
                     ChunksComplete = 10

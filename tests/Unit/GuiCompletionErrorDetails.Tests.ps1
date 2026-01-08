@@ -37,32 +37,11 @@ InModuleScope 'Robocurse' {
                 $script:TestXamlContent = Get-XamlResource -ResourceName 'CompletionDialog.xaml'
             }
 
-            It "Should have pnlErrors border" {
-                $script:TestXamlContent | Should -Match 'x:Name="pnlErrors"'
-            }
-
-            It "Should have lstErrors StackPanel" {
-                $script:TestXamlContent | Should -Match 'x:Name="lstErrors"'
-            }
-
-            It "Should have txtMoreErrors TextBlock" {
-                $script:TestXamlContent | Should -Match 'x:Name="txtMoreErrors"'
-            }
-
-            It "Should have btnCopyErrors button" {
-                $script:TestXamlContent | Should -Match 'x:Name="btnCopyErrors"'
-            }
-
-            It "Should have btnViewLogs button" {
-                $script:TestXamlContent | Should -Match 'x:Name="btnViewLogs"'
-            }
-
-            It "Should have error panel collapsed by default" {
-                $script:TestXamlContent | Should -Match 'x:Name="pnlErrors"[^>]*Visibility="Collapsed"'
-            }
+            # Error panel was removed - completion dialog now just shows summary stats
+            # and "View failed files" link for details
 
             It "Should use SizeToContent for dialog" {
-                $script:TestXamlContent | Should -Match 'SizeToContent="Height"'
+                $script:TestXamlContent | Should -Match 'SizeToContent="WidthAndHeight"'
             }
 
             It "Should have MaxHeight set" {
@@ -313,6 +292,10 @@ InModuleScope 'Robocurse' {
                 $script:TestXamlContent | Should -Match 'x:Name="txtSkippedValue"'
             }
 
+            It "Should have txtFilesCopiedValue TextBlock" {
+                $script:TestXamlContent | Should -Match 'x:Name="txtFilesCopiedValue"'
+            }
+
             It "Should have txtFilesFailedValue TextBlock" {
                 $script:TestXamlContent | Should -Match 'x:Name="txtFilesFailedValue"'
             }
@@ -325,10 +308,10 @@ InModuleScope 'Robocurse' {
                 $script:TestXamlContent | Should -Match 'x:Name="lnkFailedFiles"[^>]*Visibility="Collapsed"'
             }
 
-            It "Should have 5 stat columns" {
+            It "Should have 6 stat columns" {
                 # Count ColumnDefinition elements in stats grid
                 $matches = [regex]::Matches($script:TestXamlContent, '<ColumnDefinition')
-                $matches.Count | Should -BeGreaterOrEqual 5
+                $matches.Count | Should -BeGreaterOrEqual 6
             }
         }
 

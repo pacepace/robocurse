@@ -167,6 +167,10 @@ function New-ModuleModeBackgroundScript {
         # Use the shared C# OrchestrationState instance (thread-safe by design)
         `$script:OrchestrationState = `$SharedState
 
+        # Set orchestration session ID for chunk log naming (GUID from SharedState)
+        Set-OrchestrationSessionId -SessionId `$SharedState.SessionId
+        Write-Host "[BACKGROUND] Session ID set: `$(`$SharedState.SessionId)"
+
         # Clear callbacks - GUI mode uses timer-based polling, not callbacks
         `$script:OnProgress = `$null
         `$script:OnChunkComplete = `$null
@@ -254,6 +258,10 @@ function New-ScriptModeBackgroundScript {
 
         # Use the shared C# OrchestrationState instance (thread-safe by design)
         `$script:OrchestrationState = `$SharedState
+
+        # Set orchestration session ID for chunk log naming (GUID from SharedState)
+        Set-OrchestrationSessionId -SessionId `$SharedState.SessionId
+        Write-Host "[BACKGROUND] Session ID set: `$(`$SharedState.SessionId)"
 
         # Clear callbacks - GUI mode uses timer-based polling, not callbacks
         `$script:OnProgress = `$null

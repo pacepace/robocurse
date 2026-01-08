@@ -634,10 +634,17 @@ $additionalErrors
     # Use the template CSS and inject the status-specific header background color
     $cssWithStatusColor = $script:EmailCssTemplate + "`n.header { background: $statusColor; }"
 
-    # Build profile names line for header
+    # Build profile names list for header
     $profileNamesHtml = if ($ProfileNames -and $ProfileNames.Count -gt 0) {
-        $encodedNames = ($ProfileNames | ForEach-Object { [System.Net.WebUtility]::HtmlEncode($_) }) -join ', '
-        "<div style='font-size:14px;opacity:0.9;margin-top:4px;'>$encodedNames</div>"
+        $profileListItems = ($ProfileNames | ForEach-Object {
+            $encodedName = [System.Net.WebUtility]::HtmlEncode($_)
+            "<li style='margin:2px 0;'>$encodedName</li>"
+        }) -join "`n"
+        @"
+<ul style='font-size:13px;opacity:0.9;margin:8px 0 0 0;padding-left:20px;list-style-type:disc;text-align:left;'>
+$profileListItems
+</ul>
+"@
     } else {
         ""
     }
@@ -1290,16 +1297,28 @@ function Send-ReplicationCompletionNotification {
             SnapshotSummary = $snapshotSummary
         }
 
+        # Calculate success percentage for status determination
+        $emailFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
+        $emailFilesSkippedCalc = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
+        $emailFilesFailedCalc = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
+        $totalFiles = $emailFilesCopied + $emailFilesSkippedCalc + $emailFilesFailedCalc
+        $successPercent = if ($totalFiles -gt 0) {
+            [math]::Round(($emailFilesCopied + $emailFilesSkippedCalc) / $totalFiles * 100, 1)
+        } else { 100 }
+
         # Determine overall status
+        # Priority: PreflightErrors/Stopped > ChunksFailed > LowSuccessRate > Success
         $failedProfiles = @($profileResultsArray | Where-Object { $_.Status -eq 'Failed' })
         $emailStatus = if ($failedProfiles.Count -gt 0) {
             'Failed'  # Pre-flight failure (e.g., source path not accessible)
         } elseif ($OrchestrationState.Phase -eq 'Stopped') {
             'Failed'  # User stopped or critical failure
         } elseif ($totalFailed -gt 0) {
-            'Warning'  # Some chunk failures
+            'Failed'  # Chunks actually failed (errored out)
+        } elseif ($successPercent -lt 90) {
+            'Warning'  # Success rate below 90%
         } else {
-            'Success'
+            'Success'  # Chunks completed, success rate >= 90%
         }
 
         # Get values for email
@@ -1307,8 +1326,14 @@ function Send-ReplicationCompletionNotification {
         $emailFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
         $emailFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
 
+        # Extract profile names from results for header display
+        $emailProfileNames = @()
+        if ($profileResultsArray.Count -gt 0) {
+            $emailProfileNames = @($profileResultsArray | ForEach-Object { $_.Name })
+        }
+
         # Send the email
-        Write-RobocurseLog "Sending completion email (Status: $emailStatus, Files: $($status.FilesCopied), Skipped: $emailFilesSkipped, Failed: $emailFilesFailed)" -Level 'Info' -Component 'Email'
+        Write-RobocurseLog "Sending completion email (Status: $emailStatus, Files: $($status.FilesCopied), Skipped: $emailFilesSkipped, Failed: $emailFilesFailed, Profiles: $($emailProfileNames -join ', '))" -Level 'Info' -Component 'Email'
 
         $sendParams = @{
             Config = $Config.Email
@@ -1317,6 +1342,7 @@ function Send-ReplicationCompletionNotification {
             SessionId = $emailSessionId
             FilesSkipped = $emailFilesSkipped
             FilesFailed = $emailFilesFailed
+            ProfileNames = $emailProfileNames
         }
         if ($FailedFilesSummaryPath) {
             $sendParams['FailedFilesSummaryPath'] = $FailedFilesSummaryPath

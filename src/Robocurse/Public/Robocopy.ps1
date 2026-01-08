@@ -1713,85 +1713,104 @@ function New-FailedFilesSummary {
     .SYNOPSIS
         Generates a summary file of all failed file operations from chunk logs
     .DESCRIPTION
-        Parses all chunk log files in the Jobs folder for the specified date and
-        extracts ERROR lines indicating files that failed to copy (locked, access denied,
-        in use, etc.). Creates a summary file that can be viewed by the user or attached to emails.
-    .PARAMETER LogPath
-        The base log path (e.g., C:\Logs\Robocurse)
-    .PARAMETER Date
-        The date folder name (e.g., "2025-12-21")
+        Parses chunk log files in the Jobs folder and extracts ERROR lines indicating
+        files that failed to copy (locked, access denied, in use, etc.). Creates a summary
+        file that can be viewed by the user or attached to emails. When SessionId is provided,
+        only logs from that session are included, preventing stale data from previous runs.
+    .PARAMETER JobsPath
+        The Jobs folder path containing chunk logs (e.g., C:\Logs\Robocurse\2025-12-21\Jobs)
+    .PARAMETER SessionId
+        Optional orchestration session ID (GUID) to filter chunk logs. When provided,
+        only logs matching {SessionId}_Chunk_*.log are processed.
+    .PARAMETER ProfileNames
+        Optional array of profile names to display in the summary header.
     .OUTPUTS
         String path to the created summary file, or $null if no failed files found
     .EXAMPLE
-        $summaryPath = New-FailedFilesSummary -LogPath "C:\Logs" -Date "2025-12-21"
+        $summaryPath = New-FailedFilesSummary -JobsPath "C:\Logs\2025-12-21\Jobs" -SessionId "a1b2c3d4-e5f6-7890-abcd-ef1234567890" -ProfileNames @('Profile1', 'Profile2')
     #>
     [CmdletBinding()]
     [OutputType([string])]
     param(
         [Parameter(Mandatory = $true)]
-        [string]$LogPath,
+        [string]$JobsPath,
 
-        [Parameter(Mandatory = $true)]
-        [string]$Date
+        [Parameter(Mandatory = $false)]
+        [string]$SessionId,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$ProfileNames = @()
     )
 
-    $datePath = Join-Path $LogPath $Date
-    $jobsFolder = Join-Path $datePath "Jobs"
-    if (-not (Test-Path $jobsFolder)) {
-        Write-RobocurseLog -Message "Jobs folder not found: $jobsFolder" -Level 'Debug' -Component 'FailedFiles'
+    if (-not (Test-Path $JobsPath)) {
+        Write-RobocurseLog -Message "Jobs folder not found: $JobsPath" -Level 'Debug' -Component 'FailedFiles'
         return $null
     }
 
-    $chunkLogs = Get-ChildItem -Path $jobsFolder -Filter "Chunk_*.log" -ErrorAction SilentlyContinue
+    # Filter by session ID if provided, otherwise get all chunk logs (backward compatible)
+    $pattern = if ($SessionId) { "${SessionId}_Chunk_*.log" } else { "*Chunk_*.log" }
+    $chunkLogs = Get-ChildItem -Path $JobsPath -Filter $pattern -ErrorAction SilentlyContinue
     if (-not $chunkLogs -or $chunkLogs.Count -eq 0) {
-        Write-RobocurseLog -Message "No chunk logs found in: $jobsFolder" -Level 'Debug' -Component 'FailedFiles'
+        Write-RobocurseLog -Message "No chunk logs found in: $JobsPath (pattern: $pattern)" -Level 'Debug' -Component 'FailedFiles'
         return $null
     }
 
-    # Common Windows error codes and their meanings
+    # Windows system error codes per Microsoft documentation
+    # https://learn.microsoft.com/en-us/windows/win32/debug/system-error-codes--0-499-
     $errorDescriptions = @{
         2 = "File not found"
         3 = "Path not found"
+        4 = "Too many open files"
         5 = "Access denied"
         6 = "Invalid handle"
+        17 = "Cannot move to different drive"
         19 = "Media write-protected"
+        20 = "Device not found"
         21 = "Device not ready"
         29 = "Write fault"
         30 = "Read fault"
-        32 = "File in use by another process"
-        33 = "File locked"
+        31 = "General failure"
+        32 = "Sharing violation - file in use"
+        33 = "Lock violation - file locked"
         39 = "Disk full"
+        51 = "Network path unavailable"
+        53 = "Network path not found"
+        55 = "Network resource unavailable"
         80 = "File already exists"
+        82 = "Cannot create directory/file"
+        111 = "Filename too long"
         112 = "Disk full"
-        121 = "Timeout"
+        121 = "Semaphore timeout"
         122 = "Buffer too small"
-        123 = "Invalid filename"
+        123 = "Invalid filename syntax"
         183 = "File already exists"
-        206 = "Filename too long"
+        206 = "Filename/extension too long"
         1314 = "Privilege not held"
         1920 = "File encrypted (EFS)"
     }
 
     # Collect all ERROR entries from robocopy logs
-    # Robocopy ERROR lines have format: [timestamp] ERROR <code> (0x<hex>) <message>
-    # Example: 2024/01/15 10:30:45 ERROR 32 (0x00000020) Copying File D:\path\to\file.txt
-    # Example: ERROR 5 (0x00000005) Access is denied.
-    # The timestamp is optional, so match ERROR anywhere in the line
+    # Robocopy ERROR lines have format: [timestamp] ERROR <code> (0x<hex>) <operation> <path>
+    # Followed by indented line with actual Windows error message:
+    # Example:
+    #   ERROR 2 (0x00000002) Changing File Attributes Z:\path\file.docx
+    #      The system cannot find the file specified.
     # Robocopy retries files (R:3 = 3 retries), so deduplicate by file path
     $failedEntries = [System.Collections.Generic.List[string]]::new()
     $seenFiles = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $errorCodePattern = '\bERROR\s+(\d+)\s+'
-    # Pattern to extract file path from error line: "Copying File <path>" or "Creating Destination Directory <path>"
-    $filePathPattern = '(?:Copying File|Creating Destination Directory)\s+(.+)$'
-    $currentChunk = ""
+    # Pattern to extract file path from error line for deduplication
+    # Includes: "Copying File", "Creating Destination Directory", "Changing File Attributes"
+    $filePathPattern = '(?:Copying File|Creating Destination Directory|Changing File Attributes)\s+(.+)$'
 
     foreach ($logFile in $chunkLogs) {
         try {
-            $logContent = Get-Content -Path $logFile.FullName -ErrorAction Stop
+            $logContent = @(Get-Content -Path $logFile.FullName -ErrorAction Stop)
             $chunkName = $logFile.BaseName
             $chunkHasErrors = $false
 
-            foreach ($line in $logContent) {
+            for ($i = 0; $i -lt $logContent.Count; $i++) {
+                $line = $logContent[$i]
                 if ($line -match $errorCodePattern) {
                     $cleanLine = $line.Trim()
                     $errorCode = [int]$matches[1]
@@ -1819,10 +1838,23 @@ function New-FailedFilesSummary {
                         $chunkHasErrors = $true
                     }
 
-                    # Add error description if known (on same line)
-                    $description = $errorDescriptions[$errorCode]
-                    if ($description) {
-                        $failedEntries.Add("$cleanLine [$description]")
+                    # Check next line for Windows error message (indented line after ERROR)
+                    # Robocopy outputs the actual error text on the following line
+                    $windowsErrorMsg = $null
+                    if ($i + 1 -lt $logContent.Count) {
+                        $nextLine = $logContent[$i + 1]
+                        # Windows error messages are indented and don't start with ERROR or timestamps
+                        if ($nextLine -match '^\s{2,}(.+)$' -and $nextLine -notmatch '\bERROR\b' -and $nextLine -notmatch '^\d{4}/\d{2}/\d{2}') {
+                            $windowsErrorMsg = $matches[1].Trim()
+                        }
+                    }
+
+                    # Use Windows error message if available, otherwise fall back to our mapping
+                    if ($windowsErrorMsg) {
+                        $failedEntries.Add("$cleanLine [$windowsErrorMsg]")
+                    }
+                    elseif ($errorDescriptions[$errorCode]) {
+                        $failedEntries.Add("$cleanLine [$($errorDescriptions[$errorCode])]")
                     }
                     else {
                         $failedEntries.Add($cleanLine)
@@ -1840,13 +1872,28 @@ function New-FailedFilesSummary {
         return $null
     }
 
-    # Write the summary file
-    $summaryPath = Join-Path $datePath "FailedFiles.txt"
+    # Write the summary file (in parent of Jobs folder, with session ID if provided)
+    $datePath = Split-Path -Parent $JobsPath
+    $summaryFilename = if ($SessionId) { "FailedFiles_${SessionId}.txt" } else { "FailedFiles.txt" }
+    $summaryPath = Join-Path $datePath $summaryFilename
     try {
         # Count unique files (entries minus chunk headers and blank lines)
         $uniqueFileCount = ($failedEntries | Where-Object { $_ -and $_ -notmatch '^===' }).Count
+
+        # Build profile names line if provided
+        $profileLine = if ($ProfileNames -and $ProfileNames.Count -gt 0) {
+            "Profiles: $($ProfileNames -join ', ')"
+        } else {
+            $null
+        }
+
         $header = @(
             "Robocurse Failed Files Summary"
+        )
+        if ($profileLine) {
+            $header += $profileLine
+        }
+        $header += @(
             "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
             "Total Failed Files: $uniqueFileCount"
             ""

@@ -119,6 +119,7 @@ function Start-GuiReplication {
 
     $script:LastGuiUpdateState = $null
     $script:Controls.dgChunks.ItemsSource = $null
+    $script:CompletionInProgress = $false  # Reset completion guard for new run
 
     Write-GuiLog "Starting replication with $($profilesToRun.Count) profile(s)"
 
@@ -140,14 +141,27 @@ function Start-GuiReplication {
         $logRoot = [System.IO.Path]::GetFullPath((Join-Path $configDir $logRoot))
     }
 
-    # Initialize log session so GUI and background share the same log file
-    if (-not $script:CurrentOperationalLogPath) {
-        try {
-            Initialize-LogSession -LogRoot $logRoot
-        }
-        catch {
-            Write-GuiLog "Warning: Could not initialize log session: $($_.Exception.Message)"
-        }
+    # Initialize fresh log session for each run (ensures correct date folder and session ID)
+    # This MUST happen on every run - not just when path is null - to handle GUI left open across days
+    try {
+        Initialize-LogSession -LogRoot $logRoot
+        # Set the orchestration session ID for chunk log naming (GUID from OrchestrationState)
+        Set-OrchestrationSessionId -SessionId $script:OrchestrationState.SessionId
+    }
+    catch {
+        [System.Windows.MessageBox]::Show(
+            "Failed to initialize logging: $($_.Exception.Message)",
+            "Logging Error",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Error
+        )
+        # Reset UI state and abort
+        $script:Controls.btnRunAll.IsEnabled = $true
+        $script:Controls.btnRunSelected.IsEnabled = $true
+        $script:Controls.btnStop.IsEnabled = $false
+        $script:Controls.txtStatus.Text = "Ready"
+        $script:ProgressTimer.Stop()
+        return
     }
 
     # Create and start background runspace (using original config path for immediate persistence)
@@ -186,6 +200,10 @@ function Complete-GuiReplication {
     #>
     [CmdletBinding()]
     param()
+
+    # Prevent re-entry (can be called multiple times as phase transitions)
+    if ($script:CompletionInProgress) { return }
+    $script:CompletionInProgress = $true
 
     # Stop timer
     $script:ProgressTimer.Stop()
@@ -308,25 +326,25 @@ function Complete-GuiReplication {
         Write-GuiLog "Warning: Failed to save last run summary: $_"
     }
 
-    # Generate failed files summary
-    # Calculate log root the same way the background runspace does
+    # Generate failed files summary using session ID to filter only current run's logs
     $failedFilesSummaryPath = $null
     try {
         if ($status.FilesFailed -gt 0) {
-            # Get log root from config, same logic as GuiRunspace.ps1
-            $logRoot = if ($script:Config.GlobalSettings.LogPath) { $script:Config.GlobalSettings.LogPath } else { '.\Logs' }
-            if (-not [System.IO.Path]::IsPathRooted($logRoot)) {
-                $configDir = Split-Path -Parent $script:ConfigPath
-                $logRoot = [System.IO.Path]::GetFullPath((Join-Path $configDir $logRoot))
-            }
-            $dateFolderName = (Get-Date).ToString('yyyy-MM-dd')
-            Write-GuiLog "Failed files check: FilesFailed=$($status.FilesFailed), LogRoot=$logRoot, Date=$dateFolderName"
-            $failedFilesSummaryPath = New-FailedFilesSummary -LogPath $logRoot -Date $dateFolderName
-            if ($failedFilesSummaryPath) {
-                Write-GuiLog "Generated failed files summary: $failedFilesSummaryPath"
+            $jobsPath = Get-LogPath -Type 'ChunkJob' -ChunkId 1  # Get any chunk path to derive Jobs folder
+            if ($jobsPath) {
+                $jobsFolder = Split-Path -Parent $jobsPath
+                $sessionId = $script:OrchestrationState.SessionId
+                Write-GuiLog "Failed files check: FilesFailed=$($status.FilesFailed), JobsPath=$jobsFolder, SessionId=$sessionId"
+                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId -ProfileNames $profileNames
+                if ($failedFilesSummaryPath) {
+                    Write-GuiLog "Generated failed files summary: $failedFilesSummaryPath"
+                }
+                else {
+                    Write-GuiLog "No error entries found in chunk logs for session $sessionId"
+                }
             }
             else {
-                Write-GuiLog "No error entries found in chunk logs"
+                Write-GuiLog "Warning: Could not determine Jobs folder path"
             }
         }
         else {
@@ -373,5 +391,9 @@ function Complete-GuiReplication {
     $dialogFilesCopied = if ($status.FilesCopied) { $status.FilesCopied } else { 0 }
     $dialogFilesSkipped = if ($status.FilesSkipped) { $status.FilesSkipped } else { 0 }
     $dialogFilesFailed = if ($status.FilesFailed) { $status.FilesFailed } else { 0 }
+
     Show-CompletionDialog -ChunksComplete $status.ChunksComplete -ChunksTotal $status.ChunksTotal -ChunksFailed $status.ChunksFailed -ChunksWarning $status.ChunksWarning -FilesCopied $dialogFilesCopied -FilesSkipped $dialogFilesSkipped -FilesFailed $dialogFilesFailed -FailedFilesSummaryPath $failedFilesSummaryPath -FailedChunkDetails $failedDetails -WarningChunkDetails $warningDetails -PreflightErrors $preflightErrors
+
+    # Reset re-entry guard for next run
+    $script:CompletionInProgress = $false
 }

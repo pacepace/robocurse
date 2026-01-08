@@ -125,6 +125,12 @@ function Initialize-RobocurseGui {
         }
     })
 
+    # Log version first (before any profile loading)
+    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
+    $initMessage = "Robocurse (https://github.com/pacepace/robocurse) $version initialized"
+    Write-RobocurseLog -Message $initMessage -Level 'Info' -Component 'GUI'
+    Write-GuiLog $initMessage
+
     # Load config and populate UI
     $script:Config = Get-RobocurseConfig -Path $script:ConfigPath
     Update-ProfileList
@@ -181,11 +187,8 @@ function Initialize-RobocurseGui {
     $panelToActivate = if ($script:RestoredActivePanel) { $script:RestoredActivePanel } else { 'Profiles' }
     Set-ActivePanel -PanelName $panelToActivate
 
-    # Set window title with version
-    $version = if ($script:RobocurseVersion) { $script:RobocurseVersion } else { "dev.local" }
+    # Set window title with version (version already logged earlier)
     $script:Window.Title = "Robocurse $version - Replication Cursed Robo"
-
-    Write-GuiLog "Robocurse (https://github.com/pacepace/robocurse) $version initialized"
 
     return $script:Window
 }
