@@ -275,7 +275,8 @@ function Invoke-HeadlessReplication {
             if ($jobsPath) {
                 $jobsFolder = Split-Path -Parent $jobsPath
                 $sessionId = $script:OrchestrationState.SessionId
-                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId
+                $summaryProfileNames = @($profileResultsArray | ForEach-Object { $_.Name })
+                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId -ProfileNames $summaryProfileNames
                 if ($failedFilesSummaryPath) {
                     Write-Host "  Failed files summary: $failedFilesSummaryPath"
                 }

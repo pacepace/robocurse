@@ -1722,10 +1722,12 @@ function New-FailedFilesSummary {
     .PARAMETER SessionId
         Optional orchestration session ID (GUID) to filter chunk logs. When provided,
         only logs matching {SessionId}_Chunk_*.log are processed.
+    .PARAMETER ProfileNames
+        Optional array of profile names to display in the summary header.
     .OUTPUTS
         String path to the created summary file, or $null if no failed files found
     .EXAMPLE
-        $summaryPath = New-FailedFilesSummary -JobsPath "C:\Logs\2025-12-21\Jobs" -SessionId "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        $summaryPath = New-FailedFilesSummary -JobsPath "C:\Logs\2025-12-21\Jobs" -SessionId "a1b2c3d4-e5f6-7890-abcd-ef1234567890" -ProfileNames @('Profile1', 'Profile2')
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -1734,7 +1736,10 @@ function New-FailedFilesSummary {
         [string]$JobsPath,
 
         [Parameter(Mandatory = $false)]
-        [string]$SessionId
+        [string]$SessionId,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$ProfileNames = @()
     )
 
     if (-not (Test-Path $JobsPath)) {
@@ -1874,8 +1879,21 @@ function New-FailedFilesSummary {
     try {
         # Count unique files (entries minus chunk headers and blank lines)
         $uniqueFileCount = ($failedEntries | Where-Object { $_ -and $_ -notmatch '^===' }).Count
+
+        # Build profile names line if provided
+        $profileLine = if ($ProfileNames -and $ProfileNames.Count -gt 0) {
+            "Profiles: $($ProfileNames -join ', ')"
+        } else {
+            $null
+        }
+
         $header = @(
             "Robocurse Failed Files Summary"
+        )
+        if ($profileLine) {
+            $header += $profileLine
+        }
+        $header += @(
             "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
             "Total Failed Files: $uniqueFileCount"
             ""

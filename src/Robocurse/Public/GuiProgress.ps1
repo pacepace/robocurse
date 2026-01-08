@@ -385,14 +385,15 @@ function Get-ChunkDisplayItems {
     $currentActivity = $script:OrchestrationState.CurrentActivity
     $phase = $script:OrchestrationState.Phase
     if ($currentActivity -and ($phase -in @('Preparing', 'Scanning', 'Cleanup'))) {
-        $scanProgress = $script:OrchestrationState.ScanProgress
+        # During Cleanup, don't show stale scan progress - show 0 or nothing
+        $displayProgress = if ($phase -eq 'Cleanup') { 0 } else { $script:OrchestrationState.ScanProgress }
         $displayStatus = if ($phase -eq 'Cleanup') { 'Cleanup' } elseif ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = "--"
             SourcePath = $currentActivity
             Status = $displayStatus
-            Progress = $scanProgress
-            ProgressScale = [double]0  # No bar during preparing/scanning
+            Progress = $displayProgress
+            ProgressScale = [double]0  # No bar during preparing/scanning/cleanup
             Speed = "--"
         })
     }
@@ -610,7 +611,8 @@ function Update-GuiProgress {
             }
             # Show preparing/scanning/cleanup activity in status bar
             elseif ($script:OrchestrationState.Phase -in @('Preparing', 'Scanning', 'Cleanup') -and $script:OrchestrationState.CurrentActivity) {
-                $counter = $script:OrchestrationState.ScanProgress
+                # During Cleanup, don't show stale scan counter - just show activity text
+                $counter = if ($script:OrchestrationState.Phase -eq 'Cleanup') { 0 } else { $script:OrchestrationState.ScanProgress }
                 $activity = $script:OrchestrationState.CurrentActivity
                 $newText = if ($counter -gt 0) { "$activity ($counter)" } else { $activity }
                 $script:Controls.txtStatus.Text = $newText

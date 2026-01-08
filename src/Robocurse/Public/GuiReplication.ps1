@@ -330,7 +330,7 @@ function Complete-GuiReplication {
                 $jobsFolder = Split-Path -Parent $jobsPath
                 $sessionId = $script:OrchestrationState.SessionId
                 Write-GuiLog "Failed files check: FilesFailed=$($status.FilesFailed), JobsPath=$jobsFolder, SessionId=$sessionId"
-                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId
+                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId -ProfileNames $profileNames
                 if ($failedFilesSummaryPath) {
                     Write-GuiLog "Generated failed files summary: $failedFilesSummaryPath"
                 }

@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.c56693d - Built: 2026-01-07 15:39:51
+    Version: dev.8f0e17b - Built: 2026-01-07 16:04:06
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.c56693d'
+$script:RobocurseVersion = 'dev.8f0e17b'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -6450,10 +6450,12 @@ function New-FailedFilesSummary {
     .PARAMETER SessionId
         Optional orchestration session ID (GUID) to filter chunk logs. When provided,
         only logs matching {SessionId}_Chunk_*.log are processed.
+    .PARAMETER ProfileNames
+        Optional array of profile names to display in the summary header.
     .OUTPUTS
         String path to the created summary file, or $null if no failed files found
     .EXAMPLE
-        $summaryPath = New-FailedFilesSummary -JobsPath "C:\Logs\2025-12-21\Jobs" -SessionId "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        $summaryPath = New-FailedFilesSummary -JobsPath "C:\Logs\2025-12-21\Jobs" -SessionId "a1b2c3d4-e5f6-7890-abcd-ef1234567890" -ProfileNames @('Profile1', 'Profile2')
     #>
     [CmdletBinding()]
     [OutputType([string])]
@@ -6462,7 +6464,10 @@ function New-FailedFilesSummary {
         [string]$JobsPath,
 
         [Parameter(Mandatory = $false)]
-        [string]$SessionId
+        [string]$SessionId,
+
+        [Parameter(Mandatory = $false)]
+        [string[]]$ProfileNames = @()
     )
 
     if (-not (Test-Path $JobsPath)) {
@@ -6602,8 +6607,21 @@ function New-FailedFilesSummary {
     try {
         # Count unique files (entries minus chunk headers and blank lines)
         $uniqueFileCount = ($failedEntries | Where-Object { $_ -and $_ -notmatch '^===' }).Count
+
+        # Build profile names line if provided
+        $profileLine = if ($ProfileNames -and $ProfileNames.Count -gt 0) {
+            "Profiles: $($ProfileNames -join ', ')"
+        } else {
+            $null
+        }
+
         $header = @(
             "Robocurse Failed Files Summary"
+        )
+        if ($profileLine) {
+            $header += $profileLine
+        }
+        $header += @(
             "Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
             "Total Failed Files: $uniqueFileCount"
             ""
@@ -22981,7 +22999,7 @@ function Complete-GuiReplication {
                 $jobsFolder = Split-Path -Parent $jobsPath
                 $sessionId = $script:OrchestrationState.SessionId
                 Write-GuiLog "Failed files check: FilesFailed=$($status.FilesFailed), JobsPath=$jobsFolder, SessionId=$sessionId"
-                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId
+                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId -ProfileNames $profileNames
                 if ($failedFilesSummaryPath) {
                     Write-GuiLog "Generated failed files summary: $failedFilesSummaryPath"
                 }
@@ -23430,14 +23448,15 @@ function Get-ChunkDisplayItems {
     $currentActivity = $script:OrchestrationState.CurrentActivity
     $phase = $script:OrchestrationState.Phase
     if ($currentActivity -and ($phase -in @('Preparing', 'Scanning', 'Cleanup'))) {
-        $scanProgress = $script:OrchestrationState.ScanProgress
+        # During Cleanup, don't show stale scan progress - show 0 or nothing
+        $displayProgress = if ($phase -eq 'Cleanup') { 0 } else { $script:OrchestrationState.ScanProgress }
         $displayStatus = if ($phase -eq 'Cleanup') { 'Cleanup' } elseif ($phase -eq 'Preparing') { 'Preparing' } else { 'Scanning' }
         $chunkDisplayItems.Add([PSCustomObject]@{
             ChunkId = "--"
             SourcePath = $currentActivity
             Status = $displayStatus
-            Progress = $scanProgress
-            ProgressScale = [double]0  # No bar during preparing/scanning
+            Progress = $displayProgress
+            ProgressScale = [double]0  # No bar during preparing/scanning/cleanup
             Speed = "--"
         })
     }
@@ -23655,7 +23674,8 @@ function Update-GuiProgress {
             }
             # Show preparing/scanning/cleanup activity in status bar
             elseif ($script:OrchestrationState.Phase -in @('Preparing', 'Scanning', 'Cleanup') -and $script:OrchestrationState.CurrentActivity) {
-                $counter = $script:OrchestrationState.ScanProgress
+                # During Cleanup, don't show stale scan counter - just show activity text
+                $counter = if ($script:OrchestrationState.Phase -eq 'Cleanup') { 0 } else { $script:OrchestrationState.ScanProgress }
                 $activity = $script:OrchestrationState.CurrentActivity
                 $newText = if ($counter -gt 0) { "$activity ($counter)" } else { $activity }
                 $script:Controls.txtStatus.Text = $newText
@@ -27012,7 +27032,8 @@ function Invoke-HeadlessReplication {
             if ($jobsPath) {
                 $jobsFolder = Split-Path -Parent $jobsPath
                 $sessionId = $script:OrchestrationState.SessionId
-                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId
+                $summaryProfileNames = @($profileResultsArray | ForEach-Object { $_.Name })
+                $failedFilesSummaryPath = New-FailedFilesSummary -JobsPath $jobsFolder -SessionId $sessionId -ProfileNames $summaryProfileNames
                 if ($failedFilesSummaryPath) {
                     Write-Host "  Failed files summary: $failedFilesSummaryPath"
                 }
