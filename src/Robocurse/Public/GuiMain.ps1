@@ -396,21 +396,11 @@ function Initialize-EventHandlers {
                 }
 
                 if ($profile) {
-                    # Deselect all other profiles (set Enabled = false)
-                    foreach ($p in $script:Config.SyncProfiles) {
-                        if ($p -ne $profile) {
-                            $p.Enabled = $false
-                        }
-                    }
-
-                    # Select this profile (set Enabled = true)
-                    $profile.Enabled = $true
+                    # Enable only this profile (disables all others)
+                    Set-SingleProfileEnabled -Profile $profile
 
                     # Select this item in the ListBox (triggers SelectionChanged)
                     $script:Controls.lstProfiles.SelectedItem = $profile
-
-                    # Force refresh of the ListBox to update checkbox states
-                    $script:Controls.lstProfiles.Items.Refresh()
 
                     # Save the config to persist the changes
                     Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath | Out-Null

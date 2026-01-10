@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.8f196bc - Built: 2026-01-08 17:31:31
+    Version: dev.6c58223 - Built: 2026-01-10 18:39:37
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.8f196bc'
+$script:RobocurseVersion = 'dev.6c58223'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
@@ -19384,6 +19384,42 @@ function Save-ProfileFromForm {
     }
 }
 
+function Set-SingleProfileEnabled {
+    <#
+    .SYNOPSIS
+        Enables a single profile and disables all others
+    .DESCRIPTION
+        Used when clicking a profile row or adding a new profile to ensure
+        only one profile is enabled (checked) at a time.
+    .PARAMETER Profile
+        The profile to enable. If not specified, all profiles are disabled.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()]
+        [PSCustomObject]$Profile
+    )
+
+    if (-not $script:Config.SyncProfiles) { return }
+
+    # Disable all other profiles
+    foreach ($p in $script:Config.SyncProfiles) {
+        if ($p -ne $Profile) {
+            $p.Enabled = $false
+        }
+    }
+
+    # Enable the specified profile
+    if ($Profile) {
+        $Profile.Enabled = $true
+    }
+
+    # Refresh the listbox to update checkbox states
+    if ($script:Controls -and $script:Controls['lstProfiles']) {
+        $script:Controls.lstProfiles.Items.Refresh()
+    }
+}
+
 function Add-NewProfile {
     <#
     .SYNOPSIS
@@ -19428,6 +19464,9 @@ function Add-NewProfile {
     # Update UI
     Update-ProfileList
     $script:Controls.lstProfiles.SelectedIndex = $script:Controls.lstProfiles.Items.Count - 1
+
+    # Clear other checkboxes and enable only the new profile
+    Set-SingleProfileEnabled -Profile $newProfile
 
     # Auto-save config to disk
     $saveResult = Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath
@@ -25923,21 +25962,11 @@ function Initialize-EventHandlers {
                 }
 
                 if ($profile) {
-                    # Deselect all other profiles (set Enabled = false)
-                    foreach ($p in $script:Config.SyncProfiles) {
-                        if ($p -ne $profile) {
-                            $p.Enabled = $false
-                        }
-                    }
-
-                    # Select this profile (set Enabled = true)
-                    $profile.Enabled = $true
+                    # Enable only this profile (disables all others)
+                    Set-SingleProfileEnabled -Profile $profile
 
                     # Select this item in the ListBox (triggers SelectionChanged)
                     $script:Controls.lstProfiles.SelectedItem = $profile
-
-                    # Force refresh of the ListBox to update checkbox states
-                    $script:Controls.lstProfiles.Items.Refresh()
 
                     # Save the config to persist the changes
                     Save-RobocurseConfig -Config $script:Config -Path $script:ConfigPath | Out-Null
