@@ -809,5 +809,109 @@ Describe "GUI Replication Runspace Tests" -Tag "GUI", "Runspace", "Unit" {
                 $enabledCount | Should -Be 1
             }
         }
+
+        Context "Set-SingleProfileEnabled Function" {
+            # Tests for the Set-SingleProfileEnabled function that ensures
+            # only one profile is enabled at a time (used by both row click
+            # and add profile operations)
+
+            BeforeEach {
+                # Set up mock config with multiple profiles
+                $script:Config = [PSCustomObject]@{
+                    SyncProfiles = @(
+                        [PSCustomObject]@{ Name = "Profile1"; Enabled = $true }
+                        [PSCustomObject]@{ Name = "Profile2"; Enabled = $true }
+                        [PSCustomObject]@{ Name = "Profile3"; Enabled = $true }
+                    )
+                }
+                # Mock Controls to prevent UI refresh errors
+                $script:Controls = @{ lstProfiles = $null }
+            }
+
+            It "Should enable only the specified profile" {
+                $targetProfile = $script:Config.SyncProfiles[1]
+
+                Set-SingleProfileEnabled -Profile $targetProfile
+
+                $script:Config.SyncProfiles[0].Enabled | Should -Be $false
+                $script:Config.SyncProfiles[1].Enabled | Should -Be $true
+                $script:Config.SyncProfiles[2].Enabled | Should -Be $false
+            }
+
+            It "Should disable all profiles when no profile specified" {
+                Set-SingleProfileEnabled
+
+                $script:Config.SyncProfiles[0].Enabled | Should -Be $false
+                $script:Config.SyncProfiles[1].Enabled | Should -Be $false
+                $script:Config.SyncProfiles[2].Enabled | Should -Be $false
+            }
+
+            It "Should handle empty SyncProfiles gracefully" {
+                $script:Config.SyncProfiles = @()
+
+                { Set-SingleProfileEnabled } | Should -Not -Throw
+            }
+
+            It "Should handle null SyncProfiles gracefully" {
+                $script:Config.SyncProfiles = $null
+
+                { Set-SingleProfileEnabled } | Should -Not -Throw
+            }
+
+            It "Should result in exactly one enabled profile" {
+                $targetProfile = $script:Config.SyncProfiles[2]
+
+                Set-SingleProfileEnabled -Profile $targetProfile
+
+                $enabledCount = @($script:Config.SyncProfiles | Where-Object { $_.Enabled }).Count
+                $enabledCount | Should -Be 1
+            }
+        }
+
+        Context "Add Profile Checkbox Clearing" {
+            # Tests that adding a new profile clears checkboxes on existing profiles
+
+            BeforeEach {
+                $script:Config = [PSCustomObject]@{
+                    SyncProfiles = @(
+                        [PSCustomObject]@{ Name = "Existing1"; Enabled = $true }
+                        [PSCustomObject]@{ Name = "Existing2"; Enabled = $true }
+                    )
+                }
+                $script:Controls = @{ lstProfiles = $null }
+            }
+
+            It "Should clear other profile checkboxes when adding new profile" {
+                # Simulate what Add-NewProfile does:
+                # 1. Create new profile with Enabled = $true
+                $newProfile = [PSCustomObject]@{
+                    Name = "New Profile"
+                    Enabled = $true
+                }
+                $script:Config.SyncProfiles += $newProfile
+
+                # 2. Call Set-SingleProfileEnabled (this is the fix)
+                Set-SingleProfileEnabled -Profile $newProfile
+
+                # Verify: existing profiles should be disabled, new profile enabled
+                $script:Config.SyncProfiles[0].Enabled | Should -Be $false
+                $script:Config.SyncProfiles[1].Enabled | Should -Be $false
+                $script:Config.SyncProfiles[2].Enabled | Should -Be $true
+            }
+
+            It "Should only have new profile enabled after adding" {
+                $newProfile = [PSCustomObject]@{
+                    Name = "New Profile"
+                    Enabled = $true
+                }
+                $script:Config.SyncProfiles += $newProfile
+
+                Set-SingleProfileEnabled -Profile $newProfile
+
+                $enabledCount = @($script:Config.SyncProfiles | Where-Object { $_.Enabled }).Count
+                $enabledCount | Should -Be 1
+                ($script:Config.SyncProfiles | Where-Object { $_.Enabled }).Name | Should -Be "New Profile"
+            }
+        }
     }
 }
