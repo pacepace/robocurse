@@ -54,7 +54,7 @@
 .NOTES
     Author: Mark Pace
     License: MIT
-    Version: dev.cf80c74 - Built: 2026-01-10 10:15:18
+    Version: dev.6c58223 - Built: 2026-01-10 18:39:37
 
 .LINK
     https://github.com/pacepace/robocurse
@@ -76,7 +76,7 @@ param(
 $script:RobocurseScriptPath = $PSCommandPath
 
 # Version injected at build time
-$script:RobocurseVersion = 'dev.cf80c74'
+$script:RobocurseVersion = 'dev.6c58223'
 
 #region ==================== CONSTANTS ====================
 # Chunking defaults
